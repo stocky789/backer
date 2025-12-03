@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -19,6 +20,15 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 def get_storage(request: Request) -> Storage:
     """Get storage from app state."""
     return request.app.state.storage
+
+
+def get_timezone(storage: Storage) -> ZoneInfo:
+    """Get configured timezone from storage."""
+    tz_name = storage.get_setting("timezone", "UTC")
+    try:
+        return ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+    except Exception:
+        return ZoneInfo("UTC")
 
 
 def time_ago(dt: datetime | str | None) -> str:
@@ -181,13 +191,14 @@ async def jobs_page(request: Request):
             for r in runs
         )
 
-        # Calculate next run if scheduler available
+        # Calculate next run if scheduler available (using configured timezone)
         next_run = None
         schedule = j.get("schedule_cron")
         if schedule and j.get("enabled", True):
             try:
                 from croniter import croniter
-                cron = croniter(schedule, datetime.now())
+                tz = get_timezone(storage)
+                cron = croniter(schedule, datetime.now(tz))
                 next_run = cron.get_next(datetime)
             except Exception:
                 pass
@@ -399,13 +410,33 @@ async def settings_page(request: Request):
     storage = get_storage(request)
     data_dir = str(storage.db_path.parent)
 
+    # Get current timezone setting
+    timezone = storage.get_setting("timezone", "UTC")
+
+    # Check if settings were just saved
+    settings_saved = request.query_params.get("saved") == "1"
+
     return templates.TemplateResponse("settings.html", {
         "request": request,
         "active": "settings",
         "version": __version__,
         "server_url": server_url,
         "data_dir": data_dir,
+        "timezone": timezone,
+        "settings_saved": settings_saved,
     })
+
+
+@router.post("/settings/save")
+async def settings_save(
+    request: Request,
+    timezone: str = Form("UTC"),
+):
+    """Save settings."""
+    storage = get_storage(request)
+    storage.set_setting("timezone", timezone)
+
+    return RedirectResponse("/settings?saved=1", status_code=303)
 
 
 @router.get("/restore", response_class=HTMLResponse)
