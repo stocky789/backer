@@ -92,8 +92,6 @@ class AgentService:
             self.tools_dir = tools_dir
         else:
             # Default locations
-            import os
-            import sys
             if sys.platform == 'win32':
                 # Check in app directory first, then AppData
                 if getattr(sys, 'frozen', False):
@@ -107,8 +105,103 @@ class AgentService:
             else:
                 self.tools_dir = Path.home() / '.local' / 'share' / 'backer' / 'tools'
 
+        # Ensure tools directory exists
+        self.tools_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Tools directory: {self.tools_dir}")
+
+        # Initialize tool manager for automatic tool downloads
+        self._tool_manager = None
+        self._tools_ready = False
+
         self._running = False
         self._thread: threading.Thread | None = None
+
+    def ensure_tools_installed(self, progress_callback: Callable[[str], None] | None = None) -> dict[str, bool]:
+        """Ensure backup tools (rclone, restic) are installed.
+
+        Downloads tools automatically if not present.
+
+        Args:
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Dict with tool names and whether they're ready
+        """
+        from backer.tools.manager import ToolManager
+
+        logger.info("[TOOLS] Checking backup tools installation...")
+
+        if self._tool_manager is None:
+            self._tool_manager = ToolManager(self.tools_dir)
+
+        results = {}
+
+        # List of required tools
+        required_tools = ['rclone', 'restic']
+
+        for tool_name in required_tools:
+            try:
+                logger.info(f"[TOOLS] Checking {tool_name}...")
+
+                if progress_callback:
+                    progress_callback(f"Checking {tool_name}...")
+
+                # Check if already installed
+                tool_path = self._tool_manager.get_tool_path(tool_name)
+
+                if tool_path:
+                    logger.info(f"[TOOLS] {tool_name} found at: {tool_path}")
+                    results[tool_name] = True
+                else:
+                    # Need to download
+                    logger.info(f"[TOOLS] {tool_name} not found, downloading...")
+
+                    if progress_callback:
+                        progress_callback(f"Downloading {tool_name}...")
+
+                    def download_progress(msg: str):
+                        logger.info(f"[TOOLS] {msg}")
+                        if progress_callback:
+                            progress_callback(msg)
+
+                    try:
+                        path = self._tool_manager.download(tool_name, progress_callback=download_progress)
+                        logger.info(f"[TOOLS] {tool_name} installed to: {path}")
+                        results[tool_name] = True
+
+                        if progress_callback:
+                            progress_callback(f"{tool_name} installed successfully")
+
+                    except Exception as download_err:
+                        logger.error(f"[TOOLS] Failed to download {tool_name}: {download_err}")
+                        results[tool_name] = False
+
+                        if progress_callback:
+                            progress_callback(f"Failed to download {tool_name}: {download_err}")
+
+            except Exception as e:
+                logger.error(f"[TOOLS] Error checking {tool_name}: {e}")
+                results[tool_name] = False
+
+        # Update tools ready flag
+        self._tools_ready = all(results.values())
+
+        if self._tools_ready:
+            logger.info("[TOOLS] All backup tools are ready")
+        else:
+            failed = [t for t, ready in results.items() if not ready]
+            logger.warning(f"[TOOLS] Some tools failed to install: {failed}")
+
+        return results
+
+    def get_tool_status(self) -> dict[str, dict]:
+        """Get detailed status of all backup tools."""
+        from backer.tools.manager import ToolManager
+
+        if self._tool_manager is None:
+            self._tool_manager = ToolManager(self.tools_dir)
+
+        return self._tool_manager.list_tools()
 
     def _get_auth_header(self) -> str:
         """Get HTTP Basic auth header."""
@@ -359,6 +452,29 @@ class AgentService:
             )
             raise
 
+    def _get_tool_path(self, tool_name: str) -> Path:
+        """Get path to a backup tool, using tool manager if available."""
+        from backer.tools.manager import ToolManager
+
+        if self._tool_manager is None:
+            self._tool_manager = ToolManager(self.tools_dir)
+
+        tool_path = self._tool_manager.get_tool_path(tool_name)
+
+        if tool_path:
+            return tool_path
+
+        # Fallback to direct path in tools dir
+        if sys.platform == 'win32':
+            binary = self.tools_dir / f'{tool_name}.exe'
+        else:
+            binary = self.tools_dir / tool_name
+
+        if binary.exists():
+            return binary
+
+        raise FileNotFoundError(f"{tool_name} not found. Run ensure_tools_installed() first.")
+
     def _run_rclone_sync(
         self,
         source: str,
@@ -368,26 +484,19 @@ class AgentService:
         run_id: str,
     ) -> dict[str, Any]:
         """Run rclone sync command."""
-        logger.info(f"[RCLONE] Setting up rclone sync")
+        logger.info("[RCLONE] Setting up rclone sync")
         logger.debug(f"[RCLONE] Source: {source}")
         logger.debug(f"[RCLONE] Destination: {dest}")
 
-        if sys.platform == 'win32':
-            rclone = self.tools_dir / 'rclone.exe'
-        else:
-            rclone = self.tools_dir / 'rclone'
-
-        logger.info(f"[RCLONE] Looking for rclone at: {rclone}")
-        logger.info(f"[RCLONE] Tools directory exists: {self.tools_dir.exists()}")
-        if self.tools_dir.exists():
-            logger.info(f"[RCLONE] Tools directory contents: {list(self.tools_dir.iterdir())}")
-
-        if not rclone.exists():
-            error_msg = f"rclone not found at {rclone}"
-            logger.error(f"[RCLONE] {error_msg}")
-            raise FileNotFoundError(error_msg)
-
-        logger.info(f"[RCLONE] rclone executable found: {rclone}")
+        try:
+            rclone = self._get_tool_path('rclone')
+            logger.info(f"[RCLONE] Using rclone at: {rclone}")
+        except FileNotFoundError as e:
+            logger.error(f"[RCLONE] {e}")
+            logger.info(f"[RCLONE] Tools directory: {self.tools_dir}")
+            if self.tools_dir.exists():
+                logger.info(f"[RCLONE] Tools directory contents: {list(self.tools_dir.iterdir())}")
+            raise
 
         cmd = [str(rclone), 'sync', source, dest, '--progress', '-v']
 
@@ -451,15 +560,16 @@ class AgentService:
         run_id: str,
     ) -> dict[str, Any]:
         """Run restic backup command."""
-        import sys
+        logger.info("[RESTIC] Setting up restic backup")
+        logger.debug(f"[RESTIC] Source: {source}")
+        logger.debug(f"[RESTIC] Repository: {dest}")
 
-        if sys.platform == 'win32':
-            restic = self.tools_dir / 'restic.exe'
-        else:
-            restic = self.tools_dir / 'restic'
-
-        if not restic.exists():
-            raise FileNotFoundError(f"restic not found at {restic}")
+        try:
+            restic = self._get_tool_path('restic')
+            logger.info(f"[RESTIC] Using restic at: {restic}")
+        except FileNotFoundError as e:
+            logger.error(f"[RESTIC] {e}")
+            raise
 
         cmd = [str(restic), '-r', dest, 'backup', source, '-v']
 
@@ -469,7 +579,7 @@ class AgentService:
         if dry_run:
             cmd.append('--dry-run')
 
-        logger.info(f"Running: {' '.join(cmd)}")
+        logger.info(f"[RESTIC] Executing command: {' '.join(cmd)}")
 
         process = subprocess.Popen(
             cmd,
@@ -485,6 +595,12 @@ class AgentService:
 
         process.wait()
         output = ''.join(output_lines)
+
+        logger.info(f"[RESTIC] Process completed with return code: {process.returncode}")
+        if process.returncode != 0:
+            logger.error(f"[RESTIC] Process failed! Output:\n{output}")
+        else:
+            logger.info("[RESTIC] Backup completed successfully")
 
         return {
             'success': process.returncode == 0,

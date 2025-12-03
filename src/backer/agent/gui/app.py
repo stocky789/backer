@@ -363,8 +363,19 @@ class BackerAgentApp:
             messagebox.showinfo("Info", "Agent is already running")
             return
 
+        # Disable button and show starting status
+        self.start_btn.config(text="Starting...", state=tk.DISABLED)
+        self.status_var.set("Initializing agent...")
+        self.status_label.config(foreground='blue')
+
+        # Run initialization in background thread
+        thread = threading.Thread(target=self._do_start_agent, daemon=True)
+        thread.start()
+
+    def _do_start_agent(self):
+        """Perform agent startup in background thread."""
         try:
-            logging.info(f"Starting agent service...")
+            logging.info("Starting agent service...")
             logging.info(f"Server URL: {self.config['server_url']}")
             logging.info(f"Client ID: {self.config['client_id']}")
 
@@ -379,40 +390,53 @@ class BackerAgentApp:
 
             logging.info(f"Agent tools directory: {self.service.tools_dir}")
 
-            # Check if tools exist
-            import sys as _sys
-            if _sys.platform == 'win32':
-                rclone_path = self.service.tools_dir / 'rclone.exe'
-            else:
-                rclone_path = self.service.tools_dir / 'rclone'
+            # Automatically download/verify backup tools
+            self.root.after(0, lambda: self.status_var.set("Checking backup tools..."))
 
-            if not rclone_path.exists():
-                logging.warning(f"rclone not found at {rclone_path}")
-                messagebox.showwarning(
-                    "Warning",
-                    f"rclone not found at:\n{rclone_path}\n\n"
-                    f"Backups may fail until rclone is installed.\n\n"
-                    f"Download rclone from https://rclone.org/downloads/ "
-                    f"and place rclone.exe in:\n{self.service.tools_dir}"
-                )
-            else:
-                logging.info(f"rclone found at {rclone_path}")
+            def tool_progress(msg: str):
+                """Update UI with tool download progress."""
+                self.root.after(0, lambda: self.agent_name_var.set(msg))
 
+            tool_results = self.service.ensure_tools_installed(progress_callback=tool_progress)
+
+            # Check if all tools are ready
+            failed_tools = [t for t, ready in tool_results.items() if not ready]
+            if failed_tools:
+                error_msg = f"Failed to install backup tools: {', '.join(failed_tools)}"
+                logging.error(error_msg)
+                self.root.after(0, lambda: self._start_agent_failed(error_msg))
+                return
+
+            # Tools are ready, start the service
+            self.root.after(0, lambda: self.status_var.set("Starting agent service..."))
             self.service.start()
 
-            self.start_btn.config(text="Running...", state=tk.DISABLED)
-            self.status_var.set("Agent running - waiting for jobs")
-            self.status_label.config(foreground='green')
-
             logging.info("Agent service started successfully")
+            self.root.after(0, self._start_agent_success)
 
         except Exception as e:
             logging.error(f"Failed to start agent: {e}", exc_info=True)
-            messagebox.showerror(
-                "Error",
-                f"Failed to start agent:\n\n{e}\n\n"
-                f"Check the log file for details:\n{LOG_FILE}"
-            )
+            self.root.after(0, lambda: self._start_agent_failed(str(e)))
+
+    def _start_agent_success(self):
+        """Handle successful agent startup."""
+        self.start_btn.config(text="Running...", state=tk.DISABLED)
+        self.status_var.set("Agent running - waiting for jobs")
+        self.status_label.config(foreground='green')
+        self.agent_name_var.set("All backup tools ready")
+
+    def _start_agent_failed(self, error: str):
+        """Handle failed agent startup."""
+        self.service = None
+        self.start_btn.config(text="Start Agent", state=tk.NORMAL)
+        self.status_var.set("Failed to start")
+        self.status_label.config(foreground='red')
+        self.agent_name_var.set("")
+        messagebox.showerror(
+            "Startup Failed",
+            f"Failed to start agent:\n\n{error}\n\n"
+            f"Check the log file for details:\n{LOG_FILE}"
+        )
 
     def _on_service_status(self, status: str):
         """Callback for service status updates."""
