@@ -261,12 +261,28 @@ def import_repository_metadata(
                 for run in runs:
                     run_id = run.get("run_id")
                     if run_id:
+                        # Parse timestamps with error handling for malformed dates
+                        started_at = datetime.now()
+                        finished_at = None
+
+                        if run.get("started_at"):
+                            try:
+                                started_at = datetime.fromisoformat(run["started_at"])
+                            except (ValueError, TypeError):
+                                logger.warning(f"Invalid started_at format for run {run_id}: {run.get('started_at')}")
+
+                        if run.get("finished_at"):
+                            try:
+                                finished_at = datetime.fromisoformat(run["finished_at"])
+                            except (ValueError, TypeError):
+                                logger.warning(f"Invalid finished_at format for run {run_id}: {run.get('finished_at')}")
+
                         storage.save_job_run(
                             run_id=run_id,
                             job_name=job_name,
                             status=run.get("status", "unknown"),
-                            started_at=datetime.fromisoformat(run["started_at"]) if run.get("started_at") else datetime.now(),
-                            finished_at=datetime.fromisoformat(run["finished_at"]) if run.get("finished_at") else None,
+                            started_at=started_at,
+                            finished_at=finished_at,
                             bytes_transferred=run.get("bytes_transferred", 0),
                             files_transferred=run.get("files_transferred", 0),
                             snapshot_id=run.get("snapshot_id"),

@@ -272,15 +272,21 @@ class RepositoryMetadata:
         if not runs_dir.exists():
             return []
 
+        # Read all run files and their data
         runs = []
-        run_files = sorted(runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-
-        for run_file in run_files[:limit]:
+        for run_file in runs_dir.glob("*.json"):
             run_data = self._read_json(run_file)
             if run_data:
                 runs.append(run_data)
 
-        return runs
+        # Sort by started_at timestamp (falling back to recorded_at, then empty string)
+        # This ensures correct chronological order regardless of file modification time
+        runs.sort(
+            key=lambda r: r.get("started_at") or r.get("recorded_at") or "",
+            reverse=True
+        )
+
+        return runs[:limit]
 
     def get_latest_run(self, job_name: str) -> dict[str, Any] | None:
         """Get the most recent run for a job."""

@@ -359,6 +359,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         data = await request.json()
 
+        # Special handling for nested dicts that should be merged, not replaced
+        # Merge backend_options if both exist and incoming is not empty
+        # Empty dict {} means "clear all", non-empty means "merge"
+        if "backend_options" in data:
+            if data["backend_options"] and "backend_options" in existing:
+                # Non-empty: merge with existing
+                merged_backend_options = {**existing.get("backend_options", {}), **data["backend_options"]}
+                data["backend_options"] = merged_backend_options
+            # If data["backend_options"] is empty {}, it will replace existing (clearing it)
+
+        # Merge retention if both exist and incoming is not empty
+        if "retention" in data:
+            if data["retention"] and "retention" in existing:
+                merged_retention = {**existing.get("retention", {}), **data["retention"]}
+                data["retention"] = merged_retention
+
         # Merge updates with existing config
         updated_config = {**existing, **data}
         storage.save_job(job_name, updated_config)
