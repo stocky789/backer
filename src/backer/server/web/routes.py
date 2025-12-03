@@ -185,11 +185,13 @@ async def jobs_new_page(request: Request):
     """New job form page."""
     storage = get_storage(request)
     agents = storage.list_clients()
+    repositories = storage.list_repositories()
 
     return templates.TemplateResponse("jobs_new.html", {
         "request": request,
         "active": "jobs",
-        "agents": [{"id": a.id, "name": a.name} for a in agents],
+        "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
+        "repositories": repositories,
     })
 
 
@@ -198,22 +200,40 @@ async def jobs_create(
     request: Request,
     name: str = Form(...),
     source_path: str = Form(...),
-    destination_path: str = Form(...),
+    repository_id: str = Form(...),
+    dest_subfolder: str = Form(""),
     backend: str = Form("rclone"),
-    client_id: str = Form(""),
+    client_id: str = Form(...),
     excludes: str = Form(""),
     schedule_cron: str = Form(""),
+    schedule_preset: str = Form(""),
 ):
     """Create a new backup job."""
     storage = get_storage(request)
 
+    # Build destination path from repository
+    repo = storage.get_repository(repository_id)
+    if not repo:
+        return RedirectResponse("/jobs/new?error=invalid_repo", status_code=303)
+
+    # Build full destination path
+    destination_path = f"//{repo['server']}/{repo['share']}"
+    if repo.get("path"):
+        destination_path += "/" + repo["path"]
+    if dest_subfolder:
+        destination_path += "/" + dest_subfolder.strip("/")
+
+    # Handle schedule - use preset if custom cron not provided
+    final_schedule = schedule_cron if schedule_cron else (schedule_preset if schedule_preset != "custom" else None)
+
     job_config = {
         "source_path": source_path,
         "destination_path": destination_path,
+        "repository_id": repository_id,
         "backend": backend,
         "client_id": client_id if client_id else None,
         "excludes": [e.strip() for e in excludes.split(",") if e.strip()],
-        "schedule_cron": schedule_cron if schedule_cron else None,
+        "schedule_cron": final_schedule if final_schedule else None,
         "enabled": True,
     }
 

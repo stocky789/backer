@@ -1,75 +1,179 @@
 {% extends "base.html" %}
-{% block title %}New Job - Backer{% endblock %}
+{% block title %}New Backup - Backer{% endblock %}
 {% block page_title %}Create Backup Job{% endblock %}
 
 {% block content %}
-<div class="card" style="max-width: 600px;">
+<div class="card" style="max-width: 700px;">
     <div class="card-header">
-        <span class="card-title">Job Configuration</span>
+        <span class="card-title">Backup Configuration</span>
     </div>
     <div class="card-body">
         <form action="/jobs/create" method="POST">
             <div class="form-group">
-                <label class="form-label">Job Name *</label>
+                <label class="form-label">Backup Name *</label>
                 <input type="text" name="name" class="form-input" required
-                       placeholder="e.g., workstation-documents">
-                <div class="form-hint">Unique identifier for this backup job</div>
+                       placeholder="e.g., daily-documents">
+                <div class="form-hint">A friendly name for this backup job</div>
             </div>
 
             <div class="form-group">
-                <label class="form-label">Agent</label>
-                <select name="client_id" class="form-input">
-                    <option value="">Any available agent</option>
+                <label class="form-label">Agent *</label>
+                <select name="client_id" class="form-input" required>
+                    <option value="">Select an agent...</option>
                     {% for agent in agents %}
-                    <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.id }})</option>
+                    <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.hostname }})</option>
                     {% endfor %}
                 </select>
-                <div class="form-hint">Which agent should run this backup</div>
+                <div class="form-hint">Which computer to backup</div>
+                {% if not agents %}
+                <div class="form-hint" style="color: var(--warning);">
+                    No agents registered. <a href="/agents" style="color: var(--accent);">Set up an agent first</a>
+                </div>
+                {% endif %}
             </div>
 
             <div class="form-group">
                 <label class="form-label">Source Path *</label>
                 <input type="text" name="source_path" class="form-input" required
-                       placeholder="C:\Users\John\Documents">
-                <div class="form-hint">Path on the agent machine to backup</div>
+                       placeholder="C:\Users\John\Documents or /home/john">
+                <div class="form-hint">Folder on the agent's computer to backup</div>
             </div>
 
-            <div class="form-group">
-                <label class="form-label">Destination Path *</label>
-                <input type="text" name="destination_path" class="form-input" required
-                       placeholder="\\server\backups\john-docs or /mnt/backup/john">
-                <div class="form-hint">Where to store the backup</div>
-            </div>
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
 
             <div class="form-group">
-                <label class="form-label">Backend</label>
-                <select name="backend" class="form-input">
-                    <option value="rclone">rclone (recommended)</option>
-                    <option value="restic">restic (encrypted)</option>
-                    <option value="rsync">rsync</option>
+                <label class="form-label">Destination Repository *</label>
+                <select name="repository_id" class="form-input" required id="repoSelect" onchange="onRepoChange()">
+                    <option value="">Select a storage repository...</option>
+                    {% for repo in repositories %}
+                    <option value="{{ repo.id }}"
+                            data-server="{{ repo.server }}"
+                            data-share="{{ repo.share }}"
+                            data-path="{{ repo.path }}">
+                        {{ repo.name }} ({{ repo.repo_type|upper }}: //{{ repo.server }}/{{ repo.share }})
+                    </option>
+                    {% endfor %}
                 </select>
-                <div class="form-hint">Backup tool to use</div>
+                <div class="form-hint">Where to store backups</div>
+                {% if not repositories %}
+                <div class="form-hint" style="color: var(--warning);">
+                    No repositories configured. <a href="/storage" style="color: var(--accent);">Add a storage repository first</a>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Subfolder (optional)</label>
+                <input type="text" name="dest_subfolder" class="form-input" id="destSubfolder"
+                       placeholder="backups/workstation-1">
+                <div class="form-hint">Additional path within the repository</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Full Destination Path</label>
+                <input type="text" class="form-input" id="fullDestPath" readonly
+                       style="background: var(--bg-primary); color: var(--text-muted);">
+            </div>
+
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+
+            <div class="form-group">
+                <label class="form-label">Backup Method</label>
+                <select name="backend" class="form-input">
+                    <option value="rclone">rclone (recommended - fast, supports many backends)</option>
+                    <option value="restic">restic (encrypted, deduplicated snapshots)</option>
+                    <option value="rsync">rsync (simple file sync)</option>
+                </select>
+                <div class="form-hint">
+                    <strong>rclone</strong>: Best for most use cases<br>
+                    <strong>restic</strong>: Best for encrypted backups with versioning<br>
+                    <strong>rsync</strong>: Simple file copying
+                </div>
             </div>
 
             <div class="form-group">
                 <label class="form-label">Exclude Patterns</label>
                 <input type="text" name="excludes" class="form-input"
-                       placeholder="*.tmp, .cache, node_modules">
-                <div class="form-hint">Comma-separated patterns to exclude</div>
+                       placeholder="*.tmp, .cache, node_modules, Thumbs.db">
+                <div class="form-hint">Files/folders to skip (comma-separated)</div>
             </div>
 
             <div class="form-group">
-                <label class="form-label">Schedule (Cron)</label>
-                <input type="text" name="schedule_cron" class="form-input"
+                <label class="form-label">Schedule</label>
+                <select name="schedule_preset" class="form-input" id="schedulePreset" onchange="onScheduleChange()">
+                    <option value="">Manual only (no automatic backups)</option>
+                    <option value="0 2 * * *">Daily at 2:00 AM</option>
+                    <option value="0 3 * * 0">Weekly on Sunday at 3:00 AM</option>
+                    <option value="0 1 * * 1-5">Weekdays at 1:00 AM</option>
+                    <option value="0 */6 * * *">Every 6 hours</option>
+                    <option value="custom">Custom (enter cron expression)</option>
+                </select>
+                <div class="form-hint">When to automatically run this backup</div>
+            </div>
+
+            <div class="form-group" id="customCronGroup" style="display: none;">
+                <label class="form-label">Custom Schedule (Cron)</label>
+                <input type="text" name="schedule_cron" class="form-input" id="scheduleInput"
                        placeholder="0 2 * * *">
-                <div class="form-hint">Leave empty for manual-only. Example: "0 2 * * *" = 2 AM daily</div>
+                <div class="form-hint">
+                    Format: minute hour day month weekday<br>
+                    Example: "0 2 * * *" = 2:00 AM daily
+                </div>
             </div>
 
             <div style="display: flex; gap: 10px; margin-top: 30px;">
-                <button type="submit" class="btn btn-primary">Create Job</button>
+                <button type="submit" class="btn btn-primary">Create Backup Job</button>
                 <a href="/jobs" class="btn btn-secondary">Cancel</a>
             </div>
         </form>
     </div>
 </div>
+
+<script>
+function onRepoChange() {
+    updateDestPath();
+}
+
+function updateDestPath() {
+    const select = document.getElementById('repoSelect');
+    const option = select.options[select.selectedIndex];
+    const subfolder = document.getElementById('destSubfolder').value;
+    const fullPath = document.getElementById('fullDestPath');
+
+    if (!option.value) {
+        fullPath.value = '';
+        return;
+    }
+
+    const server = option.dataset.server;
+    const share = option.dataset.share;
+    const repoPath = option.dataset.path;
+
+    let path = `//${server}/${share}`;
+    if (repoPath) path += '/' + repoPath;
+    if (subfolder) path += '/' + subfolder.replace(/^\/+/, '');
+
+    fullPath.value = path;
+}
+
+function onScheduleChange() {
+    const preset = document.getElementById('schedulePreset');
+    const customGroup = document.getElementById('customCronGroup');
+    const cronInput = document.getElementById('scheduleInput');
+
+    if (preset.value === 'custom') {
+        customGroup.style.display = 'block';
+        cronInput.value = '';
+    } else {
+        customGroup.style.display = 'none';
+        cronInput.value = preset.value;
+    }
+}
+
+// Update path when subfolder changes
+document.getElementById('destSubfolder').addEventListener('input', updateDestPath);
+
+// Initialize
+onScheduleChange();
+</script>
 {% endblock %}
