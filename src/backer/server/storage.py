@@ -390,7 +390,7 @@ class Storage:
             return [
                 {
                     "id": row["id"],
-                    "command": row["command_type"],
+                    "command_type": row["command_type"],
                     "payload": json.loads(row["payload"]),
                     "created_at": row["created_at"],
                 }
