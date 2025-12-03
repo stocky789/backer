@@ -1,10 +1,12 @@
 """Tests for the tool manager."""
 
-import pytest
+import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from backer.tools.manager import ToolManager, TOOL_INFO
+import pytest
+
+from backer.tools.manager import TOOL_INFO, ToolManager
 
 
 class TestToolManager:
@@ -13,7 +15,7 @@ class TestToolManager:
     def test_init_creates_tools_dir(self, tmp_path: Path) -> None:
         """Test that ToolManager creates the tools directory."""
         tools_dir = tmp_path / "tools"
-        manager = ToolManager(tools_dir)
+        _manager = ToolManager(tools_dir)  # noqa: F841
         assert tools_dir.exists()
 
     def test_get_tool_path_not_installed(self, tmp_path: Path) -> None:
@@ -34,8 +36,9 @@ class TestToolManager:
         tools_dir = tmp_path / "tools"
         tools_dir.mkdir()
 
-        # Create a fake rclone binary
-        rclone_path = tools_dir / "rclone"
+        # Create a fake rclone binary (with .exe on Windows)
+        binary_name = "rclone.exe" if sys.platform == "win32" else "rclone"
+        rclone_path = tools_dir / binary_name
         rclone_path.write_text("#!/bin/bash\necho rclone")
 
         manager = ToolManager(tools_dir)
