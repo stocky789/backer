@@ -497,6 +497,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             files_transferred=result.files_transferred,
             errors=result.errors,
             output=result.output[:10000],  # Limit output size
+            snapshot_id=result.snapshot_id,  # For restic backups
         )
         # Mark progress as complete
         storage.finish_job_progress(
@@ -621,6 +622,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "destination_path": destination_path,  # Restore TO this location
             "backend": job.get("backend", "rclone"),
             "snapshot": data.get("snapshot"),
+            "clean_restore": data.get("clean_restore", False),  # Delete extra files at destination
             "dry_run": data.get("dry_run", False),
         }
 
@@ -657,6 +659,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "finished_at": r.get("finished_at"),
                 "bytes_transferred": r.get("bytes_transferred", 0),
                 "files_transferred": r.get("files_transferred", 0),
+                "snapshot_id": r.get("snapshot_id"),  # For restic backups
             }
             for r in runs
             if r.get("status") == "success" and not r.get("run_id", "").startswith("restore_")

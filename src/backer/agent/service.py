@@ -379,6 +379,7 @@ class AgentService:
                 files_transferred=result.get('files', 0),
                 output=result.get('output', ''),
                 error=result.get('error'),
+                snapshot_id=result.get('snapshot_id'),  # For restic backups
             )
 
             if result['success']:
@@ -406,17 +407,29 @@ class AgentService:
         destination_path = payload.get('destination_path')
         backend = payload.get('backend', 'rclone')
         snapshot = payload.get('snapshot')  # For restic: snapshot ID or "latest"
+        clean_restore = payload.get('clean_restore', False)
         dry_run = payload.get('dry_run', False)
 
         self._update_status(f"Restoring: {job_name}")
         logger.info(f"Starting restore: {source_path} -> {destination_path}")
+        logger.info(f"Clean restore: {clean_restore}, Dry run: {dry_run}")
 
         started_at = datetime.now()
         self._report_progress(run_id, 'running', 0, 'Starting restore...')
 
         try:
+            # For clean restore with restic, clear destination first
+            # (rclone sync already handles this automatically)
+            if clean_restore and backend == 'restic' and not dry_run:
+                dest_path = Path(destination_path)
+                if dest_path.exists():
+                    logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
+                    import shutil
+                    shutil.rmtree(destination_path)
+                    dest_path.mkdir(parents=True, exist_ok=True)
+
             if backend == 'rclone':
-                # For restore, swap source and dest
+                # rclone sync deletes files at dest that aren't in source
                 result = self._run_rclone_sync(
                     source_path, destination_path, [], dry_run, run_id
                 )
@@ -628,7 +641,7 @@ class AgentService:
                 'error': 'Repository initialization failed',
             }
 
-        cmd = [str(restic), '-r', dest, 'backup', source, '-v']
+        cmd = [str(restic), '-r', dest, 'backup', source, '--json']
 
         for exclude in excludes:
             cmd.extend(['--exclude', exclude])
@@ -647,9 +660,25 @@ class AgentService:
         )
 
         output_lines = []
+        snapshot_id = None
+        files_new = 0
+        bytes_added = 0
+
         for line in process.stdout:
             output_lines.append(line)
             logger.debug(line.strip())
+
+            # Parse JSON output for snapshot info
+            try:
+                data = json.loads(line)
+                if data.get('message_type') == 'summary':
+                    snapshot_id = data.get('snapshot_id')
+                    files_new = data.get('files_new', 0)
+                    bytes_added = data.get('data_added', 0)
+                    logger.info(f"[RESTIC] Snapshot ID: {snapshot_id}")
+                    logger.info(f"[RESTIC] Files new: {files_new}, Bytes added: {bytes_added}")
+            except (json.JSONDecodeError, TypeError):
+                pass  # Not all lines are JSON
 
         process.wait()
         output = ''.join(output_lines)
@@ -663,8 +692,9 @@ class AgentService:
         return {
             'success': process.returncode == 0,
             'output': output,
-            'bytes': 0,
-            'files': 0,
+            'bytes': bytes_added,
+            'files': files_new,
+            'snapshot_id': snapshot_id,
             'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
         }
 
@@ -771,6 +801,7 @@ class AgentService:
         files_transferred: int = 0,
         output: str = '',
         error: str | None = None,
+        snapshot_id: str | None = None,
     ):
         """Report backup result to server."""
         try:
@@ -788,6 +819,7 @@ class AgentService:
                     'files_transferred': files_transferred,
                     'output': output[:5000],  # Limit output size
                     'errors': [error] if error else [],
+                    'snapshot_id': snapshot_id,  # For restic backups
                 },
             )
         except Exception as e:
