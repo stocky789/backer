@@ -131,11 +131,13 @@ class TestResticRestore:
         """Test that the restic restore command is structured correctly."""
         from backer.agent.service import AgentService
 
-        # Mock the tool path check
+        # Mock the tool path check - use correct extension for platform
         tools_dir = temp_dirs["tools"]
-        restic_path = tools_dir / "restic"
+        restic_name = "restic.exe" if sys.platform == "win32" else "restic"
+        restic_path = tools_dir / restic_name
         restic_path.touch()
-        restic_path.chmod(0o755)
+        if sys.platform != "win32":
+            restic_path.chmod(0o755)
 
         service = AgentService(
             server_url="http://localhost:8420",
