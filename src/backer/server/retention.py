@@ -193,11 +193,16 @@ class RetentionManager:
         return runs_to_delete
 
     def _delete_run(self, job_name: str, run_id: str) -> None:
-        """Delete a job run record from the database."""
+        """Delete a job run record and associated progress from the database."""
         with self.storage._connect() as conn:
             conn.execute(
                 "DELETE FROM job_runs WHERE job_name = ? AND run_id = ?",
                 (job_name, run_id),
+            )
+            # Also clean up any orphaned progress records
+            conn.execute(
+                "DELETE FROM job_progress WHERE run_id = ?",
+                (run_id,),
             )
 
     def apply_all_retention(self, dry_run: bool = False) -> dict[str, list[dict[str, Any]]]:

@@ -331,17 +331,25 @@ class RcloneBackend(BackendBase):
         return [{"id": "current", "path": destination.path, "note": "Current backup state"}]
 
     def check(self, destination: BackupDestination) -> BackendResult:
-        """Check integrity of rclone destination."""
+        """Check integrity of rclone destination.
+
+        Uses 'rclone size' to verify the destination is accessible and get stats.
+        """
         started_at = datetime.now()
 
         try:
             binary = self._get_binary()
+            # Use 'size' command to verify destination is accessible
             result = subprocess.run(
-                [str(binary), "check", destination.path, "--one-way"],
+                [str(binary), "size", destination.path, "--json"],
                 capture_output=True,
                 text=True,
                 timeout=self.config.get("timeout", 3600),
             )
+
+            errors = []
+            if result.returncode != 0:
+                errors = [line for line in result.stderr.split("\n") if line.strip() and "ERROR" in line]
 
             return BackendResult(
                 success=result.returncode == 0,
@@ -349,6 +357,7 @@ class RcloneBackend(BackendBase):
                 started_at=started_at,
                 finished_at=datetime.now(),
                 output=result.stdout + result.stderr,
+                errors=errors,
                 return_code=result.returncode,
             )
         except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:

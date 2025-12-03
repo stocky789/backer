@@ -242,10 +242,26 @@ async def jobs_create(
     if not repo:
         return RedirectResponse("/jobs/new?error=invalid_repo", status_code=303)
 
-    # Build full destination path
-    destination_path = f"//{repo['server']}/{repo['share']}"
-    if repo.get("path"):
-        destination_path += "/" + repo["path"]
+    # Build full destination path based on repository type
+    repo_type = repo.get("repo_type", "smb")
+    if repo_type == "smb":
+        destination_path = f"//{repo['server']}/{repo['share']}"
+        if repo.get("path"):
+            destination_path += "/" + repo["path"]
+    elif repo_type == "nfs":
+        destination_path = f"{repo['server']}:{repo['share']}"
+        if repo.get("path"):
+            destination_path += "/" + repo["path"]
+    elif repo_type == "s3":
+        destination_path = f"s3://{repo['share']}"
+        if repo.get("path"):
+            destination_path += "/" + repo["path"]
+    elif repo_type == "local":
+        destination_path = repo.get("share", "") or repo.get("path", "")
+    else:
+        # Fallback for unknown types
+        destination_path = repo.get("share", "") or repo.get("path", "")
+
     if dest_subfolder:
         destination_path += "/" + dest_subfolder.strip("/")
 

@@ -137,9 +137,26 @@ class SecretsManager:
 _secrets_manager: SecretsManager | None = None
 
 
-def get_secrets_manager(data_dir: Path | None = None) -> SecretsManager:
-    """Get the global secrets manager instance."""
+def get_secrets_manager(data_dir: Path | str | None = None) -> SecretsManager:
+    """Get the global secrets manager instance.
+
+    Args:
+        data_dir: Directory for the key file. If provided and different from
+                  the current instance's directory, a new instance is created.
+
+    Returns:
+        SecretsManager instance
+    """
     global _secrets_manager
+
+    # Normalize data_dir for comparison
+    if data_dir is not None:
+        data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
+
+    # Create new instance if none exists or if data_dir changed
     if _secrets_manager is None:
         _secrets_manager = SecretsManager(data_dir)
+    elif data_dir is not None and _secrets_manager.data_dir != data_dir:
+        _secrets_manager = SecretsManager(data_dir)
+
     return _secrets_manager
