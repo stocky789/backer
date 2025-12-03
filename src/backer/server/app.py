@@ -273,6 +273,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
         # Get pending commands for this client
         commands = storage.get_pending_commands(client.id)
+        if commands:
+            logger.info(f"[HEARTBEAT] Agent '{client.id}' receiving {len(commands)} command(s)")
+            for cmd in commands:
+                logger.debug(f"[HEARTBEAT] Command: {cmd}")
         return {"status": "ok", "commands": commands}
 
     # ============ Job Management ============
@@ -318,7 +322,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     name=job["name"],
                     source_path=job.get("source_path", ""),
                     destination_path=job.get("destination_path", ""),
-                    backend=job.get("backend", "rsync"),
+                    backend=job.get("backend", "rclone"),
                     client_id=job.get("client_id"),
                     enabled=job.get("enabled", True),
                     schedule_cron=job.get("schedule_cron"),
@@ -434,6 +438,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             payload=command_payload,
         )
 
+        logger.info(f"[JOB RUN] Job '{job_name}' queued for agent '{client_id}' (run_id: {run_id})")
+        logger.debug(f"[JOB RUN] Command payload: {command_payload}")
+
         return JobRunResponse(
             run_id=run_id,
             job_name=job_name,
@@ -472,10 +479,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, str]:
         """Client reports backup result."""
+        status = "success" if result.success else "failed"
+        logger.info(f"[RESULT] Job '{result.job_name}' (run_id: {result.run_id}) completed with status: {status}")
+        if result.errors:
+            logger.warning(f"[RESULT] Job '{result.job_name}' errors: {result.errors}")
+        if result.output:
+            logger.debug(f"[RESULT] Job '{result.job_name}' output (first 500 chars): {result.output[:500]}")
+
         storage.save_job_run(
             run_id=result.run_id,
             job_name=result.job_name,
-            status="success" if result.success else "failed",
+            status=status,
             started_at=result.started_at,
             finished_at=result.finished_at,
             client_id=result.client_id,

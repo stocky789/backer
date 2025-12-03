@@ -5,6 +5,7 @@ A simple Windows GUI for connecting to a Backer server and managing backups.
 """
 
 import json
+import logging
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -20,6 +21,10 @@ else:
 
 CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'Backer'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
+LOG_DIR = CONFIG_DIR / 'logs'
+
+# Global log file path (set after logging is initialized)
+LOG_FILE: Path | None = None
 
 
 class BackerAgentApp:
@@ -181,6 +186,15 @@ class BackerAgentApp:
             width=10
         )
         exit_btn.pack(side=tk.RIGHT)
+
+        # View Logs button
+        logs_btn = ttk.Button(
+            button_frame,
+            text="View Logs",
+            command=self.open_logs,
+            width=10
+        )
+        logs_btn.pack(side=tk.RIGHT, padx=(0, 10))
 
     def on_entry_focus_in(self, event):
         """Handle entry focus in - clear placeholder."""
@@ -349,7 +363,22 @@ class BackerAgentApp:
             messagebox.showinfo("Info", "Agent is already running")
             return
 
+        # Disable button and show starting status
+        self.start_btn.config(text="Starting...", state=tk.DISABLED)
+        self.status_var.set("Initializing agent...")
+        self.status_label.config(foreground='blue')
+
+        # Run initialization in background thread
+        thread = threading.Thread(target=self._do_start_agent, daemon=True)
+        thread.start()
+
+    def _do_start_agent(self):
+        """Perform agent startup in background thread."""
         try:
+            logging.info("Starting agent service...")
+            logging.info(f"Server URL: {self.config['server_url']}")
+            logging.info(f"Client ID: {self.config['client_id']}")
+
             from backer.agent.service import AgentService
 
             self.service = AgentService(
@@ -358,22 +387,91 @@ class BackerAgentApp:
                 client_secret=self.config.get('client_secret', ''),
                 status_callback=self._on_service_status,
             )
+
+            logging.info(f"Agent tools directory: {self.service.tools_dir}")
+
+            # Automatically download/verify backup tools
+            self.root.after(0, lambda: self.status_var.set("Checking backup tools..."))
+
+            def tool_progress(msg: str):
+                """Update UI with tool download progress."""
+                self.root.after(0, lambda: self.agent_name_var.set(msg))
+
+            tool_results = self.service.ensure_tools_installed(progress_callback=tool_progress)
+
+            # Check if all tools are ready
+            failed_tools = [t for t, ready in tool_results.items() if not ready]
+            if failed_tools:
+                error_msg = f"Failed to install backup tools: {', '.join(failed_tools)}"
+                logging.error(error_msg)
+                self.root.after(0, lambda: self._start_agent_failed(error_msg))
+                return
+
+            # Tools are ready, start the service
+            self.root.after(0, lambda: self.status_var.set("Starting agent service..."))
             self.service.start()
 
-            self.start_btn.config(text="Running...", state=tk.DISABLED)
-            self.status_var.set("Agent running - waiting for jobs")
-            self.status_label.config(foreground='green')
+            logging.info("Agent service started successfully")
+            self.root.after(0, self._start_agent_success)
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to start agent: {e}")
+            logging.error(f"Failed to start agent: {e}", exc_info=True)
+            self.root.after(0, lambda: self._start_agent_failed(str(e)))
+
+    def _start_agent_success(self):
+        """Handle successful agent startup."""
+        self.start_btn.config(text="Running...", state=tk.DISABLED)
+        self.status_var.set("Agent running - waiting for jobs")
+        self.status_label.config(foreground='green')
+        self.agent_name_var.set("All backup tools ready")
+
+    def _start_agent_failed(self, error: str):
+        """Handle failed agent startup."""
+        self.service = None
+        self.start_btn.config(text="Start Agent", state=tk.NORMAL)
+        self.status_var.set("Failed to start")
+        self.status_label.config(foreground='red')
+        self.agent_name_var.set("")
+        messagebox.showerror(
+            "Startup Failed",
+            f"Failed to start agent:\n\n{error}\n\n"
+            f"Check the log file for details:\n{LOG_FILE}"
+        )
 
     def _on_service_status(self, status: str):
         """Callback for service status updates."""
         # Update UI from main thread
         self.root.after(0, lambda: self.agent_name_var.set(status))
 
+    def open_logs(self):
+        """Open the logs folder in file explorer."""
+        import subprocess
+
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        if sys.platform == 'win32':
+            # Windows: open folder in explorer
+            subprocess.Popen(['explorer', str(LOG_DIR)])
+        elif sys.platform == 'darwin':
+            # macOS
+            subprocess.Popen(['open', str(LOG_DIR)])
+        else:
+            # Linux
+            subprocess.Popen(['xdg-open', str(LOG_DIR)])
+
+        # Also show info about log location
+        if LOG_FILE and LOG_FILE.exists():
+            messagebox.showinfo(
+                "Log Files",
+                f"Log folder opened.\n\nCurrent log file:\n{LOG_FILE}\n\n"
+                f"Check this file if backups are not working as expected."
+            )
+        else:
+            messagebox.showinfo("Log Files", f"Log folder: {LOG_DIR}")
+
     def on_exit(self):
         """Handle exit - stop service if running."""
+        logging.info("Backer Agent GUI shutting down")
         if self.service:
             self.service.stop()
         self.root.quit()
@@ -385,6 +483,17 @@ class BackerAgentApp:
 
 def main():
     """Main entry point."""
+    global LOG_FILE
+
+    # Initialize logging before anything else
+    try:
+        from backer.agent.service import setup_agent_logging
+        LOG_FILE = setup_agent_logging(LOG_DIR)
+        logging.info(f"Backer Agent GUI starting - log file: {LOG_FILE}")
+    except Exception as e:
+        # Fallback if logging setup fails
+        print(f"Warning: Could not initialize logging: {e}")
+
     app = BackerAgentApp()
     app.run()
 

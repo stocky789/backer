@@ -69,6 +69,16 @@ backer server start
     └───────────────────────────────────────────────────────┘
 ```
 
+## Supported Backup Backends
+
+| Backend | Status | Description |
+|---------|--------|-------------|
+| **rclone** | ✅ Supported | Recommended for most use cases. Supports local, SMB, NFS, S3, and 50+ cloud providers. |
+| **restic** | ✅ Supported | Best for encrypted, deduplicated backups with versioning. |
+| **rsync** | ❌ Not Supported | rsync backend exists in codebase but is NOT available for agent-based backups. Use rclone instead. |
+
+**Note:** Backup tools (rclone, restic) are automatically downloaded to agents when they first connect. No manual installation required.
+
 ## Server Management
 
 After installation with the install script:

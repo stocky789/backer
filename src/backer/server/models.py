@@ -36,7 +36,7 @@ class JobCreate(BaseModel):
     name: str
     source_path: str
     destination_path: str
-    backend: str = "rsync"
+    backend: str = "rclone"  # rclone or restic (rsync not supported for agents)
     excludes: list[str] = Field(default_factory=list)
     schedule_cron: str | None = None
     client_id: str | None = None

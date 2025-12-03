@@ -271,7 +271,7 @@ class BackerAgent:
 
         try:
             backend = get_backend(
-                job.get("backend", "rsync"),
+                job.get("backend", "rclone"),  # rclone default (rsync not supported for agents)
                 job.get("backend_options", {}),
             )
 
@@ -406,7 +406,7 @@ class BackerAgent:
 
         try:
             backend = get_backend(
-                job.get("backend", "rsync"),
+                job.get("backend", "rclone"),  # rclone default (rsync not supported for agents)
                 job.get("backend_options", {}),
             )
 
