@@ -59,32 +59,64 @@
     {% endif %}
 </div>
 
-<!-- Setup Instructions -->
+<!-- Windows Setup Instructions -->
 <div class="card">
     <div class="card-header">
         <span class="card-title">Windows Agent Setup</span>
     </div>
     <div class="card-body">
         <p style="margin-bottom: 20px; color: var(--text-muted);">
-            Install the Backer agent on Windows machines to backup:
+            Install the Backer agent on Windows machines to enable backups:
         </p>
 
-        <h4 style="margin-bottom: 10px;">1. Install Python (if not installed)</h4>
+        <h4 style="margin-bottom: 10px;">1. Download the Installer</h4>
+        <p style="margin-bottom: 15px;">
+            <a href="https://github.com/stocky789/backer/releases/latest"
+               target="_blank"
+               class="btn btn-primary"
+               style="display: inline-flex; align-items: center; gap: 8px;">
+                Download backer-agent-setup.exe
+            </a>
+        </p>
+
+        <h4 style="margin-top: 20px; margin-bottom: 10px;">2. Run the Installer</h4>
         <p style="color: var(--text-muted); margin-bottom: 15px;">
-            Download from <a href="https://python.org" style="color: var(--accent)">python.org</a>
+            Double-click the downloaded file and follow the installation wizard.
         </p>
 
-        <h4 style="margin-bottom: 10px;">2. Install Backer Agent</h4>
-        <pre>pip install backer</pre>
+        <h4 style="margin-top: 20px; margin-bottom: 10px;">3. Connect to this Server</h4>
+        <p style="color: var(--text-muted); margin-bottom: 10px;">
+            When the Backer Agent opens, enter this server address:
+        </p>
+        <pre style="font-size: 14px; padding: 12px;">http://{{ request.host }}</pre>
 
-        <h4 style="margin-top: 20px; margin-bottom: 10px;">3. Register with this Server</h4>
-        <pre>backer agent register --server http://{{ request.host }}</pre>
+        <h4 style="margin-top: 20px; margin-bottom: 10px;">4. Click Connect</h4>
+        <p style="color: var(--text-muted);">
+            The agent will register with this server and appear in the list above.
+        </p>
+    </div>
+</div>
 
-        <h4 style="margin-top: 20px; margin-bottom: 10px;">4. Start the Agent</h4>
-        <pre>backer agent start</pre>
+<!-- Linux Setup Instructions -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Linux Agent Setup</span>
+    </div>
+    <div class="card-body">
+        <p style="margin-bottom: 20px; color: var(--text-muted);">
+            Install the Backer agent on Linux machines:
+        </p>
+
+        <h4 style="margin-bottom: 10px;">Quick Install</h4>
+        <pre>curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash -s -- --agent</pre>
+
+        <h4 style="margin-top: 20px; margin-bottom: 10px;">Or Manual Install</h4>
+        <pre>pip install backer
+backer agent register --server http://{{ request.host }}
+backer agent start</pre>
 
         <p style="margin-top: 20px; color: var(--text-muted);">
-            The agent will appear in this list once registered and running.
+            The agent will appear in the list above once registered and running.
         </p>
     </div>
 </div>

@@ -11,7 +11,7 @@ on:
         required: true
 
 jobs:
-  # Build Windows agent executable
+  # Build Windows agent installer
   build-windows-agent:
     runs-on: windows-latest
     steps:
@@ -30,63 +30,82 @@ jobs:
 
       - name: Download rclone
         run: |
-          $rcloneVersion = "1.65.0"
+          $rcloneVersion = "1.68.2"
           $url = "https://downloads.rclone.org/v$rcloneVersion/rclone-v$rcloneVersion-windows-amd64.zip"
+          New-Item -ItemType Directory -Force -Path dist\tools
           Invoke-WebRequest -Uri $url -OutFile rclone.zip
-          Expand-Archive -Path rclone.zip -DestinationPath tools
-          Move-Item tools/rclone-v$rcloneVersion-windows-amd64/rclone.exe tools/rclone.exe
+          Expand-Archive -Path rclone.zip -DestinationPath temp
+          Move-Item temp\rclone-v$rcloneVersion-windows-amd64\rclone.exe dist\tools\rclone.exe
         shell: pwsh
 
       - name: Download restic
         run: |
-          $resticVersion = "0.16.2"
+          $resticVersion = "0.17.3"
           $url = "https://github.com/restic/restic/releases/download/v$resticVersion/restic_${resticVersion}_windows_amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile restic.zip
-          Expand-Archive -Path restic.zip -DestinationPath tools
+          Expand-Archive -Path restic.zip -DestinationPath temp-restic
+          Move-Item temp-restic\restic_${resticVersion}_windows_amd64.exe dist\tools\restic.exe
         shell: pwsh
 
-      - name: Build with PyInstaller
+      - name: Build GUI with PyInstaller
         run: |
           pyinstaller --clean backer-agent.spec
+          # PyInstaller outputs to dist/backer-agent.exe
 
-      - name: Create package
+      - name: Install Inno Setup
         run: |
+          choco install innosetup -y
+        shell: pwsh
+
+      - name: Build Installer
+        run: |
+          # Update version in installer script
+          $version = "${{ github.event.inputs.version || github.ref_name }}"
+          $version = $version -replace '^v', ''
+          (Get-Content installer\backer-agent.iss) -replace '#define MyAppVersion ".*"', "#define MyAppVersion `"$version`"" | Set-Content installer\backer-agent.iss
+
+          # Build installer
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\backer-agent.iss
+        shell: pwsh
+
+      - name: Create ZIP package (fallback)
+        run: |
+          # Also create a ZIP for users who don't want an installer
           mkdir dist\backer-agent-windows
           mkdir dist\backer-agent-windows\tools
           copy dist\backer-agent.exe dist\backer-agent-windows\
-          copy tools\rclone.exe dist\backer-agent-windows\tools\
-          copy tools\restic*.exe dist\backer-agent-windows\tools\restic.exe
+          copy dist\tools\rclone.exe dist\backer-agent-windows\tools\
+          copy dist\tools\restic.exe dist\backer-agent-windows\tools\
 
-          # Create README
           @"
-          Backer Agent for Windows
-          ========================
+Backer Agent for Windows
+========================
 
-          Quick Start:
-          1. Open Command Prompt as Administrator
-          2. Register with your server:
-             backer-agent.exe register --server http://your-server:8420
+This is the portable version. For easier installation, use the
+backer-agent-setup.exe installer instead.
 
-          3. Install as Windows service:
-             backer-agent.exe install
+To use this version:
+1. Run backer-agent.exe
+2. Enter your server address in the GUI
+3. Click Connect
 
-          4. Or run manually:
-             backer-agent.exe start
+For more info: https://github.com/stocky789/backer
+"@ | Out-File -FilePath dist\backer-agent-windows\README.txt -Encoding UTF8
 
-          For more info: https://github.com/stocky789/backer
-          "@ | Out-File -FilePath dist\backer-agent-windows\README.txt
+          Compress-Archive -Path dist\backer-agent-windows\* -DestinationPath dist\backer-agent-windows-portable.zip
         shell: pwsh
 
-      - name: Create ZIP
-        run: |
-          Compress-Archive -Path dist\backer-agent-windows\* -DestinationPath dist\backer-agent-windows-amd64.zip
-        shell: pwsh
-
-      - name: Upload artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: backer-agent-windows
-          path: dist/backer-agent-windows-amd64.zip
+          name: backer-agent-installer
+          path: dist/backer-agent-setup.exe
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backer-agent-portable
+          path: dist/backer-agent-windows-portable.zip
 
   # Build Python package
   build-python:
@@ -122,10 +141,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Windows agent
+      - name: Download Windows installer
         uses: actions/download-artifact@v4
         with:
-          name: backer-agent-windows
+          name: backer-agent-installer
+          path: release/
+
+      - name: Download Windows portable
+        uses: actions/download-artifact@v4
+        with:
+          name: backer-agent-portable
           path: release/
 
       - name: Download Python package
@@ -151,7 +176,8 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            release/backer-agent-windows-amd64.zip
+            release/backer-agent-setup.exe
+            release/backer-agent-windows-portable.zip
             release/*.whl
             release/*.tar.gz
           body: |
@@ -159,24 +185,37 @@ jobs:
 
             ### Downloads
 
-            | Platform | Download |
-            |----------|----------|
-            | Windows Agent | `backer-agent-windows-amd64.zip` |
-            | Python Package | `backer-*.whl` |
+            | Platform | Download | Description |
+            |----------|----------|-------------|
+            | Windows Installer | `backer-agent-setup.exe` | **Recommended** - Easy install wizard |
+            | Windows Portable | `backer-agent-windows-portable.zip` | No installation required |
+            | Linux/Python | `backer-*.whl` | pip install |
+
+            ### Windows Agent Installation
+
+            **Option 1: Installer (Recommended)**
+            1. Download `backer-agent-setup.exe`
+            2. Run the installer
+            3. Enter your server address when the app opens
+            4. Click Connect
+
+            **Option 2: Portable**
+            1. Download and extract `backer-agent-windows-portable.zip`
+            2. Run `backer-agent.exe`
+            3. Enter your server address
+            4. Click Connect
 
             ### Server Installation (Linux)
 
             ```bash
-            pip install backer-${{ steps.version.outputs.version }}.tar.gz[server]
-            backer server start
+            # One-line install
+            curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
             ```
 
-            ### Windows Agent Installation
-
-            1. Download `backer-agent-windows-amd64.zip`
-            2. Extract to a folder
-            3. Open Command Prompt as Administrator
-            4. Run: `backer-agent.exe register --server http://your-server:8420`
-            5. Run: `backer-agent.exe install`
+            Or with Docker:
+            ```bash
+            git clone https://github.com/stocky789/backer.git && cd backer
+            docker compose up -d
+            ```
 
             See the [README](https://github.com/stocky789/backer#readme) for full documentation.

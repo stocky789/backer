@@ -1,12 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file for Backer Windows Agent.
+"""PyInstaller spec file for Backer Windows Agent GUI.
 
 Build with: pyinstaller backer-agent.spec
 
 This creates a single-file executable that includes:
-- The backer agent
+- The backer agent GUI
 - All Python dependencies
-- rclone and restic binaries (downloaded during build)
 """
 
 import os
@@ -20,25 +19,30 @@ block_cipher = None
 
 # Collect all backer modules
 a = Analysis(
-    ['src/backer/client/agent.py'],
+    ['src/backer/agent/gui/app.py'],
     pathex=['src'],
     binaries=[],
     datas=[
-        # Include any data files needed
+        # Include assets if they exist
+        ('assets', 'assets') if os.path.exists('assets') else ('README.md', '.'),
     ],
     hiddenimports=[
         'backer',
+        'backer.agent',
+        'backer.agent.gui',
+        'backer.agent.gui.app',
         'backer.backends',
-        'backer.backends.rsync',
         'backer.backends.rclone',
         'backer.backends.restic',
         'backer.backends.base',
         'backer.backends.registry',
         'backer.client',
         'backer.client.agent',
-        'backer.client.windows_service',
         'backer.tools',
         'backer.tools.manager',
+        'tkinter',
+        'tkinter.ttk',
+        'tkinter.messagebox',
         'httpx',
         'httpx._transports',
         'httpx._transports.default',
@@ -93,12 +97,12 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,  # Console app for now, can change to False for GUI
+    console=False,  # GUI app - no console window
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # Add icon path here if you have one: icon='assets/backer.ico'
-    version=None,  # Add version info file if needed
+    icon='assets/backer.ico' if os.path.exists('assets/backer.ico') else None,
+    version=None,
 )
