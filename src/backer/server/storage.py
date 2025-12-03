@@ -240,27 +240,63 @@ class Storage:
         errors: list[str] | None = None,
         output: str = "",
     ) -> None:
-        """Save a job run record."""
+        """Save or update a job run record.
+
+        Uses INSERT OR REPLACE to handle both new records and updates
+        to existing pending records (when results come in).
+        """
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO job_runs (run_id, job_name, client_id, status, started_at,
-                    finished_at, bytes_transferred, files_transferred, errors, output)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    job_name,
-                    client_id,
-                    status,
-                    started_at.isoformat(),
-                    finished_at.isoformat() if finished_at else None,
-                    bytes_transferred,
-                    files_transferred,
-                    json.dumps(errors or []),
-                    output,
-                ),
-            )
+            # Check if a record with this run_id already exists
+            existing = conn.execute(
+                "SELECT id FROM job_runs WHERE run_id = ? AND job_name = ?",
+                (run_id, job_name),
+            ).fetchone()
+
+            if existing:
+                # Update existing record (e.g., pending -> completed)
+                conn.execute(
+                    """
+                    UPDATE job_runs SET
+                        status = ?,
+                        finished_at = ?,
+                        bytes_transferred = ?,
+                        files_transferred = ?,
+                        errors = ?,
+                        output = ?
+                    WHERE run_id = ? AND job_name = ?
+                    """,
+                    (
+                        status,
+                        finished_at.isoformat() if finished_at else None,
+                        bytes_transferred,
+                        files_transferred,
+                        json.dumps(errors or []),
+                        output,
+                        run_id,
+                        job_name,
+                    ),
+                )
+            else:
+                # Insert new record
+                conn.execute(
+                    """
+                    INSERT INTO job_runs (run_id, job_name, client_id, status, started_at,
+                        finished_at, bytes_transferred, files_transferred, errors, output)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        job_name,
+                        client_id,
+                        status,
+                        started_at.isoformat(),
+                        finished_at.isoformat() if finished_at else None,
+                        bytes_transferred,
+                        files_transferred,
+                        json.dumps(errors or []),
+                        output,
+                    ),
+                )
 
     def get_job_runs(self, job_name: str, limit: int = 20) -> list[dict[str, Any]]:
         """Get recent runs for a job."""

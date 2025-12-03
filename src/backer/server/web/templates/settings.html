@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Settings - Backer{% endblock %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width: 700px;">
+    <div class="card-header">
+        <span class="card-title">Server Configuration</span>
+    </div>
+    <div class="card-body">
+        <div class="form-group">
+            <label class="form-label">Server Version</label>
+            <input type="text" class="form-input" value="{{ version }}" readonly
+                   style="background: var(--bg-primary); color: var(--text-muted);">
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Data Directory</label>
+            <input type="text" class="form-input" value="{{ data_dir }}" readonly
+                   style="background: var(--bg-primary); color: var(--text-muted);">
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+
+        <h3 style="margin-bottom: 15px;">Agent Registration</h3>
+        <p style="color: var(--text-muted); margin-bottom: 15px;">
+            To register a new agent, run the following command on the client machine:
+        </p>
+        <pre style="background: var(--bg-primary); padding: 15px; border-radius: 4px; overflow-x: auto;">backer-agent register --server {{ server_url }}</pre>
+
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+
+        <h3 style="margin-bottom: 15px;">Danger Zone</h3>
+        <p style="color: var(--text-muted); margin-bottom: 15px;">
+            These actions are destructive and cannot be undone.
+        </p>
+        <button class="btn btn-danger" onclick="if(confirm('This will delete ALL backup history. Are you sure?')) alert('Not implemented yet');">
+            Clear All History
+        </button>
+    </div>
+</div>
+{% endblock %}

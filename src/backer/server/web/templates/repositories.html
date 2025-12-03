@@ -278,6 +278,13 @@ let currentShare = '';
 let currentPath = '';
 let currentType = 'smb';
 
+// Escape HTML to prevent XSS
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 function showAddModal() {
     document.getElementById('addModal').style.display = 'flex';
     resetWizard();
@@ -371,10 +378,10 @@ function showSharesList(shares) {
     }
 
     list.innerHTML = shares.map(share => `
-        <div class="browser-item" onclick="selectShare('${share.name}')">
+        <div class="browser-item" onclick="selectShare('${escapeHtml(share.name)}')">
             <span class="icon">&#128193;</span>
-            <span class="name">${share.name}</span>
-            <span class="meta">${share.comment || share.type}</span>
+            <span class="name">${escapeHtml(share.name)}</span>
+            <span class="meta">${escapeHtml(share.comment || share.type)}</span>
         </div>
     `).join('');
 }
@@ -435,9 +442,9 @@ function showDirectoryList(entries) {
     }
 
     list.innerHTML = dirs.map(entry => `
-        <div class="browser-item" onclick="navigateTo('${entry.name}')">
+        <div class="browser-item" onclick="navigateTo('${escapeHtml(entry.name)}')">
             <span class="icon">&#128193;</span>
-            <span class="name">${entry.name}</span>
+            <span class="name">${escapeHtml(entry.name)}</span>
         </div>
     `).join('');
 }

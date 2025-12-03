@@ -303,7 +303,19 @@ async def storage_page(request: Request):
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """Settings page."""
-    return templates.TemplateResponse("base.html", {
+    from backer import __version__
+
+    # Get server URL from request
+    server_url = f"{request.url.scheme}://{request.url.netloc}"
+
+    # Get data directory from storage path
+    storage = get_storage(request)
+    data_dir = str(storage.db_path.parent)
+
+    return templates.TemplateResponse("settings.html", {
         "request": request,
         "active": "settings",
+        "version": __version__,
+        "server_url": server_url,
+        "data_dir": data_dir,
     })

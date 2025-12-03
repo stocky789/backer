@@ -230,7 +230,8 @@ class BackerAgent:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Execute a backup job."""
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Use run_id from command payload if provided, otherwise generate one
+        run_id = job.get("run_id") or datetime.now().strftime("%Y%m%d_%H%M%S")
         started_at = datetime.now()
 
         try:
@@ -289,7 +290,10 @@ class BackerAgent:
                 "success": False,
                 "started_at": started_at.isoformat(),
                 "finished_at": finished_at.isoformat(),
+                "bytes_transferred": 0,
+                "files_transferred": 0,
                 "errors": [str(e)],
+                "output": "",
             }
 
             try:
