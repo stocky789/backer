@@ -557,29 +557,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Required fields in request body:
         - job_name: Name of the job to restore from
         - client_id: Agent to run the restore on
-        - destination_path: Where to restore files to
 
         Optional fields:
+        - destination_path: Where to restore files to (defaults to original source path)
         - run_id: Specific backup run to restore from (defaults to latest)
         - source_subfolder: Subfolder within backup to restore
+        - snapshot: For restic, specific snapshot ID to restore (defaults to latest)
+        - dry_run: If true, don't actually restore
         """
         data = await request.json()
 
         job_name = data.get("job_name")
         client_id = data.get("client_id")
-        destination_path = data.get("destination_path")
 
         if not job_name:
             raise HTTPException(status_code=400, detail="job_name required")
         if not client_id:
             raise HTTPException(status_code=400, detail="client_id required")
-        if not destination_path:
-            raise HTTPException(status_code=400, detail="destination_path required")
 
         # Get job config
         job = storage.get_job(job_name)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        # Default destination to original source path if not specified
+        destination_path = data.get("destination_path") or job.get("source_path")
 
         # Verify client exists
         client = storage.get_client(client_id)
