@@ -267,6 +267,19 @@ async def history_page(request: Request):
     })
 
 
+@router.get("/storage", response_class=HTMLResponse)
+async def storage_page(request: Request):
+    """Storage repositories page."""
+    storage = get_storage(request)
+    repositories = storage.list_repositories()
+
+    return templates.TemplateResponse("repositories.html", {
+        "request": request,
+        "active": "storage",
+        "repositories": repositories,
+    })
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """Settings page."""

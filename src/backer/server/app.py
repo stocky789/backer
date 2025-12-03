@@ -326,6 +326,171 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
         return {"status": "recorded"}
 
+    # ============ Storage Repositories ============
+
+    @app.post("/api/v1/repositories/discover")
+    async def discover_shares_endpoint(
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Discover available shares on a server."""
+        from backer.server.repositories import (
+            RepositoryType,
+            discover_shares as do_discover,
+        )
+
+        data = await request.json()
+
+        repo_type = data.get("type", "smb")
+        server = data.get("server", "")
+        username = data.get("username")
+        password = data.get("password")
+        domain = data.get("domain")
+
+        if not server:
+            raise HTTPException(status_code=400, detail="Server address required")
+
+        try:
+            rtype = RepositoryType(repo_type)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid type: {repo_type}")
+
+        success, result = do_discover(rtype, server, username, password, domain)
+
+        if success:
+            return {
+                "success": True,
+                "shares": [{"name": s.name, "type": s.share_type, "comment": s.comment} for s in result],
+            }
+        else:
+            return {"success": False, "error": result}
+
+    @app.post("/api/v1/repositories/browse")
+    async def browse_share_endpoint(
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Browse a directory on a share."""
+        from backer.server.repositories import (
+            RepositoryType,
+            browse_directory,
+        )
+
+        data = await request.json()
+
+        repo_type = data.get("type", "smb")
+        server = data.get("server", "")
+        share = data.get("share", "")
+        path = data.get("path", "")
+        username = data.get("username")
+        password = data.get("password")
+        domain = data.get("domain")
+
+        if not server or not share:
+            raise HTTPException(status_code=400, detail="Server and share required")
+
+        try:
+            rtype = RepositoryType(repo_type)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid type: {repo_type}")
+
+        success, result = browse_directory(rtype, server, share, path, username, password, domain)
+
+        if success:
+            return {
+                "success": True,
+                "path": path,
+                "entries": [
+                    {"name": e.name, "is_dir": e.is_dir, "size": e.size}
+                    for e in result
+                ],
+            }
+        else:
+            return {"success": False, "error": result}
+
+    @app.get("/api/v1/repositories")
+    def list_repositories(storage: Storage = Depends(get_storage)) -> list[dict[str, Any]]:
+        """List all storage repositories."""
+        return storage.list_repositories()
+
+    @app.post("/api/v1/repositories")
+    async def create_repository(
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Create a new storage repository."""
+        import base64
+
+        data = await request.json()
+
+        name = data.get("name", "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Name required")
+
+        if storage.get_repository_by_name(name):
+            raise HTTPException(status_code=409, detail="Repository name already exists")
+
+        repo_id = str(uuid4())[:8]
+        password = data.get("password")
+        password_encrypted = None
+        if password:
+            password_encrypted = base64.b64encode(password.encode()).decode()
+
+        storage.add_repository(
+            repo_id=repo_id,
+            name=name,
+            repo_type=data.get("type", "smb"),
+            server=data.get("server"),
+            share=data.get("share"),
+            path=data.get("path", ""),
+            username=data.get("username"),
+            password_encrypted=password_encrypted,
+            domain=data.get("domain"),
+        )
+
+        return {"id": repo_id, "name": name, "status": "created"}
+
+    @app.delete("/api/v1/repositories/{repo_id}")
+    def delete_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, str]:
+        """Delete a repository."""
+        if not storage.delete_repository(repo_id):
+            raise HTTPException(status_code=404, detail="Repository not found")
+        return {"status": "deleted"}
+
+    @app.post("/api/v1/repositories/{repo_id}/test")
+    def test_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
+        """Test connection to a repository."""
+        from backer.server.repositories import RepositoryType, SMBBrowser, NFSBrowser
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        password = storage.get_repository_password(repo_id)
+
+        if repo["repo_type"] == "smb":
+            success, message = SMBBrowser.test_connection(
+                server=repo["server"],
+                share=repo["share"],
+                username=repo["username"],
+                password=password,
+                domain=repo["domain"],
+            )
+        elif repo["repo_type"] == "nfs":
+            # For NFS, just try to list the export
+            success, result = NFSBrowser.list_exports(repo["server"])
+            if success:
+                message = f"NFS server responding, {len(result)} exports available"
+            else:
+                message = result
+        else:
+            success, message = False, "Test not supported for this repository type"
+
+        # Update status
+        storage.update_repository_status(repo_id, "connected" if success else "error")
+
+        return {"success": success, "message": message}
+
     # ============ Web UI ============
 
     # Store storage in app state for web routes

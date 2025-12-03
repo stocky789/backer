@@ -1,0 +1,527 @@
+{% extends "base.html" %}
+{% block title %}Storage Repositories - Backer{% endblock %}
+{% block page_title %}Storage Repositories{% endblock %}
+
+{% block actions %}
+<button class="btn btn-primary" onclick="showAddModal()">+ Add Repository</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Configured Repositories ({{ repositories|length }})</span>
+    </div>
+    {% if repositories %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Server</th>
+                <th>Share/Export</th>
+                <th>Path</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for repo in repositories %}
+            <tr>
+                <td><strong>{{ repo.name }}</strong></td>
+                <td>
+                    {% if repo.repo_type == 'smb' %}
+                    <span class="badge badge-info">SMB</span>
+                    {% elif repo.repo_type == 'nfs' %}
+                    <span class="badge badge-info">NFS</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ repo.repo_type }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ repo.server or '-' }}</td>
+                <td><code>{{ repo.share or '-' }}</code></td>
+                <td><code>{{ repo.path or '/' }}</code></td>
+                <td>
+                    {% if repo.status == 'connected' %}
+                    <span class="badge badge-success">Connected</span>
+                    {% elif repo.status == 'error' %}
+                    <span class="badge badge-error">Error</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ repo.status or 'Unknown' }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button class="btn btn-secondary btn-sm" onclick="testRepo('{{ repo.id }}')">Test</button>
+                    <button class="btn btn-danger btn-sm"
+                            hx-delete="/api/v1/repositories/{{ repo.id }}"
+                            hx-confirm="Delete repository '{{ repo.name }}'?"
+                            hx-on::after-request="location.reload()">
+                        Delete
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No Storage Repositories</h3>
+        <p>Add a storage repository to define where backups will be stored</p>
+        <button class="btn btn-primary" onclick="showAddModal()">Add Repository</button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Add Repository Modal -->
+<div id="addModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 700px;">
+        <div class="modal-header">
+            <h3>Add Storage Repository</h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideAddModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <!-- Step 1: Connection -->
+            <div id="step1">
+                <div class="form-group">
+                    <label class="form-label">Repository Type</label>
+                    <select id="repoType" class="form-input" onchange="onTypeChange()">
+                        <option value="smb">SMB/CIFS (Windows Shares)</option>
+                        <option value="nfs">NFS (Linux/Unix)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Server Address</label>
+                    <input type="text" id="server" class="form-input" placeholder="192.168.1.100 or nas.local">
+                    <div class="form-hint">IP address or hostname of your NAS/server</div>
+                </div>
+
+                <div id="smbCredentials">
+                    <div class="form-group">
+                        <label class="form-label">Username (optional)</label>
+                        <input type="text" id="username" class="form-input" placeholder="admin">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password (optional)</label>
+                        <input type="password" id="password" class="form-input">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Domain (optional)</label>
+                        <input type="text" id="domain" class="form-input" placeholder="WORKGROUP">
+                    </div>
+                </div>
+
+                <button class="btn btn-primary" onclick="discoverShares()">
+                    <span id="discoverBtn">Connect & Browse Shares</span>
+                </button>
+                <div id="discoverError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+            </div>
+
+            <!-- Step 2: Share Selection -->
+            <div id="step2" style="display: none;">
+                <div class="breadcrumb" style="margin-bottom: 15px;">
+                    <span onclick="backToStep1()" style="cursor: pointer; color: var(--accent);">Connection</span>
+                    <span style="margin: 0 8px;">/</span>
+                    <span id="serverDisplay"></span>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Available Shares</label>
+                    <div id="sharesList" class="browser-list"></div>
+                </div>
+            </div>
+
+            <!-- Step 3: Directory Browser -->
+            <div id="step3" style="display: none;">
+                <div class="breadcrumb" style="margin-bottom: 15px;">
+                    <span onclick="backToStep1()" style="cursor: pointer; color: var(--accent);">Connection</span>
+                    <span style="margin: 0 8px;">/</span>
+                    <span onclick="backToStep2()" style="cursor: pointer; color: var(--accent);" id="shareDisplay"></span>
+                    <span style="margin: 0 8px;">/</span>
+                    <span id="pathDisplay">/</span>
+                </div>
+
+                <div class="browser-toolbar" style="margin-bottom: 10px;">
+                    <button class="btn btn-secondary btn-sm" onclick="navigateUp()" id="upBtn">
+                        &uarr; Up
+                    </button>
+                    <span id="currentPath" style="margin-left: 10px; color: var(--text-muted);"></span>
+                </div>
+
+                <div id="directoryList" class="browser-list" style="max-height: 300px; overflow-y: auto;"></div>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <label class="form-label">Repository Name</label>
+                    <input type="text" id="repoName" class="form-input" placeholder="My NAS Backups">
+                    <div class="form-hint">A friendly name for this repository</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Selected Path</label>
+                    <input type="text" id="selectedPath" class="form-input" readonly>
+                </div>
+
+                <button class="btn btn-primary" onclick="saveRepository()">Save Repository</button>
+                <div id="saveError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+    margin: 0;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.browser-list {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-primary);
+}
+
+.browser-item {
+    padding: 10px 15px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.browser-item:last-child {
+    border-bottom: none;
+}
+
+.browser-item:hover {
+    background: var(--bg-secondary);
+}
+
+.browser-item.selected {
+    background: var(--accent);
+    color: white;
+}
+
+.browser-item .icon {
+    font-size: 18px;
+    width: 24px;
+    text-align: center;
+}
+
+.browser-item .name {
+    flex: 1;
+}
+
+.browser-item .meta {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.error-msg {
+    color: var(--error);
+    padding: 10px;
+    background: rgba(255, 107, 107, 0.1);
+    border-radius: 4px;
+}
+
+.breadcrumb {
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+.browser-toolbar {
+    display: flex;
+    align-items: center;
+}
+
+.loading {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+}
+</style>
+
+<script>
+let currentServer = '';
+let currentShare = '';
+let currentPath = '';
+let currentType = 'smb';
+
+function showAddModal() {
+    document.getElementById('addModal').style.display = 'flex';
+    resetWizard();
+}
+
+function hideAddModal() {
+    document.getElementById('addModal').style.display = 'none';
+}
+
+function resetWizard() {
+    document.getElementById('step1').style.display = 'block';
+    document.getElementById('step2').style.display = 'none';
+    document.getElementById('step3').style.display = 'none';
+    document.getElementById('server').value = '';
+    document.getElementById('username').value = '';
+    document.getElementById('password').value = '';
+    document.getElementById('domain').value = '';
+    document.getElementById('discoverError').style.display = 'none';
+    currentServer = '';
+    currentShare = '';
+    currentPath = '';
+}
+
+function onTypeChange() {
+    currentType = document.getElementById('repoType').value;
+    const creds = document.getElementById('smbCredentials');
+    creds.style.display = currentType === 'smb' ? 'block' : 'none';
+}
+
+function backToStep1() {
+    document.getElementById('step1').style.display = 'block';
+    document.getElementById('step2').style.display = 'none';
+    document.getElementById('step3').style.display = 'none';
+}
+
+function backToStep2() {
+    document.getElementById('step2').style.display = 'block';
+    document.getElementById('step3').style.display = 'none';
+}
+
+async function discoverShares() {
+    const server = document.getElementById('server').value.trim();
+    if (!server) {
+        showError('discoverError', 'Please enter a server address');
+        return;
+    }
+
+    currentServer = server;
+    currentType = document.getElementById('repoType').value;
+
+    const btn = document.getElementById('discoverBtn');
+    btn.textContent = 'Connecting...';
+
+    try {
+        const response = await fetch('/api/v1/repositories/discover', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                type: currentType,
+                server: server,
+                username: document.getElementById('username').value || null,
+                password: document.getElementById('password').value || null,
+                domain: document.getElementById('domain').value || null
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            showSharesList(data.shares);
+        } else {
+            showError('discoverError', data.error || 'Failed to connect');
+        }
+    } catch (e) {
+        showError('discoverError', 'Connection failed: ' + e.message);
+    }
+
+    btn.textContent = 'Connect & Browse Shares';
+}
+
+function showSharesList(shares) {
+    document.getElementById('step1').style.display = 'none';
+    document.getElementById('step2').style.display = 'block';
+    document.getElementById('serverDisplay').textContent = currentServer;
+
+    const list = document.getElementById('sharesList');
+
+    if (shares.length === 0) {
+        list.innerHTML = '<div class="loading">No shares found</div>';
+        return;
+    }
+
+    list.innerHTML = shares.map(share => `
+        <div class="browser-item" onclick="selectShare('${share.name}')">
+            <span class="icon">&#128193;</span>
+            <span class="name">${share.name}</span>
+            <span class="meta">${share.comment || share.type}</span>
+        </div>
+    `).join('');
+}
+
+function selectShare(shareName) {
+    currentShare = shareName;
+    currentPath = '';
+    document.getElementById('step2').style.display = 'none';
+    document.getElementById('step3').style.display = 'block';
+    document.getElementById('shareDisplay').textContent = shareName;
+    document.getElementById('repoName').value = currentServer + ' - ' + shareName;
+    browseDirectory('');
+}
+
+async function browseDirectory(path) {
+    currentPath = path;
+    updatePathDisplay();
+
+    const list = document.getElementById('directoryList');
+    list.innerHTML = '<div class="loading">Loading...</div>';
+
+    try {
+        const response = await fetch('/api/v1/repositories/browse', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                type: currentType,
+                server: currentServer,
+                share: currentShare,
+                path: path,
+                username: document.getElementById('username').value || null,
+                password: document.getElementById('password').value || null,
+                domain: document.getElementById('domain').value || null
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            showDirectoryList(data.entries);
+        } else {
+            list.innerHTML = `<div class="error-msg">${data.error}</div>`;
+        }
+    } catch (e) {
+        list.innerHTML = `<div class="error-msg">Failed to browse: ${e.message}</div>`;
+    }
+}
+
+function showDirectoryList(entries) {
+    const list = document.getElementById('directoryList');
+
+    // Filter to only directories
+    const dirs = entries.filter(e => e.is_dir);
+
+    if (dirs.length === 0) {
+        list.innerHTML = '<div class="loading">No subdirectories (you can use this folder)</div>';
+        return;
+    }
+
+    list.innerHTML = dirs.map(entry => `
+        <div class="browser-item" onclick="navigateTo('${entry.name}')">
+            <span class="icon">&#128193;</span>
+            <span class="name">${entry.name}</span>
+        </div>
+    `).join('');
+}
+
+function navigateTo(name) {
+    const newPath = currentPath ? currentPath + '/' + name : name;
+    browseDirectory(newPath);
+}
+
+function navigateUp() {
+    if (!currentPath) return;
+    const parts = currentPath.split('/');
+    parts.pop();
+    browseDirectory(parts.join('/'));
+}
+
+function updatePathDisplay() {
+    document.getElementById('pathDisplay').textContent = '/' + currentPath;
+    document.getElementById('currentPath').textContent = currentPath || '(root)';
+    document.getElementById('upBtn').disabled = !currentPath;
+
+    // Update selected path
+    let fullPath = `//${currentServer}/${currentShare}`;
+    if (currentPath) fullPath += '/' + currentPath;
+    document.getElementById('selectedPath').value = fullPath;
+}
+
+async function saveRepository() {
+    const name = document.getElementById('repoName').value.trim();
+    if (!name) {
+        showError('saveError', 'Please enter a repository name');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/v1/repositories', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                name: name,
+                type: currentType,
+                server: currentServer,
+                share: currentShare,
+                path: currentPath,
+                username: document.getElementById('username').value || null,
+                password: document.getElementById('password').value || null,
+                domain: document.getElementById('domain').value || null
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            showError('saveError', data.detail || 'Failed to save');
+        }
+    } catch (e) {
+        showError('saveError', 'Save failed: ' + e.message);
+    }
+}
+
+function showError(elementId, message) {
+    const el = document.getElementById(elementId);
+    el.textContent = message;
+    el.style.display = 'block';
+}
+
+async function testRepo(repoId) {
+    try {
+        const response = await fetch(`/api/v1/repositories/${repoId}/test`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        alert(data.success ? 'Connection successful!' : 'Connection failed: ' + data.message);
+        if (data.success) location.reload();
+    } catch (e) {
+        alert('Test failed: ' + e.message);
+    }
+}
+
+// Close modal on background click
+document.getElementById('addModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideAddModal();
+});
+</script>
+{% endblock %}

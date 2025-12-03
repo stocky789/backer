@@ -73,6 +73,25 @@ class Storage:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_commands_client ON command_queue(client_id, status);
+
+                CREATE TABLE IF NOT EXISTS repositories (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    repo_type TEXT NOT NULL,
+                    server TEXT,
+                    share TEXT,
+                    path TEXT DEFAULT '',
+                    username TEXT,
+                    password_encrypted TEXT,
+                    domain TEXT,
+                    mount_point TEXT,
+                    status TEXT DEFAULT 'disconnected',
+                    last_checked TEXT,
+                    created_at TEXT NOT NULL,
+                    config TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_repositories_name ON repositories(name);
             """)
 
     @contextmanager
@@ -322,4 +341,145 @@ class Storage:
                 WHERE id = ?
                 """,
                 (datetime.now().isoformat(), command_id),
+            )
+
+    # Repository operations
+    def add_repository(
+        self,
+        repo_id: str,
+        name: str,
+        repo_type: str,
+        server: str | None = None,
+        share: str | None = None,
+        path: str = "",
+        username: str | None = None,
+        password_encrypted: str | None = None,
+        domain: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """Add a new storage repository."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO repositories (id, name, repo_type, server, share, path,
+                    username, password_encrypted, domain, created_at, config)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    repo_id,
+                    name,
+                    repo_type,
+                    server,
+                    share,
+                    path,
+                    username,
+                    password_encrypted,
+                    domain,
+                    datetime.now().isoformat(),
+                    json.dumps(config or {}),
+                ),
+            )
+
+    def get_repository(self, repo_id: str) -> dict[str, Any] | None:
+        """Get a repository by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM repositories WHERE id = ?", (repo_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_repository(row)
+        return None
+
+    def get_repository_by_name(self, name: str) -> dict[str, Any] | None:
+        """Get a repository by name."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM repositories WHERE name = ?", (name,)
+            ).fetchone()
+            if row:
+                return self._row_to_repository(row)
+        return None
+
+    def list_repositories(self) -> list[dict[str, Any]]:
+        """List all repositories."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM repositories ORDER BY name"
+            ).fetchall()
+            return [self._row_to_repository(row) for row in rows]
+
+    def update_repository_status(
+        self,
+        repo_id: str,
+        status: str,
+        mount_point: str | None = None,
+    ) -> None:
+        """Update repository connection status."""
+        with self._connect() as conn:
+            if mount_point:
+                conn.execute(
+                    """
+                    UPDATE repositories SET status = ?, mount_point = ?, last_checked = ?
+                    WHERE id = ?
+                    """,
+                    (status, mount_point, datetime.now().isoformat(), repo_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE repositories SET status = ?, last_checked = ?
+                    WHERE id = ?
+                    """,
+                    (status, datetime.now().isoformat(), repo_id),
+                )
+
+    def delete_repository(self, repo_id: str) -> bool:
+        """Delete a repository."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM repositories WHERE id = ?", (repo_id,))
+            return cursor.rowcount > 0
+
+    def _row_to_repository(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to a repository dict."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "repo_type": row["repo_type"],
+            "server": row["server"],
+            "share": row["share"],
+            "path": row["path"],
+            "username": row["username"],
+            "has_password": bool(row["password_encrypted"]),
+            "domain": row["domain"],
+            "mount_point": row["mount_point"],
+            "status": row["status"],
+            "last_checked": row["last_checked"],
+            "created_at": row["created_at"],
+            "config": json.loads(row["config"]) if row["config"] else {},
+        }
+
+    def get_repository_password(self, repo_id: str) -> str | None:
+        """Get repository password (for internal use only)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT password_encrypted FROM repositories WHERE id = ?", (repo_id,)
+            ).fetchone()
+            # For now, just base64 - in production use proper encryption
+            if row and row["password_encrypted"]:
+                import base64
+                try:
+                    return base64.b64decode(row["password_encrypted"]).decode()
+                except Exception:
+                    return None
+        return None
+
+    def set_repository_password(self, repo_id: str, password: str) -> None:
+        """Set repository password."""
+        import base64
+        # For now, just base64 - in production use proper encryption
+        encrypted = base64.b64encode(password.encode()).decode()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE repositories SET password_encrypted = ? WHERE id = ?",
+                (encrypted, repo_id),
             )
