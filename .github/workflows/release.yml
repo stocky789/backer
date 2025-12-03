@@ -70,28 +70,12 @@ jobs:
 
       - name: Create ZIP package (fallback)
         run: |
-          # Also create a ZIP for users who don't want an installer
           mkdir dist\backer-agent-windows
           mkdir dist\backer-agent-windows\tools
           copy dist\backer-agent.exe dist\backer-agent-windows\
           copy dist\tools\rclone.exe dist\backer-agent-windows\tools\
           copy dist\tools\restic.exe dist\backer-agent-windows\tools\
-
-          @"
-Backer Agent for Windows
-========================
-
-This is the portable version. For easier installation, use the
-backer-agent-setup.exe installer instead.
-
-To use this version:
-1. Run backer-agent.exe
-2. Enter your server address in the GUI
-3. Click Connect
-
-For more info: https://github.com/stocky789/backer
-"@ | Out-File -FilePath dist\backer-agent-windows\README.txt -Encoding UTF8
-
+          echo "Backer Agent for Windows - Run backer-agent.exe and enter your server address" > dist\backer-agent-windows\README.txt
           Compress-Archive -Path dist\backer-agent-windows\* -DestinationPath dist\backer-agent-windows-portable.zip
         shell: pwsh
 
