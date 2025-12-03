@@ -338,6 +338,7 @@ class AgentService:
         destination_path = payload.get('destination_path')
         backend = payload.get('backend', 'rclone')
         excludes = payload.get('excludes', [])
+        backend_options = payload.get('backend_options', {})
         dry_run = payload.get('dry_run', False)
 
         self._update_status(f"Backing up: {job_name}")
@@ -361,7 +362,8 @@ class AgentService:
                 )
             elif backend == 'restic':
                 result = self._run_restic_backup(
-                    source_path, destination_path, excludes, dry_run, run_id
+                    source_path, destination_path, excludes, dry_run, run_id,
+                    backend_options=backend_options,
                 )
             else:
                 raise ValueError(f"Unknown backend: {backend}")
@@ -408,6 +410,7 @@ class AgentService:
         backend = payload.get('backend', 'rclone')
         snapshot = payload.get('snapshot')  # For restic: snapshot ID or "latest"
         clean_restore = payload.get('clean_restore', False)
+        backend_options = payload.get('backend_options', {})
         dry_run = payload.get('dry_run', False)
 
         self._update_status(f"Restoring: {job_name}")
@@ -435,7 +438,8 @@ class AgentService:
                 )
             elif backend == 'restic':
                 result = self._run_restic_restore(
-                    source_path, destination_path, snapshot, dry_run, run_id
+                    source_path, destination_path, snapshot, dry_run, run_id,
+                    backend_options=backend_options,
                 )
             else:
                 raise ValueError(f"Restore not supported for backend: {backend}")
@@ -611,6 +615,7 @@ class AgentService:
         excludes: list[str],
         dry_run: bool,
         run_id: str,
+        backend_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run restic backup command."""
         logger.info("[RESTIC] Setting up restic backup")
@@ -624,10 +629,15 @@ class AgentService:
             logger.error(f"[RESTIC] {e}")
             raise
 
+        backend_options = backend_options or {}
+
         # Set up environment with password
-        # Use a default password for now - in production this should come from config
+        # Priority: backend_options > env var > default
         env = os.environ.copy()
-        if 'RESTIC_PASSWORD' not in env:
+        if 'restic_password' in backend_options:
+            env['RESTIC_PASSWORD'] = backend_options['restic_password']
+            logger.info("[RESTIC] Using password from job configuration")
+        elif 'RESTIC_PASSWORD' not in env:
             env['RESTIC_PASSWORD'] = 'backer-default-password'
             logger.info("[RESTIC] Using default repository password")
 
@@ -705,6 +715,7 @@ class AgentService:
         snapshot: str | None,
         dry_run: bool,
         run_id: str,
+        backend_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run restic restore command."""
         logger.info("[RESTIC] Setting up restic restore")
@@ -719,9 +730,15 @@ class AgentService:
             logger.error(f"[RESTIC] {e}")
             raise
 
+        backend_options = backend_options or {}
+
         # Set up environment with password
+        # Priority: backend_options > env var > default
         env = os.environ.copy()
-        if 'RESTIC_PASSWORD' not in env:
+        if 'restic_password' in backend_options:
+            env['RESTIC_PASSWORD'] = backend_options['restic_password']
+            logger.info("[RESTIC] Using password from job configuration")
+        elif 'RESTIC_PASSWORD' not in env:
             env['RESTIC_PASSWORD'] = 'backer-default-password'
             logger.info("[RESTIC] Using default repository password")
 

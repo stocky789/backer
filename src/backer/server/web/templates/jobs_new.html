@@ -79,7 +79,7 @@
 
             <div class="form-group">
                 <label class="form-label">Backup Method</label>
-                <select name="backend" class="form-input">
+                <select name="backend" class="form-input" id="backendSelect" onchange="onBackendChange()">
                     <option value="rclone">rclone (recommended - fast, supports SMB/NFS/Cloud)</option>
                     <option value="restic">restic (encrypted, deduplicated snapshots)</option>
                 </select>
@@ -90,6 +90,16 @@
                 <div class="form-hint" style="margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border-radius: 4px;">
                     <strong>Note:</strong> rsync backend is not currently supported for agent-based backups.
                     Use rclone instead - it provides similar functionality with broader compatibility.
+                </div>
+            </div>
+
+            <div class="form-group" id="resticPasswordGroup" style="display: none;">
+                <label class="form-label">Restic Repository Password</label>
+                <input type="password" name="restic_password" class="form-input" id="resticPassword"
+                       placeholder="Leave empty to use default password">
+                <div class="form-hint">
+                    Password used to encrypt the restic repository. If left empty, a default password will be used.<br>
+                    <strong>Important:</strong> Remember this password - you'll need it to restore backups!
                 </div>
             </div>
 
@@ -223,8 +233,20 @@ function onRetentionChange() {
 // Update path when subfolder changes
 document.getElementById('destSubfolder').addEventListener('input', updateDestPath);
 
+function onBackendChange() {
+    const backend = document.getElementById('backendSelect').value;
+    const passwordGroup = document.getElementById('resticPasswordGroup');
+
+    if (backend === 'restic') {
+        passwordGroup.style.display = 'block';
+    } else {
+        passwordGroup.style.display = 'none';
+    }
+}
+
 // Initialize
 onScheduleChange();
 onRetentionChange();
+onBackendChange();
 </script>
 {% endblock %}

@@ -98,6 +98,7 @@ def trigger_job_internal(job_name: str) -> None:
         "destination_path": job.get("destination_path"),
         "backend": job.get("backend", "rclone"),
         "excludes": job.get("excludes", []),
+        "backend_options": job.get("backend_options", {}),  # Includes restic_password
         "dry_run": False,
     }
 
@@ -429,6 +430,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "destination_path": job.get("destination_path"),
             "backend": job.get("backend", "rclone"),
             "excludes": job.get("excludes", []),
+            "backend_options": job.get("backend_options", {}),  # Includes restic_password
             "dry_run": request.dry_run,
         }
 
@@ -621,6 +623,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "source_path": backup_source,  # Restore FROM backup location
             "destination_path": destination_path,  # Restore TO this location
             "backend": job.get("backend", "rclone"),
+            "backend_options": job.get("backend_options", {}),  # Includes restic_password
             "snapshot": data.get("snapshot"),
             "clean_restore": data.get("clean_restore", False),  # Delete extra files at destination
             "dry_run": data.get("dry_run", False),
