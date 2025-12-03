@@ -392,9 +392,15 @@ async function saveJob(event) {
         excludes: excludesStr ? excludesStr.split(',').map(s => s.trim()).filter(s => s) : []
     };
 
-    // Only update restic password if a new one is provided
-    if (backend === 'restic' && resticPassword) {
-        data.backend_options = { restic_password: resticPassword };
+    // Handle backend_options based on backend type
+    if (backend === 'restic') {
+        // Only update restic password if a new one is provided
+        if (resticPassword) {
+            data.backend_options = { restic_password: resticPassword };
+        }
+    } else {
+        // When switching away from restic, clear restic-specific options
+        data.backend_options = {};
     }
 
     try {

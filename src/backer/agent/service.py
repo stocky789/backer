@@ -8,6 +8,8 @@ import base64
 import json
 import logging
 import os
+import platform
+import socket
 import subprocess
 import sys
 import threading
@@ -19,6 +21,8 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from backer.core.repo_metadata import RepositoryMetadata
 
 
 def get_subprocess_flags() -> int:
@@ -395,6 +399,17 @@ class AgentService:
 
             if result['success']:
                 self._update_status(f"Backup complete: {job_name}")
+                # Write metadata to repository for discovery
+                self._write_repo_metadata(
+                    repo_path=destination_path,
+                    job_name=job_name,
+                    run_id=run_id,
+                    source_path=source_path,
+                    backend=backend,
+                    result=result,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
             else:
                 self._update_status(f"Backup failed: {job_name}")
 
@@ -825,6 +840,10 @@ class AgentService:
         # Determine the actual restore target
         # Restic recreates the full path structure inside --target
         # So to restore to original location, we need to use the filesystem root
+        #
+        # On Windows, restic stores paths like C:\Test internally as \C\Test
+        # When restoring, we need to use "/" as target which restic interprets
+        # as "restore to original absolute paths" on Windows
         restore_target = dest
         if original_paths:
             # Check if destination matches or is parent of original backup path
@@ -833,15 +852,8 @@ class AgentService:
                 orig_normalized = orig_path.replace('\\', '/').rstrip('/')
                 if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
                     # Restoring to original location - use filesystem root
-                    if sys.platform == 'win32':
-                        # Extract drive letter from original path
-                        # Use just "C:" without trailing backslash to avoid escaping issues
-                        if len(orig_path) >= 2 and orig_path[1] == ':':
-                            restore_target = orig_path[:2]  # e.g., "C:"
-                        else:
-                            restore_target = 'C:'
-                    else:
-                        restore_target = '/'
+                    # Use "/" on all platforms - restic handles this correctly
+                    restore_target = '/'
                     logger.info(f"[RESTIC] Restoring to original location, using target: {restore_target}")
                     break
 
@@ -964,3 +976,82 @@ class AgentService:
             )
         except Exception as e:
             logger.error(f"Failed to report result: {e}")
+
+    def _write_repo_metadata(
+        self,
+        repo_path: str,
+        job_name: str,
+        run_id: str,
+        source_path: str,
+        backend: str,
+        result: dict[str, Any],
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> None:
+        """Write backup metadata to the repository for discovery.
+
+        This enables a new Backer server to discover existing backups
+        when pointed to a repository.
+        """
+        try:
+            # Normalize path for metadata
+            repo_path = self._normalize_windows_path(repo_path)
+            repo = RepositoryMetadata(repo_path)
+
+            # Initialize repository metadata if needed
+            if not repo.is_initialized():
+                repo.initialize()
+
+            # Save agent information
+            repo.save_agent(
+                agent_id=self.client_id,
+                agent_data={
+                    "hostname": socket.gethostname(),
+                    "platform": sys.platform,
+                    "os_info": f"{platform.system()} {platform.release()}",
+                    "python_version": platform.python_version(),
+                },
+            )
+
+            # Save job configuration
+            repo.save_job(
+                job_name=job_name,
+                job_config={
+                    "source_path": source_path,
+                    "backend": backend,
+                    "client_id": self.client_id,
+                },
+            )
+
+            # Save run record
+            run_data = {
+                "status": "success" if result.get("success") else "failed",
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "bytes_transferred": result.get("bytes", 0),
+                "files_transferred": result.get("files", 0),
+                "snapshot_id": result.get("snapshot_id"),
+                "agent_id": self.client_id,
+                "hostname": socket.gethostname(),
+            }
+            repo.save_job_run(job_name, run_id, run_data)
+
+            # For restic, also save snapshot metadata
+            snapshot_id = result.get("snapshot_id")
+            if snapshot_id and backend == "restic":
+                repo.save_snapshot(
+                    snapshot_id=snapshot_id,
+                    snapshot_data={
+                        "job_name": job_name,
+                        "run_id": run_id,
+                        "hostname": socket.gethostname(),
+                        "paths": [source_path],
+                        "time": finished_at.isoformat(),
+                    },
+                )
+
+            logger.info(f"[METADATA] Wrote backup metadata to repository: {repo_path}")
+
+        except Exception as e:
+            # Don't fail the backup just because metadata writing failed
+            logger.warning(f"[METADATA] Failed to write repository metadata: {e}")

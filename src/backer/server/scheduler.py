@@ -48,17 +48,40 @@ class BackupScheduler:
         self._thread: threading.Thread | None = None
         self._last_run_times: dict[str, datetime] = {}
 
+        # Timezone caching to avoid database hits on every _now() call
+        self._cached_timezone: ZoneInfo | None = None
+        self._timezone_cache_time: datetime | None = None
+        self._timezone_cache_ttl = 300  # Refresh timezone cache every 5 minutes
+
     def _get_timezone(self) -> ZoneInfo:
-        """Get the configured timezone from storage.
+        """Get the configured timezone from storage with caching.
 
         Returns ZoneInfo for the configured timezone, or UTC if not set or invalid.
+        Uses a cache to avoid hitting the database on every call.
         """
+        now = datetime.now()
+
+        # Check if cache is valid
+        if (
+            self._cached_timezone is not None
+            and self._timezone_cache_time is not None
+            and (now - self._timezone_cache_time).total_seconds() < self._timezone_cache_ttl
+        ):
+            return self._cached_timezone
+
+        # Cache miss or expired - fetch from storage
         tz_name = self.storage.get_setting("timezone", "UTC")
         try:
-            return ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+            tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
         except Exception:
             logger.warning(f"Invalid timezone '{tz_name}', using UTC")
-            return ZoneInfo("UTC")
+            tz = ZoneInfo("UTC")
+
+        # Update cache
+        self._cached_timezone = tz
+        self._timezone_cache_time = now
+
+        return tz
 
     def _now(self) -> datetime:
         """Get current time in the configured timezone."""

@@ -51,6 +51,7 @@
                 </td>
                 <td>
                     <button class="btn btn-secondary btn-sm" onclick="testRepo('{{ repo.id }}')">Test</button>
+                    <button class="btn btn-secondary btn-sm" onclick="scanRepo('{{ repo.id }}', '{{ repo.name }}')">Scan</button>
                     <button class="btn btn-danger btn-sm"
                             hx-delete="/api/v1/repositories/{{ repo.id }}"
                             hx-confirm="Delete repository '{{ repo.name }}'?"
@@ -530,5 +531,297 @@ async function testRepo(repoId) {
 document.getElementById('addModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideAddModal();
 });
+
+// ============ Repository Scanning ============
+
+let currentScanRepoId = null;
+
+function showScanModal() {
+    document.getElementById('scanModal').style.display = 'flex';
+}
+
+function hideScanModal() {
+    document.getElementById('scanModal').style.display = 'none';
+}
+
+async function scanRepo(repoId, repoName) {
+    currentScanRepoId = repoId;
+    document.getElementById('scanRepoName').textContent = repoName;
+    document.getElementById('scanResults').innerHTML = '<div class="loading">Scanning repository for backup metadata...</div>';
+    document.getElementById('scanActions').style.display = 'none';
+    showScanModal();
+
+    try {
+        const response = await fetch(`/api/v1/repositories/${repoId}/scan`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            displayScanResults(data);
+        } else {
+            document.getElementById('scanResults').innerHTML = `
+                <div class="error-msg">
+                    <strong>Scan failed:</strong> ${escapeHtml(data.error || 'Unknown error')}
+                </div>
+            `;
+        }
+    } catch (e) {
+        document.getElementById('scanResults').innerHTML = `
+            <div class="error-msg">
+                <strong>Scan failed:</strong> ${escapeHtml(e.message)}
+            </div>
+        `;
+    }
+}
+
+function displayScanResults(data) {
+    const resultsDiv = document.getElementById('scanResults');
+    const summary = data.summary || {};
+
+    if (!data.initialized) {
+        resultsDiv.innerHTML = `
+            <div class="scan-section">
+                <h4>No Backer Metadata Found</h4>
+                <p>This repository does not have Backer metadata. Backups will start being tracked after the first backup completes.</p>
+                <p style="color: var(--text-muted);">Path: <code>${escapeHtml(data.path)}</code></p>
+            </div>
+        `;
+        return;
+    }
+
+    let html = `
+        <div class="scan-section">
+            <h4>Repository Summary</h4>
+            <div class="scan-stats">
+                <div class="stat-item">
+                    <span class="stat-value">${summary.agent_count || 0}</span>
+                    <span class="stat-label">Agents</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-value">${summary.job_count || 0}</span>
+                    <span class="stat-label">Jobs</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-value">${summary.total_runs || 0}</span>
+                    <span class="stat-label">Backup Runs</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-value">${summary.snapshot_count || 0}</span>
+                    <span class="stat-label">Snapshots</span>
+                </div>
+            </div>
+            <p style="color: var(--text-muted); margin-top: 10px;">Path: <code>${escapeHtml(data.path)}</code></p>
+        </div>
+    `;
+
+    // Show agents
+    if (data.agents && data.agents.length > 0) {
+        html += `
+            <div class="scan-section">
+                <h4>Discovered Agents (${data.agents.length})</h4>
+                <table class="scan-table">
+                    <thead>
+                        <tr>
+                            <th>Agent ID</th>
+                            <th>Hostname</th>
+                            <th>First Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        for (const agent of data.agents) {
+            html += `
+                <tr>
+                    <td><code>${escapeHtml(agent.agent_id || '-')}</code></td>
+                    <td>${escapeHtml(agent.hostname || '-')}</td>
+                    <td>${escapeHtml(agent.first_seen ? agent.first_seen.split('T')[0] : '-')}</td>
+                </tr>
+            `;
+        }
+        html += '</tbody></table></div>';
+    }
+
+    // Show jobs
+    if (data.jobs && data.jobs.length > 0) {
+        html += `
+            <div class="scan-section">
+                <h4>Discovered Jobs (${data.jobs.length})</h4>
+                <table class="scan-table">
+                    <thead>
+                        <tr>
+                            <th>Job Name</th>
+                            <th>Run Count</th>
+                            <th>Last Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        for (const job of data.jobs) {
+            html += `
+                <tr>
+                    <td><strong>${escapeHtml(job.job_name || '-')}</strong></td>
+                    <td>${job.run_count || 0}</td>
+                    <td>${escapeHtml(job.updated_at ? job.updated_at.split('T')[0] : '-')}</td>
+                </tr>
+            `;
+        }
+        html += '</tbody></table></div>';
+    }
+
+    // Show recent snapshots
+    if (data.snapshots && data.snapshots.length > 0) {
+        html += `
+            <div class="scan-section">
+                <h4>Recent Snapshots (${data.snapshots.length})</h4>
+                <table class="scan-table">
+                    <thead>
+                        <tr>
+                            <th>Snapshot ID</th>
+                            <th>Hostname</th>
+                            <th>Time</th>
+                            <th>Paths</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        for (const snap of data.snapshots.slice(0, 10)) {
+            html += `
+                <tr>
+                    <td><code>${escapeHtml(snap.short_id || snap.snapshot_id?.slice(0, 8) || '-')}</code></td>
+                    <td>${escapeHtml(snap.hostname || '-')}</td>
+                    <td>${escapeHtml(snap.time ? snap.time.split('T')[0] : '-')}</td>
+                    <td><code>${escapeHtml((snap.paths || []).join(', ') || '-')}</code></td>
+                </tr>
+            `;
+        }
+        html += '</tbody></table></div>';
+    }
+
+    resultsDiv.innerHTML = html;
+
+    // Show import button if there's data to import
+    if (summary.job_count > 0 || summary.agent_count > 0) {
+        document.getElementById('scanActions').style.display = 'block';
+    }
+}
+
+async function importMetadata() {
+    if (!currentScanRepoId) return;
+
+    const btn = document.getElementById('importBtn');
+    btn.textContent = 'Importing...';
+    btn.disabled = true;
+
+    try {
+        const response = await fetch(`/api/v1/repositories/${currentScanRepoId}/import`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            const imported = data.imported || {};
+            alert(`Import complete!\n\nImported:\n- ${imported.agents || 0} agents\n- ${imported.jobs || 0} jobs\n- ${imported.runs || 0} backup runs`);
+            hideScanModal();
+        } else {
+            alert('Import failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Import failed: ' + e.message);
+    }
+
+    btn.textContent = 'Import to Server';
+    btn.disabled = false;
+}
+
+// Close scan modal on background click
+document.getElementById('scanModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideScanModal();
+});
 </script>
+
+<!-- Scan Results Modal -->
+<div id="scanModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 800px;">
+        <div class="modal-header">
+            <h3>Repository Scan: <span id="scanRepoName"></span></h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideScanModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="scanResults"></div>
+            <div id="scanActions" style="display: none; margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);">
+                <p style="margin-bottom: 10px;">Import discovered jobs and run history into this server's database:</p>
+                <button id="importBtn" class="btn btn-primary" onclick="importMetadata()">Import to Server</button>
+                <span style="color: var(--text-muted); margin-left: 10px;">This will import job configurations and backup history</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.scan-section {
+    margin-bottom: 20px;
+    padding-bottom: 15px;
+    border-bottom: 1px solid var(--border);
+}
+
+.scan-section:last-child {
+    border-bottom: none;
+}
+
+.scan-section h4 {
+    margin: 0 0 10px 0;
+    color: var(--text-primary);
+}
+
+.scan-stats {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.stat-item {
+    background: var(--bg-primary);
+    padding: 15px 20px;
+    border-radius: 8px;
+    text-align: center;
+    min-width: 100px;
+}
+
+.stat-value {
+    display: block;
+    font-size: 24px;
+    font-weight: bold;
+    color: var(--accent);
+}
+
+.stat-label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 5px;
+}
+
+.scan-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.scan-table th,
+.scan-table td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.scan-table th {
+    background: var(--bg-primary);
+    font-weight: 600;
+}
+
+.scan-table tr:hover {
+    background: var(--bg-primary);
+}
+</style>
 {% endblock %}
