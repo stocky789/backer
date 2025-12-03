@@ -81,6 +81,8 @@ class KopiaBackend(BackendBase):
                 text=True,
                 timeout=10,
             )
+            if result.returncode != 0:
+                return False, f"kopia version check failed: {result.stderr.strip()}"
             return True, result.stdout.strip()
         except (subprocess.TimeoutExpired, OSError) as e:
             return False, str(e)
@@ -90,21 +92,47 @@ class KopiaBackend(BackendBase):
 
         Returns:
             Tuple of (repo_type, extra_args)
+
+        Raises:
+            ValueError: If the path format is invalid (e.g., empty bucket name)
         """
         if path.startswith("s3://"):
             # S3 bucket: s3://bucket/prefix
-            return "s3", ["--bucket", path[5:].split("/")[0], "--prefix", "/".join(path[5:].split("/")[1:])]
+            remainder = path[5:]
+            if not remainder or remainder.startswith("/"):
+                raise ValueError(f"Invalid S3 path '{path}': bucket name is required")
+            parts = remainder.split("/", 1)
+            bucket = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+            return "s3", ["--bucket", bucket, "--prefix", prefix]
         elif path.startswith("gs://"):
             # Google Cloud Storage
-            return "gcs", ["--bucket", path[5:].split("/")[0], "--prefix", "/".join(path[5:].split("/")[1:])]
+            remainder = path[5:]
+            if not remainder or remainder.startswith("/"):
+                raise ValueError(f"Invalid GCS path '{path}': bucket name is required")
+            parts = remainder.split("/", 1)
+            bucket = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+            return "gcs", ["--bucket", bucket, "--prefix", prefix]
         elif path.startswith("azure://"):
             # Azure Blob Storage
-            return "azure", ["--container", path[8:].split("/")[0], "--prefix", "/".join(path[8:].split("/")[1:])]
+            remainder = path[8:]
+            if not remainder or remainder.startswith("/"):
+                raise ValueError(f"Invalid Azure path '{path}': container name is required")
+            parts = remainder.split("/", 1)
+            container = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+            return "azure", ["--container", container, "--prefix", prefix]
         elif path.startswith("sftp://"):
             # SFTP
-            return "sftp", ["--path", path[7:]]
+            remainder = path[7:]
+            if not remainder:
+                raise ValueError(f"Invalid SFTP path '{path}': host/path is required")
+            return "sftp", ["--path", remainder]
         else:
             # Local filesystem (default)
+            if not path:
+                raise ValueError("Repository path cannot be empty")
             return "filesystem", ["--path", path]
 
     def init_repo(self, destination: BackupDestination) -> BackendResult:
@@ -181,7 +209,8 @@ class KopiaBackend(BackendBase):
                 timeout=10,
             )
         except Exception:
-            pass  # Ignore disconnect errors
+            # Disconnect errors are non-fatal and expected when not connected
+            pass
 
     def backup(
         self,

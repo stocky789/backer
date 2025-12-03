@@ -70,22 +70,28 @@
                 </td>
                 <td>
                     <div class="btn-group">
-                        <button class="btn btn-primary btn-sm" onclick="runJob('{{ job.name }}')"
+                        <button class="btn btn-primary btn-sm job-run-btn"
+                                data-job-name="{{ job.name }}"
                                 {% if not job.client_id %}disabled title="Assign an agent first"{% endif %}>
                             Run
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="quickRestore('{{ job.name }}', '{{ job.client_id or '' }}', '{{ job.source_path or '' }}')"
+                        <button class="btn btn-secondary btn-sm job-restore-btn"
+                                data-job-name="{{ job.name }}"
+                                data-client-id="{{ job.client_id or '' }}"
+                                data-source-path="{{ job.source_path or '' }}"
                                 {% if not job.has_backups %}disabled title="Run a successful backup first"{% endif %}>
                             Restore
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="toggleJob('{{ job.name }}')">
+                        <button class="btn btn-secondary btn-sm job-toggle-btn"
+                                data-job-name="{{ job.name }}">
                             {{ 'Enable' if not job.enabled else 'Disable' }}
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="editJob('{{ job.name }}')">
+                        <button class="btn btn-secondary btn-sm job-edit-btn"
+                                data-job-name="{{ job.name }}">
                             Edit
                         </button>
                         <button class="btn btn-danger btn-sm"
-                                hx-delete="/api/v1/jobs/{{ job.name }}"
+                                hx-delete="/api/v1/jobs/{{ job.name|urlencode }}"
                                 hx-confirm="Delete job '{{ job.name }}'? This cannot be undone."
                                 hx-on::after-request="location.reload()">
                             Delete
@@ -300,6 +306,33 @@
 </style>
 
 <script>
+// Event delegation for job action buttons
+document.addEventListener('DOMContentLoaded', function() {
+    // Run buttons
+    document.querySelectorAll('.job-run-btn').forEach(btn => {
+        btn.addEventListener('click', () => runJob(btn.dataset.jobName));
+    });
+
+    // Restore buttons
+    document.querySelectorAll('.job-restore-btn').forEach(btn => {
+        btn.addEventListener('click', () => quickRestore(
+            btn.dataset.jobName,
+            btn.dataset.clientId,
+            btn.dataset.sourcePath
+        ));
+    });
+
+    // Toggle buttons
+    document.querySelectorAll('.job-toggle-btn').forEach(btn => {
+        btn.addEventListener('click', () => toggleJob(btn.dataset.jobName));
+    });
+
+    // Edit buttons
+    document.querySelectorAll('.job-edit-btn').forEach(btn => {
+        btn.addEventListener('click', () => editJob(btn.dataset.jobName));
+    });
+});
+
 async function runJob(jobName) {
     try {
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/run`, {

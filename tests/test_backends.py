@@ -258,3 +258,21 @@ class TestKopiaBackend:
         repo_type, args = backend._get_repo_type("sftp://server/path")
         assert repo_type == "sftp"
         assert "--path" in args
+
+    def test_get_repo_type_invalid_s3_path(self) -> None:
+        """Test that invalid S3 path raises ValueError."""
+        backend = KopiaBackend()
+        with pytest.raises(ValueError, match="bucket name is required"):
+            backend._get_repo_type("s3://")
+
+    def test_get_repo_type_invalid_azure_path(self) -> None:
+        """Test that invalid Azure path raises ValueError."""
+        backend = KopiaBackend()
+        with pytest.raises(ValueError, match="container name is required"):
+            backend._get_repo_type("azure://")
+
+    def test_get_repo_type_empty_path(self) -> None:
+        """Test that empty path raises ValueError."""
+        backend = KopiaBackend()
+        with pytest.raises(ValueError, match="cannot be empty"):
+            backend._get_repo_type("")

@@ -73,6 +73,8 @@ class RcloneBackend(BackendBase):
                 text=True,
                 timeout=10,
             )
+            if result.returncode != 0:
+                return False, f"rclone version check failed: {result.stderr.strip()}"
             version_line = result.stdout.split("\n")[0]
             return True, version_line
         except (subprocess.TimeoutExpired, OSError) as e:

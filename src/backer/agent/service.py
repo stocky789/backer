@@ -639,7 +639,12 @@ class AgentService:
                 except (ValueError, IndexError):
                     pass
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[RCLONE] Process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[RCLONE] Process completed with return code: {process.returncode}")
@@ -781,7 +786,12 @@ class AgentService:
             except (json.JSONDecodeError, TypeError):
                 pass  # Not all lines are JSON
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[RESTIC] Process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[RESTIC] Process completed with return code: {process.returncode}")
@@ -915,7 +925,12 @@ class AgentService:
             output_lines.append(line)
             logger.debug(line.strip())
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[RESTIC] Restore process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[RESTIC] Process completed with return code: {process.returncode}")
@@ -1153,7 +1168,12 @@ class AgentService:
             except (json.JSONDecodeError, TypeError):
                 pass  # Not all lines are JSON
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[KOPIA] Process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[KOPIA] Process completed with return code: {process.returncode}")
@@ -1187,8 +1207,8 @@ class AgentService:
                 timeout=10,
                 creationflags=get_subprocess_flags(),
             )
-        except Exception:
-            pass  # Ignore disconnect errors
+        except Exception as e:
+            logger.debug(f"[KOPIA] Failed to disconnect repository (non-fatal): {e}")
 
     def _run_kopia_restore(
         self,
@@ -1277,7 +1297,12 @@ class AgentService:
             output_lines.append(line)
             logger.debug(line.strip())
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[KOPIA] Restore process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[KOPIA] Process completed with return code: {process.returncode}")
