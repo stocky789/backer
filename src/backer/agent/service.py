@@ -439,7 +439,8 @@ class AgentService:
                     logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
                     import shutil
                     shutil.rmtree(destination_path)
-                    dest_path.mkdir(parents=True, exist_ok=True)
+                    # Don't recreate the directory - let restic create it
+                    # This avoids metadata conflicts that can cause restore issues
 
             if backend == 'rclone':
                 # rclone sync deletes files at dest that aren't in source
@@ -834,10 +835,11 @@ class AgentService:
                     # Restoring to original location - use filesystem root
                     if sys.platform == 'win32':
                         # Extract drive letter from original path
+                        # Use just "C:" without trailing backslash to avoid escaping issues
                         if len(orig_path) >= 2 and orig_path[1] == ':':
-                            restore_target = orig_path[:2] + '\\'  # e.g., "C:\"
+                            restore_target = orig_path[:2]  # e.g., "C:"
                         else:
-                            restore_target = 'C:\\'
+                            restore_target = 'C:'
                     else:
                         restore_target = '/'
                     logger.info(f"[RESTIC] Restoring to original location, using target: {restore_target}")
@@ -847,7 +849,8 @@ class AgentService:
 
         # Build restore command
         # restic restore <snapshot> --target <dest>
-        cmd = [str(restic), '-r', repo, 'restore', snapshot_id, '--target', restore_target, '-v']
+        # Use -vv for more verbose output to debug restore issues
+        cmd = [str(restic), '-r', repo, 'restore', snapshot_id, '--target', restore_target, '-vv']
 
         # Add --include to restore only specific path from snapshot
         if include_path:
@@ -859,6 +862,7 @@ class AgentService:
             cmd.append('--dry-run')
 
         logger.info(f"[RESTIC] Executing command: {' '.join(cmd)}")
+        logger.info(f"[RESTIC] Expected restore location: {dest}")
 
         process = subprocess.Popen(
             cmd,
@@ -882,6 +886,19 @@ class AgentService:
             logger.error(f"[RESTIC] Process failed! Output:\n{output}")
         else:
             logger.info("[RESTIC] Restore completed successfully")
+
+        # Verify restore by checking if destination exists and has contents
+        dest_path = Path(dest)
+        if dest_path.exists():
+            try:
+                contents = list(dest_path.iterdir())
+                logger.info(f"[RESTIC] Destination {dest} exists with {len(contents)} items")
+                for item in contents[:10]:  # Log first 10 items
+                    logger.debug(f"[RESTIC]   - {item.name}")
+            except Exception as e:
+                logger.warning(f"[RESTIC] Could not list destination contents: {e}")
+        else:
+            logger.warning(f"[RESTIC] Destination {dest} does not exist after restore!")
 
         return {
             'success': process.returncode == 0,
