@@ -87,7 +87,8 @@ class TestResticRestore:
     def test_restore_target_calculation_original_location(self):
         """Test that restore target is calculated correctly for original location restore."""
         # When restoring to original location (dest == original backup path),
-        # target should be filesystem root so restic recreates the full path
+        # target should be filesystem root "/" so restic recreates the full path
+        # This works on both Windows and Linux - restic interprets "/" correctly
 
         # Simulate the logic from _run_restic_restore
         dest = "/home/user/backup"
@@ -100,19 +101,12 @@ class TestResticRestore:
             orig_normalized = orig_path.replace('\\', '/').rstrip('/')
             if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
                 # Restoring to original location - use filesystem root
-                if sys.platform == 'win32':
-                    if len(orig_path) >= 2 and orig_path[1] == ':':
-                        restore_target = orig_path[:2]  # e.g., "C:"
-                    else:
-                        restore_target = 'C:'
-                else:
-                    restore_target = '/'
+                # Use "/" on all platforms - restic handles this correctly
+                restore_target = '/'
                 break
 
-        if sys.platform != 'win32':
-            assert restore_target == '/'
-        else:
-            assert restore_target in ['C:', 'D:', 'E:']  # Some drive letter
+        # On all platforms, we use "/" for original location restore
+        assert restore_target == '/'
 
     def test_restore_target_calculation_different_location(self):
         """Test that restore target is the destination when restoring to different location."""
@@ -230,19 +224,25 @@ class TestResticRestore:
         # Destination should NOT exist after clean
         assert not dest.exists()
 
-    def test_windows_target_path_no_trailing_backslash(self):
-        """Test that Windows target path doesn't have trailing backslash."""
+    def test_restore_target_uses_forward_slash(self):
+        """Test that restore target uses '/' for original location restore on all platforms."""
+        # This tests that we always use "/" for restoring to original location
+        # Restic handles "/" correctly on Windows, interpreting it as the filesystem root
+
         orig_path = "C:\\Users\\test\\backup"
+        dest = "C:\\Users\\test\\backup"
 
-        # Simulate the logic
-        if len(orig_path) >= 2 and orig_path[1] == ':':
-            restore_target = orig_path[:2]  # e.g., "C:"
-        else:
-            restore_target = 'C:'
+        # Simulate the logic from _run_restic_restore
+        dest_normalized = dest.replace('\\', '/').rstrip('/')
+        restore_target = dest
 
-        # Should be "C:" not "C:\\"
-        assert restore_target == "C:"
-        assert not restore_target.endswith("\\")
+        orig_normalized = orig_path.replace('\\', '/').rstrip('/')
+        if dest_normalized == orig_normalized:
+            # Use "/" on all platforms for original location restore
+            restore_target = '/'
+
+        # Should be "/" not "C:" or "C:\\"
+        assert restore_target == "/"
 
 
 class TestResticBackupRestore:

@@ -840,6 +840,10 @@ class AgentService:
         # Determine the actual restore target
         # Restic recreates the full path structure inside --target
         # So to restore to original location, we need to use the filesystem root
+        #
+        # On Windows, restic stores paths like C:\Test internally as \C\Test
+        # When restoring, we need to use "/" as target which restic interprets
+        # as "restore to original absolute paths" on Windows
         restore_target = dest
         if original_paths:
             # Check if destination matches or is parent of original backup path
@@ -848,15 +852,8 @@ class AgentService:
                 orig_normalized = orig_path.replace('\\', '/').rstrip('/')
                 if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
                     # Restoring to original location - use filesystem root
-                    if sys.platform == 'win32':
-                        # Extract drive letter from original path
-                        # Use just "C:" without trailing backslash to avoid escaping issues
-                        if len(orig_path) >= 2 and orig_path[1] == ':':
-                            restore_target = orig_path[:2]  # e.g., "C:"
-                        else:
-                            restore_target = 'C:'
-                    else:
-                        restore_target = '/'
+                    # Use "/" on all platforms - restic handles this correctly
+                    restore_target = '/'
                     logger.info(f"[RESTIC] Restoring to original location, using target: {restore_target}")
                     break
 
