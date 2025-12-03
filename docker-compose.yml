@@ -1,0 +1,36 @@
+# Backer Server - Docker Compose
+#
+# Quick start:
+#   docker compose up -d
+#
+# Web UI: http://localhost:8420
+
+services:
+  backer:
+    build: .
+    image: backer:latest
+    container_name: backer
+    restart: unless-stopped
+    ports:
+      - "8420:8420"
+    volumes:
+      - backer-data:/data
+      # Optional: Mount backup destinations
+      # - /mnt/backups:/mnt/backups
+    environment:
+      - BACKER_DATA_DIR=/data
+    # Required for SMB/NFS mounts inside container
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8420/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  backer-data:
+    name: backer-data
