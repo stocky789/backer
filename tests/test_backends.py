@@ -1,14 +1,14 @@
 """Tests for backup backends."""
 
-import pytest
-from pathlib import Path
 from datetime import datetime
-from unittest.mock import patch, MagicMock
-import subprocess
+from pathlib import Path
+from unittest.mock import patch
 
-from backer.backends.base import BackendResult, BackupSource, BackupDestination, OperationType
-from backer.backends.registry import BackendRegistry, get_backend
+import pytest
+
+from backer.backends.base import BackendResult, BackupDestination, BackupSource, OperationType
 from backer.backends.rclone import RcloneBackend
+from backer.backends.registry import BackendRegistry, get_backend
 from backer.backends.restic import ResticBackend
 
 
@@ -27,7 +27,7 @@ class TestBackendRegistry:
 
     def test_get_backend_unknown(self) -> None:
         """Test getting unknown backend raises error."""
-        with pytest.raises(ValueError, match="Unknown backend"):
+        with pytest.raises(ValueError, match="unknown_backend"):
             get_backend("unknown_backend")
 
     def test_available_backends(self) -> None:
@@ -76,15 +76,16 @@ class TestRcloneBackend:
     def test_build_command_basic(self) -> None:
         """Test basic command building."""
         backend = RcloneBackend()
+        binary_path = Path('/usr/bin/rclone')
 
-        with patch.object(backend, '_get_binary', return_value=Path('/usr/bin/rclone')):
+        with patch.object(backend, '_get_binary', return_value=binary_path):
             cmd = backend._build_command(
                 operation="sync",
                 source="/source",
                 destination="/dest",
             )
 
-        assert cmd[0] == "/usr/bin/rclone"
+        assert cmd[0] == str(binary_path)
         assert cmd[1] == "sync"
         assert "/source" in cmd
         assert "/dest" in cmd
@@ -136,14 +137,15 @@ class TestResticBackend:
     def test_build_backup_command(self) -> None:
         """Test backup command building."""
         backend = ResticBackend()
+        binary_path = Path('/usr/bin/restic')
 
-        with patch.object(backend, '_get_binary', return_value=Path('/usr/bin/restic')):
+        with patch.object(backend, '_get_binary', return_value=binary_path):
             cmd = backend._build_backup_command(
                 repo="/backup/repo",
                 source="/data",
             )
 
-        assert cmd[0] == "/usr/bin/restic"
+        assert cmd[0] == str(binary_path)
         assert "backup" in cmd
         assert "--repo" in cmd
         assert "/backup/repo" in cmd
