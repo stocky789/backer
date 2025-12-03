@@ -15,7 +15,6 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from backer import __version__
-from backer.server.web.routes import router as web_router
 from backer.server.models import (
     BackupResult,
     Client,
@@ -28,8 +27,9 @@ from backer.server.models import (
     JobRunRequest,
     JobRunResponse,
 )
-from backer.server.storage import Storage
 from backer.server.scheduler import BackupScheduler
+from backer.server.storage import Storage
+from backer.server.web.routes import router as web_router
 
 logger = logging.getLogger(__name__)
 
@@ -749,6 +749,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Discover available shares on a server."""
         from backer.server.repositories import (
             RepositoryType,
+        )
+        from backer.server.repositories import (
             discover_shares as do_discover,
         )
 
@@ -874,7 +876,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/repositories/{repo_id}/test")
     def test_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
         """Test connection to a repository."""
-        from backer.server.repositories import RepositoryType, SMBBrowser, NFSBrowser
+        from backer.server.repositories import NFSBrowser, SMBBrowser
 
         repo = storage.get_repository(repo_id)
         if not repo:

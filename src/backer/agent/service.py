@@ -5,7 +5,6 @@ Background service that polls the server for commands and executes backups.
 """
 
 import base64
-import hashlib
 import json
 import logging
 import os
@@ -14,11 +13,12 @@ import sys
 import threading
 import time
 import traceback
-import urllib.request
 import urllib.error
+import urllib.request
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 def setup_agent_logging(log_dir: Path | None = None) -> Path:
@@ -541,7 +541,7 @@ class AgentService:
         if process.returncode != 0:
             logger.error(f"[RCLONE] Process failed! Output:\n{output}")
         else:
-            logger.info(f"[RCLONE] Sync completed successfully")
+            logger.info("[RCLONE] Sync completed successfully")
 
         return {
             'success': process.returncode == 0,

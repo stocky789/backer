@@ -10,7 +10,6 @@ Security model:
 - For stronger protection, use an external secrets manager or HSM
 """
 
-import os
 import sys
 from pathlib import Path
 

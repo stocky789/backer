@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -117,12 +116,14 @@ async def dashboard(request: Request):
     repositories = storage.list_repositories()
 
     # Stats
+    today = datetime.now().strftime("%Y-%m-%d")
+    backups_today = sum(1 for r in recent_runs if r.get("started_at", "")[:10] == today)
     stats = {
         "agents_online": online_count,
         "total_agents": len(agents),
         "total_jobs": len(jobs),
         "total_repositories": len(repositories),
-        "backups_today": sum(1 for r in recent_runs if r.get("started_at", "")[:10] == datetime.now().strftime("%Y-%m-%d")),
+        "backups_today": backups_today,
     }
 
     return templates.TemplateResponse("dashboard.html", {

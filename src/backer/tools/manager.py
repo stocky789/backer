@@ -3,13 +3,10 @@
 Automatically downloads rclone, restic, etc. so users don't need to install them manually.
 """
 
-import hashlib
-import os
 import platform
 import shutil
 import stat
 import subprocess
-import tarfile
 import tempfile
 import zipfile
 from pathlib import Path

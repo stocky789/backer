@@ -7,11 +7,10 @@ from rich.console import Console
 from rich.table import Table
 
 from backer import __version__
-from backer.backends import BackendRegistry
-from backer.backends.base import BackupDestination, BackupSource
 
 # Import backends to register them
-from backer.backends import rsync, rclone, restic  # noqa: F401
+from backer.backends import BackendRegistry, rclone, restic, rsync  # noqa: F401
+from backer.backends.base import BackupDestination, BackupSource
 
 console = Console()
 
@@ -327,7 +326,7 @@ def agent_start(server: str | None) -> None:
 def agent_status() -> None:
     """Show agent status."""
     from backer.client.agent import BackerAgent
-    from backer.client.windows_service import is_windows, get_task_status
+    from backer.client.windows_service import get_task_status, is_windows
 
     try:
         ag = BackerAgent.from_config()
@@ -368,7 +367,7 @@ def agent_install(method: str) -> None:
         backer agent install --method systemd # Linux systemd service
     """
     from backer.client.agent import BackerAgent
-    from backer.client.windows_service import is_windows, install_service, create_systemd_service
+    from backer.client.windows_service import create_systemd_service, install_service, is_windows
 
     # Check if registered
     try:
@@ -447,7 +446,13 @@ def job_list(server: str | None) -> None:
         table.add_column("Status")
 
         for j in jobs:
-            status_style = "green" if j.get("last_status") == "success" else "red" if j.get("last_status") == "failed" else "dim"
+            last_status = j.get("last_status")
+            if last_status == "success":
+                status_style = "green"
+            elif last_status == "failed":
+                status_style = "red"
+            else:
+                status_style = "dim"
             table.add_row(
                 j["name"],
                 j.get("backend", "rclone"),

@@ -317,11 +317,16 @@ class BackerAgent:
                     files_processed=files_done,
                 )
 
+            # Check if backend supports progress callback
+            supports_progress = (
+                hasattr(backend.backup, '__code__') and
+                'progress_callback' in backend.backup.__code__.co_varnames
+            )
             result = backend.backup(
                 source=source,
                 destination=destination,
                 dry_run=dry_run,
-                progress_callback=progress_callback if hasattr(backend.backup, '__code__') and 'progress_callback' in backend.backup.__code__.co_varnames else None,
+                progress_callback=progress_callback if supports_progress else None,
             )
 
             finished_at = datetime.now()
