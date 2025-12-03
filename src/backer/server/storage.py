@@ -516,25 +516,49 @@ class Storage:
         }
 
     def get_repository_password(self, repo_id: str) -> str | None:
-        """Get repository password (for internal use only)."""
+        """Get repository password (for internal use only).
+
+        Handles both new Fernet-encrypted passwords and legacy base64 passwords.
+        Legacy passwords are automatically migrated to encrypted format.
+        """
+        from backer.server.secrets import get_secrets_manager
+
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT password_encrypted FROM repositories WHERE id = ?", (repo_id,)
             ).fetchone()
-            # For now, just base64 - in production use proper encryption
-            if row and row["password_encrypted"]:
-                import base64
-                try:
-                    return base64.b64decode(row["password_encrypted"]).decode()
-                except Exception:
-                    return None
-        return None
+
+            if not row or not row["password_encrypted"]:
+                return None
+
+            encrypted_value = row["password_encrypted"]
+            secrets = get_secrets_manager(self.db_path.parent)
+
+            # Check if it's Fernet-encrypted (new format)
+            if secrets.is_encrypted(encrypted_value):
+                return secrets.decrypt(encrypted_value)
+
+            # Legacy base64 format - migrate to encrypted
+            import base64
+            try:
+                plaintext = base64.b64decode(encrypted_value).decode()
+                # Migrate to new encrypted format
+                new_encrypted = secrets.encrypt(plaintext)
+                conn.execute(
+                    "UPDATE repositories SET password_encrypted = ? WHERE id = ?",
+                    (new_encrypted, repo_id),
+                )
+                return plaintext
+            except Exception:
+                return None
 
     def set_repository_password(self, repo_id: str, password: str) -> None:
-        """Set repository password."""
-        import base64
-        # For now, just base64 - in production use proper encryption
-        encrypted = base64.b64encode(password.encode()).decode()
+        """Set repository password using Fernet encryption."""
+        from backer.server.secrets import get_secrets_manager
+
+        secrets = get_secrets_manager(self.db_path.parent)
+        encrypted = secrets.encrypt(password)
+
         with self._connect() as conn:
             conn.execute(
                 "UPDATE repositories SET password_encrypted = ? WHERE id = ?",

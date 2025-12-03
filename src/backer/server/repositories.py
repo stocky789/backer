@@ -3,11 +3,65 @@
 import subprocess
 import re
 import os
+import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
+
+
+@contextmanager
+def smb_auth_file(
+    username: str | None,
+    password: str | None,
+    domain: str | None = None,
+) -> Generator[str | None, None, None]:
+    """Create a temporary SMB authentication file.
+
+    This is more secure than passing passwords on the command line,
+    as command line arguments are visible in process listings.
+
+    The auth file format is:
+        username = <user>
+        password = <pass>
+        domain = <domain>
+
+    Yields:
+        Path to the auth file, or None if no credentials provided
+    """
+    if not username or not password:
+        yield None
+        return
+
+    # Create a secure temp file
+    fd, auth_path = tempfile.mkstemp(prefix="smb_auth_", suffix=".txt")
+
+    try:
+        # Write credentials to file
+        auth_content = f"username = {username}\npassword = {password}\n"
+        if domain:
+            auth_content += f"domain = {domain}\n"
+
+        os.write(fd, auth_content.encode("utf-8"))
+        os.close(fd)
+
+        # Set restrictive permissions (owner read only)
+        if sys.platform != "win32":
+            os.chmod(auth_path, 0o400)
+
+        yield auth_path
+
+    finally:
+        # Securely delete the file
+        try:
+            # Overwrite with zeros before deleting
+            with open(auth_path, "wb") as f:
+                f.write(b"\x00" * 256)
+            os.unlink(auth_path)
+        except Exception:
+            pass
 
 
 class RepositoryType(str, Enum):
@@ -49,60 +103,58 @@ class SMBBrowser:
         Returns:
             Tuple of (success, shares_list or error_message)
         """
-        # Build smbclient command
-        cmd = ["smbclient", "-L", f"//{server}", "-g"]  # -g for parseable output
+        with smb_auth_file(username, password, domain) as auth_path:
+            # Build smbclient command
+            cmd = ["smbclient", "-L", f"//{server}", "-g"]  # -g for parseable output
 
-        if username and password:
-            if domain:
-                cmd.extend(["-U", f"{domain}\\{username}%{password}"])
+            if auth_path:
+                cmd.extend(["-A", auth_path])
             else:
-                cmd.extend(["-U", f"{username}%{password}"])
-        else:
-            cmd.append("-N")  # No password
+                cmd.append("-N")  # No password
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
 
-            if result.returncode != 0:
-                error = result.stderr.strip()
-                if "NT_STATUS_ACCESS_DENIED" in error:
-                    return False, "Access denied - check credentials"
-                elif "NT_STATUS_BAD_NETWORK_NAME" in error:
-                    return False, "Server not found or not accessible"
-                elif "NT_STATUS_LOGON_FAILURE" in error:
-                    return False, "Login failed - invalid username or password"
-                elif "NT_STATUS_HOST_UNREACHABLE" in error:
-                    return False, "Host unreachable - check network connection"
-                else:
-                    return False, error or "Unknown error connecting to server"
+                if result.returncode != 0:
+                    error = result.stderr.strip()
+                    if "NT_STATUS_ACCESS_DENIED" in error:
+                        return False, "Access denied - check credentials"
+                    elif "NT_STATUS_BAD_NETWORK_NAME" in error:
+                        return False, "Server not found or not accessible"
+                    elif "NT_STATUS_LOGON_FAILURE" in error:
+                        return False, "Login failed - invalid username or password"
+                    elif "NT_STATUS_HOST_UNREACHABLE" in error:
+                        return False, "Host unreachable - check network connection"
+                    else:
+                        return False, error or "Unknown error connecting to server"
 
-            # Parse output: format is "type|name|comment"
-            shares = []
-            for line in result.stdout.split("\n"):
-                line = line.strip()
-                if line.startswith("Disk|") or line.startswith("IPC|") or line.startswith("Printer|"):
-                    parts = line.split("|")
-                    if len(parts) >= 2:
-                        share_type = parts[0]
-                        name = parts[1]
-                        comment = parts[2] if len(parts) > 2 else ""
-                        # Skip IPC$ and other system shares
-                        if not name.endswith("$") and share_type == "Disk":
-                            shares.append(ShareInfo(name=name, share_type=share_type, comment=comment))
+                # Parse output: format is "type|name|comment"
+                shares = []
+                for line in result.stdout.split("\n"):
+                    line = line.strip()
+                    if line.startswith("Disk|") or line.startswith("IPC|") or line.startswith("Printer|"):
+                        parts = line.split("|")
+                        if len(parts) >= 2:
+                            share_type = parts[0]
+                            name = parts[1]
+                            comment = parts[2] if len(parts) > 2 else ""
+                            # Skip IPC$ and other system shares
+                            if not name.endswith("$") and share_type == "Disk":
+                                shares.append(ShareInfo(name=name, share_type=share_type, comment=comment))
 
-            return True, shares
+                return True, shares
 
-        except subprocess.TimeoutExpired:
-            return False, "Connection timed out"
-        except FileNotFoundError:
-            return False, "smbclient not installed - install samba-client package"
-        except Exception as e:
-            return False, str(e)
+            except subprocess.TimeoutExpired:
+                return False, "Connection timed out"
+            except FileNotFoundError:
+                return False, "smbclient not installed - install samba-client package"
+            except Exception as e:
+                return False, str(e)
 
     @staticmethod
     def list_directory(
@@ -133,71 +185,69 @@ class SMBBrowser:
         else:
             smb_path = "/*"
 
-        # Build smbclient command
-        cmd = ["smbclient", f"//{server}/{share}"]
+        with smb_auth_file(username, password, domain) as auth_path:
+            # Build smbclient command
+            cmd = ["smbclient", f"//{server}/{share}"]
 
-        if username and password:
-            if domain:
-                cmd.extend(["-U", f"{domain}\\{username}%{password}"])
+            if auth_path:
+                cmd.extend(["-A", auth_path])
             else:
-                cmd.extend(["-U", f"{username}%{password}"])
-        else:
-            cmd.append("-N")
+                cmd.append("-N")
 
-        cmd.extend(["-c", f"ls {smb_path}"])
+            cmd.extend(["-c", f"ls {smb_path}"])
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
 
-            if result.returncode != 0:
-                error = result.stderr.strip()
-                if "NT_STATUS_ACCESS_DENIED" in error:
-                    return False, "Access denied to this directory"
-                elif "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error:
-                    return False, "Directory not found"
-                else:
-                    return False, error or "Failed to list directory"
+                if result.returncode != 0:
+                    error = result.stderr.strip()
+                    if "NT_STATUS_ACCESS_DENIED" in error:
+                        return False, "Access denied to this directory"
+                    elif "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error:
+                        return False, "Directory not found"
+                    else:
+                        return False, error or "Failed to list directory"
 
-            # Parse directory listing
-            entries = []
-            for line in result.stdout.split("\n"):
-                line = line.strip()
-                # Format: "  filename                          D        0  Wed Dec  3 10:15:30 2025"
-                # Or:     "  filename                                1234  Wed Dec  3 10:15:30 2025"
-                match = re.match(r"^\s*(.+?)\s+([DAHN]*)\s+(\d+)\s+(.+)$", line)
-                if match:
-                    name = match.group(1).strip()
-                    attrs = match.group(2)
-                    size = int(match.group(3))
-                    modified = match.group(4)
+                # Parse directory listing
+                entries = []
+                for line in result.stdout.split("\n"):
+                    line = line.strip()
+                    # Format: "  filename                          D        0  Wed Dec  3 10:15:30 2025"
+                    # Or:     "  filename                                1234  Wed Dec  3 10:15:30 2025"
+                    match = re.match(r"^\s*(.+?)\s+([DAHN]*)\s+(\d+)\s+(.+)$", line)
+                    if match:
+                        name = match.group(1).strip()
+                        attrs = match.group(2)
+                        size = int(match.group(3))
+                        modified = match.group(4)
 
-                    # Skip . and ..
-                    if name in (".", ".."):
-                        continue
+                        # Skip . and ..
+                        if name in (".", ".."):
+                            continue
 
-                    is_dir = "D" in attrs
-                    entries.append(DirectoryEntry(
-                        name=name,
-                        is_dir=is_dir,
-                        size=size,
-                        modified=modified,
-                    ))
+                        is_dir = "D" in attrs
+                        entries.append(DirectoryEntry(
+                            name=name,
+                            is_dir=is_dir,
+                            size=size,
+                            modified=modified,
+                        ))
 
-            # Sort: directories first, then files
-            entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
-            return True, entries
+                # Sort: directories first, then files
+                entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
+                return True, entries
 
-        except subprocess.TimeoutExpired:
-            return False, "Connection timed out"
-        except FileNotFoundError:
-            return False, "smbclient not installed"
-        except Exception as e:
-            return False, str(e)
+            except subprocess.TimeoutExpired:
+                return False, "Connection timed out"
+            except FileNotFoundError:
+                return False, "smbclient not installed"
+            except Exception as e:
+                return False, str(e)
 
     @staticmethod
     def test_connection(

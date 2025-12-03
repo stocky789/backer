@@ -792,7 +792,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Create a new storage repository."""
-        import base64
+        from backer.server.secrets import get_secrets_manager
 
         data = await request.json()
 
@@ -807,7 +807,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         password = data.get("password")
         password_encrypted = None
         if password:
-            password_encrypted = base64.b64encode(password.encode()).decode()
+            secrets = get_secrets_manager(storage.db_path.parent)
+            password_encrypted = secrets.encrypt(password)
 
         storage.add_repository(
             repo_id=repo_id,
