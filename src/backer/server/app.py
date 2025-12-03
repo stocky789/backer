@@ -189,7 +189,32 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def register_client(
         request: ClientRegisterRequest, req: Request, storage: Storage = Depends(get_storage)
     ) -> ClientRegisterResponse:
-        """Register a new client with the server."""
+        """Register a new client or re-register existing one by hostname."""
+        # Check if client with this hostname already exists
+        existing_client = storage.get_client_by_hostname(request.hostname)
+
+        if existing_client:
+            # Re-register: generate new secret for existing client
+            client_secret = secrets.token_urlsafe(32)
+            secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
+            storage.update_client_secret(existing_client.id, secret_hash)
+
+            # Update client status to online
+            storage.update_client_status(
+                existing_client.id,
+                ClientStatus.ONLINE,
+                ip_address=req.client.host if req.client else None,
+            )
+
+            logger.info(f"Re-registered existing client: {existing_client.id} ({request.hostname})")
+
+            return ClientRegisterResponse(
+                client_id=existing_client.id,
+                client_secret=client_secret,
+                server_version=__version__,
+            )
+
+        # New client registration
         client_id = str(uuid4())[:8]
         client_secret = secrets.token_urlsafe(32)
         secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
@@ -207,6 +232,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         storage.add_client(client, secret_hash)
+        logger.info(f"Registered new client: {client_id} ({request.hostname})")
 
         return ClientRegisterResponse(
             client_id=client_id,
