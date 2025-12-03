@@ -202,9 +202,11 @@ class BackerAgent:
             if cmd_type == "backup":
                 # Merge command-level fields into payload for backwards compat
                 job_data = {**command, **payload}
-                self.execute_backup(job_data)
+                dry_run = payload.get("dry_run", False)
+                self.execute_backup(job_data, dry_run=dry_run)
             elif cmd_type == "restore":
-                self.execute_restore(payload)
+                dry_run = payload.get("dry_run", False)
+                self.execute_restore(payload, dry_run=dry_run)
             else:
                 print(f"Unknown command: {cmd_type}")
                 return

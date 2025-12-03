@@ -1,6 +1,5 @@
 """Backup job scheduler - runs jobs according to their cron schedules."""
 
-import asyncio
 import logging
 import threading
 from datetime import datetime, timedelta

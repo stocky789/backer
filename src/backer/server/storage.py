@@ -3,7 +3,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Generator
 
@@ -645,7 +645,7 @@ class Storage:
 
     def cleanup_stale_progress(self, max_age_minutes: int = 60) -> int:
         """Clean up stale progress records (jobs that hung or crashed)."""
-        cutoff = (datetime.now() - __import__('datetime').timedelta(minutes=max_age_minutes)).isoformat()
+        cutoff = (datetime.now() - timedelta(minutes=max_age_minutes)).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
