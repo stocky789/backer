@@ -60,6 +60,19 @@ class Storage:
 
                 CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_name);
                 CREATE INDEX IF NOT EXISTS idx_job_runs_started ON job_runs(started_at DESC);
+
+                CREATE TABLE IF NOT EXISTS command_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT NOT NULL,
+                    command_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    executed_at TEXT,
+                    status TEXT DEFAULT 'pending',
+                    FOREIGN KEY (client_id) REFERENCES clients(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_commands_client ON command_queue(client_id, status);
             """)
 
     @contextmanager
@@ -246,3 +259,67 @@ class Storage:
         """Get the most recent run for a job."""
         runs = self.get_job_runs(job_name, limit=1)
         return runs[0] if runs else None
+
+    # Command queue operations
+    def queue_command(
+        self,
+        client_id: str,
+        command_type: str,
+        payload: dict[str, Any],
+    ) -> int:
+        """Add a command to the queue for a client.
+
+        Returns the command ID.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO command_queue (client_id, command_type, payload, created_at, status)
+                VALUES (?, ?, ?, ?, 'pending')
+                """,
+                (client_id, command_type, json.dumps(payload), datetime.now().isoformat()),
+            )
+            return cursor.lastrowid or 0
+
+    def get_pending_commands(self, client_id: str) -> list[dict[str, Any]]:
+        """Get pending commands for a client."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, command_type, payload, created_at FROM command_queue
+                WHERE client_id = ? AND status = 'pending'
+                ORDER BY created_at ASC
+                """,
+                (client_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "command": row["command_type"],
+                    "payload": json.loads(row["payload"]),
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
+
+    def mark_command_executed(self, command_id: int) -> None:
+        """Mark a command as executed."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE command_queue SET status = 'executed', executed_at = ?
+                WHERE id = ?
+                """,
+                (datetime.now().isoformat(), command_id),
+            )
+
+    def mark_command_failed(self, command_id: int, error: str | None = None) -> None:
+        """Mark a command as failed."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE command_queue SET status = 'failed', executed_at = ?
+                WHERE id = ?
+                """,
+                (datetime.now().isoformat(), command_id),
+            )

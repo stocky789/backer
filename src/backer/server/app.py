@@ -156,8 +156,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage.update_client_status(
             client.id, ClientStatus.ONLINE, ip_address=req.client.host if req.client else None
         )
-        # Could return pending commands here
-        return {"status": "ok", "commands": []}
+        # Get pending commands for this client
+        commands = storage.get_pending_commands(client.id)
+        return {"status": "ok", "commands": commands}
 
     # ============ Job Management ============
 
@@ -232,25 +233,53 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
+        client_id = job.get("client_id")
+        if not client_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Job has no assigned agent. Assign an agent to run this job.",
+            )
+
+        # Check client exists
+        client = storage.get_client(client_id)
+        if not client:
+            raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
+
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         started_at = datetime.now()
 
+        # Save the run record as "pending"
         storage.save_job_run(
             run_id=run_id,
             job_name=job_name,
-            status="running",
+            status="pending",
             started_at=started_at,
-            client_id=job.get("client_id"),
+            client_id=client_id,
         )
 
-        # In a real implementation, this would dispatch to the client
-        # For now, we just mark it as started
+        # Queue the backup command for the client
+        command_payload = {
+            "job_name": job_name,
+            "run_id": run_id,
+            "source_path": job.get("source_path"),
+            "destination_path": job.get("destination_path"),
+            "backend": job.get("backend", "rclone"),
+            "excludes": job.get("excludes", []),
+            "dry_run": request.dry_run,
+        }
+
+        storage.queue_command(
+            client_id=client_id,
+            command_type="backup",
+            payload=command_payload,
+        )
+
         return JobRunResponse(
             run_id=run_id,
             job_name=job_name,
-            status="running",
+            status="pending",
             started_at=started_at,
-            message="Job started" + (" (dry run)" if request.dry_run else ""),
+            message=f"Backup queued for agent '{client_id}'" + (" (dry run)" if request.dry_run else ""),
         )
 
     @app.get("/api/v1/jobs/{job_name}/runs")
@@ -261,6 +290,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not storage.get_job(job_name):
             raise HTTPException(status_code=404, detail="Job not found")
         return storage.get_job_runs(job_name, limit)
+
+    # ============ Command acknowledgement ============
+
+    @app.post("/api/v1/commands/{command_id}/ack")
+    def acknowledge_command(
+        command_id: int,
+        client: Client = Depends(verify_client),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, str]:
+        """Mark a command as received/executed by the client."""
+        storage.mark_command_executed(command_id)
+        return {"status": "acknowledged"}
 
     # ============ Client-reported results ============
 

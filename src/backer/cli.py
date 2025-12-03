@@ -327,6 +327,7 @@ def agent_start(server: str | None) -> None:
 def agent_status() -> None:
     """Show agent status."""
     from backer.client.agent import BackerAgent
+    from backer.client.windows_service import is_windows, get_task_status
 
     try:
         ag = BackerAgent.from_config()
@@ -339,9 +340,76 @@ def agent_status() -> None:
         except Exception as e:
             console.print(f"[yellow]✗ Cannot reach server:[/yellow] {e}")
 
+        # Show service status on Windows
+        if is_windows():
+            task_info = get_task_status()
+            if task_info["installed"]:
+                console.print(f"[dim]Service: {task_info.get('status', 'Unknown')}[/dim]")
+            else:
+                console.print("[dim]Service: Not installed (run 'backer agent install')[/dim]")
+
     except FileNotFoundError:
         console.print("[yellow]Agent not registered[/yellow]")
         console.print("Run 'backer agent register --server <url>' to register")
+
+
+@agent.command("install")
+@click.option("--method", "-m", default="task", type=click.Choice(["task", "startup", "systemd"]),
+              help="Installation method (Windows: task/startup, Linux: systemd)")
+def agent_install(method: str) -> None:
+    """Install agent to run at system startup.
+
+    On Windows, creates a scheduled task or startup script.
+    On Linux, creates a systemd user service.
+
+    Examples:
+        backer agent install                  # Default: scheduled task on Windows
+        backer agent install --method startup # Use startup folder instead
+        backer agent install --method systemd # Linux systemd service
+    """
+    from backer.client.agent import BackerAgent
+    from backer.client.windows_service import is_windows, install_service, create_systemd_service
+
+    # Check if registered
+    try:
+        ag = BackerAgent.from_config()
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] Agent not registered. Run 'backer agent register' first.")
+        raise SystemExit(1)
+
+    if method == "systemd":
+        if is_windows():
+            console.print("[red]Error:[/red] Systemd not available on Windows")
+            raise SystemExit(1)
+        success, message = create_systemd_service()
+    else:
+        if not is_windows():
+            console.print("[yellow]Warning:[/yellow] Windows service methods not available on Linux")
+            console.print("Use --method systemd instead")
+            raise SystemExit(1)
+        success, message = install_service(method=method, server_url=ag.server_url)
+
+    if success:
+        console.print(f"[green]✓ {message}[/green]")
+    else:
+        console.print(f"[red]Error:[/red] {message}")
+        raise SystemExit(1)
+
+
+@agent.command("uninstall")
+def agent_uninstall() -> None:
+    """Remove agent from system startup."""
+    from backer.client.windows_service import is_windows, uninstall_service
+
+    if is_windows():
+        success, message = uninstall_service()
+        if success:
+            console.print(f"[green]✓ {message}[/green]")
+        else:
+            console.print(f"[yellow]{message}[/yellow]")
+    else:
+        console.print("Run: systemctl --user disable backer-agent")
+        console.print("Then delete ~/.config/systemd/user/backer-agent.service")
 
 
 # ============ Job commands (for use with server) ============

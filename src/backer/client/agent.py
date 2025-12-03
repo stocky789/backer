@@ -1,5 +1,6 @@
 """Backer agent - runs on client machines and executes backups."""
 
+import os
 import platform
 import signal
 import socket
@@ -15,6 +16,36 @@ import httpx
 from backer import __version__
 from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
+
+
+def get_config_dir() -> Path:
+    """Get platform-appropriate config directory."""
+    if sys.platform == "win32":
+        # Use APPDATA on Windows
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "Backer"
+        return Path.home() / "AppData" / "Roaming" / "Backer"
+    else:
+        # Use XDG config on Linux/Mac
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config:
+            return Path(xdg_config) / "backer"
+        return Path.home() / ".config" / "backer"
+
+
+def get_data_dir() -> Path:
+    """Get platform-appropriate data directory."""
+    if sys.platform == "win32":
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            return Path(localappdata) / "Backer"
+        return Path.home() / "AppData" / "Local" / "Backer"
+    else:
+        xdg_data = os.environ.get("XDG_DATA_HOME")
+        if xdg_data:
+            return Path(xdg_data) / "backer"
+        return Path.home() / ".local" / "share" / "backer"
 
 
 class BackerAgent:
@@ -37,7 +68,7 @@ class BackerAgent:
         self.server_url = server_url.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret
-        self.config_path = config_path or Path.home() / ".config" / "backer" / "agent.yaml"
+        self.config_path = config_path or get_config_dir() / "agent.yaml"
         self.hostname = socket.gethostname()
 
         self._running = False
@@ -103,8 +134,9 @@ class BackerAgent:
         with open(self.config_path, "w") as f:
             yaml.dump(config, f)
 
-        # Secure the file
-        self.config_path.chmod(0o600)
+        # Secure the file (skip on Windows where chmod doesn't work the same)
+        if sys.platform != "win32":
+            self.config_path.chmod(0o600)
 
     @classmethod
     def from_config(cls, config_path: Path | None = None) -> "BackerAgent":
@@ -112,7 +144,7 @@ class BackerAgent:
         import yaml
 
         if config_path is None:
-            config_path = Path.home() / ".config" / "backer" / "agent.yaml"
+            config_path = get_config_dir() / "agent.yaml"
 
         if not config_path.exists():
             raise FileNotFoundError(f"Agent config not found: {config_path}")
@@ -161,13 +193,36 @@ class BackerAgent:
     def _handle_command(self, command: dict[str, Any]) -> None:
         """Handle a command from the server."""
         cmd_type = command.get("command")
+        cmd_id = command.get("id")
+        payload = command.get("payload", {})
 
-        if cmd_type == "backup":
-            self.execute_backup(command)
-        elif cmd_type == "restore":
-            self.execute_restore(command)
-        else:
-            print(f"Unknown command: {cmd_type}")
+        print(f"Received command: {cmd_type} (id={cmd_id})")
+
+        try:
+            if cmd_type == "backup":
+                # Merge command-level fields into payload for backwards compat
+                job_data = {**command, **payload}
+                self.execute_backup(job_data)
+            elif cmd_type == "restore":
+                self.execute_restore(payload)
+            else:
+                print(f"Unknown command: {cmd_type}")
+                return
+
+            # Acknowledge command was processed
+            if cmd_id:
+                self._acknowledge_command(cmd_id)
+
+        except Exception as e:
+            print(f"Command {cmd_id} failed: {e}")
+
+    def _acknowledge_command(self, command_id: int) -> None:
+        """Acknowledge that a command was processed."""
+        try:
+            client = self._get_client()
+            client.post(f"/api/v1/commands/{command_id}/ack")
+        except Exception as e:
+            print(f"Failed to acknowledge command {command_id}: {e}")
 
     def execute_backup(
         self,
