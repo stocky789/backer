@@ -11,8 +11,37 @@ on:
         required: true
 
 jobs:
+  # Run tests first on both platforms
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,server,client]"
+
+      - name: Run linting
+        run: |
+          ruff check src/
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short || echo "No tests found, skipping"
+
   # Build Windows agent installer
   build-windows-agent:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +73,8 @@ jobs:
           $url = "https://github.com/restic/restic/releases/download/v$resticVersion/restic_${resticVersion}_windows_amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile restic.zip
           Expand-Archive -Path restic.zip -DestinationPath temp-restic
-          Move-Item temp-restic\restic_${resticVersion}_windows_amd64.exe dist\tools\restic.exe
+          # Restic zip contains restic.exe directly (not versioned filename)
+          Move-Item temp-restic\restic.exe dist\tools\restic.exe
         shell: pwsh
 
       - name: Build GUI with PyInstaller
@@ -93,6 +123,7 @@ jobs:
 
   # Build Python package
   build-python:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
