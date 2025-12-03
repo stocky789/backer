@@ -15,6 +15,7 @@ class BackendType(str, Enum):
     RCLONE = "rclone"
     RESTIC = "restic"
     BORG = "borg"
+    KOPIA = "kopia"
 
 
 class OperationType(str, Enum):

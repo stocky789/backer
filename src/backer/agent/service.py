@@ -150,7 +150,7 @@ class AgentService:
         results = {}
 
         # List of required tools
-        required_tools = ['rclone', 'restic']
+        required_tools = ['rclone', 'restic', 'kopia']
 
         for tool_name in required_tools:
             try:
@@ -378,6 +378,11 @@ class AgentService:
                     source_path, destination_path, excludes, dry_run, run_id,
                     backend_options=backend_options,
                 )
+            elif backend == 'kopia':
+                result = self._run_kopia_backup(
+                    source_path, destination_path, excludes, dry_run, run_id,
+                    backend_options=backend_options,
+                )
             else:
                 raise ValueError(f"Unknown backend: {backend}")
 
@@ -446,9 +451,9 @@ class AgentService:
         self._report_progress(run_id, 'running', 0, 'Starting restore...')
 
         try:
-            # For clean restore with restic, clear destination first
+            # For clean restore with restic/kopia, clear destination first
             # (rclone sync already handles this automatically)
-            if clean_restore and backend == 'restic' and not dry_run:
+            if clean_restore and backend in ('restic', 'kopia') and not dry_run:
                 dest_path = Path(destination_path)
                 if dest_path.exists():
                     logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
@@ -464,6 +469,12 @@ class AgentService:
                 )
             elif backend == 'restic':
                 result = self._run_restic_restore(
+                    source_path, destination_path, snapshot, dry_run, run_id,
+                    backend_options=backend_options,
+                    include_path=source_subfolder,
+                )
+            elif backend == 'kopia':
+                result = self._run_kopia_restore(
                     source_path, destination_path, snapshot, dry_run, run_id,
                     backend_options=backend_options,
                     include_path=source_subfolder,
@@ -628,7 +639,12 @@ class AgentService:
                 except (ValueError, IndexError):
                     pass
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[RCLONE] Process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[RCLONE] Process completed with return code: {process.returncode}")
@@ -770,7 +786,12 @@ class AgentService:
             except (json.JSONDecodeError, TypeError):
                 pass  # Not all lines are JSON
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[RESTIC] Process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[RESTIC] Process completed with return code: {process.returncode}")
@@ -904,7 +925,12 @@ class AgentService:
             output_lines.append(line)
             logger.debug(line.strip())
 
-        process.wait()
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[RESTIC] Restore process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
         output = ''.join(output_lines)
 
         logger.info(f"[RESTIC] Process completed with return code: {process.returncode}")
@@ -981,6 +1007,323 @@ class AgentService:
                 logger.warning(f"[RESTIC] Could not list destination contents: {e}")
         else:
             logger.warning(f"[RESTIC] Destination {original_dest} does not exist after restore!")
+
+        return {
+            'success': process.returncode == 0,
+            'output': output,
+            'bytes': 0,
+            'files': 0,
+            'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
+        }
+
+    def _init_kopia_repo(self, kopia: Path, dest: str, env: dict) -> bool:
+        """Initialize kopia repository if it doesn't exist."""
+        # Check if repo exists by running snapshot list command
+        check_cmd = [str(kopia), 'repository', 'status', '--json']
+        logger.info("[KOPIA] Checking if repository is connected...")
+
+        result = subprocess.run(
+            check_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode == 0:
+            logger.info("[KOPIA] Repository already connected")
+            return True
+
+        # Try to connect to existing repository
+        logger.info("[KOPIA] Attempting to connect to existing repository...")
+        connect_cmd = [str(kopia), 'repository', 'connect', 'filesystem', '--path', dest]
+
+        result = subprocess.run(
+            connect_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode == 0:
+            logger.info("[KOPIA] Connected to existing repository")
+            return True
+
+        # Repository doesn't exist, initialize it
+        logger.info("[KOPIA] Repository not found, initializing...")
+        init_cmd = [str(kopia), 'repository', 'create', 'filesystem', '--path', dest]
+
+        result = subprocess.run(
+            init_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode == 0:
+            logger.info("[KOPIA] Repository initialized successfully")
+            return True
+        else:
+            logger.error(f"[KOPIA] Failed to initialize repository: {result.stderr}")
+            return False
+
+    def _run_kopia_backup(
+        self,
+        source: str,
+        dest: str,
+        excludes: list[str],
+        dry_run: bool,
+        run_id: str,
+        backend_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run kopia backup command."""
+        logger.info("[KOPIA] Setting up kopia backup")
+
+        # Normalize paths for Windows (convert UNC forward slashes to backslashes)
+        source = self._normalize_windows_path(source)
+        dest = self._normalize_windows_path(dest)
+
+        logger.debug(f"[KOPIA] Source: {source}")
+        logger.debug(f"[KOPIA] Repository: {dest}")
+
+        try:
+            kopia = self._get_tool_path('kopia')
+            logger.info(f"[KOPIA] Using kopia at: {kopia}")
+        except FileNotFoundError as e:
+            logger.error(f"[KOPIA] {e}")
+            raise
+
+        backend_options = backend_options or {}
+
+        # Set up environment with password
+        # Priority: backend_options > env var > default
+        env = os.environ.copy()
+        if 'kopia_password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['kopia_password']
+            logger.info("[KOPIA] Using password from job configuration")
+        elif 'restic_password' in backend_options:
+            # Allow using restic_password for compatibility
+            env['KOPIA_PASSWORD'] = backend_options['restic_password']
+            logger.info("[KOPIA] Using restic_password from job configuration")
+        elif 'KOPIA_PASSWORD' not in env:
+            env['KOPIA_PASSWORD'] = 'backer-default-password'
+            logger.info("[KOPIA] Using default repository password")
+
+        # Initialize/connect to repository if needed
+        if not self._init_kopia_repo(kopia, dest, env):
+            return {
+                'success': False,
+                'output': 'Failed to initialize kopia repository',
+                'bytes': 0,
+                'files': 0,
+                'error': 'Repository initialization failed',
+            }
+
+        cmd = [str(kopia), 'snapshot', 'create', source, '--json']
+
+        for exclude in excludes:
+            cmd.extend(['--ignore-rules', exclude])
+
+        if dry_run:
+            cmd.append('--dry-run')
+
+        logger.info(f"[KOPIA] Executing command: {' '.join(cmd)}")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            creationflags=get_subprocess_flags(),
+        )
+
+        output_lines = []
+        snapshot_id = None
+        total_size = 0
+        total_files = 0
+
+        for line in process.stdout:
+            output_lines.append(line)
+            logger.debug(line.strip())
+
+            # Parse JSON output for snapshot info
+            try:
+                data = json.loads(line)
+                # Kopia has different output format
+                if 'id' in data:
+                    snapshot_id = data.get('id')
+                elif 'snapshotID' in data:
+                    snapshot_id = data.get('snapshotID')
+
+                # Try to extract stats from rootEntry
+                if 'rootEntry' in data:
+                    root = data.get('rootEntry', {})
+                    summ = root.get('summ', {})
+                    total_size = summ.get('size', 0)
+                    total_files = summ.get('files', 0)
+
+            except (json.JSONDecodeError, TypeError):
+                pass  # Not all lines are JSON
+
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[KOPIA] Process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
+        output = ''.join(output_lines)
+
+        logger.info(f"[KOPIA] Process completed with return code: {process.returncode}")
+        if process.returncode != 0:
+            logger.error(f"[KOPIA] Process failed! Output:\n{output}")
+        else:
+            logger.info("[KOPIA] Backup completed successfully")
+            if snapshot_id:
+                logger.info(f"[KOPIA] Snapshot ID: {snapshot_id}")
+
+        # Disconnect after backup
+        self._disconnect_kopia_repo(kopia, env)
+
+        return {
+            'success': process.returncode == 0,
+            'output': output,
+            'bytes': total_size,
+            'files': total_files,
+            'snapshot_id': snapshot_id,
+            'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
+        }
+
+    def _disconnect_kopia_repo(self, kopia: Path, env: dict) -> None:
+        """Disconnect from kopia repository."""
+        try:
+            subprocess.run(
+                [str(kopia), 'repository', 'disconnect'],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+                creationflags=get_subprocess_flags(),
+            )
+        except Exception as e:
+            logger.debug(f"[KOPIA] Failed to disconnect repository (non-fatal): {e}")
+
+    def _run_kopia_restore(
+        self,
+        repo: str,
+        dest: str,
+        snapshot: str | None,
+        dry_run: bool,
+        run_id: str,
+        backend_options: dict[str, Any] | None = None,
+        include_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Run kopia restore command."""
+        logger.info("[KOPIA] Setting up kopia restore")
+
+        # Normalize paths for Windows (convert UNC forward slashes to backslashes)
+        repo = self._normalize_windows_path(repo)
+        dest = self._normalize_windows_path(dest)
+
+        logger.debug(f"[KOPIA] Repository: {repo}")
+        logger.debug(f"[KOPIA] Destination: {dest}")
+        logger.debug(f"[KOPIA] Snapshot: {snapshot or 'latest'}")
+        logger.debug(f"[KOPIA] Include path: {include_path or 'all'}")
+
+        try:
+            kopia = self._get_tool_path('kopia')
+            logger.info(f"[KOPIA] Using kopia at: {kopia}")
+        except FileNotFoundError as e:
+            logger.error(f"[KOPIA] {e}")
+            raise
+
+        backend_options = backend_options or {}
+
+        # Set up environment with password
+        env = os.environ.copy()
+        if 'kopia_password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['kopia_password']
+            logger.info("[KOPIA] Using password from job configuration")
+        elif 'restic_password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['restic_password']
+            logger.info("[KOPIA] Using restic_password from job configuration")
+        elif 'KOPIA_PASSWORD' not in env:
+            env['KOPIA_PASSWORD'] = 'backer-default-password'
+            logger.info("[KOPIA] Using default repository password")
+
+        # Connect to repository
+        connect_cmd = [str(kopia), 'repository', 'connect', 'filesystem', '--path', repo]
+        result = subprocess.run(
+            connect_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode != 0:
+            return {
+                'success': False,
+                'output': result.stderr,
+                'bytes': 0,
+                'files': 0,
+                'error': f"Failed to connect to repository: {result.stderr}",
+            }
+
+        # Use provided snapshot or latest
+        snapshot_id = snapshot if snapshot else 'latest'
+
+        # Build restore command
+        # kopia snapshot restore <snapshot-id> <destination>
+        cmd = [str(kopia), 'snapshot', 'restore', snapshot_id, dest]
+
+        # Note: Kopia doesn't have a direct --dry-run for restore
+
+        logger.info(f"[KOPIA] Executing command: {' '.join(cmd)}")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            creationflags=get_subprocess_flags(),
+        )
+
+        output_lines = []
+        for line in process.stdout:
+            output_lines.append(line)
+            logger.debug(line.strip())
+
+        try:
+            process.wait(timeout=300)  # 5 minute timeout for process cleanup
+        except subprocess.TimeoutExpired:
+            logger.warning("[KOPIA] Restore process wait timed out, killing process")
+            process.kill()
+            process.wait(timeout=10)
+        output = ''.join(output_lines)
+
+        logger.info(f"[KOPIA] Process completed with return code: {process.returncode}")
+        if process.returncode != 0:
+            logger.error(f"[KOPIA] Process failed! Output:\n{output}")
+        else:
+            logger.info("[KOPIA] Restore completed successfully")
+
+        # Disconnect after restore
+        self._disconnect_kopia_repo(kopia, env)
+
+        # Verify restore
+        dest_path = Path(dest)
+        if dest_path.exists():
+            try:
+                contents = list(dest_path.iterdir())
+                logger.info(f"[KOPIA] Destination {dest} exists with {len(contents)} items")
+            except Exception as e:
+                logger.warning(f"[KOPIA] Could not list destination contents: {e}")
+        else:
+            logger.warning(f"[KOPIA] Destination {dest} does not exist after restore!")
 
         return {
             'success': process.returncode == 0,
@@ -1106,9 +1449,9 @@ class AgentService:
             }
             repo.save_job_run(job_name, run_id, run_data)
 
-            # For restic, also save snapshot metadata
+            # For restic/kopia, also save snapshot metadata
             snapshot_id = result.get("snapshot_id")
-            if snapshot_id and backend == "restic":
+            if snapshot_id and backend in ("restic", "kopia"):
                 repo.save_snapshot(
                     snapshot_id=snapshot_id,
                     snapshot_data={
@@ -1117,6 +1460,7 @@ class AgentService:
                         "hostname": socket.gethostname(),
                         "paths": [source_path],
                         "time": finished_at.isoformat(),
+                        "backend": backend,
                     },
                 )
 

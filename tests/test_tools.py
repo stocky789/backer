@@ -64,6 +64,7 @@ class TestToolManager:
 
             assert "rclone" in tools
             assert "restic" in tools
+            assert "kopia" in tools
 
             for name, info in tools.items():
                 assert "installed" in info
@@ -114,6 +115,15 @@ class TestToolInfo:
     def test_restic_info_complete(self) -> None:
         """Test restic info has all required fields."""
         info = TOOL_INFO["restic"]
+        assert "version" in info
+        assert "base_url" in info
+        assert "platforms" in info
+        assert "arch_map" in info
+        assert "binary_name" in info
+
+    def test_kopia_info_complete(self) -> None:
+        """Test kopia info has all required fields."""
+        info = TOOL_INFO["kopia"]
         assert "version" in info
         assert "base_url" in info
         assert "platforms" in info
