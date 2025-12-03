@@ -121,6 +121,43 @@
                 </div>
             </div>
 
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+
+            <div class="form-group">
+                <label class="form-label">Retention Policy</label>
+                <select name="retention_preset" class="form-input" id="retentionPreset" onchange="onRetentionChange()">
+                    <option value="forever">Keep all backups (no automatic cleanup)</option>
+                    <option value="minimal">Minimal (keep last 3 backups)</option>
+                    <option value="standard" selected>Standard (7 daily + 4 weekly)</option>
+                    <option value="extended">Extended (14 daily + 8 weekly + 12 monthly)</option>
+                    <option value="custom">Custom settings</option>
+                </select>
+                <div class="form-hint">How long to keep old backup history records</div>
+            </div>
+
+            <div id="customRetentionGroup" style="display: none;">
+                <div class="form-group">
+                    <label class="form-label">Keep Last N Backups</label>
+                    <input type="number" name="retention_keep_last" class="form-input" id="retentionKeepLast"
+                           placeholder="7" min="0">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Keep Daily for N Days</label>
+                    <input type="number" name="retention_keep_daily" class="form-input" id="retentionKeepDaily"
+                           placeholder="7" min="0">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Keep Weekly for N Weeks</label>
+                    <input type="number" name="retention_keep_weekly" class="form-input" id="retentionKeepWeekly"
+                           placeholder="4" min="0">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Keep Monthly for N Months</label>
+                    <input type="number" name="retention_keep_monthly" class="form-input" id="retentionKeepMonthly"
+                           placeholder="12" min="0">
+                </div>
+            </div>
+
             <div style="display: flex; gap: 10px; margin-top: 30px;">
                 <button type="submit" class="btn btn-primary">Create Backup Job</button>
                 <a href="/jobs" class="btn btn-secondary">Cancel</a>
@@ -170,10 +207,22 @@ function onScheduleChange() {
     }
 }
 
+function onRetentionChange() {
+    const preset = document.getElementById('retentionPreset');
+    const customGroup = document.getElementById('customRetentionGroup');
+
+    if (preset.value === 'custom') {
+        customGroup.style.display = 'block';
+    } else {
+        customGroup.style.display = 'none';
+    }
+}
+
 // Update path when subfolder changes
 document.getElementById('destSubfolder').addEventListener('input', updateDestPath);
 
 // Initialize
 onScheduleChange();
+onRetentionChange();
 </script>
 {% endblock %}

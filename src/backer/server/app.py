@@ -459,6 +459,71 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "jobs": _scheduler.get_job_status(),
         }
 
+    # ============ Retention Policies ============
+
+    @app.get("/api/v1/retention/presets")
+    def get_retention_presets() -> dict[str, Any]:
+        """Get available retention policy presets."""
+        from backer.server.retention import RETENTION_PRESETS
+        return {"presets": RETENTION_PRESETS}
+
+    @app.post("/api/v1/jobs/{job_name}/retention")
+    async def set_job_retention(
+        job_name: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Set retention policy for a job."""
+        job = storage.get_job(job_name)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        data = await request.json()
+        job["retention"] = data
+        storage.save_job(job_name, job)
+
+        return {"status": "updated", "retention": data}
+
+    @app.post("/api/v1/jobs/{job_name}/retention/apply")
+    def apply_job_retention(
+        job_name: str,
+        dry_run: bool = False,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Apply retention policy to a job (clean up old runs)."""
+        from backer.server.retention import RetentionManager
+
+        manager = RetentionManager(storage)
+        deleted = manager.apply_retention(job_name, dry_run=dry_run)
+
+        return {
+            "job_name": job_name,
+            "dry_run": dry_run,
+            "deleted_count": len(deleted),
+            "deleted_runs": [{"run_id": r["run_id"], "started_at": r.get("started_at")} for r in deleted],
+        }
+
+    @app.post("/api/v1/retention/apply-all")
+    def apply_all_retention(
+        dry_run: bool = False,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Apply retention policies to all jobs."""
+        from backer.server.retention import RetentionManager
+
+        manager = RetentionManager(storage)
+        results = manager.apply_all_retention(dry_run=dry_run)
+
+        return {
+            "dry_run": dry_run,
+            "jobs_processed": len(results),
+            "total_deleted": sum(len(runs) for runs in results.values()),
+            "details": {
+                job: [{"run_id": r["run_id"], "started_at": r.get("started_at")} for r in runs]
+                for job, runs in results.items()
+            },
+        }
+
     # ============ Storage Repositories ============
 
     @app.post("/api/v1/repositories/discover")

@@ -236,6 +236,11 @@ async def jobs_create(
     excludes: str = Form(""),
     schedule_cron: str = Form(""),
     schedule_preset: str = Form(""),
+    retention_preset: str = Form("standard"),
+    retention_keep_last: int = Form(None),
+    retention_keep_daily: int = Form(None),
+    retention_keep_weekly: int = Form(None),
+    retention_keep_monthly: int = Form(None),
 ):
     """Create a new backup job."""
     storage = get_storage(request)
@@ -255,6 +260,25 @@ async def jobs_create(
     # Handle schedule - use preset if custom cron not provided
     final_schedule = schedule_cron if schedule_cron else (schedule_preset if schedule_preset != "custom" else None)
 
+    # Build retention policy
+    retention = {}
+    if retention_preset == "custom":
+        if retention_keep_last:
+            retention["keep_last"] = retention_keep_last
+        if retention_keep_daily:
+            retention["keep_daily"] = retention_keep_daily
+        if retention_keep_weekly:
+            retention["keep_weekly"] = retention_keep_weekly
+        if retention_keep_monthly:
+            retention["keep_monthly"] = retention_keep_monthly
+    elif retention_preset == "minimal":
+        retention = {"keep_last": 3}
+    elif retention_preset == "standard":
+        retention = {"keep_last": 7, "keep_daily": 7, "keep_weekly": 4}
+    elif retention_preset == "extended":
+        retention = {"keep_last": 14, "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12}
+    # "forever" preset means no retention policy (keep all)
+
     job_config = {
         "source_path": source_path,
         "destination_path": destination_path,
@@ -263,6 +287,7 @@ async def jobs_create(
         "client_id": client_id if client_id else None,
         "excludes": [e.strip() for e in excludes.split(",") if e.strip()],
         "schedule_cron": final_schedule if final_schedule else None,
+        "retention": retention,
         "enabled": True,
     }
 
