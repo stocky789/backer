@@ -8,14 +8,63 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import subprocess
+import sys
 import threading
 import time
+import traceback
 import urllib.request
 import urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+
+
+def setup_agent_logging(log_dir: Path | None = None) -> Path:
+    """Configure logging to both console and file for the agent.
+
+    Returns the log file path.
+    """
+    # Determine log directory
+    if log_dir is None:
+        if sys.platform == 'win32':
+            log_dir = Path(os.environ.get('APPDATA', Path.home())) / 'Backer' / 'logs'
+        else:
+            log_dir = Path.home() / '.local' / 'share' / 'backer' / 'logs'
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"backer-agent-{datetime.now().strftime('%Y-%m-%d')}.log"
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # Clear any existing handlers
+    root_logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_format)
+    root_logger.addHandler(console_handler)
+
+    # File handler with more detail
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(file_format)
+    root_logger.addHandler(file_handler)
+
+    return log_file
+
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +210,8 @@ class AgentService:
         cmd_type = command.get('command_type')
         payload = command.get('payload', {})
 
-        logger.info(f"Processing command {cmd_id}: {cmd_type}")
+        logger.info(f"[COMMAND] Processing command {cmd_id}: {cmd_type}")
+        logger.debug(f"[COMMAND] Full payload: {json.dumps(payload, indent=2)}")
 
         try:
             if cmd_type == 'backup':
@@ -169,13 +219,16 @@ class AgentService:
             elif cmd_type == 'restore':
                 self._execute_restore(payload)
             else:
-                logger.warning(f"Unknown command type: {cmd_type}")
+                logger.warning(f"[COMMAND] Unknown command type: {cmd_type}")
 
             # Acknowledge command
+            logger.debug(f"[COMMAND] Acknowledging command {cmd_id}")
             self._make_request(f'/api/v1/commands/{cmd_id}/ack', method='POST')
+            logger.info(f"[COMMAND] Command {cmd_id} completed successfully")
 
         except Exception as e:
-            logger.error(f"Command {cmd_id} failed: {e}")
+            logger.error(f"[COMMAND] Command {cmd_id} failed: {e}")
+            logger.error(f"[COMMAND] Traceback:\n{traceback.format_exc()}")
             # Report failure
             self._report_result(
                 run_id=payload.get('run_id', 'unknown'),
@@ -195,7 +248,13 @@ class AgentService:
         dry_run = payload.get('dry_run', False)
 
         self._update_status(f"Backing up: {job_name}")
-        logger.info(f"Starting backup: {source_path} -> {destination_path}")
+        logger.info(f"[BACKUP] Starting backup job '{job_name}' (run_id: {run_id})")
+        logger.info(f"[BACKUP] Source: {source_path}")
+        logger.info(f"[BACKUP] Destination: {destination_path}")
+        logger.info(f"[BACKUP] Backend: {backend}")
+        logger.info(f"[BACKUP] Tools directory: {self.tools_dir}")
+        logger.info(f"[BACKUP] Excludes: {excludes}")
+        logger.info(f"[BACKUP] Dry run: {dry_run}")
 
         started_at = datetime.now()
 
@@ -309,15 +368,26 @@ class AgentService:
         run_id: str,
     ) -> dict[str, Any]:
         """Run rclone sync command."""
-        import sys
+        logger.info(f"[RCLONE] Setting up rclone sync")
+        logger.debug(f"[RCLONE] Source: {source}")
+        logger.debug(f"[RCLONE] Destination: {dest}")
 
         if sys.platform == 'win32':
             rclone = self.tools_dir / 'rclone.exe'
         else:
             rclone = self.tools_dir / 'rclone'
 
+        logger.info(f"[RCLONE] Looking for rclone at: {rclone}")
+        logger.info(f"[RCLONE] Tools directory exists: {self.tools_dir.exists()}")
+        if self.tools_dir.exists():
+            logger.info(f"[RCLONE] Tools directory contents: {list(self.tools_dir.iterdir())}")
+
         if not rclone.exists():
-            raise FileNotFoundError(f"rclone not found at {rclone}")
+            error_msg = f"rclone not found at {rclone}"
+            logger.error(f"[RCLONE] {error_msg}")
+            raise FileNotFoundError(error_msg)
+
+        logger.info(f"[RCLONE] rclone executable found: {rclone}")
 
         cmd = [str(rclone), 'sync', source, dest, '--progress', '-v']
 
@@ -327,7 +397,7 @@ class AgentService:
         if dry_run:
             cmd.append('--dry-run')
 
-        logger.info(f"Running: {' '.join(cmd)}")
+        logger.info(f"[RCLONE] Executing command: {' '.join(cmd)}")
 
         process = subprocess.Popen(
             cmd,
@@ -357,6 +427,12 @@ class AgentService:
 
         process.wait()
         output = ''.join(output_lines)
+
+        logger.info(f"[RCLONE] Process completed with return code: {process.returncode}")
+        if process.returncode != 0:
+            logger.error(f"[RCLONE] Process failed! Output:\n{output}")
+        else:
+            logger.info(f"[RCLONE] Sync completed successfully")
 
         return {
             'success': process.returncode == 0,
