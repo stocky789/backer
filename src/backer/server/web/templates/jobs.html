@@ -18,46 +18,75 @@
                 <th>Name</th>
                 <th>Agent</th>
                 <th>Source</th>
-                <th>Destination</th>
-                <th>Backend</th>
                 <th>Schedule</th>
-                <th>Last Run</th>
+                <th>Status</th>
+                <th>Next Run</th>
                 <th>Actions</th>
             </tr>
         </thead>
         <tbody>
             {% for job in jobs %}
-            <tr>
-                <td><strong>{{ job.name }}</strong></td>
-                <td>{{ job.client_id or 'Any' }}</td>
-                <td><code>{{ job.source_path[:20] }}...</code></td>
-                <td><code>{{ job.destination_path[:20] }}...</code></td>
-                <td>{{ job.backend }}</td>
-                <td>{{ job.schedule_cron or 'Manual' }}</td>
+            <tr class="{% if not job.enabled %}row-disabled{% endif %}">
                 <td>
-                    {% if job.last_status == 'success' %}
-                    <span class="badge badge-success">Success</span>
-                    {% elif job.last_status == 'failed' %}
-                    <span class="badge badge-error">Failed</span>
+                    <strong>{{ job.name }}</strong>
+                    <br><small style="color: var(--text-muted);">{{ job.backend }}</small>
+                </td>
+                <td>
+                    {% if job.client_id %}
+                    <span class="badge badge-info">{{ job.client_id }}</span>
                     {% else %}
-                    <span class="badge badge-muted">{{ job.last_status or 'Never' }}</span>
+                    <span class="badge badge-muted">Unassigned</span>
                     {% endif %}
                 </td>
                 <td>
-                    <button class="btn btn-primary btn-sm"
-                            hx-post="/api/v1/jobs/{{ job.name }}/run"
-                            hx-headers='{"Content-Type": "application/json"}'
-                            hx-vals='{"dry_run": false}'
-                            hx-swap="none"
-                            hx-on::after-request="alert('Job started!')">
-                        Run
-                    </button>
-                    <button class="btn btn-danger btn-sm"
-                            hx-delete="/api/v1/jobs/{{ job.name }}"
-                            hx-confirm="Delete job '{{ job.name }}'?"
-                            hx-on::after-request="location.reload()">
-                        Delete
-                    </button>
+                    <code title="{{ job.source_path }}">{{ job.source_path[:30] }}{% if job.source_path|length > 30 %}...{% endif %}</code>
+                </td>
+                <td>
+                    {% if job.schedule_cron %}
+                    <code>{{ job.schedule_cron }}</code>
+                    {% else %}
+                    <span style="color: var(--text-muted);">Manual</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if not job.enabled %}
+                    <span class="badge badge-muted">Disabled</span>
+                    {% elif job.last_status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif job.last_status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% elif job.last_status == 'pending' %}
+                    <span class="badge badge-warning">Running</span>
+                    {% else %}
+                    <span class="badge badge-muted">Never run</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if job.next_run %}
+                    <small>{{ job.next_run.strftime('%m/%d %H:%M') }}</small>
+                    {% else %}
+                    <span style="color: var(--text-muted);">-</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="btn-group">
+                        <button class="btn btn-primary btn-sm" onclick="runJob('{{ job.name }}')"
+                                {% if not job.client_id %}disabled title="Assign an agent first"{% endif %}>
+                            Run
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="toggleJob('{{ job.name }}')">
+                            {{ 'Enable' if not job.enabled else 'Disable' }}
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="editJob('{{ job.name }}')">
+                            Edit
+                        </button>
+                        <button class="btn btn-danger btn-sm"
+                                hx-delete="/api/v1/jobs/{{ job.name }}"
+                                hx-confirm="Delete job '{{ job.name }}'? This cannot be undone."
+                                hx-on::after-request="location.reload()">
+                            Delete
+                        </button>
+                    </div>
                 </td>
             </tr>
             {% endfor %}
@@ -71,4 +100,219 @@
     </div>
     {% endif %}
 </div>
+
+<!-- Edit Job Modal -->
+<div id="editModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-header">
+            <h3>Edit Job: <span id="editJobName"></span></h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideEditModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="editForm" onsubmit="saveJob(event)">
+                <input type="hidden" id="editJobOriginalName">
+
+                <div class="form-group">
+                    <label class="form-label">Source Path</label>
+                    <input type="text" id="editSourcePath" class="form-input" required>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Agent</label>
+                    <select id="editClientId" class="form-input">
+                        <option value="">Unassigned</option>
+                        {% for agent in agents %}
+                        <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.hostname }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Backend</label>
+                    <select id="editBackend" class="form-input">
+                        <option value="rclone">rclone</option>
+                        <option value="restic">restic</option>
+                        <option value="rsync">rsync</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Schedule (cron)</label>
+                    <input type="text" id="editSchedule" class="form-input" placeholder="0 2 * * *">
+                    <div class="form-hint">Leave empty for manual-only backups</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Excludes</label>
+                    <input type="text" id="editExcludes" class="form-input" placeholder="*.tmp, .cache">
+                    <div class="form-hint">Comma-separated patterns to exclude</div>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideEditModal()">Cancel</button>
+                </div>
+            </form>
+            <div id="editError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+        </div>
+    </div>
+</div>
+
+<style>
+.btn-group {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.row-disabled {
+    opacity: 0.6;
+}
+
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+    margin: 0;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.error-msg {
+    color: var(--error);
+    padding: 10px;
+    background: rgba(255, 107, 107, 0.1);
+    border-radius: 4px;
+}
+</style>
+
+<script>
+async function runJob(jobName) {
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/run`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dry_run: false})
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            alert(`Backup started!\nRun ID: ${data.run_id}\n${data.message}`);
+            location.reload();
+        } else {
+            alert('Error: ' + (data.detail || 'Failed to start job'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function toggleJob(jobName) {
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/toggle`, {
+            method: 'PATCH'
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const data = await response.json();
+            alert('Error: ' + (data.detail || 'Failed to toggle job'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function editJob(jobName) {
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}`);
+        const job = await response.json();
+
+        document.getElementById('editJobName').textContent = jobName;
+        document.getElementById('editJobOriginalName').value = jobName;
+        document.getElementById('editSourcePath').value = job.source_path || '';
+        document.getElementById('editClientId').value = job.client_id || '';
+        document.getElementById('editBackend').value = job.backend || 'rclone';
+        document.getElementById('editSchedule').value = job.schedule_cron || '';
+        document.getElementById('editExcludes').value = (job.excludes || []).join(', ');
+
+        document.getElementById('editModal').style.display = 'flex';
+    } catch (e) {
+        alert('Error loading job: ' + e.message);
+    }
+}
+
+function hideEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+}
+
+async function saveJob(event) {
+    event.preventDefault();
+
+    const jobName = document.getElementById('editJobOriginalName').value;
+    const excludesStr = document.getElementById('editExcludes').value;
+
+    const data = {
+        source_path: document.getElementById('editSourcePath').value,
+        client_id: document.getElementById('editClientId').value || null,
+        backend: document.getElementById('editBackend').value,
+        schedule_cron: document.getElementById('editSchedule').value || null,
+        excludes: excludesStr ? excludesStr.split(',').map(s => s.trim()).filter(s => s) : []
+    };
+
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const result = await response.json();
+            document.getElementById('editError').textContent = result.detail || 'Failed to save';
+            document.getElementById('editError').style.display = 'block';
+        }
+    } catch (e) {
+        document.getElementById('editError').textContent = e.message;
+        document.getElementById('editError').style.display = 'block';
+    }
+}
+
+// Close modal on background click
+document.getElementById('editModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideEditModal();
+});
+</script>
 {% endblock %}

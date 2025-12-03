@@ -7,15 +7,15 @@
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label">Agents Online</div>
-        <div class="stat-value success">{{ stats.agents_online }}</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-label">Total Agents</div>
-        <div class="stat-value">{{ stats.total_agents }}</div>
+        <div class="stat-value success">{{ stats.agents_online }}/{{ stats.total_agents }}</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Backup Jobs</div>
         <div class="stat-value">{{ stats.total_jobs }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Storage Repos</div>
+        <div class="stat-value">{{ stats.total_repositories }}</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Backups Today</div>

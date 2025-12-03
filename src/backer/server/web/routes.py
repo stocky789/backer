@@ -113,11 +113,15 @@ async def dashboard(request: Request):
     recent_runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
     recent_runs = recent_runs[:10]
 
+    # Get repositories count
+    repositories = storage.list_repositories()
+
     # Stats
     stats = {
         "agents_online": online_count,
         "total_agents": len(agents),
         "total_jobs": len(jobs),
+        "total_repositories": len(repositories),
         "backups_today": sum(1 for r in recent_runs if r.get("started_at", "")[:10] == datetime.now().strftime("%Y-%m-%d")),
     }
 
@@ -163,20 +167,45 @@ async def jobs_page(request: Request):
     """Jobs management page."""
     storage = get_storage(request)
 
+    # Import scheduler to get next run times
+    try:
+        from backer.server.scheduler import BackupScheduler
+        # Access the global scheduler through app state if available
+        scheduler = getattr(request.app.state, 'scheduler', None)
+    except ImportError:
+        scheduler = None
+
     jobs_raw = storage.list_jobs()
     jobs = []
 
     for j in jobs_raw:
         latest = storage.get_latest_run(j["name"])
+
+        # Calculate next run if scheduler available
+        next_run = None
+        schedule = j.get("schedule_cron")
+        if schedule and j.get("enabled", True):
+            try:
+                from croniter import croniter
+                cron = croniter(schedule, datetime.now())
+                next_run = cron.get_next(datetime)
+            except Exception:
+                pass
+
         jobs.append({
             **j,
             "last_status": latest["status"] if latest else None,
+            "next_run": next_run,
         })
+
+    # Get agents for edit modal
+    agents = storage.list_clients()
 
     return templates.TemplateResponse("jobs.html", {
         "request": request,
         "active": "jobs",
         "jobs": jobs,
+        "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
     })
 
 
