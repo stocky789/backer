@@ -2,6 +2,7 @@
 Backer Windows Agent - GUI Application
 
 A simple Windows GUI for connecting to a Backer server and managing backups.
+Includes system tray support for background operation.
 """
 
 import json
@@ -25,6 +26,30 @@ LOG_DIR = CONFIG_DIR / 'logs'
 
 # Global log file path (set after logging is initialized)
 LOG_FILE: Path | None = None
+
+# Try to import pystray for system tray support
+try:
+    import pystray
+    from PIL import Image
+    TRAY_AVAILABLE = True
+except ImportError:
+    TRAY_AVAILABLE = False
+
+
+def create_tray_icon_image():
+    """Create a simple icon image for the system tray."""
+    # Create a simple 64x64 icon with a "B" on it
+    try:
+        # Try to load the icon file if it exists
+        icon_path = APP_DIR / "backer.ico"
+        if icon_path.exists():
+            return Image.open(str(icon_path))
+    except Exception:
+        pass
+
+    # Create a simple colored square as fallback
+    img = Image.new('RGB', (64, 64), color=(0, 120, 212))
+    return img
 
 
 class BackerAgentApp:
@@ -50,8 +75,15 @@ class BackerAgentApp:
         # Agent service instance
         self.service = None
 
+        # System tray icon
+        self.tray_icon = None
+        self._tray_thread = None
+
         # Setup UI
         self.setup_ui()
+
+        # Handle window close button (minimize to tray instead of closing)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
 
         # Check connection status on startup
         if self.config.get('server_url'):
@@ -434,6 +466,18 @@ class BackerAgentApp:
         self.status_label.config(foreground='green')
         self.agent_name_var.set("All backup tools ready")
 
+        # Setup system tray icon
+        self.setup_tray_icon()
+
+        # Show notification about tray
+        if TRAY_AVAILABLE:
+            messagebox.showinfo(
+                "Agent Started",
+                "Backer Agent is now running!\n\n"
+                "You can close this window - the agent will continue running in the background.\n\n"
+                "Look for the Backer icon in your system tray to access the agent."
+            )
+
     def _start_agent_failed(self, error: str):
         """Handle failed agent startup."""
         self.service = None
@@ -452,6 +496,67 @@ class BackerAgentApp:
         # Update UI from main thread
         self.root.after(0, lambda: self.agent_name_var.set(status))
 
+        # Also update tray icon tooltip if available
+        if self.tray_icon:
+            try:
+                self.tray_icon.title = f"Backer Agent - {status}"
+            except Exception:
+                pass
+
+    def setup_tray_icon(self):
+        """Setup system tray icon."""
+        if not TRAY_AVAILABLE:
+            logging.warning("System tray not available (pystray/pillow not installed)")
+            return
+
+        try:
+            # Create the tray icon
+            image = create_tray_icon_image()
+
+            menu = pystray.Menu(
+                pystray.MenuItem("Show Window", self._tray_show_window, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Status: Running", None, enabled=False),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("View Logs", self._tray_open_logs),
+                pystray.MenuItem("Exit", self._tray_exit),
+            )
+
+            self.tray_icon = pystray.Icon(
+                "backer_agent",
+                image,
+                "Backer Agent - Running",
+                menu
+            )
+
+            # Run tray icon in a separate thread
+            self._tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+            self._tray_thread.start()
+
+            logging.info("System tray icon created successfully")
+
+        except Exception as e:
+            logging.error(f"Failed to create system tray icon: {e}")
+            self.tray_icon = None
+
+    def _tray_show_window(self, icon=None, item=None):
+        """Show the main window from tray."""
+        self.root.after(0, self._show_window)
+
+    def _show_window(self):
+        """Show and focus the main window."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_open_logs(self, icon=None, item=None):
+        """Open logs folder from tray."""
+        self.root.after(0, self.open_logs)
+
+    def _tray_exit(self, icon=None, item=None):
+        """Exit application from tray."""
+        self.root.after(0, self.on_exit)
+
     def open_logs(self):
         """Open the logs folder in file explorer."""
         import subprocess
@@ -459,8 +564,11 @@ class BackerAgentApp:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 
         if sys.platform == 'win32':
-            # Windows: open folder in explorer
-            subprocess.Popen(['explorer', str(LOG_DIR)])
+            # Windows: open folder in explorer (use shell=True to avoid console window)
+            subprocess.Popen(
+                ['explorer', str(LOG_DIR)],
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
         elif sys.platform == 'darwin':
             # macOS
             subprocess.Popen(['open', str(LOG_DIR)])
@@ -478,11 +586,40 @@ class BackerAgentApp:
         else:
             messagebox.showinfo("Log Files", f"Log folder: {LOG_DIR}")
 
+    def on_window_close(self):
+        """Handle window close button - minimize to tray if agent is running."""
+        if self.service is not None and TRAY_AVAILABLE and self.tray_icon is not None:
+            # Agent is running and tray is available - hide to tray
+            self.root.withdraw()
+            logging.info("Window minimized to system tray")
+        else:
+            # No agent running or no tray - ask to confirm exit
+            self.on_exit()
+
     def on_exit(self):
         """Handle exit - stop service if running."""
+        if self.service is not None:
+            if not messagebox.askyesno(
+                "Confirm Exit",
+                "The Backer Agent is currently running.\n\n"
+                "Exiting will stop the agent and no backups will be performed until you restart it.\n\n"
+                "Are you sure you want to exit?"
+            ):
+                return
+
         logging.info("Backer Agent GUI shutting down")
+
+        # Stop the tray icon
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+
+        # Stop the service
         if self.service:
             self.service.stop()
+
         self.root.quit()
 
     def run(self):

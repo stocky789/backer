@@ -21,6 +21,15 @@ from pathlib import Path
 from typing import Any
 
 
+def get_subprocess_flags() -> int:
+    """Get subprocess creation flags to hide console window on Windows."""
+    if sys.platform == 'win32':
+        # CREATE_NO_WINDOW = 0x08000000
+        # This prevents the console window from appearing
+        return subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0x08000000
+    return 0
+
+
 def setup_agent_logging(log_dir: Path | None = None) -> Path:
     """Configure logging to both console and file for the agent.
 
@@ -515,6 +524,7 @@ class AgentService:
                 text=True,
                 env=env,
                 timeout=30,
+                creationflags=get_subprocess_flags(),
             )
             if result.returncode == 0 and result.stdout:
                 snapshots = json.loads(result.stdout)
@@ -580,6 +590,7 @@ class AgentService:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            creationflags=get_subprocess_flags(),
         )
 
         output_lines = []
@@ -629,6 +640,7 @@ class AgentService:
             capture_output=True,
             text=True,
             env=env,
+            creationflags=get_subprocess_flags(),
         )
 
         if result.returncode == 0:
@@ -644,6 +656,7 @@ class AgentService:
             capture_output=True,
             text=True,
             env=env,
+            creationflags=get_subprocess_flags(),
         )
 
         if result.returncode == 0:
@@ -717,6 +730,7 @@ class AgentService:
             stderr=subprocess.STDOUT,
             text=True,
             env=env,
+            creationflags=get_subprocess_flags(),
         )
 
         output_lines = []
@@ -852,6 +866,7 @@ class AgentService:
             stderr=subprocess.STDOUT,
             text=True,
             env=env,
+            creationflags=get_subprocess_flags(),
         )
 
         output_lines = []
