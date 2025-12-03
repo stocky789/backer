@@ -525,6 +525,18 @@ class AgentService:
             logger.warning(f"[RESTIC] Could not query snapshot paths: {e}")
         return []
 
+    def _normalize_windows_path(self, path: str) -> str:
+        """Normalize path for Windows - convert forward slashes to backslashes for UNC paths.
+
+        On Windows, UNC paths must use backslashes (\\\\server\\share), but our server
+        stores them with forward slashes (//server/share) for cross-platform compatibility.
+        """
+        if sys.platform == 'win32':
+            # Convert forward slash UNC paths to backslash format
+            if path.startswith('//'):
+                return path.replace('/', '\\')
+        return path
+
     def _run_rclone_sync(
         self,
         source: str,
@@ -535,6 +547,11 @@ class AgentService:
     ) -> dict[str, Any]:
         """Run rclone sync command."""
         logger.info("[RCLONE] Setting up rclone sync")
+
+        # Normalize paths for Windows (convert UNC forward slashes to backslashes)
+        source = self._normalize_windows_path(source)
+        dest = self._normalize_windows_path(dest)
+
         logger.debug(f"[RCLONE] Source: {source}")
         logger.debug(f"[RCLONE] Destination: {dest}")
 
@@ -647,6 +664,11 @@ class AgentService:
     ) -> dict[str, Any]:
         """Run restic backup command."""
         logger.info("[RESTIC] Setting up restic backup")
+
+        # Normalize paths for Windows (convert UNC forward slashes to backslashes)
+        source = self._normalize_windows_path(source)
+        dest = self._normalize_windows_path(dest)
+
         logger.debug(f"[RESTIC] Source: {source}")
         logger.debug(f"[RESTIC] Repository: {dest}")
 
@@ -748,6 +770,11 @@ class AgentService:
     ) -> dict[str, Any]:
         """Run restic restore command."""
         logger.info("[RESTIC] Setting up restic restore")
+
+        # Normalize paths for Windows (convert UNC forward slashes to backslashes)
+        repo = self._normalize_windows_path(repo)
+        dest = self._normalize_windows_path(dest)
+
         logger.debug(f"[RESTIC] Repository: {repo}")
         logger.debug(f"[RESTIC] Destination: {dest}")
         logger.debug(f"[RESTIC] Snapshot: {snapshot or 'latest'}")
