@@ -98,6 +98,7 @@ def trigger_job_internal(job_name: str) -> None:
         "destination_path": job.get("destination_path"),
         "backend": job.get("backend", "rclone"),
         "excludes": job.get("excludes", []),
+        "backend_options": job.get("backend_options", {}),  # Includes restic_password
         "dry_run": False,
     }
 
@@ -284,6 +285,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/jobs", response_model=JobResponse)
     def create_job(job: JobCreate, storage: Storage = Depends(get_storage)) -> JobResponse:
         """Create a new backup job."""
+        # Validate job name
+        if job.name.lower().startswith("restore:"):
+            raise HTTPException(status_code=400, detail="Job name cannot start with 'restore:'")
+
         if storage.get_job(job.name):
             raise HTTPException(status_code=409, detail="Job already exists")
 
@@ -429,6 +434,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "destination_path": job.get("destination_path"),
             "backend": job.get("backend", "rclone"),
             "excludes": job.get("excludes", []),
+            "backend_options": job.get("backend_options", {}),  # Includes restic_password
             "dry_run": request.dry_run,
         }
 
@@ -497,6 +503,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             files_transferred=result.files_transferred,
             errors=result.errors,
             output=result.output[:10000],  # Limit output size
+            snapshot_id=result.snapshot_id,  # For restic backups
         )
         # Mark progress as complete
         storage.finish_job_progress(
@@ -557,29 +564,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Required fields in request body:
         - job_name: Name of the job to restore from
         - client_id: Agent to run the restore on
-        - destination_path: Where to restore files to
 
         Optional fields:
+        - destination_path: Where to restore files to (defaults to original source path)
         - run_id: Specific backup run to restore from (defaults to latest)
         - source_subfolder: Subfolder within backup to restore
+        - snapshot: For restic, specific snapshot ID to restore (defaults to latest)
+        - dry_run: If true, don't actually restore
         """
         data = await request.json()
 
         job_name = data.get("job_name")
         client_id = data.get("client_id")
-        destination_path = data.get("destination_path")
 
         if not job_name:
             raise HTTPException(status_code=400, detail="job_name required")
         if not client_id:
             raise HTTPException(status_code=400, detail="client_id required")
-        if not destination_path:
-            raise HTTPException(status_code=400, detail="destination_path required")
 
         # Get job config
         job = storage.get_job(job_name)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        # Default destination to original source path if not specified
+        destination_path = data.get("destination_path") or job.get("source_path")
 
         # Verify client exists
         client = storage.get_client(client_id)
@@ -588,8 +597,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get backup source path (this is the backup destination in the job)
         backup_source = job.get("destination_path")
+        backend = job.get("backend", "rclone")
         source_subfolder = data.get("source_subfolder", "")
-        if source_subfolder:
+
+        # For rclone, append subfolder to source path
+        # For restic, subfolder is handled separately via --include flag
+        if source_subfolder and backend != "restic":
             backup_source = f"{backup_source}/{source_subfolder}"
 
         restore_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -617,8 +630,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "run_id": f"restore_{restore_id}",
             "source_path": backup_source,  # Restore FROM backup location
             "destination_path": destination_path,  # Restore TO this location
-            "backend": job.get("backend", "rclone"),
+            "backend": backend,
+            "backend_options": job.get("backend_options", {}),  # Includes restic_password
             "snapshot": data.get("snapshot"),
+            "source_subfolder": source_subfolder if backend == "restic" else "",  # For restic --include
+            "clean_restore": data.get("clean_restore", False),  # Delete extra files at destination
             "dry_run": data.get("dry_run", False),
         }
 
@@ -655,6 +671,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "finished_at": r.get("finished_at"),
                 "bytes_transferred": r.get("bytes_transferred", 0),
                 "files_transferred": r.get("files_transferred", 0),
+                "snapshot_id": r.get("snapshot_id"),  # For restic backups
             }
             for r in runs
             if r.get("status") == "success" and not r.get("run_id", "").startswith("restore_")

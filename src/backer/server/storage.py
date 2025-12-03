@@ -56,6 +56,7 @@ class Storage:
                     files_transferred INTEGER DEFAULT 0,
                     errors TEXT DEFAULT '[]',
                     output TEXT DEFAULT '',
+                    snapshot_id TEXT,
                     FOREIGN KEY (job_name) REFERENCES jobs(name)
                 );
 
@@ -279,6 +280,7 @@ class Storage:
         files_transferred: int = 0,
         errors: list[str] | None = None,
         output: str = "",
+        snapshot_id: str | None = None,
     ) -> None:
         """Save or update a job run record.
 
@@ -302,7 +304,8 @@ class Storage:
                         bytes_transferred = ?,
                         files_transferred = ?,
                         errors = ?,
-                        output = ?
+                        output = ?,
+                        snapshot_id = ?
                     WHERE run_id = ? AND job_name = ?
                     """,
                     (
@@ -312,6 +315,7 @@ class Storage:
                         files_transferred,
                         json.dumps(errors or []),
                         output,
+                        snapshot_id,
                         run_id,
                         job_name,
                     ),
@@ -321,8 +325,8 @@ class Storage:
                 conn.execute(
                     """
                     INSERT INTO job_runs (run_id, job_name, client_id, status, started_at,
-                        finished_at, bytes_transferred, files_transferred, errors, output)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        finished_at, bytes_transferred, files_transferred, errors, output, snapshot_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -335,6 +339,7 @@ class Storage:
                         files_transferred,
                         json.dumps(errors or []),
                         output,
+                        snapshot_id,
                     ),
                 )
 

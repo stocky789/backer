@@ -74,6 +74,10 @@
                                 {% if not job.client_id %}disabled title="Assign an agent first"{% endif %}>
                             Run
                         </button>
+                        <button class="btn btn-secondary btn-sm" onclick="quickRestore('{{ job.name }}', '{{ job.client_id or '' }}', '{{ job.source_path or '' }}')"
+                                {% if not job.has_backups %}disabled title="Run a successful backup first"{% endif %}>
+                            Restore
+                        </button>
                         <button class="btn btn-secondary btn-sm" onclick="toggleJob('{{ job.name }}')">
                             {{ 'Enable' if not job.enabled else 'Disable' }}
                         </button>
@@ -129,11 +133,20 @@
 
                 <div class="form-group">
                     <label class="form-label">Backend</label>
-                    <select id="editBackend" class="form-input">
+                    <select id="editBackend" class="form-input" onchange="onEditBackendChange()">
                         <option value="rclone">rclone</option>
                         <option value="restic">restic</option>
                         <option value="rsync">rsync</option>
                     </select>
+                </div>
+
+                <div class="form-group" id="editResticPasswordGroup" style="display: none;">
+                    <label class="form-label">Restic Repository Password</label>
+                    <input type="password" id="editResticPassword" class="form-input"
+                           placeholder="Leave empty to keep current password">
+                    <div class="form-hint">
+                        Password for the restic repository. Leave empty to keep current password.
+                    </div>
                 </div>
 
                 <div class="form-group">
@@ -154,6 +167,70 @@
                 </div>
             </form>
             <div id="editError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Restore Modal -->
+<div id="restoreModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-header">
+            <h3>Quick Restore: <span id="restoreJobName"></span></h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideRestoreModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="restoreForm" onsubmit="submitRestore(event)">
+                <input type="hidden" id="restoreJobNameInput">
+
+                <div class="form-group">
+                    <label class="form-label">Restore To Agent</label>
+                    <select id="restoreClientId" class="form-input" required>
+                        {% if agents %}
+                        {% for agent in agents %}
+                        <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.hostname }})</option>
+                        {% endfor %}
+                        {% else %}
+                        <option value="" disabled>No agents available</option>
+                        {% endif %}
+                    </select>
+                    <div class="form-hint">Agent where files will be restored</div>
+                    {% if not agents %}
+                    <div class="form-hint" style="color: var(--warning);">
+                        <a href="/agents" style="color: var(--accent);">Register an agent first</a> to enable restores.
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Backup Point</label>
+                    <select id="restoreBackupSelect" class="form-input">
+                        <option value="">Latest backup</option>
+                    </select>
+                    <div class="form-hint">Select which backup to restore from</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Destination Path (Optional)</label>
+                    <input type="text" id="restoreDestPath" class="form-input"
+                           placeholder="Leave empty to restore to original location">
+                    <div class="form-hint">Where to restore files. Empty = original source path.</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="restoreClean"> Clean Restore
+                    </label>
+                    <div class="form-hint">Delete files at destination that don't exist in the backup</div>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="submit" class="btn btn-primary">Start Restore</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideRestoreModal()">Cancel</button>
+                    <a href="/restore" class="btn btn-secondary" style="margin-left: auto;">Advanced Options</a>
+                </div>
+            </form>
+            <div id="restoreError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+            <div id="restoreSuccess" class="success-msg" style="display: none; margin-top: 10px;"></div>
         </div>
     </div>
 </div>
@@ -212,6 +289,13 @@
     background: rgba(255, 107, 107, 0.1);
     border-radius: 4px;
 }
+
+.success-msg {
+    color: var(--success);
+    padding: 10px;
+    background: rgba(76, 175, 80, 0.1);
+    border-radius: 4px;
+}
 </style>
 
 <script>
@@ -265,10 +349,26 @@ async function editJob(jobName) {
         document.getElementById('editBackend').value = job.backend || 'rclone';
         document.getElementById('editSchedule').value = job.schedule_cron || '';
         document.getElementById('editExcludes').value = (job.excludes || []).join(', ');
+        document.getElementById('editResticPassword').value = '';
+        document.getElementById('editError').style.display = 'none';
+
+        // Show/hide restic password field
+        onEditBackendChange();
 
         document.getElementById('editModal').style.display = 'flex';
     } catch (e) {
         alert('Error loading job: ' + e.message);
+    }
+}
+
+function onEditBackendChange() {
+    const backend = document.getElementById('editBackend').value;
+    const passwordGroup = document.getElementById('editResticPasswordGroup');
+
+    if (backend === 'restic') {
+        passwordGroup.style.display = 'block';
+    } else {
+        passwordGroup.style.display = 'none';
     }
 }
 
@@ -281,14 +381,21 @@ async function saveJob(event) {
 
     const jobName = document.getElementById('editJobOriginalName').value;
     const excludesStr = document.getElementById('editExcludes').value;
+    const backend = document.getElementById('editBackend').value;
+    const resticPassword = document.getElementById('editResticPassword').value;
 
     const data = {
         source_path: document.getElementById('editSourcePath').value,
         client_id: document.getElementById('editClientId').value || null,
-        backend: document.getElementById('editBackend').value,
+        backend: backend,
         schedule_cron: document.getElementById('editSchedule').value || null,
         excludes: excludesStr ? excludesStr.split(',').map(s => s.trim()).filter(s => s) : []
     };
+
+    // Only update restic password if a new one is provided
+    if (backend === 'restic' && resticPassword) {
+        data.backend_options = { restic_password: resticPassword };
+    }
 
     try {
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}`, {
@@ -313,6 +420,98 @@ async function saveJob(event) {
 // Close modal on background click
 document.getElementById('editModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideEditModal();
+});
+
+// Quick Restore Functions
+async function quickRestore(jobName, clientId, sourcePath) {
+    document.getElementById('restoreJobName').textContent = jobName;
+    document.getElementById('restoreJobNameInput').value = jobName;
+    document.getElementById('restoreDestPath').placeholder = sourcePath ? `Default: ${sourcePath}` : 'Leave empty to restore to original location';
+    document.getElementById('restoreDestPath').value = '';
+    document.getElementById('restoreClean').checked = false;
+    document.getElementById('restoreError').style.display = 'none';
+    document.getElementById('restoreSuccess').style.display = 'none';
+    document.getElementById('restoreForm').style.display = 'block';
+
+    // Pre-select the agent
+    if (clientId) {
+        document.getElementById('restoreClientId').value = clientId;
+    }
+
+    // Load available backups
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/backups`);
+        const backups = await response.json();
+
+        const select = document.getElementById('restoreBackupSelect');
+        select.innerHTML = '<option value="" data-snapshot="">Latest backup</option>';
+
+        backups.forEach(backup => {
+            const date = new Date(backup.started_at).toLocaleString();
+            const snapshotLabel = backup.snapshot_id ? ` [${backup.snapshot_id.substring(0, 8)}]` : '';
+            select.innerHTML += `<option value="${backup.run_id}" data-snapshot="${backup.snapshot_id || ''}">${date}${snapshotLabel} (${backup.files_transferred} files)</option>`;
+        });
+    } catch (e) {
+        console.error('Failed to load backups:', e);
+    }
+
+    document.getElementById('restoreModal').style.display = 'flex';
+}
+
+function hideRestoreModal() {
+    document.getElementById('restoreModal').style.display = 'none';
+}
+
+async function submitRestore(event) {
+    event.preventDefault();
+
+    const jobName = document.getElementById('restoreJobNameInput').value;
+    const clientId = document.getElementById('restoreClientId').value;
+    const destPath = document.getElementById('restoreDestPath').value;
+    const cleanRestore = document.getElementById('restoreClean').checked;
+    const backupSelect = document.getElementById('restoreBackupSelect');
+    const backupRunId = backupSelect.value;
+    const snapshotId = backupSelect.options[backupSelect.selectedIndex]?.dataset?.snapshot || null;
+
+    const errorDiv = document.getElementById('restoreError');
+    const successDiv = document.getElementById('restoreSuccess');
+    errorDiv.style.display = 'none';
+    successDiv.style.display = 'none';
+
+    try {
+        const response = await fetch('/api/v1/restore', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                job_name: jobName,
+                client_id: clientId,
+                destination_path: destPath || null,
+                clean_restore: cleanRestore,
+                run_id: backupRunId || null,
+                snapshot: snapshotId || null,
+                dry_run: false,
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            successDiv.innerHTML = `<strong>Restore Started!</strong><br>Run ID: <code>${data.restore_id}</code><br><a href="/">View progress on Dashboard</a>`;
+            successDiv.style.display = 'block';
+            document.getElementById('restoreForm').style.display = 'none';
+        } else {
+            errorDiv.textContent = data.detail || 'Failed to start restore';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+// Close restore modal on background click
+document.getElementById('restoreModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideRestoreModal();
 });
 </script>
 {% endblock %}

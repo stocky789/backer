@@ -338,6 +338,7 @@ class AgentService:
         destination_path = payload.get('destination_path')
         backend = payload.get('backend', 'rclone')
         excludes = payload.get('excludes', [])
+        backend_options = payload.get('backend_options', {})
         dry_run = payload.get('dry_run', False)
 
         self._update_status(f"Backing up: {job_name}")
@@ -361,7 +362,8 @@ class AgentService:
                 )
             elif backend == 'restic':
                 result = self._run_restic_backup(
-                    source_path, destination_path, excludes, dry_run, run_id
+                    source_path, destination_path, excludes, dry_run, run_id,
+                    backend_options=backend_options,
                 )
             else:
                 raise ValueError(f"Unknown backend: {backend}")
@@ -379,6 +381,7 @@ class AgentService:
                 files_transferred=result.get('files', 0),
                 output=result.get('output', ''),
                 error=result.get('error'),
+                snapshot_id=result.get('snapshot_id'),  # For restic backups
             )
 
             if result['success']:
@@ -405,19 +408,40 @@ class AgentService:
         source_path = payload.get('source_path')
         destination_path = payload.get('destination_path')
         backend = payload.get('backend', 'rclone')
+        snapshot = payload.get('snapshot')  # For restic: snapshot ID or "latest"
+        source_subfolder = payload.get('source_subfolder', '')  # For restic: --include path
+        clean_restore = payload.get('clean_restore', False)
+        backend_options = payload.get('backend_options', {})
         dry_run = payload.get('dry_run', False)
 
         self._update_status(f"Restoring: {job_name}")
         logger.info(f"Starting restore: {source_path} -> {destination_path}")
+        logger.info(f"Clean restore: {clean_restore}, Dry run: {dry_run}")
 
         started_at = datetime.now()
         self._report_progress(run_id, 'running', 0, 'Starting restore...')
 
         try:
+            # For clean restore with restic, clear destination first
+            # (rclone sync already handles this automatically)
+            if clean_restore and backend == 'restic' and not dry_run:
+                dest_path = Path(destination_path)
+                if dest_path.exists():
+                    logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
+                    import shutil
+                    shutil.rmtree(destination_path)
+                    dest_path.mkdir(parents=True, exist_ok=True)
+
             if backend == 'rclone':
-                # For restore, swap source and dest
+                # rclone sync deletes files at dest that aren't in source
                 result = self._run_rclone_sync(
                     source_path, destination_path, [], dry_run, run_id
+                )
+            elif backend == 'restic':
+                result = self._run_restic_restore(
+                    source_path, destination_path, snapshot, dry_run, run_id,
+                    backend_options=backend_options,
+                    include_path=source_subfolder,
                 )
             else:
                 raise ValueError(f"Restore not supported for backend: {backend}")
@@ -551,6 +575,41 @@ class AgentService:
             'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
         }
 
+    def _init_restic_repo(self, restic: Path, dest: str, env: dict) -> bool:
+        """Initialize restic repository if it doesn't exist."""
+        # Check if repo exists by running snapshots command
+        check_cmd = [str(restic), '-r', dest, 'snapshots', '--json']
+        logger.info("[RESTIC] Checking if repository exists...")
+
+        result = subprocess.run(
+            check_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        if result.returncode == 0:
+            logger.info("[RESTIC] Repository already exists")
+            return True
+
+        # Repository doesn't exist, initialize it
+        logger.info("[RESTIC] Repository not found, initializing...")
+        init_cmd = [str(restic), '-r', dest, 'init']
+
+        result = subprocess.run(
+            init_cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        if result.returncode == 0:
+            logger.info("[RESTIC] Repository initialized successfully")
+            return True
+        else:
+            logger.error(f"[RESTIC] Failed to initialize repository: {result.stderr}")
+            return False
+
     def _run_restic_backup(
         self,
         source: str,
@@ -558,6 +617,7 @@ class AgentService:
         excludes: list[str],
         dry_run: bool,
         run_id: str,
+        backend_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run restic backup command."""
         logger.info("[RESTIC] Setting up restic backup")
@@ -571,7 +631,29 @@ class AgentService:
             logger.error(f"[RESTIC] {e}")
             raise
 
-        cmd = [str(restic), '-r', dest, 'backup', source, '-v']
+        backend_options = backend_options or {}
+
+        # Set up environment with password
+        # Priority: backend_options > env var > default
+        env = os.environ.copy()
+        if 'restic_password' in backend_options:
+            env['RESTIC_PASSWORD'] = backend_options['restic_password']
+            logger.info("[RESTIC] Using password from job configuration")
+        elif 'RESTIC_PASSWORD' not in env:
+            env['RESTIC_PASSWORD'] = 'backer-default-password'
+            logger.info("[RESTIC] Using default repository password")
+
+        # Initialize repository if needed
+        if not self._init_restic_repo(restic, dest, env):
+            return {
+                'success': False,
+                'output': 'Failed to initialize restic repository',
+                'bytes': 0,
+                'files': 0,
+                'error': 'Repository initialization failed',
+            }
+
+        cmd = [str(restic), '-r', dest, 'backup', source, '--json']
 
         for exclude in excludes:
             cmd.extend(['--exclude', exclude])
@@ -586,6 +668,108 @@ class AgentService:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=env,
+        )
+
+        output_lines = []
+        snapshot_id = None
+        files_new = 0
+        bytes_added = 0
+
+        for line in process.stdout:
+            output_lines.append(line)
+            logger.debug(line.strip())
+
+            # Parse JSON output for snapshot info
+            try:
+                data = json.loads(line)
+                if data.get('message_type') == 'summary':
+                    snapshot_id = data.get('snapshot_id')
+                    files_new = data.get('files_new', 0)
+                    bytes_added = data.get('data_added', 0)
+                    logger.info(f"[RESTIC] Snapshot ID: {snapshot_id}")
+                    logger.info(f"[RESTIC] Files new: {files_new}, Bytes added: {bytes_added}")
+            except (json.JSONDecodeError, TypeError):
+                pass  # Not all lines are JSON
+
+        process.wait()
+        output = ''.join(output_lines)
+
+        logger.info(f"[RESTIC] Process completed with return code: {process.returncode}")
+        if process.returncode != 0:
+            logger.error(f"[RESTIC] Process failed! Output:\n{output}")
+        else:
+            logger.info("[RESTIC] Backup completed successfully")
+
+        return {
+            'success': process.returncode == 0,
+            'output': output,
+            'bytes': bytes_added,
+            'files': files_new,
+            'snapshot_id': snapshot_id,
+            'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
+        }
+
+    def _run_restic_restore(
+        self,
+        repo: str,
+        dest: str,
+        snapshot: str | None,
+        dry_run: bool,
+        run_id: str,
+        backend_options: dict[str, Any] | None = None,
+        include_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Run restic restore command."""
+        logger.info("[RESTIC] Setting up restic restore")
+        logger.debug(f"[RESTIC] Repository: {repo}")
+        logger.debug(f"[RESTIC] Destination: {dest}")
+        logger.debug(f"[RESTIC] Snapshot: {snapshot or 'latest'}")
+        logger.debug(f"[RESTIC] Include path: {include_path or 'all'}")
+
+        try:
+            restic = self._get_tool_path('restic')
+            logger.info(f"[RESTIC] Using restic at: {restic}")
+        except FileNotFoundError as e:
+            logger.error(f"[RESTIC] {e}")
+            raise
+
+        backend_options = backend_options or {}
+
+        # Set up environment with password
+        # Priority: backend_options > env var > default
+        env = os.environ.copy()
+        if 'restic_password' in backend_options:
+            env['RESTIC_PASSWORD'] = backend_options['restic_password']
+            logger.info("[RESTIC] Using password from job configuration")
+        elif 'RESTIC_PASSWORD' not in env:
+            env['RESTIC_PASSWORD'] = 'backer-default-password'
+            logger.info("[RESTIC] Using default repository password")
+
+        # Use provided snapshot or "latest"
+        snapshot_id = snapshot if snapshot else 'latest'
+
+        # Build restore command
+        # restic restore <snapshot> --target <dest>
+        cmd = [str(restic), '-r', repo, 'restore', snapshot_id, '--target', dest, '-v']
+
+        # Add --include to restore only specific path from snapshot
+        if include_path:
+            # Strip leading slashes to make it relative
+            include_path = include_path.lstrip('/')
+            cmd.extend(['--include', include_path])
+
+        if dry_run:
+            cmd.append('--dry-run')
+
+        logger.info(f"[RESTIC] Executing command: {' '.join(cmd)}")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
         )
 
         output_lines = []
@@ -600,7 +784,7 @@ class AgentService:
         if process.returncode != 0:
             logger.error(f"[RESTIC] Process failed! Output:\n{output}")
         else:
-            logger.info("[RESTIC] Backup completed successfully")
+            logger.info("[RESTIC] Restore completed successfully")
 
         return {
             'success': process.returncode == 0,
@@ -643,6 +827,7 @@ class AgentService:
         files_transferred: int = 0,
         output: str = '',
         error: str | None = None,
+        snapshot_id: str | None = None,
     ):
         """Report backup result to server."""
         try:
@@ -660,6 +845,7 @@ class AgentService:
                     'files_transferred': files_transferred,
                     'output': output[:5000],  # Limit output size
                     'errors': [error] if error else [],
+                    'snapshot_id': snapshot_id,  # For restic backups
                 },
             )
         except Exception as e:

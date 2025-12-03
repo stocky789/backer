@@ -14,7 +14,7 @@
                 <select id="jobSelect" class="form-input" required onchange="loadBackups()">
                     <option value="">-- Select a job --</option>
                     {% for job in jobs %}
-                    <option value="{{ job.name }}" data-client="{{ job.client_id or '' }}">{{ job.name }}</option>
+                    <option value="{{ job.name }}" data-client="{{ job.client_id or '' }}" data-source="{{ job.source_path or '' }}">{{ job.name }}</option>
                     {% endfor %}
                 </select>
                 <div class="form-hint">Choose which backup job to restore from</div>
@@ -40,10 +40,10 @@
             </div>
 
             <div class="form-group">
-                <label class="form-label">Destination Path</label>
-                <input type="text" id="destinationPath" class="form-input" required
-                       placeholder="/home/user/restored-data">
-                <div class="form-hint">Path on the agent where files will be restored. Use a different path than the original to avoid overwriting.</div>
+                <label class="form-label">Destination Path (Optional)</label>
+                <input type="text" id="destinationPath" class="form-input"
+                       placeholder="Leave empty to restore to original location">
+                <div class="form-hint">Where to restore files. If empty, restores to the original source path from the backup job.</div>
             </div>
 
             <div class="form-group">
@@ -51,6 +51,13 @@
                 <input type="text" id="sourceSubfolder" class="form-input"
                        placeholder="subfolder/to/restore">
                 <div class="form-hint">Only restore files from this subfolder within the backup</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">
+                    <input type="checkbox" id="cleanRestore"> Clean Restore
+                </label>
+                <div class="form-hint">Delete files at destination that don't exist in the backup. Use this to fully restore to a previous state (removes any files added since the backup).</div>
             </div>
 
             <div class="form-group">
@@ -142,18 +149,27 @@ async function loadBackups() {
     const backupGroup = document.getElementById('backupSelectGroup');
     const backupSelect = document.getElementById('backupSelect');
     const agentSelect = document.getElementById('agentSelect');
+    const destinationInput = document.getElementById('destinationPath');
 
     const jobName = jobSelect.value;
     if (!jobName) {
         backupGroup.style.display = 'none';
+        destinationInput.placeholder = 'Leave empty to restore to original location';
         return;
     }
 
     // Auto-select the agent associated with this job
     const selectedOption = jobSelect.options[jobSelect.selectedIndex];
     const clientId = selectedOption.dataset.client;
+    const sourcePath = selectedOption.dataset.source;
+
     if (clientId) {
         agentSelect.value = clientId;
+    }
+
+    // Show original source path as placeholder
+    if (sourcePath) {
+        destinationInput.placeholder = `Default: ${sourcePath}`;
     }
 
     // Fetch available backups
@@ -161,12 +177,13 @@ async function loadBackups() {
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/backups`);
         const backups = await response.json();
 
-        backupSelect.innerHTML = '<option value="">Latest backup</option>';
+        backupSelect.innerHTML = '<option value="" data-snapshot="">Latest backup</option>';
 
         backups.forEach(backup => {
             const date = new Date(backup.started_at).toLocaleString();
             const size = formatBytes(backup.bytes_transferred);
-            backupSelect.innerHTML += `<option value="${backup.run_id}">${date} (${backup.files_transferred} files, ${size})</option>`;
+            const snapshotLabel = backup.snapshot_id ? ` [${backup.snapshot_id.substring(0, 8)}]` : '';
+            backupSelect.innerHTML += `<option value="${backup.run_id}" data-snapshot="${backup.snapshot_id || ''}">${date}${snapshotLabel} (${backup.files_transferred} files, ${size})</option>`;
         });
 
         backupGroup.style.display = 'block';
@@ -189,8 +206,12 @@ async function submitRestore(event) {
     const clientId = document.getElementById('agentSelect').value;
     const destinationPath = document.getElementById('destinationPath').value;
     const sourceSubfolder = document.getElementById('sourceSubfolder').value;
+    const cleanRestore = document.getElementById('cleanRestore').checked;
     const dryRun = document.getElementById('dryRun').checked;
-    const backupRunId = document.getElementById('backupSelect').value;
+    const backupSelect = document.getElementById('backupSelect');
+    const backupRunId = backupSelect.value;
+    // Get snapshot_id from selected option for restic restores
+    const snapshotId = backupSelect.options[backupSelect.selectedIndex]?.dataset?.snapshot || null;
 
     const errorDiv = document.getElementById('restoreError');
     const resultDiv = document.getElementById('restoreResult');
@@ -204,9 +225,11 @@ async function submitRestore(event) {
             body: JSON.stringify({
                 job_name: jobName,
                 client_id: clientId,
-                destination_path: destinationPath,
+                destination_path: destinationPath || null,  // null = use original source path
                 source_subfolder: sourceSubfolder || null,
+                clean_restore: cleanRestore,
                 run_id: backupRunId || null,
+                snapshot: snapshotId || null,  // For restic: specific snapshot to restore
                 dry_run: dryRun,
             })
         });
