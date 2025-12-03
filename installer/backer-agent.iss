@@ -31,7 +31,6 @@ DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist
 OutputBaseFilename=backer-agent-setup
-SetupIconFile=..\assets\backer.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
