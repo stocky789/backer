@@ -839,22 +839,36 @@ class AgentService:
 
         # Determine the actual restore target
         # Restic recreates the full path structure inside --target
-        # So to restore to original location, we need to use the filesystem root
         #
-        # On Windows, restic stores paths like C:\Test internally as \C\Test
-        # When restoring, we need to use "/" as target which restic interprets
-        # as "restore to original absolute paths" on Windows
+        # WINDOWS QUIRK: Restic stores Windows paths like C:\Test internally as /C/Test
+        # (drive letter becomes a directory). When restoring with --target /, files
+        # end up at \C\Test (current drive root + \C\Test), e.g., C:\C\Test instead of C:\Test.
+        #
+        # Solution for Windows: Restore to drive root, then move files from the nested
+        # drive letter directory to the correct location.
         restore_target = dest
+        needs_windows_path_fix = False
+        windows_drive_letter = None
+        original_dest = dest
+
         if original_paths:
             # Check if destination matches or is parent of original backup path
             dest_normalized = dest.replace('\\', '/').rstrip('/')
             for orig_path in original_paths:
                 orig_normalized = orig_path.replace('\\', '/').rstrip('/')
                 if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
-                    # Restoring to original location - use filesystem root
-                    # Use "/" on all platforms - restic handles this correctly
-                    restore_target = '/'
-                    logger.info(f"[RESTIC] Restoring to original location, using target: {restore_target}")
+                    # Restoring to original location
+                    if sys.platform == 'win32' and len(dest) >= 2 and dest[1] == ':':
+                        # Windows absolute path - extract drive letter
+                        windows_drive_letter = dest[0].upper()
+                        # Restore to drive root - files will end up at <drive>:\<drive>\<path>
+                        restore_target = f"{windows_drive_letter}:\\"
+                        needs_windows_path_fix = True
+                        logger.info(f"[RESTIC] Windows restore: using target {restore_target}, will fix path after")
+                    else:
+                        # Unix or relative path - use / as target
+                        restore_target = '/'
+                        logger.info(f"[RESTIC] Restoring to original location, using target: {restore_target}")
                     break
 
         logger.debug(f"[RESTIC] Final restore target: {restore_target}")
@@ -899,18 +913,74 @@ class AgentService:
         else:
             logger.info("[RESTIC] Restore completed successfully")
 
+        # Windows path fix: move files from nested drive letter directory to correct location
+        if needs_windows_path_fix and process.returncode == 0 and windows_drive_letter:
+            # Files were restored to e.g., C:\C\Test instead of C:\Test
+            # We need to move them from the nested location
+            try:
+                # Calculate the nested path where restic put the files
+                # e.g., for dest=C:\Test, files are at C:\C\Test
+                dest_without_drive = original_dest[2:].lstrip('\\').lstrip('/')  # "Test" from "C:\Test"
+                nested_path = Path(f"{windows_drive_letter}:\\{windows_drive_letter}\\{dest_without_drive}")
+                actual_dest = Path(original_dest)
+
+                logger.info(f"[RESTIC] Windows path fix: moving from {nested_path} to {actual_dest}")
+
+                if nested_path.exists():
+                    import shutil
+
+                    # Ensure destination parent exists
+                    actual_dest.parent.mkdir(parents=True, exist_ok=True)
+
+                    # If destination doesn't exist, just rename/move
+                    if not actual_dest.exists():
+                        shutil.move(str(nested_path), str(actual_dest))
+                        logger.info(f"[RESTIC] Moved {nested_path} to {actual_dest}")
+                    else:
+                        # Destination exists, merge contents
+                        for item in nested_path.iterdir():
+                            dest_item = actual_dest / item.name
+                            if dest_item.exists():
+                                if dest_item.is_dir():
+                                    shutil.rmtree(str(dest_item))
+                                else:
+                                    dest_item.unlink()
+                            shutil.move(str(item), str(dest_item))
+                        logger.info(f"[RESTIC] Merged contents from {nested_path} to {actual_dest}")
+
+                        # Remove the now-empty nested directory
+                        try:
+                            nested_path.rmdir()
+                        except OSError:
+                            pass  # Not empty, that's fine
+
+                    # Try to clean up the empty drive letter directory (e.g., C:\C)
+                    drive_letter_dir = Path(f"{windows_drive_letter}:\\{windows_drive_letter}")
+                    try:
+                        if drive_letter_dir.exists() and not any(drive_letter_dir.iterdir()):
+                            drive_letter_dir.rmdir()
+                            logger.info(f"[RESTIC] Cleaned up empty directory: {drive_letter_dir}")
+                    except OSError:
+                        pass  # Directory not empty or other issue
+
+                else:
+                    logger.warning(f"[RESTIC] Expected nested path {nested_path} does not exist")
+
+            except Exception as e:
+                logger.error(f"[RESTIC] Failed to fix Windows path: {e}")
+
         # Verify restore by checking if destination exists and has contents
-        dest_path = Path(dest)
+        dest_path = Path(original_dest)
         if dest_path.exists():
             try:
                 contents = list(dest_path.iterdir())
-                logger.info(f"[RESTIC] Destination {dest} exists with {len(contents)} items")
+                logger.info(f"[RESTIC] Destination {original_dest} exists with {len(contents)} items")
                 for item in contents[:10]:  # Log first 10 items
                     logger.debug(f"[RESTIC]   - {item.name}")
             except Exception as e:
                 logger.warning(f"[RESTIC] Could not list destination contents: {e}")
         else:
-            logger.warning(f"[RESTIC] Destination {dest} does not exist after restore!")
+            logger.warning(f"[RESTIC] Destination {original_dest} does not exist after restore!")
 
         return {
             'success': process.returncode == 0,
