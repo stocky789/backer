@@ -389,7 +389,7 @@ class Storage:
                 (datetime.now().isoformat(), command_id),
             )
 
-    def mark_command_failed(self, command_id: int, error: str | None = None) -> None:
+    def mark_command_failed(self, command_id: int) -> None:
         """Mark a command as failed."""
         with self._connect() as conn:
             conn.execute(

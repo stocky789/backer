@@ -1,6 +1,6 @@
 """Web UI routes for Backer server."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -166,14 +166,6 @@ async def agents_page(request: Request):
 async def jobs_page(request: Request):
     """Jobs management page."""
     storage = get_storage(request)
-
-    # Import scheduler to get next run times
-    try:
-        from backer.server.scheduler import BackupScheduler
-        # Access the global scheduler through app state if available
-        scheduler = getattr(request.app.state, 'scheduler', None)
-    except ImportError:
-        scheduler = None
 
     jobs_raw = storage.list_jobs()
     jobs = []

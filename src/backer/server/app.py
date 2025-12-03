@@ -71,7 +71,7 @@ def trigger_job_internal(job_name: str) -> None:
         logger.error(f"Agent {client_id} not found for job {job_name}")
         return
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     started_at = datetime.now()
 
     # Save the run record as "pending"
@@ -372,7 +372,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
 
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         started_at = datetime.now()
 
         # Save the run record as "pending"
@@ -552,7 +552,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if source_subfolder:
             backup_source = f"{backup_source}/{source_subfolder}"
 
-        restore_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        restore_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         started_at = datetime.now()
 
         # Save restore record
