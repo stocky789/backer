@@ -6,12 +6,12 @@ A simple Windows GUI for connecting to a Backer server and managing backups.
 
 import json
 import logging
+import os
+import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
 from pathlib import Path
-import sys
-import os
+from tkinter import messagebox, ttk
 
 # Add parent to path for imports when running as frozen exe
 if getattr(sys, 'frozen', False):
@@ -213,7 +213,9 @@ class BackerAgentApp:
         server_url = self.server_url_var.get().strip()
 
         # Check for placeholder
-        if server_url == 'http://192.168.1.100:8420' and self.server_entry.cget('foreground') == 'gray':
+        is_placeholder = server_url == 'http://192.168.1.100:8420'
+        is_gray = self.server_entry.cget('foreground') == 'gray'
+        if is_placeholder and is_gray:
             messagebox.showwarning("Warning", "Please enter your server address")
             return
 
@@ -244,9 +246,9 @@ class BackerAgentApp:
     def _do_connect(self, server_url: str):
         """Perform connection in background thread."""
         try:
-            import urllib.request
-            import socket
             import platform
+            import socket
+            import urllib.request
 
             # Test connection to server
             health_url = f"{server_url.rstrip('/')}/health"
@@ -290,9 +292,10 @@ class BackerAgentApp:
 
         except urllib.error.URLError as e:
             error_msg = str(e.reason) if hasattr(e, 'reason') else str(e)
-            self.root.after(0, lambda: self._connect_failed(f"Cannot reach server: {error_msg}"))
+            self.root.after(0, lambda m=error_msg: self._connect_failed(f"Cannot reach server: {m}"))
         except Exception as e:
-            self.root.after(0, lambda: self._connect_failed(str(e)))
+            err_str = str(e)
+            self.root.after(0, lambda m=err_str: self._connect_failed(m))
 
     def _connect_success(self, agent_name: str):
         """Handle successful connection."""
@@ -301,7 +304,12 @@ class BackerAgentApp:
         self.agent_name_var.set(f"Registered as: {agent_name}")
         self.connect_btn.config(state=tk.NORMAL, text="Reconnect")
         self.start_btn.config(state=tk.NORMAL)
-        messagebox.showinfo("Success", f"Successfully connected to server!\n\nThis machine is now registered as '{agent_name}'\n\nClick 'Start Agent' to begin receiving backup jobs.")
+        msg = (
+            f"Successfully connected to server!\n\n"
+            f"This machine is now registered as '{agent_name}'\n\n"
+            f"Click 'Start Agent' to begin receiving backup jobs."
+        )
+        messagebox.showinfo("Success", msg)
 
     def _connect_failed(self, error: str):
         """Handle failed connection."""
@@ -416,7 +424,8 @@ class BackerAgentApp:
 
         except Exception as e:
             logging.error(f"Failed to start agent: {e}", exc_info=True)
-            self.root.after(0, lambda: self._start_agent_failed(str(e)))
+            err_str = str(e)
+            self.root.after(0, lambda m=err_str: self._start_agent_failed(m))
 
     def _start_agent_success(self):
         """Handle successful agent startup."""

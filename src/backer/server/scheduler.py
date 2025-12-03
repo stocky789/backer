@@ -2,8 +2,9 @@
 
 import logging
 import threading
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 try:
     from croniter import croniter

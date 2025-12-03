@@ -1,15 +1,15 @@
 """Storage repository management - SMB/NFS share discovery and browsing."""
 
-import subprocess
-import re
 import os
+import re
+import subprocess
 import sys
 import tempfile
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Generator
 
 
 @contextmanager
