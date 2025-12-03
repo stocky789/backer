@@ -1,0 +1,403 @@
+"""Backer CLI - unified backup management."""
+
+from pathlib import Path
+from typing import Any
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from backer import __version__
+from backer.backends import BackendRegistry
+from backer.backends.base import BackupDestination, BackupSource
+
+# Import backends to register them
+from backer.backends import rsync, rclone, restic  # noqa: F401
+
+console = Console()
+
+
+@click.group()
+@click.version_option(version=__version__)
+@click.option("--config", "-c", type=click.Path(path_type=Path), help="Config file path")
+@click.pass_context
+def main(ctx: click.Context, config: Path | None) -> None:
+    """Backer - Unified backup orchestration.
+
+    Consolidates rsync, rclone, restic and more into one tool.
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["config_path"] = config
+
+
+# ============ Standalone backup commands ============
+
+
+@main.command()
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("destination")
+@click.option("--backend", "-b", default="rsync", help="Backend to use (rsync, rclone, restic)")
+@click.option("--exclude", "-e", multiple=True, help="Exclude patterns")
+@click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def backup(
+    source: Path,
+    destination: str,
+    backend: str,
+    exclude: tuple[str, ...],
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Run a one-off backup.
+
+    SOURCE is the local path to back up.
+    DESTINATION is where to store the backup (local path or remote URI).
+
+    Examples:
+
+        backer backup /home/user/docs /mnt/backup/docs
+
+        backer backup /data remote:bucket/data -b rclone
+
+        backer backup /home restic:/backup -b restic
+    """
+    from backer.backends import get_backend
+
+    console.print(f"[bold]Backing up[/bold] {source} → {destination}")
+    console.print(f"Backend: {backend}" + (" (dry run)" if dry_run else ""))
+
+    try:
+        be = get_backend(backend)
+
+        available, msg = be.check_available()
+        if not available:
+            console.print(f"[red]Error:[/red] {msg}")
+            raise SystemExit(1)
+
+        console.print(f"[dim]{msg}[/dim]")
+
+        src = BackupSource(path=source, excludes=list(exclude))
+        dest = BackupDestination(path=destination)
+
+        with console.status("Running backup..."):
+            result = be.backup(source=src, destination=dest, dry_run=dry_run)
+
+        if result.success:
+            console.print("[green]✓ Backup completed successfully[/green]")
+            console.print(f"  Files: {result.files_transferred}")
+            console.print(f"  Bytes: {result.bytes_transferred:,}")
+            console.print(f"  Duration: {result.duration_seconds:.1f}s")
+        else:
+            console.print("[red]✗ Backup failed[/red]")
+            for error in result.errors:
+                console.print(f"  [red]{error}[/red]")
+            raise SystemExit(1)
+
+        if verbose and result.output:
+            console.print("\n[dim]--- Output ---[/dim]")
+            console.print(result.output[:2000])
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+@main.command()
+@click.argument("source")
+@click.argument("destination", type=click.Path(path_type=Path))
+@click.option("--backend", "-b", default="rsync", help="Backend to use")
+@click.option("--snapshot", "-s", help="Snapshot ID to restore (for restic/borg)")
+@click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
+def restore(
+    source: str,
+    destination: Path,
+    backend: str,
+    snapshot: str | None,
+    dry_run: bool,
+) -> None:
+    """Restore from a backup.
+
+    SOURCE is the backup location.
+    DESTINATION is where to restore files.
+    """
+    from backer.backends import get_backend
+
+    console.print(f"[bold]Restoring[/bold] {source} → {destination}")
+
+    try:
+        be = get_backend(backend)
+        src = BackupDestination(path=source)
+
+        with console.status("Restoring..."):
+            result = be.restore(source=src, destination=destination, snapshot=snapshot, dry_run=dry_run)
+
+        if result.success:
+            console.print("[green]✓ Restore completed[/green]")
+        else:
+            console.print("[red]✗ Restore failed[/red]")
+            for error in result.errors:
+                console.print(f"  [red]{error}[/red]")
+            raise SystemExit(1)
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+@main.command()
+def backends() -> None:
+    """List available backup backends and their status."""
+    table = Table(title="Available Backends")
+    table.add_column("Backend", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Version/Info")
+
+    for backend_type, (available, info) in BackendRegistry.check_all_available().items():
+        status = "[green]✓ Available[/green]" if available else "[red]✗ Not found[/red]"
+        table.add_row(backend_type.value, status, info)
+
+    console.print(table)
+
+
+# ============ Server commands ============
+
+
+@main.group()
+def server() -> None:
+    """Server management commands."""
+    pass
+
+
+@server.command("start")
+@click.option("--host", "-h", default="0.0.0.0", help="Host to bind to")
+@click.option("--port", "-p", default=8420, help="Port to listen on")
+@click.option("--data-dir", type=click.Path(path_type=Path), help="Data directory")
+def server_start(host: str, port: int, data_dir: Path | None) -> None:
+    """Start the Backer server."""
+    console.print(f"[bold]Starting Backer server[/bold] on {host}:{port}")
+
+    try:
+        from backer.server.daemon import run_server
+        run_server(host=host, port=port, data_dir=data_dir)
+    except ImportError as e:
+        console.print(f"[red]Error:[/red] Server dependencies not installed: {e}")
+        console.print("Install with: pip install backer[server]")
+        raise SystemExit(1)
+
+
+# ============ Agent commands ============
+
+
+@main.group()
+def agent() -> None:
+    """Agent management commands."""
+    pass
+
+
+@agent.command("register")
+@click.option("--server", "-s", required=True, help="Server URL (e.g., http://backup-server:8420)")
+def agent_register(server: str) -> None:
+    """Register this machine as a backup client."""
+    from backer.client.agent import BackerAgent
+
+    console.print(f"Registering with server: {server}")
+
+    try:
+        agent = BackerAgent(server_url=server)
+        client_id, _ = agent.register()
+        console.print(f"[green]✓ Registered successfully[/green]")
+        console.print(f"  Client ID: {client_id}")
+        console.print(f"  Config saved to: {agent.config_path}")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+@agent.command("start")
+@click.option("--server", "-s", help="Server URL (uses saved config if not specified)")
+def agent_start(server: str | None) -> None:
+    """Start the backup agent."""
+    from backer.client.agent import BackerAgent
+
+    try:
+        if server:
+            # Try to load existing config, fall back to new agent
+            try:
+                agent = BackerAgent.from_config()
+                if agent.server_url != server:
+                    console.print("[yellow]Warning:[/yellow] Server URL differs from saved config")
+            except FileNotFoundError:
+                console.print("No saved config found. Registering with server...")
+                agent = BackerAgent(server_url=server)
+                agent.register()
+        else:
+            agent = BackerAgent.from_config()
+
+        console.print(f"[bold]Starting agent[/bold] (client_id: {agent.client_id})")
+        agent.run()
+
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] No agent config found. Run 'backer agent register' first.")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+@agent.command("status")
+def agent_status() -> None:
+    """Show agent status."""
+    from backer.client.agent import BackerAgent
+
+    try:
+        agent = BackerAgent.from_config()
+        console.print(f"Client ID: {agent.client_id}")
+        console.print(f"Server: {agent.server_url}")
+
+        # Try to ping server
+        try:
+            result = agent.heartbeat()
+            console.print("[green]✓ Connected to server[/green]")
+        except Exception as e:
+            console.print(f"[yellow]✗ Cannot reach server:[/yellow] {e}")
+
+    except FileNotFoundError:
+        console.print("[yellow]Agent not registered[/yellow]")
+        console.print("Run 'backer agent register --server <url>' to register")
+
+
+# ============ Job commands (for use with server) ============
+
+
+@main.group()
+def job() -> None:
+    """Job management commands (requires server)."""
+    pass
+
+
+@job.command("list")
+@click.option("--server", "-s", help="Server URL")
+def job_list(server: str | None) -> None:
+    """List all backup jobs."""
+    import httpx
+
+    server_url = server or "http://localhost:8420"
+
+    try:
+        response = httpx.get(f"{server_url}/api/v1/jobs")
+        response.raise_for_status()
+        jobs = response.json()
+
+        if not jobs:
+            console.print("No jobs configured")
+            return
+
+        table = Table(title="Backup Jobs")
+        table.add_column("Name", style="cyan")
+        table.add_column("Backend")
+        table.add_column("Source")
+        table.add_column("Destination")
+        table.add_column("Last Run")
+        table.add_column("Status")
+
+        for j in jobs:
+            status_style = "green" if j.get("last_status") == "success" else "red" if j.get("last_status") == "failed" else "dim"
+            table.add_row(
+                j["name"],
+                j.get("backend", "rsync"),
+                j.get("source_path", "")[:30],
+                j.get("destination_path", "")[:30],
+                j.get("last_run", "-")[:19] if j.get("last_run") else "-",
+                f"[{status_style}]{j.get('last_status', '-')}[/{status_style}]",
+            )
+
+        console.print(table)
+
+    except httpx.ConnectError:
+        console.print(f"[red]Error:[/red] Cannot connect to server at {server_url}")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+@job.command("create")
+@click.option("--name", "-n", required=True, help="Job name")
+@click.option("--source", "-s", required=True, help="Source path")
+@click.option("--dest", "-d", required=True, help="Destination path")
+@click.option("--backend", "-b", default="rsync", help="Backend to use")
+@click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
+@click.option("--server", help="Server URL")
+def job_create(
+    name: str,
+    source: str,
+    dest: str,
+    backend: str,
+    schedule: str | None,
+    server: str | None,
+) -> None:
+    """Create a new backup job."""
+    import httpx
+
+    server_url = server or "http://localhost:8420"
+
+    job_data = {
+        "name": name,
+        "source_path": source,
+        "destination_path": dest,
+        "backend": backend,
+        "schedule_cron": schedule,
+    }
+
+    try:
+        response = httpx.post(f"{server_url}/api/v1/jobs", json=job_data)
+        response.raise_for_status()
+
+        console.print(f"[green]✓ Job '{name}' created[/green]")
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 409:
+            console.print(f"[red]Error:[/red] Job '{name}' already exists")
+        else:
+            console.print(f"[red]Error:[/red] {e.response.text}")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+@job.command("run")
+@click.argument("name")
+@click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
+@click.option("--server", help="Server URL")
+def job_run(name: str, dry_run: bool, server: str | None) -> None:
+    """Run a backup job."""
+    import httpx
+
+    server_url = server or "http://localhost:8420"
+
+    try:
+        response = httpx.post(
+            f"{server_url}/api/v1/jobs/{name}/run",
+            json={"dry_run": dry_run},
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        console.print(f"[green]✓ Job started[/green]")
+        console.print(f"  Run ID: {result['run_id']}")
+        console.print(f"  Status: {result['status']}")
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            console.print(f"[red]Error:[/red] Job '{name}' not found")
+        else:
+            console.print(f"[red]Error:[/red] {e.response.text}")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
