@@ -924,6 +924,200 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         return {"success": success, "message": message}
 
+    @app.post("/api/v1/repositories/{repo_id}/scan")
+    def scan_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
+        """Scan a repository for existing Backer metadata and backups.
+
+        This discovers what backups exist in the repository, which can then
+        be imported into the server database.
+        """
+        from backer.core.repo_metadata import RepositoryMetadata
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        # Build repository path
+        repo_type = repo.get("repo_type", "smb")
+        if repo_type == "smb":
+            repo_path = f"//{repo['server']}/{repo['share']}"
+            if repo.get("path"):
+                repo_path += "/" + repo["path"]
+        elif repo_type == "nfs":
+            repo_path = f"{repo['server']}:{repo['share']}"
+            if repo.get("path"):
+                repo_path += "/" + repo["path"]
+        elif repo_type == "local":
+            repo_path = repo.get("share", "") or repo.get("path", "")
+        else:
+            repo_path = repo.get("share", "") or repo.get("path", "")
+
+        try:
+            repo_meta = RepositoryMetadata(repo_path, repo_type)
+            discovery = repo_meta.discover_all()
+
+            return {
+                "success": True,
+                "repository_id": repo_id,
+                "repository_name": repo.get("name"),
+                "path": repo_path,
+                "initialized": discovery.get("initialized", False),
+                "summary": discovery.get("summary", {}),
+                "agents": discovery.get("agents", []),
+                "jobs": [
+                    {
+                        "job_name": j.get("job_name"),
+                        "run_count": j.get("run_count", 0),
+                        "created_at": j.get("created_at"),
+                        "updated_at": j.get("updated_at"),
+                    }
+                    for j in discovery.get("jobs", [])
+                ],
+                "snapshots": [
+                    {
+                        "snapshot_id": s.get("snapshot_id"),
+                        "short_id": s.get("short_id"),
+                        "hostname": s.get("hostname"),
+                        "time": s.get("time"),
+                        "paths": s.get("paths", []),
+                    }
+                    for s in discovery.get("snapshots", [])[:50]  # Limit to 50 most recent
+                ],
+            }
+        except Exception as e:
+            logger.error(f"Failed to scan repository {repo_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "repository_id": repo_id,
+            }
+
+    @app.post("/api/v1/repositories/{repo_id}/scan-restic")
+    async def scan_restic_repository(
+        repo_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Scan a restic repository for snapshots and sync metadata.
+
+        This queries restic directly to find snapshots and updates the
+        repository metadata. Requires the restic password.
+        """
+        from backer.server.repo_metadata import (
+            RepositoryMetadata,
+            ResticRepositoryScanner,
+        )
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        data = await request.json()
+        password = data.get("password")
+        if not password:
+            # Try to get password from repository or job configuration
+            password = storage.get_repository_password(repo_id)
+            if not password:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Restic password required (provide in request body or repository config)"
+                )
+
+        # Build repository path
+        repo_type = repo.get("repo_type", "smb")
+        if repo_type == "smb":
+            repo_path = f"//{repo['server']}/{repo['share']}"
+            if repo.get("path"):
+                repo_path += "/" + repo["path"]
+        elif repo_type == "nfs":
+            repo_path = f"{repo['server']}:{repo['share']}"
+            if repo.get("path"):
+                repo_path += "/" + repo["path"]
+        elif repo_type == "local":
+            repo_path = repo.get("share", "") or repo.get("path", "")
+        else:
+            repo_path = repo.get("share", "") or repo.get("path", "")
+
+        try:
+            # First, ensure metadata is initialized
+            repo_meta = RepositoryMetadata(repo_path, repo_type)
+            if not repo_meta.is_initialized():
+                repo_meta.initialize()
+
+            # Scan restic repo and sync to metadata
+            scanner = ResticRepositoryScanner(repo_path, password)
+
+            if not scanner.is_restic_repo():
+                return {
+                    "success": False,
+                    "error": "Not a valid restic repository or incorrect password",
+                    "repository_id": repo_id,
+                }
+
+            sync_result = scanner.scan_and_sync(repo_meta)
+
+            return {
+                "success": True,
+                "repository_id": repo_id,
+                "repository_name": repo.get("name"),
+                "path": repo_path,
+                **sync_result,
+            }
+        except Exception as e:
+            logger.error(f"Failed to scan restic repository {repo_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "repository_id": repo_id,
+            }
+
+    @app.post("/api/v1/repositories/{repo_id}/import")
+    def import_repository_metadata_endpoint(
+        repo_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Import discovered metadata from repository into server database.
+
+        This imports jobs, runs, and agent references from the repository
+        metadata into the server's database, enabling management of
+        previously-created backups.
+        """
+        from backer.server.repo_metadata import import_repository_metadata
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        # Build repository path
+        repo_type = repo.get("repo_type", "smb")
+        if repo_type == "smb":
+            repo_path = f"//{repo['server']}/{repo['share']}"
+            if repo.get("path"):
+                repo_path += "/" + repo["path"]
+        elif repo_type == "nfs":
+            repo_path = f"{repo['server']}:{repo['share']}"
+            if repo.get("path"):
+                repo_path += "/" + repo["path"]
+        elif repo_type == "local":
+            repo_path = repo.get("share", "") or repo.get("path", "")
+        else:
+            repo_path = repo.get("share", "") or repo.get("path", "")
+
+        try:
+            result = import_repository_metadata(repo_path, storage, repo_id)
+            return {
+                "repository_id": repo_id,
+                "repository_name": repo.get("name"),
+                **result,
+            }
+        except Exception as e:
+            logger.error(f"Failed to import metadata from repository {repo_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "repository_id": repo_id,
+            }
+
     # ============ Web UI ============
 
     # Store storage in app state for web routes
