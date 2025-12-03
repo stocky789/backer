@@ -45,6 +45,8 @@ server = [
 ]
 client = [
     "httpx>=0.24",
+    "pystray>=0.19; sys_platform == 'win32'",
+    "pillow>=10.0; sys_platform == 'win32'",
 ]
 all = [
     "backer[server,client]",

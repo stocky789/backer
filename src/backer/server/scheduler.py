@@ -5,6 +5,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 try:
     from croniter import croniter
@@ -47,6 +48,23 @@ class BackupScheduler:
         self._thread: threading.Thread | None = None
         self._last_run_times: dict[str, datetime] = {}
 
+    def _get_timezone(self) -> ZoneInfo:
+        """Get the configured timezone from storage.
+
+        Returns ZoneInfo for the configured timezone, or UTC if not set or invalid.
+        """
+        tz_name = self.storage.get_setting("timezone", "UTC")
+        try:
+            return ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+        except Exception:
+            logger.warning(f"Invalid timezone '{tz_name}', using UTC")
+            return ZoneInfo("UTC")
+
+    def _now(self) -> datetime:
+        """Get current time in the configured timezone."""
+        tz = self._get_timezone()
+        return datetime.now(tz)
+
     def start(self) -> None:
         """Start the scheduler in a background thread."""
         if not HAS_CRONITER:
@@ -86,7 +104,7 @@ class BackupScheduler:
     def _check_and_run_jobs(self) -> None:
         """Check all jobs and run any that are due."""
         jobs = self.storage.list_jobs()
-        now = datetime.now()
+        now = self._now()
 
         for job in jobs:
             job_name = job.get("name")
@@ -143,7 +161,7 @@ class BackupScheduler:
 
         Args:
             schedule: Cron expression
-            from_time: Calculate next run from this time (default: now)
+            from_time: Calculate next run from this time (default: now in configured timezone)
 
         Returns:
             Next run datetime, or None if invalid schedule
@@ -152,7 +170,7 @@ class BackupScheduler:
             return None
 
         try:
-            base_time = from_time or datetime.now()
+            base_time = from_time or self._now()
             cron = croniter(schedule, base_time)
             return cron.get_next(datetime)
         except Exception:
@@ -165,7 +183,7 @@ class BackupScheduler:
         """
         jobs = self.storage.list_jobs()
         status = []
-        now = datetime.now()
+        now = self._now()
 
         for job in jobs:
             job_name = job.get("name")

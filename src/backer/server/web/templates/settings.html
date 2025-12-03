@@ -22,6 +22,66 @@
 
         <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
 
+        <h3 style="margin-bottom: 15px;">Schedule Settings</h3>
+        <form method="POST" action="/settings/save">
+            <div class="form-group">
+                <label class="form-label">Server Timezone</label>
+                <select name="timezone" class="form-input" id="timezone-select">
+                    <option value="UTC" {% if timezone == 'UTC' %}selected{% endif %}>UTC</option>
+                    <optgroup label="Americas">
+                        <option value="America/New_York" {% if timezone == 'America/New_York' %}selected{% endif %}>Eastern Time (US & Canada)</option>
+                        <option value="America/Chicago" {% if timezone == 'America/Chicago' %}selected{% endif %}>Central Time (US & Canada)</option>
+                        <option value="America/Denver" {% if timezone == 'America/Denver' %}selected{% endif %}>Mountain Time (US & Canada)</option>
+                        <option value="America/Los_Angeles" {% if timezone == 'America/Los_Angeles' %}selected{% endif %}>Pacific Time (US & Canada)</option>
+                        <option value="America/Anchorage" {% if timezone == 'America/Anchorage' %}selected{% endif %}>Alaska</option>
+                        <option value="Pacific/Honolulu" {% if timezone == 'Pacific/Honolulu' %}selected{% endif %}>Hawaii</option>
+                        <option value="America/Toronto" {% if timezone == 'America/Toronto' %}selected{% endif %}>Toronto</option>
+                        <option value="America/Vancouver" {% if timezone == 'America/Vancouver' %}selected{% endif %}>Vancouver</option>
+                        <option value="America/Sao_Paulo" {% if timezone == 'America/Sao_Paulo' %}selected{% endif %}>Sao Paulo</option>
+                        <option value="America/Mexico_City" {% if timezone == 'America/Mexico_City' %}selected{% endif %}>Mexico City</option>
+                    </optgroup>
+                    <optgroup label="Europe">
+                        <option value="Europe/London" {% if timezone == 'Europe/London' %}selected{% endif %}>London</option>
+                        <option value="Europe/Paris" {% if timezone == 'Europe/Paris' %}selected{% endif %}>Paris</option>
+                        <option value="Europe/Berlin" {% if timezone == 'Europe/Berlin' %}selected{% endif %}>Berlin</option>
+                        <option value="Europe/Amsterdam" {% if timezone == 'Europe/Amsterdam' %}selected{% endif %}>Amsterdam</option>
+                        <option value="Europe/Moscow" {% if timezone == 'Europe/Moscow' %}selected{% endif %}>Moscow</option>
+                    </optgroup>
+                    <optgroup label="Asia/Pacific">
+                        <option value="Asia/Tokyo" {% if timezone == 'Asia/Tokyo' %}selected{% endif %}>Tokyo</option>
+                        <option value="Asia/Shanghai" {% if timezone == 'Asia/Shanghai' %}selected{% endif %}>Shanghai</option>
+                        <option value="Asia/Hong_Kong" {% if timezone == 'Asia/Hong_Kong' %}selected{% endif %}>Hong Kong</option>
+                        <option value="Asia/Singapore" {% if timezone == 'Asia/Singapore' %}selected{% endif %}>Singapore</option>
+                        <option value="Asia/Seoul" {% if timezone == 'Asia/Seoul' %}selected{% endif %}>Seoul</option>
+                        <option value="Asia/Dubai" {% if timezone == 'Asia/Dubai' %}selected{% endif %}>Dubai</option>
+                        <option value="Asia/Kolkata" {% if timezone == 'Asia/Kolkata' %}selected{% endif %}>Mumbai/Kolkata</option>
+                    </optgroup>
+                    <optgroup label="Australia/Oceania">
+                        <option value="Australia/Sydney" {% if timezone == 'Australia/Sydney' %}selected{% endif %}>Sydney</option>
+                        <option value="Australia/Melbourne" {% if timezone == 'Australia/Melbourne' %}selected{% endif %}>Melbourne</option>
+                        <option value="Australia/Brisbane" {% if timezone == 'Australia/Brisbane' %}selected{% endif %}>Brisbane</option>
+                        <option value="Australia/Perth" {% if timezone == 'Australia/Perth' %}selected{% endif %}>Perth</option>
+                        <option value="Australia/Adelaide" {% if timezone == 'Australia/Adelaide' %}selected{% endif %}>Adelaide</option>
+                        <option value="Pacific/Auckland" {% if timezone == 'Pacific/Auckland' %}selected{% endif %}>Auckland</option>
+                    </optgroup>
+                    <optgroup label="Africa">
+                        <option value="Africa/Johannesburg" {% if timezone == 'Africa/Johannesburg' %}selected{% endif %}>Johannesburg</option>
+                        <option value="Africa/Cairo" {% if timezone == 'Africa/Cairo' %}selected{% endif %}>Cairo</option>
+                        <option value="Africa/Lagos" {% if timezone == 'Africa/Lagos' %}selected{% endif %}>Lagos</option>
+                    </optgroup>
+                </select>
+                <small style="color: var(--text-muted); display: block; margin-top: 5px;">
+                    This timezone is used for scheduling backups. Scheduled jobs will run according to this timezone.
+                </small>
+            </div>
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+            {% if settings_saved %}
+            <span style="color: var(--success); margin-left: 10px;">Settings saved!</span>
+            {% endif %}
+        </form>
+
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+
         <h3 style="margin-bottom: 15px;">Supported Backup Backends</h3>
         <div style="background: var(--bg-primary); padding: 15px; border-radius: 4px; margin-bottom: 20px;">
             <table style="width: 100%; border-collapse: collapse;">
