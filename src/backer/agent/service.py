@@ -499,6 +499,32 @@ class AgentService:
 
         raise FileNotFoundError(f"{tool_name} not found. Run ensure_tools_installed() first.")
 
+    def _get_restic_snapshot_paths(
+        self,
+        restic: Path,
+        repo: str,
+        snapshot_id: str,
+        env: dict[str, str],
+    ) -> list[str]:
+        """Get the original paths from a restic snapshot."""
+        try:
+            cmd = [str(restic), '-r', repo, 'snapshots', snapshot_id, '--json']
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            if result.returncode == 0 and result.stdout:
+                snapshots = json.loads(result.stdout)
+                if snapshots and len(snapshots) > 0:
+                    # Return the paths from the snapshot
+                    return snapshots[0].get('paths', [])
+        except Exception as e:
+            logger.warning(f"[RESTIC] Could not query snapshot paths: {e}")
+        return []
+
     def _run_rclone_sync(
         self,
         source: str,
@@ -749,9 +775,38 @@ class AgentService:
         # Use provided snapshot or "latest"
         snapshot_id = snapshot if snapshot else 'latest'
 
+        # Query the snapshot to get the original backup paths
+        # Restic stores absolute paths, so we need to determine the correct target
+        original_paths = self._get_restic_snapshot_paths(restic, repo, snapshot_id, env)
+        logger.debug(f"[RESTIC] Original backup paths: {original_paths}")
+
+        # Determine the actual restore target
+        # Restic recreates the full path structure inside --target
+        # So to restore to original location, we need to use the filesystem root
+        restore_target = dest
+        if original_paths:
+            # Check if destination matches or is parent of original backup path
+            dest_normalized = dest.replace('\\', '/').rstrip('/')
+            for orig_path in original_paths:
+                orig_normalized = orig_path.replace('\\', '/').rstrip('/')
+                if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
+                    # Restoring to original location - use filesystem root
+                    if sys.platform == 'win32':
+                        # Extract drive letter from original path
+                        if len(orig_path) >= 2 and orig_path[1] == ':':
+                            restore_target = orig_path[:2] + '\\'  # e.g., "C:\"
+                        else:
+                            restore_target = 'C:\\'
+                    else:
+                        restore_target = '/'
+                    logger.info(f"[RESTIC] Restoring to original location, using target: {restore_target}")
+                    break
+
+        logger.debug(f"[RESTIC] Final restore target: {restore_target}")
+
         # Build restore command
         # restic restore <snapshot> --target <dest>
-        cmd = [str(restic), '-r', repo, 'restore', snapshot_id, '--target', dest, '-v']
+        cmd = [str(restic), '-r', repo, 'restore', snapshot_id, '--target', restore_target, '-v']
 
         # Add --include to restore only specific path from snapshot
         if include_path:
