@@ -8,11 +8,27 @@
         <span class="card-title">Backup Configuration</span>
     </div>
     <div class="card-body">
+        {% set error = request.query_params.get('error') %}
+        {% if error %}
+        <div class="alert alert-error" style="margin-bottom: 20px;">
+            {% if error == 'invalid_repo' %}
+            <strong>Error:</strong> Invalid storage repository selected.
+            {% elif error == 'invalid_name' %}
+            <strong>Error:</strong> Job name cannot start with "restore:".
+            {% elif error == 'job_exists' %}
+            <strong>Error:</strong> A job with this name already exists.
+            {% else %}
+            <strong>Error:</strong> Failed to create job. Please try again.
+            {% endif %}
+        </div>
+        {% endif %}
+
         <form action="/jobs/create" method="POST">
             <div class="form-group">
                 <label class="form-label">Backup Name *</label>
                 <input type="text" name="name" class="form-input" required
-                       placeholder="e.g., daily-documents">
+                       placeholder="e.g., daily-documents" pattern="^(?!restore:).*$"
+                       title="Job name cannot start with 'restore:'">
                 <div class="form-hint">A friendly name for this backup job</div>
             </div>
 

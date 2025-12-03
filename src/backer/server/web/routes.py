@@ -174,6 +174,13 @@ async def jobs_page(request: Request):
     for j in jobs_raw:
         latest = storage.get_latest_run(j["name"])
 
+        # Check if there are any successful backups (for restore button)
+        runs = storage.get_job_runs(j["name"], limit=50)
+        has_backups = any(
+            r.get("status") == "success" and not r.get("run_id", "").startswith("restore_")
+            for r in runs
+        )
+
         # Calculate next run if scheduler available
         next_run = None
         schedule = j.get("schedule_cron")
@@ -189,6 +196,7 @@ async def jobs_page(request: Request):
             **j,
             "last_status": latest["status"] if latest else None,
             "next_run": next_run,
+            "has_backups": has_backups,
         })
 
     # Get agents for edit modal
@@ -238,6 +246,15 @@ async def jobs_create(
 ):
     """Create a new backup job."""
     storage = get_storage(request)
+
+    # Validate job name
+    name = name.strip()
+    if name.lower().startswith("restore:"):
+        return RedirectResponse("/jobs/new?error=invalid_name", status_code=303)
+
+    # Check for existing job with same name
+    if storage.get_job(name):
+        return RedirectResponse("/jobs/new?error=job_exists", status_code=303)
 
     # Build destination path from repository
     repo = storage.get_repository(repository_id)

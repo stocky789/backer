@@ -285,6 +285,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/jobs", response_model=JobResponse)
     def create_job(job: JobCreate, storage: Storage = Depends(get_storage)) -> JobResponse:
         """Create a new backup job."""
+        # Validate job name
+        if job.name.lower().startswith("restore:"):
+            raise HTTPException(status_code=400, detail="Job name cannot start with 'restore:'")
+
         if storage.get_job(job.name):
             raise HTTPException(status_code=409, detail="Job already exists")
 
