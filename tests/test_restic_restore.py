@@ -86,11 +86,11 @@ class TestResticRestore:
 
     def test_restore_target_calculation_original_location(self):
         """Test that restore target is calculated correctly for original location restore."""
-        # When restoring to original location (dest == original backup path),
-        # target should be filesystem root "/" so restic recreates the full path
-        # This works on both Windows and Linux - restic interprets "/" correctly
+        # When restoring to original location (dest == original backup path):
+        # - On Linux: use "/" as target
+        # - On Windows: use drive root (e.g., "C:\") then move files after restore
 
-        # Simulate the logic from _run_restic_restore
+        # Test Linux path
         dest = "/home/user/backup"
         original_paths = ["/home/user/backup"]
 
@@ -100,13 +100,43 @@ class TestResticRestore:
         for orig_path in original_paths:
             orig_normalized = orig_path.replace('\\', '/').rstrip('/')
             if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
-                # Restoring to original location - use filesystem root
-                # Use "/" on all platforms - restic handles this correctly
-                restore_target = '/'
+                # On Linux, use "/" for original location restore
+                if sys.platform != 'win32':
+                    restore_target = '/'
                 break
 
-        # On all platforms, we use "/" for original location restore
-        assert restore_target == '/'
+        # On Linux, we use "/" for original location restore
+        if sys.platform != 'win32':
+            assert restore_target == '/'
+
+    def test_restore_target_calculation_windows_original_location(self):
+        """Test Windows-specific restore target calculation."""
+        # On Windows, restic stores C:\Test as /C/Test internally
+        # Using --target / would create files at \C\Test (wrong location)
+        # So we use drive root and then move files after restore
+
+        dest = "C:\\Test"
+        original_paths = ["C:\\Test"]
+
+        dest_normalized = dest.replace('\\', '/').rstrip('/')
+        restore_target = dest
+        needs_windows_path_fix = False
+        windows_drive_letter = None
+
+        for orig_path in original_paths:
+            orig_normalized = orig_path.replace('\\', '/').rstrip('/')
+            if dest_normalized == orig_normalized or orig_normalized.startswith(dest_normalized + '/'):
+                # Windows absolute path handling
+                if len(dest) >= 2 and dest[1] == ':':
+                    windows_drive_letter = dest[0].upper()
+                    restore_target = f"{windows_drive_letter}:\\"
+                    needs_windows_path_fix = True
+                break
+
+        # On Windows with absolute paths, use drive root as target
+        assert restore_target == "C:\\"
+        assert needs_windows_path_fix is True
+        assert windows_drive_letter == "C"
 
     def test_restore_target_calculation_different_location(self):
         """Test that restore target is the destination when restoring to different location."""
@@ -226,25 +256,41 @@ class TestResticRestore:
         # Destination should NOT exist after clean
         assert not dest.exists()
 
-    def test_restore_target_uses_forward_slash(self):
-        """Test that restore target uses '/' for original location restore on all platforms."""
-        # This tests that we always use "/" for restoring to original location
-        # Restic handles "/" correctly on Windows, interpreting it as the filesystem root
+    def test_restore_target_uses_forward_slash_on_linux(self):
+        """Test that restore target uses '/' for original location restore on Linux."""
+        # On Linux, we use "/" for restoring to original location
+        # On Windows, we use drive root and fix the path after restore
 
-        orig_path = "C:\\Users\\test\\backup"
-        dest = "C:\\Users\\test\\backup"
+        orig_path = "/home/user/backup"
+        dest = "/home/user/backup"
 
-        # Simulate the logic from _run_restic_restore
+        # Simulate the logic from _run_restic_restore (Linux path)
         dest_normalized = dest.replace('\\', '/').rstrip('/')
         restore_target = dest
 
         orig_normalized = orig_path.replace('\\', '/').rstrip('/')
         if dest_normalized == orig_normalized:
-            # Use "/" on all platforms for original location restore
+            # On Linux, use "/" for original location restore
             restore_target = '/'
 
-        # Should be "/" not "C:" or "C:\\"
+        # Should be "/" for Linux paths
         assert restore_target == "/"
+
+    def test_windows_path_fix_calculation(self):
+        """Test that Windows path fix correctly calculates nested path."""
+        # On Windows, restic creates C:\C\Test when restoring C:\Test with --target C:\
+        # We need to move files from the nested location to the correct one
+
+        original_dest = "C:\\Test"
+        windows_drive_letter = "C"
+
+        # Calculate the nested path where restic puts files
+        dest_without_drive = original_dest[2:].lstrip('\\').lstrip('/')  # "Test"
+        nested_path = f"{windows_drive_letter}:\\{windows_drive_letter}\\{dest_without_drive}"
+
+        # The nested path should be C:\C\Test
+        assert nested_path == "C:\\C\\Test"
+        assert dest_without_drive == "Test"
 
 
 class TestResticBackupRestore:
