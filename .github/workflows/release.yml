@@ -78,8 +78,8 @@ jobs:
           $url = "https://github.com/restic/restic/releases/download/v$resticVersion/restic_${resticVersion}_windows_amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile restic.zip
           Expand-Archive -Path restic.zip -DestinationPath temp-restic
-          # Restic zip contains restic.exe directly (not versioned filename)
-          Move-Item temp-restic\restic.exe dist\tools\restic.exe
+          # Restic zip contains versioned exe (restic_X.Y.Z_windows_amd64.exe)
+          Get-ChildItem temp-restic -Filter "restic*.exe" | Move-Item -Destination dist\tools\restic.exe
         shell: pwsh
 
       - name: Build GUI with PyInstaller
