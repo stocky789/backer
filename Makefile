@@ -1,4 +1,4 @@
-.PHONY: install install-dev setup test test-quick lint format type-check clean build run-server demo help
+.PHONY: install install-dev setup test test-quick lint format type-check clean build build-agent run-server demo release help
 
 # Default target
 help:
@@ -17,12 +17,16 @@ help:
 	@echo "  make type-check   Run type checker"
 	@echo ""
 	@echo "Build:"
-	@echo "  make build        Build distribution packages"
+	@echo "  make build        Build Python distribution packages"
+	@echo "  make build-agent  Build Windows agent executable (requires PyInstaller)"
 	@echo "  make clean        Remove build artifacts"
 	@echo ""
 	@echo "Run:"
 	@echo "  make run-server   Start the backup server"
 	@echo "  make demo         Run a demo backup"
+	@echo ""
+	@echo "Release:"
+	@echo "  make release VERSION=x.y.z   Create and push a release tag"
 
 # Installation
 install:
@@ -30,6 +34,7 @@ install:
 
 install-dev:
 	pip install -e ".[dev,all]"
+	pip install pyinstaller
 
 setup: install
 	backer setup
@@ -56,6 +61,12 @@ type-check:
 build: clean
 	python -m build
 
+build-agent:
+	@echo "Building Windows agent..."
+	@echo "Note: For full Windows build, run on Windows with PyInstaller"
+	pip install pyinstaller
+	pyinstaller --clean backer-agent.spec
+
 clean:
 	rm -rf build/ dist/ *.egg-info src/*.egg-info
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
@@ -65,6 +76,20 @@ clean:
 # Run
 run-server:
 	backer server start
+
+# Release - creates a git tag and pushes it to trigger GitHub Actions
+release:
+ifndef VERSION
+	$(error VERSION is required. Usage: make release VERSION=0.1.0)
+endif
+	@echo "Creating release v$(VERSION)..."
+	@sed -i 's/version = ".*"/version = "$(VERSION)"/' pyproject.toml
+	git add pyproject.toml
+	git commit -m "Release v$(VERSION)"
+	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"
+	@echo ""
+	@echo "Release v$(VERSION) created locally."
+	@echo "To publish, run: git push && git push --tags"
 
 # Demo - creates test data and runs a backup
 demo:

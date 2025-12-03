@@ -125,6 +125,78 @@ Jobs:
   backer job run NAME       Run a job manually
 ```
 
+## Installation
+
+### Server (Linux)
+
+```bash
+# Option 1: Install from source
+git clone https://github.com/stocky789/backer.git
+cd backer
+pip install -e ".[server]"
+backer setup  # Downloads rclone + restic
+
+# Option 2: Install from PyPI (when released)
+pip install backer[server]
+
+# Start server
+backer server start
+# Web UI: http://localhost:8420
+```
+
+**Run as a systemd service:**
+
+```bash
+# Create service file
+cat > /etc/systemd/system/backer.service << 'EOF'
+[Unit]
+Description=Backer Backup Server
+After=network.target
+
+[Service]
+Type=simple
+User=backer
+ExecStart=/usr/local/bin/backer server start --host 0.0.0.0 --port 8420
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start
+sudo systemctl enable backer
+sudo systemctl start backer
+```
+
+### Windows Agent
+
+**Option 1: Download pre-built executable**
+
+1. Go to [Releases](https://github.com/stocky789/backer/releases)
+2. Download `backer-agent-windows-amd64.zip`
+3. Extract and run in Command Prompt:
+
+```cmd
+backer-agent.exe register --server http://your-server:8420
+backer-agent.exe install
+```
+
+**Option 2: Install from Python**
+
+```powershell
+pip install backer[client]
+backer agent register --server http://your-server:8420
+backer agent install
+```
+
+### Linux Agent
+
+```bash
+pip install backer[client]
+backer agent register --server http://your-server:8420
+backer agent install --method systemd
+```
+
 ## Development
 
 ```bash
@@ -136,12 +208,32 @@ make test
 
 # Quick backup test
 make demo
-./scripts/test-backup.sh
 
 # Lint and format
 make lint
 make format
+
+# Build Python package
+make build
+
+# Build Windows agent (on Windows with PyInstaller)
+make build-agent
 ```
+
+## Creating a Release
+
+```bash
+# Update version and create tag
+make release VERSION=0.2.0
+
+# Push to GitHub (triggers automated build)
+git push && git push --tags
+```
+
+This will:
+1. Build Windows agent executable
+2. Build Python packages
+3. Create GitHub release with downloads
 
 ## API
 
