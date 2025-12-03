@@ -373,3 +373,37 @@ async def settings_page(request: Request):
         "server_url": server_url,
         "data_dir": data_dir,
     })
+
+
+@router.get("/restore", response_class=HTMLResponse)
+async def restore_page(request: Request):
+    """Restore page."""
+    storage = get_storage(request)
+
+    # Get jobs (to select backup source)
+    jobs = storage.list_jobs()
+
+    # Get agents (to select restore target)
+    agents = storage.list_clients()
+
+    # Get recent restore operations
+    all_runs = []
+    for job in jobs:
+        runs = storage.get_job_runs(f"restore:{job['name']}", limit=10)
+        for run in runs:
+            all_runs.append({
+                **run,
+                "started_at_ago": time_ago(run.get("started_at")),
+            })
+
+    # Sort by time
+    all_runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+    recent_restores = all_runs[:10]
+
+    return templates.TemplateResponse("restore.html", {
+        "request": request,
+        "active": "restore",
+        "jobs": jobs,
+        "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
+        "recent_restores": recent_restores,
+    })

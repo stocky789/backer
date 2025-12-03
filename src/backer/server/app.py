@@ -83,6 +83,13 @@ def trigger_job_internal(job_name: str) -> None:
         client_id=client_id,
     )
 
+    # Start progress tracking
+    _storage.start_job_progress(
+        run_id=run_id,
+        job_name=job_name,
+        client_id=client_id,
+    )
+
     # Queue the backup command for the client
     command_payload = {
         "job_name": job_name,
@@ -377,6 +384,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             client_id=client_id,
         )
 
+        # Start progress tracking
+        storage.start_job_progress(
+            run_id=run_id,
+            job_name=job_name,
+            client_id=client_id,
+        )
+
         # Queue the backup command for the client
         command_payload = {
             "job_name": job_name,
@@ -444,7 +458,168 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             errors=result.errors,
             output=result.output[:10000],  # Limit output size
         )
+        # Mark progress as complete
+        storage.finish_job_progress(
+            result.run_id,
+            status="completed" if result.success else "failed"
+        )
         return {"status": "recorded"}
+
+    # ============ Progress Tracking ============
+
+    @app.post("/api/v1/progress")
+    async def report_progress(
+        request: Request,
+        client: Client = Depends(verify_client),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, str]:
+        """Client reports backup progress update."""
+        data = await request.json()
+        run_id = data.get("run_id")
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id required")
+
+        storage.update_job_progress(
+            run_id=run_id,
+            status=data.get("status"),
+            progress_percent=data.get("progress_percent"),
+            current_file=data.get("current_file"),
+            bytes_processed=data.get("bytes_processed"),
+            files_processed=data.get("files_processed"),
+            total_bytes=data.get("total_bytes"),
+            total_files=data.get("total_files"),
+            message=data.get("message"),
+        )
+        return {"status": "updated"}
+
+    @app.get("/api/v1/running")
+    def get_running_jobs(storage: Storage = Depends(get_storage)) -> list[dict[str, Any]]:
+        """Get all currently running backup jobs."""
+        return storage.get_running_jobs()
+
+    @app.get("/api/v1/progress/{run_id}")
+    def get_progress(run_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
+        """Get progress for a specific job run."""
+        progress = storage.get_job_progress(run_id)
+        if not progress:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return progress
+
+    # ============ Restore Operations ============
+
+    @app.post("/api/v1/restore")
+    async def trigger_restore(
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Trigger a restore operation.
+
+        Required fields in request body:
+        - job_name: Name of the job to restore from
+        - client_id: Agent to run the restore on
+        - destination_path: Where to restore files to
+
+        Optional fields:
+        - run_id: Specific backup run to restore from (defaults to latest)
+        - source_subfolder: Subfolder within backup to restore
+        """
+        data = await request.json()
+
+        job_name = data.get("job_name")
+        client_id = data.get("client_id")
+        destination_path = data.get("destination_path")
+
+        if not job_name:
+            raise HTTPException(status_code=400, detail="job_name required")
+        if not client_id:
+            raise HTTPException(status_code=400, detail="client_id required")
+        if not destination_path:
+            raise HTTPException(status_code=400, detail="destination_path required")
+
+        # Get job config
+        job = storage.get_job(job_name)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        # Verify client exists
+        client = storage.get_client(client_id)
+        if not client:
+            raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
+
+        # Get backup source path (this is the backup destination in the job)
+        backup_source = job.get("destination_path")
+        source_subfolder = data.get("source_subfolder", "")
+        if source_subfolder:
+            backup_source = f"{backup_source}/{source_subfolder}"
+
+        restore_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        started_at = datetime.now()
+
+        # Save restore record
+        storage.save_job_run(
+            run_id=f"restore_{restore_id}",
+            job_name=f"restore:{job_name}",
+            status="pending",
+            started_at=started_at,
+            client_id=client_id,
+        )
+
+        # Start progress tracking
+        storage.start_job_progress(
+            run_id=f"restore_{restore_id}",
+            job_name=f"restore:{job_name}",
+            client_id=client_id,
+        )
+
+        # Queue restore command for the agent
+        command_payload = {
+            "job_name": job_name,
+            "run_id": f"restore_{restore_id}",
+            "source_path": backup_source,  # Restore FROM backup location
+            "destination_path": destination_path,  # Restore TO this location
+            "backend": job.get("backend", "rclone"),
+            "snapshot": data.get("snapshot"),
+            "dry_run": data.get("dry_run", False),
+        }
+
+        storage.queue_command(
+            client_id=client_id,
+            command_type="restore",
+            payload=command_payload,
+        )
+
+        return {
+            "restore_id": f"restore_{restore_id}",
+            "job_name": job_name,
+            "status": "pending",
+            "started_at": started_at.isoformat(),
+            "message": f"Restore queued for agent '{client_id}'",
+        }
+
+    @app.get("/api/v1/jobs/{job_name}/backups")
+    def list_job_backups(
+        job_name: str,
+        limit: int = 20,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List available backups for a job (successful runs that can be restored from)."""
+        if not storage.get_job(job_name):
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        runs = storage.get_job_runs(job_name, limit=limit)
+        # Filter to only successful backups (not restores)
+        backups = [
+            {
+                "run_id": r["run_id"],
+                "started_at": r.get("started_at"),
+                "finished_at": r.get("finished_at"),
+                "bytes_transferred": r.get("bytes_transferred", 0),
+                "files_transferred": r.get("files_transferred", 0),
+            }
+            for r in runs
+            if r.get("status") == "success" and not r.get("run_id", "").startswith("restore_")
+        ]
+        return backups
 
     # ============ Scheduler Status ============
 

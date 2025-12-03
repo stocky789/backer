@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block title %}Restore - Backer{% endblock %}
+{% block page_title %}Restore from Backup{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Restore Data</span>
+    </div>
+    <div class="modal-body">
+        <form id="restoreForm" onsubmit="submitRestore(event)">
+            <div class="form-group">
+                <label class="form-label">Select Backup Job</label>
+                <select id="jobSelect" class="form-input" required onchange="loadBackups()">
+                    <option value="">-- Select a job --</option>
+                    {% for job in jobs %}
+                    <option value="{{ job.name }}" data-client="{{ job.client_id or '' }}">{{ job.name }}</option>
+                    {% endfor %}
+                </select>
+                <div class="form-hint">Choose which backup job to restore from</div>
+            </div>
+
+            <div class="form-group" id="backupSelectGroup" style="display: none;">
+                <label class="form-label">Select Backup Point</label>
+                <select id="backupSelect" class="form-input">
+                    <option value="">Latest backup</option>
+                </select>
+                <div class="form-hint">Leave as "Latest" to restore from the most recent backup</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Restore To Agent</label>
+                <select id="agentSelect" class="form-input" required>
+                    <option value="">-- Select an agent --</option>
+                    {% for agent in agents %}
+                    <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.hostname }})</option>
+                    {% endfor %}
+                </select>
+                <div class="form-hint">Agent where files will be restored</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Destination Path</label>
+                <input type="text" id="destinationPath" class="form-input" required
+                       placeholder="/home/user/restored-data">
+                <div class="form-hint">Path on the agent where files will be restored. Use a different path than the original to avoid overwriting.</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Source Subfolder (Optional)</label>
+                <input type="text" id="sourceSubfolder" class="form-input"
+                       placeholder="subfolder/to/restore">
+                <div class="form-hint">Only restore files from this subfolder within the backup</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">
+                    <input type="checkbox" id="dryRun"> Dry Run
+                </label>
+                <div class="form-hint">Preview what would be restored without making changes</div>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <button type="submit" class="btn btn-primary">Start Restore</button>
+                <a href="/history" class="btn btn-secondary">Cancel</a>
+            </div>
+        </form>
+
+        <div id="restoreResult" style="display: none; margin-top: 20px;">
+            <div class="alert alert-info">
+                <strong>Restore Started</strong>
+                <p id="restoreMessage"></p>
+                <p>Run ID: <code id="restoreRunId"></code></p>
+                <a href="/" class="btn btn-secondary btn-sm" style="margin-top: 10px;">View Progress on Dashboard</a>
+            </div>
+        </div>
+
+        <div id="restoreError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+    </div>
+</div>
+
+<!-- Recent Restores -->
+{% if recent_restores %}
+<div class="card" style="margin-top: 20px;">
+    <div class="card-header">
+        <span class="card-title">Recent Restores</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Job</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Files</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for restore in recent_restores %}
+            <tr>
+                <td>{{ restore.job_name.replace('restore:', '') }}</td>
+                <td>
+                    {% if restore.status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif restore.status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% elif restore.status == 'pending' %}
+                    <span class="badge badge-info">Running</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ restore.status }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ restore.started_at_ago }}</td>
+                <td>{{ restore.files_transferred or 0 }} files</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<style>
+.alert {
+    padding: 15px;
+    border-radius: 6px;
+    margin-bottom: 10px;
+}
+.alert-info {
+    background: rgba(76, 175, 254, 0.1);
+    border: 1px solid var(--info);
+}
+.error-msg {
+    color: var(--error);
+    padding: 10px;
+    background: rgba(255, 107, 107, 0.1);
+    border-radius: 4px;
+}
+</style>
+
+<script>
+async function loadBackups() {
+    const jobSelect = document.getElementById('jobSelect');
+    const backupGroup = document.getElementById('backupSelectGroup');
+    const backupSelect = document.getElementById('backupSelect');
+    const agentSelect = document.getElementById('agentSelect');
+
+    const jobName = jobSelect.value;
+    if (!jobName) {
+        backupGroup.style.display = 'none';
+        return;
+    }
+
+    // Auto-select the agent associated with this job
+    const selectedOption = jobSelect.options[jobSelect.selectedIndex];
+    const clientId = selectedOption.dataset.client;
+    if (clientId) {
+        agentSelect.value = clientId;
+    }
+
+    // Fetch available backups
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/backups`);
+        const backups = await response.json();
+
+        backupSelect.innerHTML = '<option value="">Latest backup</option>';
+
+        backups.forEach(backup => {
+            const date = new Date(backup.started_at).toLocaleString();
+            const size = formatBytes(backup.bytes_transferred);
+            backupSelect.innerHTML += `<option value="${backup.run_id}">${date} (${backup.files_transferred} files, ${size})</option>`;
+        });
+
+        backupGroup.style.display = 'block';
+    } catch (e) {
+        console.error('Failed to load backups:', e);
+    }
+}
+
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
+}
+
+async function submitRestore(event) {
+    event.preventDefault();
+
+    const jobName = document.getElementById('jobSelect').value;
+    const clientId = document.getElementById('agentSelect').value;
+    const destinationPath = document.getElementById('destinationPath').value;
+    const sourceSubfolder = document.getElementById('sourceSubfolder').value;
+    const dryRun = document.getElementById('dryRun').checked;
+    const backupRunId = document.getElementById('backupSelect').value;
+
+    const errorDiv = document.getElementById('restoreError');
+    const resultDiv = document.getElementById('restoreResult');
+    errorDiv.style.display = 'none';
+    resultDiv.style.display = 'none';
+
+    try {
+        const response = await fetch('/api/v1/restore', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                job_name: jobName,
+                client_id: clientId,
+                destination_path: destinationPath,
+                source_subfolder: sourceSubfolder || null,
+                run_id: backupRunId || null,
+                dry_run: dryRun,
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            document.getElementById('restoreMessage').textContent = data.message;
+            document.getElementById('restoreRunId').textContent = data.restore_id;
+            resultDiv.style.display = 'block';
+            document.getElementById('restoreForm').style.display = 'none';
+        } else {
+            errorDiv.textContent = data.detail || 'Failed to start restore';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+</script>
+{% endblock %}

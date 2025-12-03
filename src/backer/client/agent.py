@@ -224,6 +224,31 @@ class BackerAgent:
         except Exception as e:
             print(f"Failed to acknowledge command {command_id}: {e}")
 
+    def _report_progress(
+        self,
+        run_id: str,
+        status: str | None = None,
+        progress_percent: int | None = None,
+        current_file: str | None = None,
+        bytes_processed: int | None = None,
+        files_processed: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Report progress update to server."""
+        try:
+            client = self._get_client()
+            client.post("/api/v1/progress", json={
+                "run_id": run_id,
+                "status": status,
+                "progress_percent": progress_percent,
+                "current_file": current_file,
+                "bytes_processed": bytes_processed,
+                "files_processed": files_processed,
+                "message": message,
+            })
+        except Exception as e:
+            print(f"Failed to report progress: {e}")
+
     def execute_backup(
         self,
         job: dict[str, Any],
@@ -233,6 +258,14 @@ class BackerAgent:
         # Use run_id from command payload if provided, otherwise generate one
         run_id = job.get("run_id") or datetime.now().strftime("%Y%m%d_%H%M%S")
         started_at = datetime.now()
+
+        # Report that we're starting
+        self._report_progress(
+            run_id=run_id,
+            status="running",
+            progress_percent=0,
+            message="Initializing backup...",
+        )
 
         try:
             backend = get_backend(
@@ -244,6 +277,13 @@ class BackerAgent:
             if not available:
                 raise RuntimeError(f"Backend not available: {message}")
 
+            self._report_progress(
+                run_id=run_id,
+                status="running",
+                progress_percent=5,
+                message="Backend ready, starting transfer...",
+            )
+
             source = BackupSource(
                 path=Path(job["source_path"]).expanduser(),
                 excludes=job.get("excludes", []),
@@ -251,13 +291,45 @@ class BackerAgent:
 
             destination = BackupDestination(path=job["destination_path"])
 
+            # Create progress callback for backends that support it
+            def progress_callback(
+                bytes_done: int = 0,
+                files_done: int = 0,
+                current_file: str = "",
+                total_bytes: int = 0,
+            ) -> None:
+                # Calculate percentage (leave 5% for init, 5% for finish)
+                percent = 5
+                if total_bytes > 0:
+                    percent = 5 + int((bytes_done / total_bytes) * 90)
+                elif files_done > 0:
+                    # Estimate based on files if no byte info
+                    percent = min(5 + files_done, 95)
+
+                self._report_progress(
+                    run_id=run_id,
+                    status="running",
+                    progress_percent=percent,
+                    current_file=current_file[:200] if current_file else None,
+                    bytes_processed=bytes_done,
+                    files_processed=files_done,
+                )
+
             result = backend.backup(
                 source=source,
                 destination=destination,
                 dry_run=dry_run,
+                progress_callback=progress_callback if hasattr(backend.backup, '__code__') and 'progress_callback' in backend.backup.__code__.co_varnames else None,
             )
 
             finished_at = datetime.now()
+
+            self._report_progress(
+                run_id=run_id,
+                status="finishing",
+                progress_percent=95,
+                message="Finalizing backup...",
+            )
 
             # Report result to server
             report = {
@@ -283,6 +355,14 @@ class BackerAgent:
 
         except Exception as e:
             finished_at = datetime.now()
+
+            self._report_progress(
+                run_id=run_id,
+                status="failed",
+                progress_percent=0,
+                message=str(e)[:200],
+            )
+
             report = {
                 "run_id": run_id,
                 "job_name": job.get("job_name", "unknown"),
@@ -310,26 +390,106 @@ class BackerAgent:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Execute a restore job."""
-        backend = get_backend(
-            job.get("backend", "rsync"),
-            job.get("backend_options", {}),
+        run_id = job.get("run_id") or f"restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        started_at = datetime.now()
+        job_name = job.get("job_name", "unknown")
+
+        # Report that we're starting restore
+        self._report_progress(
+            run_id=run_id,
+            status="running",
+            progress_percent=0,
+            message="Initializing restore...",
         )
 
-        source = BackupDestination(path=job["source_path"])
-        destination = Path(job["destination_path"])
+        try:
+            backend = get_backend(
+                job.get("backend", "rsync"),
+                job.get("backend_options", {}),
+            )
 
-        result = backend.restore(
-            source=source,
-            destination=destination,
-            snapshot=job.get("snapshot"),
-            dry_run=dry_run,
-        )
+            available, message = backend.check_available()
+            if not available:
+                raise RuntimeError(f"Backend not available: {message}")
 
-        return {
-            "success": result.success,
-            "errors": result.errors,
-            "files_transferred": result.files_transferred,
-        }
+            self._report_progress(
+                run_id=run_id,
+                status="running",
+                progress_percent=5,
+                message="Backend ready, starting restore...",
+            )
+
+            source = BackupDestination(path=job["source_path"])
+            destination = Path(job["destination_path"])
+
+            result = backend.restore(
+                source=source,
+                destination=destination,
+                snapshot=job.get("snapshot"),
+                dry_run=dry_run,
+            )
+
+            finished_at = datetime.now()
+
+            self._report_progress(
+                run_id=run_id,
+                status="finishing",
+                progress_percent=95,
+                message="Finalizing restore...",
+            )
+
+            # Report result to server
+            report = {
+                "run_id": run_id,
+                "job_name": f"restore:{job_name}",
+                "client_id": self.client_id,
+                "success": result.success,
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "bytes_transferred": getattr(result, "bytes_transferred", 0),
+                "files_transferred": result.files_transferred,
+                "errors": result.errors,
+                "output": getattr(result, "output", "")[:5000],
+            }
+
+            try:
+                client = self._get_client()
+                client.post("/api/v1/results", json=report)
+            except Exception as e:
+                print(f"Failed to report restore result: {e}")
+
+            return report
+
+        except Exception as e:
+            finished_at = datetime.now()
+
+            self._report_progress(
+                run_id=run_id,
+                status="failed",
+                progress_percent=0,
+                message=str(e)[:200],
+            )
+
+            report = {
+                "run_id": run_id,
+                "job_name": f"restore:{job_name}",
+                "client_id": self.client_id,
+                "success": False,
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "bytes_transferred": 0,
+                "files_transferred": 0,
+                "errors": [str(e)],
+                "output": "",
+            }
+
+            try:
+                client = self._get_client()
+                client.post("/api/v1/results", json=report)
+            except Exception:
+                pass
+
+            return report
 
     def run(self, heartbeat_interval: int = 60) -> None:
         """Run the agent in daemon mode."""

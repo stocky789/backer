@@ -92,6 +92,27 @@ class Storage:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_repositories_name ON repositories(name);
+
+                CREATE TABLE IF NOT EXISTS job_progress (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    job_name TEXT NOT NULL,
+                    client_id TEXT,
+                    status TEXT DEFAULT 'starting',
+                    progress_percent INTEGER DEFAULT 0,
+                    current_file TEXT,
+                    bytes_processed INTEGER DEFAULT 0,
+                    files_processed INTEGER DEFAULT 0,
+                    total_bytes INTEGER DEFAULT 0,
+                    total_files INTEGER DEFAULT 0,
+                    message TEXT,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (job_name) REFERENCES jobs(name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_job_progress_run ON job_progress(run_id);
+                CREATE INDEX IF NOT EXISTS idx_job_progress_status ON job_progress(status);
             """)
 
     @contextmanager
@@ -519,3 +540,119 @@ class Storage:
                 "UPDATE repositories SET password_encrypted = ? WHERE id = ?",
                 (encrypted, repo_id),
             )
+
+    # Progress tracking operations
+    def start_job_progress(
+        self,
+        run_id: str,
+        job_name: str,
+        client_id: str | None = None,
+    ) -> None:
+        """Start tracking progress for a job run."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO job_progress
+                    (run_id, job_name, client_id, status, started_at, updated_at)
+                VALUES (?, ?, ?, 'starting', ?, ?)
+                """,
+                (run_id, job_name, client_id, now, now),
+            )
+
+    def update_job_progress(
+        self,
+        run_id: str,
+        status: str | None = None,
+        progress_percent: int | None = None,
+        current_file: str | None = None,
+        bytes_processed: int | None = None,
+        files_processed: int | None = None,
+        total_bytes: int | None = None,
+        total_files: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Update progress for a running job."""
+        updates = ["updated_at = ?"]
+        params: list[Any] = [datetime.now().isoformat()]
+
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if progress_percent is not None:
+            updates.append("progress_percent = ?")
+            params.append(progress_percent)
+        if current_file is not None:
+            updates.append("current_file = ?")
+            params.append(current_file)
+        if bytes_processed is not None:
+            updates.append("bytes_processed = ?")
+            params.append(bytes_processed)
+        if files_processed is not None:
+            updates.append("files_processed = ?")
+            params.append(files_processed)
+        if total_bytes is not None:
+            updates.append("total_bytes = ?")
+            params.append(total_bytes)
+        if total_files is not None:
+            updates.append("total_files = ?")
+            params.append(total_files)
+        if message is not None:
+            updates.append("message = ?")
+            params.append(message)
+
+        params.append(run_id)
+
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE job_progress SET {', '.join(updates)} WHERE run_id = ?",
+                params,
+            )
+
+    def finish_job_progress(self, run_id: str, status: str = "completed") -> None:
+        """Mark a job progress as finished and clean up."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE job_progress SET status = ?, progress_percent = 100, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (status, datetime.now().isoformat(), run_id),
+            )
+
+    def get_job_progress(self, run_id: str) -> dict[str, Any] | None:
+        """Get progress for a specific job run."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_progress WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    def get_running_jobs(self) -> list[dict[str, Any]]:
+        """Get all currently running jobs."""
+        with self._connect() as conn:
+            # Get from job_progress table - active jobs
+            rows = conn.execute(
+                """
+                SELECT * FROM job_progress
+                WHERE status NOT IN ('completed', 'failed', 'cancelled')
+                ORDER BY started_at DESC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def cleanup_stale_progress(self, max_age_minutes: int = 60) -> int:
+        """Clean up stale progress records (jobs that hung or crashed)."""
+        cutoff = (datetime.now() - __import__('datetime').timedelta(minutes=max_age_minutes)).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM job_progress
+                WHERE status NOT IN ('completed', 'failed', 'cancelled')
+                AND updated_at < ?
+                """,
+                (cutoff,),
+            )
+            return cursor.rowcount

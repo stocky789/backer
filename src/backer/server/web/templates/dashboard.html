@@ -3,6 +3,15 @@
 {% block page_title %}Dashboard{% endblock %}
 
 {% block content %}
+<!-- Running Jobs Panel -->
+<div id="runningJobsPanel" class="card" style="display: none; margin-bottom: 20px; border-left: 3px solid var(--info);">
+    <div class="card-header">
+        <span class="card-title">Running Jobs</span>
+        <span class="badge badge-info" id="runningCount">0</span>
+    </div>
+    <div id="runningJobsList"></div>
+</div>
+
 <!-- Stats -->
 <div class="stats-grid">
     <div class="stat-card">
@@ -164,4 +173,106 @@
     </div>
     {% endif %}
 </div>
+
+<style>
+.running-job {
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+}
+.running-job:last-child {
+    border-bottom: none;
+}
+.running-job-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.running-job-name {
+    font-weight: bold;
+}
+.running-job-status {
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+.progress-bar-container {
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+.progress-bar {
+    background: var(--info);
+    height: 100%;
+    transition: width 0.3s ease;
+}
+.running-job-details {
+    font-size: 0.85em;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+}
+.current-file {
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+</style>
+
+<script>
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
+}
+
+function updateRunningJobs() {
+    fetch('/api/v1/running')
+        .then(response => response.json())
+        .then(jobs => {
+            const panel = document.getElementById('runningJobsPanel');
+            const list = document.getElementById('runningJobsList');
+            const count = document.getElementById('runningCount');
+
+            if (jobs.length === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+
+            panel.style.display = 'block';
+            count.textContent = jobs.length;
+
+            list.innerHTML = jobs.map(job => `
+                <div class="running-job">
+                    <div class="running-job-header">
+                        <span class="running-job-name">${escapeHtml(job.job_name)}</span>
+                        <span class="running-job-status">${escapeHtml(job.message || job.status || 'Running...')}</span>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" style="width: ${job.progress_percent || 0}%"></div>
+                    </div>
+                    <div class="running-job-details">
+                        <span class="current-file">${job.current_file ? escapeHtml(job.current_file) : ''}</span>
+                        <span>${job.progress_percent || 0}% ${job.bytes_processed ? '(' + formatBytes(job.bytes_processed) + ')' : ''}</span>
+                    </div>
+                </div>
+            `).join('');
+        })
+        .catch(err => console.error('Failed to fetch running jobs:', err));
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Initial load and poll every 2 seconds
+updateRunningJobs();
+setInterval(updateRunningJobs, 2000);
+</script>
 {% endblock %}
