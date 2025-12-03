@@ -19,7 +19,7 @@ class DestinationConfig(BaseModel):
     """Configuration for a backup destination."""
 
     path: str
-    backend: str = "rsync"  # rsync, rclone, restic, borg
+    backend: str = "rclone"  # rclone, restic (rsync not supported for agents)
 
 
 class RetentionConfig(BaseModel):

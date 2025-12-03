@@ -63,7 +63,7 @@ class BackupDestination:
     """Destination definition for a backup."""
 
     path: str  # Can be local path or remote URI (rclone remote:path, etc.)
-    backend_type: BackendType = BackendType.RSYNC
+    backend_type: BackendType = BackendType.RCLONE  # Default to rclone (rsync not supported for agents)
 
 
 class BackendBase(ABC):
