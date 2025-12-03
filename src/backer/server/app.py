@@ -597,8 +597,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get backup source path (this is the backup destination in the job)
         backup_source = job.get("destination_path")
+        backend = job.get("backend", "rclone")
         source_subfolder = data.get("source_subfolder", "")
-        if source_subfolder:
+
+        # For rclone, append subfolder to source path
+        # For restic, subfolder is handled separately via --include flag
+        if source_subfolder and backend != "restic":
             backup_source = f"{backup_source}/{source_subfolder}"
 
         restore_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -626,9 +630,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "run_id": f"restore_{restore_id}",
             "source_path": backup_source,  # Restore FROM backup location
             "destination_path": destination_path,  # Restore TO this location
-            "backend": job.get("backend", "rclone"),
+            "backend": backend,
             "backend_options": job.get("backend_options", {}),  # Includes restic_password
             "snapshot": data.get("snapshot"),
+            "source_subfolder": source_subfolder if backend == "restic" else "",  # For restic --include
             "clean_restore": data.get("clean_restore", False),  # Delete extra files at destination
             "dry_run": data.get("dry_run", False),
         }

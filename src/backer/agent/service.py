@@ -409,6 +409,7 @@ class AgentService:
         destination_path = payload.get('destination_path')
         backend = payload.get('backend', 'rclone')
         snapshot = payload.get('snapshot')  # For restic: snapshot ID or "latest"
+        source_subfolder = payload.get('source_subfolder', '')  # For restic: --include path
         clean_restore = payload.get('clean_restore', False)
         backend_options = payload.get('backend_options', {})
         dry_run = payload.get('dry_run', False)
@@ -440,6 +441,7 @@ class AgentService:
                 result = self._run_restic_restore(
                     source_path, destination_path, snapshot, dry_run, run_id,
                     backend_options=backend_options,
+                    include_path=source_subfolder,
                 )
             else:
                 raise ValueError(f"Restore not supported for backend: {backend}")
@@ -716,12 +718,14 @@ class AgentService:
         dry_run: bool,
         run_id: str,
         backend_options: dict[str, Any] | None = None,
+        include_path: str | None = None,
     ) -> dict[str, Any]:
         """Run restic restore command."""
         logger.info("[RESTIC] Setting up restic restore")
         logger.debug(f"[RESTIC] Repository: {repo}")
         logger.debug(f"[RESTIC] Destination: {dest}")
         logger.debug(f"[RESTIC] Snapshot: {snapshot or 'latest'}")
+        logger.debug(f"[RESTIC] Include path: {include_path or 'all'}")
 
         try:
             restic = self._get_tool_path('restic')
@@ -746,9 +750,14 @@ class AgentService:
         snapshot_id = snapshot if snapshot else 'latest'
 
         # Build restore command
-        # restic restore <snapshot> --target <dest> --delete
-        # --delete removes files in destination that are not in the snapshot
+        # restic restore <snapshot> --target <dest>
         cmd = [str(restic), '-r', repo, 'restore', snapshot_id, '--target', dest, '-v']
+
+        # Add --include to restore only specific path from snapshot
+        if include_path:
+            # Strip leading slashes to make it relative
+            include_path = include_path.lstrip('/')
+            cmd.extend(['--include', include_path])
 
         if dry_run:
             cmd.append('--dry-run')
