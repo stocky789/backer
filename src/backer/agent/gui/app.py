@@ -28,7 +28,7 @@ class BackerAgentApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Backer Agent")
-        self.root.geometry("450x350")
+        self.root.geometry("450x420")
         self.root.resizable(False, False)
 
         # Set icon if available
@@ -122,7 +122,16 @@ class BackerAgentApp:
             font=('Segoe UI', 8),
             foreground='gray'
         )
-        help_label.pack(anchor=tk.W)
+        help_label.pack(anchor=tk.W, pady=(0, 10))
+
+        # Connect button - prominently placed
+        self.connect_btn = ttk.Button(
+            url_frame,
+            text="Connect",
+            command=self.connect_to_server,
+            width=20
+        )
+        self.connect_btn.pack(pady=(5, 0))
 
         # Status frame
         status_frame = ttk.LabelFrame(main_frame, text="Status", padding="15")
@@ -150,15 +159,6 @@ class BackerAgentApp:
         # Buttons frame
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=(10, 0))
-
-        # Connect button
-        self.connect_btn = ttk.Button(
-            button_frame,
-            text="Connect",
-            command=self.connect_to_server,
-            width=15
-        )
-        self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         # Install Service button
         self.install_btn = ttk.Button(
