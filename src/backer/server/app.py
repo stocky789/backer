@@ -10,8 +10,10 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 
 from backer import __version__
+from backer.server.web.routes import router as web_router
 from backer.server.models import (
     BackupResult,
     Client,
@@ -282,5 +284,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             output=result.output[:10000],  # Limit output size
         )
         return {"status": "recorded"}
+
+    # ============ Web UI ============
+
+    # Store storage in app state for web routes
+    app.state.storage = _storage
+
+    # Mount static files
+    static_dir = Path(__file__).parent / "web" / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # Include web UI routes
+    app.include_router(web_router)
 
     return app

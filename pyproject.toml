@@ -39,6 +39,8 @@ server = [
     "fastapi>=0.100",
     "uvicorn>=0.20",
     "httpx>=0.24",
+    "jinja2>=3.0",
+    "python-multipart>=0.0.6",
 ]
 client = [
     "httpx>=0.24",

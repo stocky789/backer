@@ -1,286 +1,156 @@
 # Backer
 
-Unified backup orchestration - one tool to manage rsync, rclone, restic and more.
+Open-source backup management with web UI - like Veeam/UrBackup but simpler.
 
-## Prerequisites
+**Self-contained**: Backer automatically downloads rclone and restic - no manual tool installation required.
 
-You need at least one of these backup tools installed:
-
-```bash
-# Debian/Ubuntu
-sudo apt install rsync rclone restic
-
-# Arch
-sudo pacman -S rsync rclone restic
-
-# macOS
-brew install rsync rclone restic
-```
-
-## Installation
+## Quick Start
 
 ```bash
-# Clone the repo
+# Install
 git clone https://github.com/stocky789/backer.git
 cd backer
-
-# Install in development mode (recommended for now)
 pip install -e ".[all]"
 
-# Or just the basics (no server/client)
-pip install -e .
+# Setup (downloads backup tools automatically)
+backer setup
+
+# Run a backup
+backer backup /home/user/documents /mnt/backup/documents
 ```
 
-Verify it works:
+## Architecture
 
-```bash
-backer --version
-backer backends    # Shows which backup tools are available
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Backer Server + Web UI                    │
+│    - Manage agents from web dashboard                        │
+│    - Configure and schedule backup jobs                      │
+│    - Monitor backup status in real-time                      │
+│    - View backup history and logs                            │
+│    http://localhost:8420                                     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+           ┌──────────────────┼──────────────────┐
+           │                  │                  │
+           ▼                  ▼                  ▼
+    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+    │   Agent     │    │   Agent     │    │   Agent     │
+    │ (Workstation)│   │  (Server)   │    │   (NAS)     │
+    └─────────────┘    └─────────────┘    └─────────────┘
+           │                  │                  │
+           ▼                  ▼                  ▼
+    ┌───────────────────────────────────────────────────────┐
+    │          Backup Tools (auto-downloaded)                │
+    │              rclone  •  restic                         │
+    └───────────────────────────────────────────────────────┘
 ```
 
-## Usage
+## Server + Agent Mode (Recommended)
 
-### 1. Simple Backups (Standalone Mode)
+This is how you'd typically use Backer for multiple machines:
 
-No server needed - just run backups directly.
-
-**Backup a folder with rsync:**
+**1. Start the server:**
 
 ```bash
-# Basic backup
-backer backup /home/user/documents /mnt/external/documents
-
-# Dry run first (see what would happen)
-backer backup /home/user/documents /mnt/external/documents --dry-run
-
-# Exclude patterns
-backer backup /home/user/projects /backup/projects \
-  -e "node_modules" \
-  -e "*.log" \
-  -e ".git"
-```
-
-**Backup to cloud with rclone:**
-
-First configure rclone if you haven't:
-
-```bash
-rclone config   # Interactive setup for your cloud provider
-```
-
-Then backup:
-
-```bash
-# Backup to configured remote (e.g., "gdrive" or "s3")
-backer backup /home/user/photos gdrive:backups/photos -b rclone
-
-# Backup to S3-compatible storage
-backer backup /data s3:mybucket/data -b rclone
-```
-
-**Backup with restic (encrypted + deduplicated):**
-
-First initialize a restic repo:
-
-```bash
-export RESTIC_PASSWORD="your-secure-password"
-restic init -r /mnt/backup/restic-repo
-```
-
-Then backup:
-
-```bash
-backer backup /home/user /mnt/backup/restic-repo -b restic
-```
-
-**Restore:**
-
-```bash
-# Restore from rsync backup
-backer restore /mnt/external/documents /home/user/documents-restored
-
-# Restore from restic (latest snapshot)
-backer restore /mnt/backup/restic-repo /tmp/restored -b restic
-
-# Restore specific restic snapshot
-backer restore /mnt/backup/restic-repo /tmp/restored -b restic -s abc123
-```
-
-### 2. Server Mode (Multi-Machine Backups)
-
-For backing up multiple machines from a central server.
-
-**Start the server:**
-
-```bash
-# On your backup server
 backer server start
-
-# Custom port
-backer server start --port 9000
-
-# Bind to specific interface
-backer server start --host 192.168.1.100 --port 8420
+# Web UI available at http://localhost:8420
 ```
 
-The server runs at `http://localhost:8420` by default.
-
-**Register client machines:**
+**2. On each machine to backup:**
 
 ```bash
-# On each machine you want to back up
+# Install backer
+pip install -e ".[client]"
+
+# Register with server
 backer agent register --server http://backup-server:8420
 
-# This saves credentials to ~/.config/backer/agent.yaml
-```
-
-**Start the agent:**
-
-```bash
-# Run in foreground
+# Start agent (keeps running in background)
 backer agent start
-
-# Or check status
-backer agent status
 ```
 
-**Create and manage jobs:**
+**3. Manage everything from the web UI:**
+
+- See all connected agents
+- Create backup jobs
+- Run backups on demand
+- View backup history
+- Monitor status
+
+## Standalone Mode (Single Machine)
+
+For simple single-machine backups, no server needed:
 
 ```bash
-# Create a backup job
-backer job create \
-  --name workstation-docs \
-  --source /home/user/documents \
-  --dest /mnt/backup/workstation/docs \
-  --backend rsync \
-  --server http://backup-server:8420
+# Check installed tools
+backer tools
 
-# List all jobs
-backer job list --server http://backup-server:8420
+# Backup to local drive
+backer backup /data /mnt/backup
 
-# Run a job manually
-backer job run workstation-docs --server http://backup-server:8420
+# Backup to cloud (requires rclone config)
+backer backup /data remote:bucket/data
 
-# Dry run
-backer job run workstation-docs --dry-run --server http://backup-server:8420
+# Dry run first
+backer backup /data /backup --dry-run
+
+# With excludes
+backer backup /home /backup -e ".cache" -e "node_modules"
 ```
 
-### 3. Using the API Directly
-
-The server exposes a REST API you can use with curl or any HTTP client:
-
-```bash
-# Health check
-curl http://localhost:8420/health
-
-# List all clients
-curl http://localhost:8420/api/v1/clients
-
-# List all jobs
-curl http://localhost:8420/api/v1/jobs
-
-# Create a job
-curl -X POST http://localhost:8420/api/v1/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-backup",
-    "source_path": "/data",
-    "destination_path": "/backup/data",
-    "backend": "rsync"
-  }'
-
-# Run a job
-curl -X POST http://localhost:8420/api/v1/jobs/my-backup/run \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": false}'
-
-# Get job history
-curl http://localhost:8420/api/v1/jobs/my-backup/runs
-```
-
-## CLI Reference
+## CLI Commands
 
 ```
-backer --help                    Show all commands
-backer backup --help             Backup command options
-backer restore --help            Restore command options
-backer backends                  List available backends
+Setup:
+  backer setup              Download and install backup tools
+  backer tools              Show installed tools status
+  backer backends           Show available backends
 
-backer server start              Start backup server
-backer server start -p 9000      Custom port
+Backup:
+  backer backup SRC DEST    Run a backup
+  backer restore SRC DEST   Restore from backup
 
-backer agent register -s URL     Register with server
-backer agent start               Start agent daemon
-backer agent status              Check agent status
+Server:
+  backer server start       Start server with web UI
 
-backer job list                  List all jobs
-backer job create                Create a job
-backer job run NAME              Run a job
+Agent:
+  backer agent register     Register agent with server
+  backer agent start        Start agent daemon
+  backer agent status       Check connection status
+
+Jobs:
+  backer job list           List all jobs
+  backer job create         Create a backup job
+  backer job run NAME       Run a job manually
 ```
-
-## Example: Full Backup Setup
-
-Here's a complete example backing up a home directory to an external drive:
-
-```bash
-# 1. Check rsync is available
-backer backends
-
-# 2. Do a dry run first
-backer backup /home/user /mnt/external/home-backup \
-  -e ".cache" \
-  -e "Downloads" \
-  -e ".local/share/Trash" \
-  --dry-run
-
-# 3. Run the actual backup
-backer backup /home/user /mnt/external/home-backup \
-  -e ".cache" \
-  -e "Downloads" \
-  -e ".local/share/Trash"
-
-# 4. Verify with verbose output
-backer backup /home/user /mnt/external/home-backup \
-  -e ".cache" \
-  --verbose
-```
-
-## Data Storage
-
-- **Server database:** `~/.local/share/backer/backer.db` (SQLite)
-- **Job history:** `~/.local/share/backer/history/`
-- **Agent config:** `~/.config/backer/agent.yaml`
-
-## Current Limitations
-
-This is early development. What works:
-
-- Single backup/restore operations via CLI
-- Server API for job management
-- Client registration and heartbeat
-- rsync, rclone, restic backends
-
-What's not implemented yet:
-
-- Scheduled jobs (cron defined but not executing)
-- Automatic agent job execution from server
-- Web UI
-- Email notifications
 
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+# Install with dev dependencies
+make install-dev
 
-# Run linter
-ruff check src/
+# Run tests
+make test
 
-# Format code
-ruff format src/
+# Quick backup test
+make demo
+./scripts/test-backup.sh
 
-# Type check
-mypy src/backer/
+# Lint and format
+make lint
+make format
+```
+
+## API
+
+The server exposes a REST API:
+
+```bash
+curl http://localhost:8420/health
+curl http://localhost:8420/api/v1/clients
+curl http://localhost:8420/api/v1/jobs
 ```
 
 ## License

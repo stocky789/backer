@@ -1,7 +1,6 @@
 """Rclone backend implementation."""
 
 import json
-import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +15,7 @@ from backer.backends.base import (
     OperationType,
 )
 from backer.backends.registry import BackendRegistry
+from backer.tools.manager import get_tool_manager
 
 
 @BackendRegistry.register(BackendType.RCLONE)
@@ -28,20 +28,47 @@ class RcloneBackend(BackendBase):
     - Backblaze B2
     - Azure Blob Storage
     - SFTP
+    - Local filesystem
     - And many more...
     """
 
     backend_type = BackendType.RCLONE
 
+    def __init__(self, config: dict[str, Any] | None = None):
+        super().__init__(config)
+        self._tool_manager = get_tool_manager()
+        self._binary_path: Path | None = None
+
+    def _get_binary(self, auto_install: bool = True) -> Path:
+        """Get path to rclone binary, downloading if necessary."""
+        if self._binary_path and self._binary_path.exists():
+            return self._binary_path
+
+        path = self._tool_manager.get_tool_path("rclone")
+        if path:
+            self._binary_path = path
+            return path
+
+        if auto_install:
+            self._binary_path = self._tool_manager.download("rclone")
+            return self._binary_path
+
+        raise RuntimeError("rclone not installed. Run 'backer setup' to install tools.")
+
     def check_available(self) -> tuple[bool, str]:
-        """Check if rclone is available."""
-        rclone_path = shutil.which("rclone")
-        if not rclone_path:
-            return False, "rclone not found in PATH"
+        """Check if rclone is available, downloading if needed."""
+        try:
+            binary = self._get_binary(auto_install=False)
+        except RuntimeError:
+            # Try to auto-install
+            try:
+                binary = self._get_binary(auto_install=True)
+            except Exception as e:
+                return False, f"rclone not available and auto-install failed: {e}"
 
         try:
             result = subprocess.run(
-                ["rclone", "version"],
+                [str(binary), "version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -54,15 +81,16 @@ class RcloneBackend(BackendBase):
     def list_remotes(self) -> list[str]:
         """List configured rclone remotes."""
         try:
+            binary = self._get_binary()
             result = subprocess.run(
-                ["rclone", "listremotes"],
+                [str(binary), "listremotes"],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
             if result.returncode == 0:
                 return [r.strip() for r in result.stdout.strip().split("\n") if r.strip()]
-        except (subprocess.TimeoutExpired, OSError):
+        except (subprocess.TimeoutExpired, OSError, RuntimeError):
             pass
         return []
 
@@ -76,7 +104,8 @@ class RcloneBackend(BackendBase):
         extra_flags: list[str] | None = None,
     ) -> list[str]:
         """Build rclone command."""
-        cmd = ["rclone", operation]
+        binary = self._get_binary()
+        cmd = [str(binary), operation]
 
         # Common flags
         cmd.extend([
@@ -113,12 +142,9 @@ class RcloneBackend(BackendBase):
         """Parse rclone output for stats."""
         stats: dict[str, Any] = {}
 
-        # Try to extract transfer stats from output
-        # rclone outputs stats like: "Transferred: 1.234 GiB / 5.678 GiB, 22%, 10.5 MiB/s"
         lines = output.strip().split("\n")
         for line in lines:
             if "Transferred:" in line and "Errors:" not in line:
-                # Try to parse transfer line
                 parts = line.split(",")
                 if len(parts) >= 1:
                     stats["transfer_summary"] = parts[0].replace("Transferred:", "").strip()
@@ -141,14 +167,23 @@ class RcloneBackend(BackendBase):
         """Run rclone sync backup."""
         started_at = datetime.now()
 
-        # Use 'sync' for backup - makes destination match source
-        cmd = self._build_command(
-            operation="sync",
-            source=str(source.path),
-            destination=destination.path,
-            excludes=source.excludes,
-            dry_run=dry_run,
-        )
+        try:
+            cmd = self._build_command(
+                operation="sync",
+                source=str(source.path),
+                destination=destination.path,
+                excludes=source.excludes,
+                dry_run=dry_run,
+            )
+        except RuntimeError as e:
+            return BackendResult(
+                success=False,
+                operation=OperationType.BACKUP,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(e)],
+                return_code=-1,
+            )
 
         try:
             result = subprocess.run(
@@ -206,13 +241,22 @@ class RcloneBackend(BackendBase):
         """Restore from rclone backup."""
         started_at = datetime.now()
 
-        # For restore, copy from remote to local
-        cmd = self._build_command(
-            operation="sync",
-            source=source.path,
-            destination=str(destination),
-            dry_run=dry_run,
-        )
+        try:
+            cmd = self._build_command(
+                operation="sync",
+                source=source.path,
+                destination=str(destination),
+                dry_run=dry_run,
+            )
+        except RuntimeError as e:
+            return BackendResult(
+                success=False,
+                operation=OperationType.RESTORE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(e)],
+                return_code=-1,
+            )
 
         try:
             result = subprocess.run(
@@ -260,14 +304,11 @@ class RcloneBackend(BackendBase):
             )
 
     def list_snapshots(self, destination: BackupDestination) -> list[dict[str, Any]]:
-        """List contents at destination.
-
-        rclone doesn't have native snapshot support, but we can list
-        what's at the destination.
-        """
+        """List contents at destination."""
         try:
+            binary = self._get_binary()
             result = subprocess.run(
-                ["rclone", "lsjson", destination.path, "--dirs-only"],
+                [str(binary), "lsjson", destination.path, "--dirs-only"],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -284,7 +325,7 @@ class RcloneBackend(BackendBase):
                     }
                     for item in items
                 ]
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError):
             pass
 
         return [{"id": "current", "path": destination.path, "note": "Current backup state"}]
@@ -294,8 +335,9 @@ class RcloneBackend(BackendBase):
         started_at = datetime.now()
 
         try:
+            binary = self._get_binary()
             result = subprocess.run(
-                ["rclone", "check", destination.path, "--one-way"],
+                [str(binary), "check", destination.path, "--one-way"],
                 capture_output=True,
                 text=True,
                 timeout=self.config.get("timeout", 3600),
@@ -309,7 +351,7 @@ class RcloneBackend(BackendBase):
                 output=result.stdout + result.stderr,
                 return_code=result.returncode,
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
             return BackendResult(
                 success=False,
                 operation=OperationType.CHECK,

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}History - Backer{% endblock %}
+{% block page_title %}Backup History{% endblock %}
+
+{% block actions %}
+<button class="btn btn-secondary" onclick="location.reload()">Refresh</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Recent Backups</span>
+    </div>
+    {% if runs %}
+    <table>
+        <thead>
+            <tr>
+                <th>Job</th>
+                <th>Agent</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Duration</th>
+                <th>Files</th>
+                <th>Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for run in runs %}
+            <tr>
+                <td><strong>{{ run.job_name }}</strong></td>
+                <td>{{ run.client_id or '-' }}</td>
+                <td>
+                    {% if run.status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif run.status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% elif run.status == 'running' %}
+                    <span class="badge badge-info">Running</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ run.status }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ run.started_at_formatted }}</td>
+                <td>{{ run.duration or '-' }}</td>
+                <td>{{ run.files_transferred or '-' }}</td>
+                <td>{{ run.bytes_formatted or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No Backup History</h3>
+        <p>Run a backup job to see history here</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

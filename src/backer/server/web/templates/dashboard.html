@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Backer{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<!-- Stats -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Agents Online</div>
+        <div class="stat-value success">{{ stats.agents_online }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total Agents</div>
+        <div class="stat-value">{{ stats.total_agents }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Backup Jobs</div>
+        <div class="stat-value">{{ stats.total_jobs }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Backups Today</div>
+        <div class="stat-value">{{ stats.backups_today }}</div>
+    </div>
+</div>
+
+<div class="grid grid-2">
+    <!-- Agents -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Agents</span>
+            <a href="/agents" class="btn btn-secondary btn-sm">View All</a>
+        </div>
+        {% if agents %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for agent in agents[:5] %}
+                <tr>
+                    <td><strong>{{ agent.name }}</strong></td>
+                    <td>
+                        {% if agent.status == 'online' %}
+                        <span class="badge badge-success">Online</span>
+                        {% else %}
+                        <span class="badge badge-muted">Offline</span>
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--text-muted)">{{ agent.last_seen_ago }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No agents registered yet</p>
+            <a href="/agents" class="btn btn-primary btn-sm">Setup Agent</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Recent Activity -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Recent Activity</span>
+            <a href="/history" class="btn btn-secondary btn-sm">View All</a>
+        </div>
+        {% if recent_runs %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Job</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in recent_runs[:5] %}
+                <tr>
+                    <td>{{ run.job_name }}</td>
+                    <td>
+                        {% if run.status == 'success' %}
+                        <span class="badge badge-success">Success</span>
+                        {% elif run.status == 'failed' %}
+                        <span class="badge badge-error">Failed</span>
+                        {% elif run.status == 'running' %}
+                        <span class="badge badge-info">Running</span>
+                        {% else %}
+                        <span class="badge badge-muted">{{ run.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--text-muted)">{{ run.started_at_ago }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No backup history yet</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Jobs -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Backup Jobs</span>
+        <a href="/jobs/new" class="btn btn-primary btn-sm">+ New Job</a>
+    </div>
+    {% if jobs %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Agent</th>
+                <th>Source</th>
+                <th>Destination</th>
+                <th>Last Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in jobs %}
+            <tr>
+                <td><strong>{{ job.name }}</strong></td>
+                <td>{{ job.client_id or 'Any' }}</td>
+                <td><code>{{ job.source_path[:25] }}{% if job.source_path|length > 25 %}...{% endif %}</code></td>
+                <td><code>{{ job.destination_path[:25] }}{% if job.destination_path|length > 25 %}...{% endif %}</code></td>
+                <td>
+                    {% if job.last_status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif job.last_status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% elif job.last_status %}
+                    <span class="badge badge-muted">{{ job.last_status }}</span>
+                    {% else %}
+                    <span class="badge badge-muted">Never Run</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/v1/jobs/{{ job.name }}/run"
+                            hx-headers='{"Content-Type": "application/json"}'
+                            hx-vals='{"dry_run": false}'
+                            hx-swap="none"
+                            hx-on::after-request="alert('Backup job started!')">
+                        Run Now
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No Backup Jobs</h3>
+        <p>Create a backup job to start protecting your data</p>
+        <a href="/jobs/new" class="btn btn-primary">Create First Job</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -2,7 +2,6 @@
 
 import json
 import os
-import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from backer.backends.base import (
     OperationType,
 )
 from backer.backends.registry import BackendRegistry
+from backer.tools.manager import get_tool_manager
 
 
 @BackendRegistry.register(BackendType.RESTIC)
@@ -34,6 +34,8 @@ class ResticBackend(BackendBase):
 
     def __init__(self, config: dict[str, Any] | None = None):
         super().__init__(config)
+        self._tool_manager = get_tool_manager()
+        self._binary_path: Path | None = None
         self._env = os.environ.copy()
 
         # Set repository password from config if provided
@@ -42,15 +44,35 @@ class ResticBackend(BackendBase):
         elif "password_file" in self.config:
             self._env["RESTIC_PASSWORD_FILE"] = self.config["password_file"]
 
+    def _get_binary(self, auto_install: bool = True) -> Path:
+        """Get path to restic binary, downloading if necessary."""
+        if self._binary_path and self._binary_path.exists():
+            return self._binary_path
+
+        path = self._tool_manager.get_tool_path("restic")
+        if path:
+            self._binary_path = path
+            return path
+
+        if auto_install:
+            self._binary_path = self._tool_manager.download("restic")
+            return self._binary_path
+
+        raise RuntimeError("restic not installed. Run 'backer setup' to install tools.")
+
     def check_available(self) -> tuple[bool, str]:
-        """Check if restic is available."""
-        restic_path = shutil.which("restic")
-        if not restic_path:
-            return False, "restic not found in PATH"
+        """Check if restic is available, downloading if needed."""
+        try:
+            binary = self._get_binary(auto_install=False)
+        except RuntimeError:
+            try:
+                binary = self._get_binary(auto_install=True)
+            except Exception as e:
+                return False, f"restic not available and auto-install failed: {e}"
 
         try:
             result = subprocess.run(
-                ["restic", "version"],
+                [str(binary), "version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -64,8 +86,9 @@ class ResticBackend(BackendBase):
         started_at = datetime.now()
 
         try:
+            binary = self._get_binary()
             result = subprocess.run(
-                ["restic", "init", "--repo", destination.path],
+                [str(binary), "init", "--repo", destination.path],
                 capture_output=True,
                 text=True,
                 env=self._env,
@@ -74,14 +97,14 @@ class ResticBackend(BackendBase):
 
             return BackendResult(
                 success=result.returncode == 0,
-                operation=OperationType.BACKUP,  # No INIT type, use BACKUP
+                operation=OperationType.BACKUP,
                 started_at=started_at,
                 finished_at=datetime.now(),
                 output=result.stdout + result.stderr,
                 return_code=result.returncode,
                 errors=[result.stderr] if result.returncode != 0 else [],
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
             return BackendResult(
                 success=False,
                 operation=OperationType.BACKUP,
@@ -100,7 +123,8 @@ class ResticBackend(BackendBase):
         dry_run: bool = False,
     ) -> list[str]:
         """Build restic backup command."""
-        cmd = ["restic", "backup", "--repo", repo, "--json"]
+        binary = self._get_binary()
+        cmd = [str(binary), "backup", "--repo", repo, "--json"]
 
         if dry_run:
             cmd.append("--dry-run")
@@ -124,12 +148,22 @@ class ResticBackend(BackendBase):
         """Run restic backup."""
         started_at = datetime.now()
 
-        cmd = self._build_backup_command(
-            repo=destination.path,
-            source=str(source.path),
-            excludes=source.excludes,
-            dry_run=dry_run,
-        )
+        try:
+            cmd = self._build_backup_command(
+                repo=destination.path,
+                source=str(source.path),
+                excludes=source.excludes,
+                dry_run=dry_run,
+            )
+        except RuntimeError as e:
+            return BackendResult(
+                success=False,
+                operation=OperationType.BACKUP,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(e)],
+                return_code=-1,
+            )
 
         try:
             result = subprocess.run(
@@ -142,7 +176,6 @@ class ResticBackend(BackendBase):
 
             finished_at = datetime.now()
 
-            # Parse JSON output for stats
             stats: dict[str, Any] = {}
             snapshot_id = None
             errors = []
@@ -211,11 +244,22 @@ class ResticBackend(BackendBase):
     ) -> BackendResult:
         """Restore from restic snapshot."""
         started_at = datetime.now()
-
         snapshot_id = snapshot or "latest"
 
+        try:
+            binary = self._get_binary()
+        except RuntimeError as e:
+            return BackendResult(
+                success=False,
+                operation=OperationType.RESTORE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(e)],
+                return_code=-1,
+            )
+
         cmd = [
-            "restic", "restore",
+            str(binary), "restore",
             "--repo", source.path,
             "--target", str(destination),
             snapshot_id,
@@ -270,8 +314,9 @@ class ResticBackend(BackendBase):
     def list_snapshots(self, destination: BackupDestination) -> list[dict[str, Any]]:
         """List available restic snapshots."""
         try:
+            binary = self._get_binary()
             result = subprocess.run(
-                ["restic", "snapshots", "--repo", destination.path, "--json"],
+                [str(binary), "snapshots", "--repo", destination.path, "--json"],
                 capture_output=True,
                 text=True,
                 env=self._env,
@@ -291,7 +336,7 @@ class ResticBackend(BackendBase):
                     }
                     for snap in snapshots
                 ]
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError):
             pass
 
         return []
@@ -308,7 +353,19 @@ class ResticBackend(BackendBase):
         """Prune old snapshots using restic forget + prune."""
         started_at = datetime.now()
 
-        cmd = ["restic", "forget", "--repo", destination.path, "--prune"]
+        try:
+            binary = self._get_binary()
+        except RuntimeError as e:
+            return BackendResult(
+                success=False,
+                operation=OperationType.PRUNE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(e)],
+                return_code=-1,
+            )
+
+        cmd = [str(binary), "forget", "--repo", destination.path, "--prune"]
 
         if dry_run:
             cmd.append("--dry-run")
@@ -360,8 +417,9 @@ class ResticBackend(BackendBase):
         started_at = datetime.now()
 
         try:
+            binary = self._get_binary()
             result = subprocess.run(
-                ["restic", "check", "--repo", destination.path],
+                [str(binary), "check", "--repo", destination.path],
                 capture_output=True,
                 text=True,
                 env=self._env,
@@ -376,7 +434,7 @@ class ResticBackend(BackendBase):
                 output=result.stdout + result.stderr,
                 return_code=result.returncode,
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
             return BackendResult(
                 success=False,
                 operation=OperationType.CHECK,

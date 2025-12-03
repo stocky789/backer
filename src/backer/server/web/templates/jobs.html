@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Jobs - Backer{% endblock %}
+{% block page_title %}Backup Jobs{% endblock %}
+
+{% block actions %}
+<a href="/jobs/new" class="btn btn-primary">+ New Job</a>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">All Jobs ({{ jobs|length }})</span>
+    </div>
+    {% if jobs %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Agent</th>
+                <th>Source</th>
+                <th>Destination</th>
+                <th>Backend</th>
+                <th>Schedule</th>
+                <th>Last Run</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in jobs %}
+            <tr>
+                <td><strong>{{ job.name }}</strong></td>
+                <td>{{ job.client_id or 'Any' }}</td>
+                <td><code>{{ job.source_path[:20] }}...</code></td>
+                <td><code>{{ job.destination_path[:20] }}...</code></td>
+                <td>{{ job.backend }}</td>
+                <td>{{ job.schedule_cron or 'Manual' }}</td>
+                <td>
+                    {% if job.last_status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif job.last_status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ job.last_status or 'Never' }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/v1/jobs/{{ job.name }}/run"
+                            hx-headers='{"Content-Type": "application/json"}'
+                            hx-vals='{"dry_run": false}'
+                            hx-swap="none"
+                            hx-on::after-request="alert('Job started!')">
+                        Run
+                    </button>
+                    <button class="btn btn-danger btn-sm"
+                            hx-delete="/api/v1/jobs/{{ job.name }}"
+                            hx-confirm="Delete job '{{ job.name }}'?"
+                            hx-on::after-request="location.reload()">
+                        Delete
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No Backup Jobs</h3>
+        <p>Create your first backup job to get started</p>
+        <a href="/jobs/new" class="btn btn-primary">Create Job</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

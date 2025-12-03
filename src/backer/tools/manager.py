@@ -1,0 +1,291 @@
+"""Tool manager for downloading and managing backup tool binaries.
+
+Automatically downloads rclone, restic, etc. so users don't need to install them manually.
+"""
+
+import hashlib
+import os
+import platform
+import shutil
+import stat
+import subprocess
+import tarfile
+import tempfile
+import zipfile
+from pathlib import Path
+from typing import Any
+from urllib.request import urlopen
+
+# Tool download information
+TOOL_INFO: dict[str, dict[str, Any]] = {
+    "rclone": {
+        "version": "1.68.2",
+        "base_url": "https://downloads.rclone.org/v{version}/rclone-v{version}-{platform}-{arch}.{ext}",
+        "platforms": {
+            "Linux": {"name": "linux", "ext": "zip"},
+            "Darwin": {"name": "osx", "ext": "zip"},
+            "Windows": {"name": "windows", "ext": "zip"},
+        },
+        "arch_map": {
+            "x86_64": "amd64",
+            "AMD64": "amd64",
+            "aarch64": "arm64",
+            "arm64": "arm64",
+        },
+        "binary_name": {"Linux": "rclone", "Darwin": "rclone", "Windows": "rclone.exe"},
+    },
+    "restic": {
+        "version": "0.17.3",
+        "base_url": "https://github.com/restic/restic/releases/download/v{version}/restic_{version}_{platform}_{arch}.bz2",
+        "platforms": {
+            "Linux": {"name": "linux"},
+            "Darwin": {"name": "darwin"},
+            "Windows": {"name": "windows"},
+        },
+        "arch_map": {
+            "x86_64": "amd64",
+            "AMD64": "amd64",
+            "aarch64": "arm64",
+            "arm64": "arm64",
+        },
+        "binary_name": {"Linux": "restic", "Darwin": "restic", "Windows": "restic.exe"},
+    },
+}
+
+
+class ToolManager:
+    """Manages downloading and updating backup tools."""
+
+    def __init__(self, tools_dir: Path | None = None):
+        """Initialize the tool manager.
+
+        Args:
+            tools_dir: Directory to store tool binaries.
+                      Defaults to ~/.local/share/backer/tools/
+        """
+        if tools_dir is None:
+            tools_dir = Path.home() / ".local" / "share" / "backer" / "tools"
+        self.tools_dir = tools_dir
+        self.tools_dir.mkdir(parents=True, exist_ok=True)
+
+        self._system = platform.system()
+        self._machine = platform.machine()
+
+    def get_tool_path(self, tool_name: str) -> Path | None:
+        """Get the path to a tool binary.
+
+        Returns the path if the tool is installed, None otherwise.
+        """
+        if tool_name not in TOOL_INFO:
+            return None
+
+        info = TOOL_INFO[tool_name]
+        binary_name = info["binary_name"].get(self._system)
+        if not binary_name:
+            return None
+
+        tool_path = self.tools_dir / binary_name
+        if tool_path.exists():
+            return tool_path
+
+        # Check if tool is available system-wide
+        system_path = shutil.which(tool_name)
+        if system_path:
+            return Path(system_path)
+
+        return None
+
+    def is_installed(self, tool_name: str) -> bool:
+        """Check if a tool is installed (either managed or system-wide)."""
+        return self.get_tool_path(tool_name) is not None
+
+    def get_version(self, tool_name: str) -> str | None:
+        """Get the installed version of a tool."""
+        tool_path = self.get_tool_path(tool_name)
+        if not tool_path:
+            return None
+
+        try:
+            result = subprocess.run(
+                [str(tool_path), "version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.stdout.strip().split("\n")[0]
+        except Exception:
+            return None
+
+    def _get_download_url(self, tool_name: str) -> str | None:
+        """Get the download URL for a tool."""
+        if tool_name not in TOOL_INFO:
+            return None
+
+        info = TOOL_INFO[tool_name]
+
+        # Get platform info
+        platform_info = info["platforms"].get(self._system)
+        if not platform_info:
+            return None
+
+        # Get architecture
+        arch = info["arch_map"].get(self._machine)
+        if not arch:
+            return None
+
+        # Build URL
+        url = info["base_url"].format(
+            version=info["version"],
+            platform=platform_info["name"],
+            arch=arch,
+            ext=platform_info.get("ext", ""),
+        )
+
+        return url
+
+    def download(self, tool_name: str, progress_callback: Any | None = None) -> Path:
+        """Download and install a tool.
+
+        Args:
+            tool_name: Name of the tool to download (rclone, restic)
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Path to the installed binary
+
+        Raises:
+            ValueError: If tool is not supported
+            RuntimeError: If download or installation fails
+        """
+        if tool_name not in TOOL_INFO:
+            raise ValueError(f"Unknown tool: {tool_name}. Supported: {list(TOOL_INFO.keys())}")
+
+        url = self._get_download_url(tool_name)
+        if not url:
+            raise RuntimeError(
+                f"No download available for {tool_name} on {self._system}/{self._machine}"
+            )
+
+        info = TOOL_INFO[tool_name]
+        binary_name = info["binary_name"][self._system]
+        target_path = self.tools_dir / binary_name
+
+        if progress_callback:
+            progress_callback(f"Downloading {tool_name} from {url}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+
+            # Download the file
+            download_path = tmpdir_path / f"{tool_name}_download"
+            self._download_file(url, download_path)
+
+            # Extract based on tool type
+            if tool_name == "rclone":
+                extracted = self._extract_rclone(download_path, tmpdir_path)
+            elif tool_name == "restic":
+                extracted = self._extract_restic(download_path, tmpdir_path, binary_name)
+            else:
+                raise RuntimeError(f"Don't know how to extract {tool_name}")
+
+            # Move to final location
+            shutil.move(str(extracted), str(target_path))
+
+            # Make executable
+            target_path.chmod(target_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        if progress_callback:
+            progress_callback(f"Installed {tool_name} to {target_path}")
+
+        return target_path
+
+    def _download_file(self, url: str, dest: Path) -> None:
+        """Download a file from URL."""
+        try:
+            with urlopen(url, timeout=60) as response:
+                with open(dest, "wb") as f:
+                    shutil.copyfileobj(response, f)
+        except Exception as e:
+            raise RuntimeError(f"Failed to download {url}: {e}")
+
+    def _extract_rclone(self, archive_path: Path, tmpdir: Path) -> Path:
+        """Extract rclone from zip archive."""
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            # Find the rclone binary in the archive
+            for name in zf.namelist():
+                if name.endswith("/rclone") or name.endswith("/rclone.exe"):
+                    zf.extract(name, tmpdir)
+                    return tmpdir / name
+
+        raise RuntimeError("Could not find rclone binary in archive")
+
+    def _extract_restic(self, archive_path: Path, tmpdir: Path, binary_name: str) -> Path:
+        """Extract restic from bz2 archive."""
+        import bz2
+
+        extracted_path = tmpdir / binary_name
+
+        with bz2.open(archive_path, "rb") as f_in:
+            with open(extracted_path, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+        return extracted_path
+
+    def ensure_installed(
+        self, tool_name: str, progress_callback: Any | None = None
+    ) -> Path:
+        """Ensure a tool is installed, downloading if necessary.
+
+        Returns:
+            Path to the tool binary
+        """
+        existing = self.get_tool_path(tool_name)
+        if existing:
+            return existing
+
+        return self.download(tool_name, progress_callback)
+
+    def list_tools(self) -> dict[str, dict[str, Any]]:
+        """List all supported tools and their status."""
+        result = {}
+        for tool_name in TOOL_INFO:
+            path = self.get_tool_path(tool_name)
+            result[tool_name] = {
+                "installed": path is not None,
+                "path": str(path) if path else None,
+                "version": self.get_version(tool_name) if path else None,
+                "managed": path and self.tools_dir in path.parents if path else False,
+                "available_version": TOOL_INFO[tool_name]["version"],
+            }
+        return result
+
+    def update(self, tool_name: str, progress_callback: Any | None = None) -> Path:
+        """Update a tool to the latest bundled version."""
+        # Remove existing managed version
+        info = TOOL_INFO.get(tool_name)
+        if info:
+            binary_name = info["binary_name"].get(self._system)
+            if binary_name:
+                existing = self.tools_dir / binary_name
+                if existing.exists():
+                    existing.unlink()
+
+        # Download fresh
+        return self.download(tool_name, progress_callback)
+
+
+# Global tool manager instance
+_tool_manager: ToolManager | None = None
+
+
+def get_tool_manager() -> ToolManager:
+    """Get the global tool manager instance."""
+    global _tool_manager
+    if _tool_manager is None:
+        _tool_manager = ToolManager()
+    return _tool_manager
+
+
+def get_tool_path(tool_name: str) -> Path | None:
+    """Convenience function to get tool path."""
+    return get_tool_manager().get_tool_path(tool_name)

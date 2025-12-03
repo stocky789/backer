@@ -1,7 +1,6 @@
 """Backer CLI - unified backup management."""
 
 from pathlib import Path
-from typing import Any
 
 import click
 from rich.console import Console
@@ -25,9 +24,103 @@ def main(ctx: click.Context, config: Path | None) -> None:
     """Backer - Unified backup orchestration.
 
     Consolidates rsync, rclone, restic and more into one tool.
+
+    Run 'backer setup' to download and install backup tools.
     """
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
+
+
+# ============ Setup and tool management ============
+
+
+@main.command()
+@click.option("--force", "-f", is_flag=True, help="Force reinstall even if already installed")
+def setup(force: bool) -> None:
+    """Download and install backup tools (rclone, restic).
+
+    This automatically downloads the required backup tools so you don't
+    need to install them manually.
+    """
+    from backer.tools.manager import get_tool_manager
+
+    manager = get_tool_manager()
+
+    console.print("[bold]Backer Setup[/bold]")
+    console.print(f"Tools directory: {manager.tools_dir}\n")
+
+    tools = ["rclone", "restic"]
+
+    for tool in tools:
+        existing = manager.get_tool_path(tool)
+
+        if existing and not force:
+            version = manager.get_version(tool)
+            console.print(f"[green]✓[/green] {tool} already installed: {version}")
+            console.print(f"  Path: {existing}")
+        else:
+            console.print(f"[yellow]→[/yellow] Downloading {tool}...")
+            try:
+                path = manager.download(tool, progress_callback=lambda msg: console.print(f"  {msg}"))
+                version = manager.get_version(tool)
+                console.print(f"[green]✓[/green] {tool} installed: {version}")
+                console.print(f"  Path: {path}")
+            except Exception as e:
+                console.print(f"[red]✗[/red] Failed to install {tool}: {e}")
+
+    console.print("\n[bold]Setup complete![/bold]")
+    console.print("Run 'backer tools' to see installed tools.")
+
+
+@main.command()
+def tools() -> None:
+    """Show status of backup tools."""
+    from backer.tools.manager import get_tool_manager
+
+    manager = get_tool_manager()
+    tools_info = manager.list_tools()
+
+    table = Table(title="Backup Tools")
+    table.add_column("Tool", style="cyan")
+    table.add_column("Status")
+    table.add_column("Version")
+    table.add_column("Location")
+
+    for name, info in tools_info.items():
+        if info["installed"]:
+            status = "[green]✓ Installed[/green]"
+            if info["managed"]:
+                status += " (managed)"
+            else:
+                status += " (system)"
+        else:
+            status = "[red]✗ Not installed[/red]"
+
+        table.add_row(
+            name,
+            status,
+            info["version"] or "-",
+            info["path"] or f"(available: v{info['available_version']})",
+        )
+
+    console.print(table)
+    console.print(f"\nManaged tools directory: {manager.tools_dir}")
+    console.print("Run 'backer setup' to install missing tools.")
+
+
+@main.command()
+def backends() -> None:
+    """List available backup backends and their status."""
+    table = Table(title="Available Backends")
+    table.add_column("Backend", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Version/Info")
+
+    for backend_type, (available, info) in BackendRegistry.check_all_available().items():
+        status = "[green]✓ Available[/green]" if available else "[red]✗ Not found[/red]"
+        table.add_row(backend_type.value, status, info)
+
+    console.print(table)
 
 
 # ============ Standalone backup commands ============
@@ -36,7 +129,7 @@ def main(ctx: click.Context, config: Path | None) -> None:
 @main.command()
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination")
-@click.option("--backend", "-b", default="rsync", help="Backend to use (rsync, rclone, restic)")
+@click.option("--backend", "-b", default="rclone", help="Backend to use (rclone, restic, rsync)")
 @click.option("--exclude", "-e", multiple=True, help="Exclude patterns")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
@@ -59,7 +152,7 @@ def backup(
 
         backer backup /data remote:bucket/data -b rclone
 
-        backer backup /home restic:/backup -b restic
+        backer backup /home /backup/repo -b restic
     """
     from backer.backends import get_backend
 
@@ -69,7 +162,9 @@ def backup(
     try:
         be = get_backend(backend)
 
-        available, msg = be.check_available()
+        with console.status(f"Checking {backend} availability..."):
+            available, msg = be.check_available()
+
         if not available:
             console.print(f"[red]Error:[/red] {msg}")
             raise SystemExit(1)
@@ -105,7 +200,7 @@ def backup(
 @main.command()
 @click.argument("source")
 @click.argument("destination", type=click.Path(path_type=Path))
-@click.option("--backend", "-b", default="rsync", help="Backend to use")
+@click.option("--backend", "-b", default="rclone", help="Backend to use")
 @click.option("--snapshot", "-s", help="Snapshot ID to restore (for restic/borg)")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 def restore(
@@ -142,21 +237,6 @@ def restore(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise SystemExit(1)
-
-
-@main.command()
-def backends() -> None:
-    """List available backup backends and their status."""
-    table = Table(title="Available Backends")
-    table.add_column("Backend", style="cyan")
-    table.add_column("Status", style="green")
-    table.add_column("Version/Info")
-
-    for backend_type, (available, info) in BackendRegistry.check_all_available().items():
-        status = "[green]✓ Available[/green]" if available else "[red]✗ Not found[/red]"
-        table.add_row(backend_type.value, status, info)
-
-    console.print(table)
 
 
 # ============ Server commands ============
@@ -203,11 +283,11 @@ def agent_register(server: str) -> None:
     console.print(f"Registering with server: {server}")
 
     try:
-        agent = BackerAgent(server_url=server)
-        client_id, _ = agent.register()
-        console.print(f"[green]✓ Registered successfully[/green]")
+        ag = BackerAgent(server_url=server)
+        client_id, _ = ag.register()
+        console.print("[green]✓ Registered successfully[/green]")
         console.print(f"  Client ID: {client_id}")
-        console.print(f"  Config saved to: {agent.config_path}")
+        console.print(f"  Config saved to: {ag.config_path}")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise SystemExit(1)
@@ -221,20 +301,19 @@ def agent_start(server: str | None) -> None:
 
     try:
         if server:
-            # Try to load existing config, fall back to new agent
             try:
-                agent = BackerAgent.from_config()
-                if agent.server_url != server:
+                ag = BackerAgent.from_config()
+                if ag.server_url != server:
                     console.print("[yellow]Warning:[/yellow] Server URL differs from saved config")
             except FileNotFoundError:
                 console.print("No saved config found. Registering with server...")
-                agent = BackerAgent(server_url=server)
-                agent.register()
+                ag = BackerAgent(server_url=server)
+                ag.register()
         else:
-            agent = BackerAgent.from_config()
+            ag = BackerAgent.from_config()
 
-        console.print(f"[bold]Starting agent[/bold] (client_id: {agent.client_id})")
-        agent.run()
+        console.print(f"[bold]Starting agent[/bold] (client_id: {ag.client_id})")
+        ag.run()
 
     except FileNotFoundError:
         console.print("[red]Error:[/red] No agent config found. Run 'backer agent register' first.")
@@ -250,13 +329,12 @@ def agent_status() -> None:
     from backer.client.agent import BackerAgent
 
     try:
-        agent = BackerAgent.from_config()
-        console.print(f"Client ID: {agent.client_id}")
-        console.print(f"Server: {agent.server_url}")
+        ag = BackerAgent.from_config()
+        console.print(f"Client ID: {ag.client_id}")
+        console.print(f"Server: {ag.server_url}")
 
-        # Try to ping server
         try:
-            result = agent.heartbeat()
+            ag.heartbeat()
             console.print("[green]✓ Connected to server[/green]")
         except Exception as e:
             console.print(f"[yellow]✗ Cannot reach server:[/yellow] {e}")
@@ -304,7 +382,7 @@ def job_list(server: str | None) -> None:
             status_style = "green" if j.get("last_status") == "success" else "red" if j.get("last_status") == "failed" else "dim"
             table.add_row(
                 j["name"],
-                j.get("backend", "rsync"),
+                j.get("backend", "rclone"),
                 j.get("source_path", "")[:30],
                 j.get("destination_path", "")[:30],
                 j.get("last_run", "-")[:19] if j.get("last_run") else "-",
@@ -325,7 +403,7 @@ def job_list(server: str | None) -> None:
 @click.option("--name", "-n", required=True, help="Job name")
 @click.option("--source", "-s", required=True, help="Source path")
 @click.option("--dest", "-d", required=True, help="Destination path")
-@click.option("--backend", "-b", default="rsync", help="Backend to use")
+@click.option("--backend", "-b", default="rclone", help="Backend to use")
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
 @click.option("--server", help="Server URL")
 def job_create(
@@ -384,7 +462,7 @@ def job_run(name: str, dry_run: bool, server: str | None) -> None:
         response.raise_for_status()
         result = response.json()
 
-        console.print(f"[green]✓ Job started[/green]")
+        console.print("[green]✓ Job started[/green]")
         console.print(f"  Run ID: {result['run_id']}")
         console.print(f"  Status: {result['status']}")
 
