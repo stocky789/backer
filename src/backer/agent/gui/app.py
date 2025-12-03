@@ -42,6 +42,9 @@ class BackerAgentApp:
         # Load existing config
         self.config = self.load_config()
 
+        # Agent service instance
+        self.service = None
+
         # Setup UI
         self.setup_ui()
 
@@ -160,21 +163,21 @@ class BackerAgentApp:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=(10, 0))
 
-        # Install Service button
-        self.install_btn = ttk.Button(
+        # Start Agent button
+        self.start_btn = ttk.Button(
             button_frame,
-            text="Install Service",
-            command=self.install_service,
+            text="Start Agent",
+            command=self.start_agent,
             width=15,
             state=tk.DISABLED
         )
-        self.install_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         # Exit button
         exit_btn = ttk.Button(
             button_frame,
             text="Exit",
-            command=self.root.quit,
+            command=self.on_exit,
             width=10
         )
         exit_btn.pack(side=tk.RIGHT)
@@ -248,9 +251,8 @@ class BackerAgentApp:
             register_url = f"{server_url.rstrip('/')}/api/v1/clients/register"
             data = json.dumps({
                 'hostname': hostname,
-                'os': platform.system(),
-                'os_version': platform.version(),
-                'agent_version': '1.0.0'
+                'version': '1.0.0',
+                'os_info': f"{platform.system()} {platform.release()}",
             }).encode('utf-8')
 
             req = urllib.request.Request(register_url, data=data, method='POST')
@@ -260,10 +262,12 @@ class BackerAgentApp:
             with urllib.request.urlopen(req, timeout=10) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 client_id = result.get('client_id', 'unknown')
+                client_secret = result.get('client_secret', '')
 
-            # Save config
+            # Save config (including secret for future auth)
             self.config['server_url'] = server_url
             self.config['client_id'] = client_id
+            self.config['client_secret'] = client_secret
             self.config['hostname'] = hostname
             self.save_config()
 
@@ -282,8 +286,8 @@ class BackerAgentApp:
         self.status_label.config(foreground='green')
         self.agent_name_var.set(f"Registered as: {agent_name}")
         self.connect_btn.config(state=tk.NORMAL, text="Reconnect")
-        self.install_btn.config(state=tk.NORMAL)
-        messagebox.showinfo("Success", f"Successfully connected to server!\n\nThis machine is now registered as '{agent_name}'")
+        self.start_btn.config(state=tk.NORMAL)
+        messagebox.showinfo("Success", f"Successfully connected to server!\n\nThis machine is now registered as '{agent_name}'\n\nClick 'Start Agent' to begin receiving backup jobs.")
 
     def _connect_failed(self, error: str):
         """Handle failed connection."""
@@ -327,7 +331,7 @@ class BackerAgentApp:
         self.status_label.config(foreground='green')
         self.agent_name_var.set(f"Registered as: {hostname}")
         self.connect_btn.config(text="Reconnect")
-        self.install_btn.config(state=tk.NORMAL)
+        self.start_btn.config(state=tk.NORMAL)
 
     def _check_failed(self):
         """Handle failed connection check."""
@@ -335,42 +339,44 @@ class BackerAgentApp:
         self.status_label.config(foreground='black')
         self.agent_name_var.set("Previously configured server is unreachable")
 
-    def install_service(self):
-        """Install the agent as a Windows service."""
-        if not self.config.get('server_url'):
+    def start_agent(self):
+        """Start the agent background service."""
+        if not self.config.get('server_url') or not self.config.get('client_id'):
             messagebox.showwarning("Warning", "Please connect to a server first")
             return
 
-        result = messagebox.askyesno(
-            "Install Service",
-            "This will install Backer Agent as a Windows service that runs automatically.\n\n"
-            "The service will:\n"
-            "- Start automatically when Windows boots\n"
-            "- Run backups on schedule from the server\n"
-            "- Report status to the Backer server\n\n"
-            "Administrator privileges are required.\n\n"
-            "Continue?"
-        )
-
-        if not result:
+        if self.service is not None:
+            messagebox.showinfo("Info", "Agent is already running")
             return
 
         try:
-            # For now, show instructions - actual service install requires admin
-            if getattr(sys, 'frozen', False):
-                exe_path = sys.executable
-            else:
-                exe_path = "backer-agent.exe"
+            from backer.agent.service import AgentService
 
-            messagebox.showinfo(
-                "Install Service",
-                f"To install as a service, run this command as Administrator:\n\n"
-                f'sc create BackerAgent binPath= "{exe_path} --service" start= auto\n'
-                f'sc start BackerAgent\n\n'
-                f"Or use the included install-service.bat file."
+            self.service = AgentService(
+                server_url=self.config['server_url'],
+                client_id=self.config['client_id'],
+                client_secret=self.config.get('client_secret', ''),
+                status_callback=self._on_service_status,
             )
+            self.service.start()
+
+            self.start_btn.config(text="Running...", state=tk.DISABLED)
+            self.status_var.set("Agent running - waiting for jobs")
+            self.status_label.config(foreground='green')
+
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to install service: {e}")
+            messagebox.showerror("Error", f"Failed to start agent: {e}")
+
+    def _on_service_status(self, status: str):
+        """Callback for service status updates."""
+        # Update UI from main thread
+        self.root.after(0, lambda: self.agent_name_var.set(status))
+
+    def on_exit(self):
+        """Handle exit - stop service if running."""
+        if self.service:
+            self.service.stop()
+        self.root.quit()
 
     def run(self):
         """Run the application."""
