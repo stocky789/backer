@@ -264,6 +264,126 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
         raise SystemExit(1)
 
 
+@server.command("uninstall")
+@click.option("--keep-data", is_flag=True, help="Keep backup data in /var/lib/backer")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def server_uninstall(keep_data: bool, yes: bool) -> None:
+    """Uninstall Backer server from this system.
+
+    This will:
+    - Stop and disable the backer systemd service
+    - Remove the service file
+    - Remove /opt/backer and /usr/local/bin/backer
+    - Optionally remove /var/lib/backer (backup data)
+    - Remove the backer system user
+
+    Use --keep-data to preserve your backup configuration and history.
+    """
+    import os
+    import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        console.print("[red]Error:[/red] Server uninstall is only supported on Linux")
+        console.print("On Windows, use the Control Panel to uninstall Backer")
+        raise SystemExit(1)
+
+    # Check if running as root
+    if os.geteuid() != 0:
+        console.print("[red]Error:[/red] Server uninstall requires root privileges")
+        console.print("Run with: sudo backer server uninstall")
+        raise SystemExit(1)
+
+    console.print("[bold]Backer Server Uninstall[/bold]\n")
+    console.print("This will remove:")
+    console.print("  • Systemd service (backer.service)")
+    console.print("  • Installation directory (/opt/backer)")
+    console.print("  • Binary symlink (/usr/local/bin/backer)")
+    if not keep_data:
+        console.print("  • [yellow]Backup data and config (/var/lib/backer)[/yellow]")
+    else:
+        console.print("  • [dim]Backup data will be preserved[/dim]")
+    console.print("  • System user (backer)")
+    console.print()
+
+    if not yes:
+        if not click.confirm("Continue with uninstall?"):
+            console.print("Aborted.")
+            raise SystemExit(0)
+
+    def run_cmd(cmd: list[str], ignore_errors: bool = False) -> bool:
+        """Run a command and return success status."""
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return result.returncode == 0
+        except Exception:
+            return ignore_errors
+
+    # Stop and disable service
+    console.print("\n[bold]1. Stopping service...[/bold]")
+    if run_cmd(["systemctl", "stop", "backer"]):
+        console.print("   [green]✓[/green] Service stopped")
+    else:
+        console.print("   [dim]Service not running or not found[/dim]")
+
+    if run_cmd(["systemctl", "disable", "backer"]):
+        console.print("   [green]✓[/green] Service disabled")
+    else:
+        console.print("   [dim]Service not enabled or not found[/dim]")
+
+    # Remove service file
+    console.print("\n[bold]2. Removing service file...[/bold]")
+    service_file = Path("/etc/systemd/system/backer.service")
+    if service_file.exists():
+        service_file.unlink()
+        console.print("   [green]✓[/green] Removed /etc/systemd/system/backer.service")
+        run_cmd(["systemctl", "daemon-reload"])
+        console.print("   [green]✓[/green] Reloaded systemd")
+    else:
+        console.print("   [dim]Service file not found[/dim]")
+
+    # Remove installation directories
+    console.print("\n[bold]3. Removing installation files...[/bold]")
+    import shutil
+
+    dirs_to_remove = ["/opt/backer"]
+    if not keep_data:
+        dirs_to_remove.append("/var/lib/backer")
+
+    for dir_path in dirs_to_remove:
+        path = Path(dir_path)
+        if path.exists():
+            shutil.rmtree(path)
+            console.print(f"   [green]✓[/green] Removed {dir_path}")
+        else:
+            console.print(f"   [dim]{dir_path} not found[/dim]")
+
+    # Remove symlink
+    symlink = Path("/usr/local/bin/backer")
+    if symlink.exists() or symlink.is_symlink():
+        symlink.unlink()
+        console.print("   [green]✓[/green] Removed /usr/local/bin/backer")
+    else:
+        console.print("   [dim]/usr/local/bin/backer not found[/dim]")
+
+    # Remove user
+    console.print("\n[bold]4. Removing system user...[/bold]")
+    if run_cmd(["userdel", "backer"], ignore_errors=True):
+        console.print("   [green]✓[/green] Removed backer user")
+    else:
+        console.print("   [dim]User not found or could not be removed[/dim]")
+
+    console.print("\n[bold green]✓ Backer server uninstalled successfully[/bold green]")
+
+    if keep_data:
+        console.print("\n[yellow]Note:[/yellow] Backup data preserved in /var/lib/backer")
+        console.print("To remove it later: sudo rm -rf /var/lib/backer")
+
+    # Suggest cleaning up user files
+    console.print("\n[dim]To clean up user files, run as your user:[/dim]")
+    console.print("[dim]  rm -rf ~/backer ~/venv[/dim]")
+
+
 # ============ Agent commands ============
 
 
