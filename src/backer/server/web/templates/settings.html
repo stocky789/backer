@@ -22,6 +22,42 @@
 
         <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
 
+        <h3 style="margin-bottom: 15px;">Supported Backup Backends</h3>
+        <div style="background: var(--bg-primary); padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+            <table style="width: 100%; border-collapse: collapse;">
+                <tr>
+                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border);">
+                        <strong style="color: var(--success);">rclone</strong>
+                    </td>
+                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border); color: var(--text-muted);">
+                        Supported - Recommended for most use cases. Handles SMB, NFS, S3, and 50+ cloud providers.
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border);">
+                        <strong style="color: var(--success);">restic</strong>
+                    </td>
+                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border); color: var(--text-muted);">
+                        Supported - Best for encrypted, deduplicated backups with versioning.
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 0;">
+                        <strong style="color: var(--text-muted);">rsync</strong>
+                    </td>
+                    <td style="padding: 8px 0; color: var(--warning);">
+                        Not supported - rsync backend exists but is not available for agent-based backups. Use rclone instead.
+                    </td>
+                </tr>
+            </table>
+        </div>
+        <p style="color: var(--text-muted); font-size: 0.9em; margin-bottom: 20px;">
+            Backup tools (rclone, restic) are automatically downloaded to agents when they first connect.
+            No manual installation required.
+        </p>
+
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+
         <h3 style="margin-bottom: 15px;">Agent Registration</h3>
         <p style="color: var(--text-muted); margin-bottom: 15px;">
             To register a new agent, run the following command on the client machine:

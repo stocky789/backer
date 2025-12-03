@@ -80,14 +80,16 @@
             <div class="form-group">
                 <label class="form-label">Backup Method</label>
                 <select name="backend" class="form-input">
-                    <option value="rclone">rclone (recommended - fast, supports many backends)</option>
+                    <option value="rclone">rclone (recommended - fast, supports SMB/NFS/Cloud)</option>
                     <option value="restic">restic (encrypted, deduplicated snapshots)</option>
-                    <option value="rsync">rsync (simple file sync)</option>
                 </select>
                 <div class="form-hint">
-                    <strong>rclone</strong>: Best for most use cases<br>
-                    <strong>restic</strong>: Best for encrypted backups with versioning<br>
-                    <strong>rsync</strong>: Simple file copying
+                    <strong>rclone</strong>: Best for most use cases - supports local, SMB, NFS, S3, and 50+ cloud providers<br>
+                    <strong>restic</strong>: Best for encrypted backups with versioning and deduplication
+                </div>
+                <div class="form-hint" style="margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border-radius: 4px;">
+                    <strong>Note:</strong> rsync backend is not currently supported for agent-based backups.
+                    Use rclone instead - it provides similar functionality with broader compatibility.
                 </div>
             </div>
 

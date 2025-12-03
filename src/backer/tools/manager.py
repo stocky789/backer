@@ -17,6 +17,8 @@ from typing import Any
 from urllib.request import urlopen
 
 # Tool download information
+# Note: rsync backend exists but is NOT currently supported for remote agents.
+# Only rclone and restic are supported for agent-based backups.
 TOOL_INFO: dict[str, dict[str, Any]] = {
     "rclone": {
         "version": "1.68.2",
@@ -50,6 +52,7 @@ TOOL_INFO: dict[str, dict[str, Any]] = {
         },
         "binary_name": {"Linux": "restic", "Darwin": "restic", "Windows": "restic.exe"},
     },
+    # rsync is NOT supported for agent backups - only for local server-side operations
 }
 
 
