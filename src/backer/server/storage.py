@@ -161,6 +161,24 @@ class Storage:
                 return self._row_to_client(row)
         return None
 
+    def get_client_by_hostname(self, hostname: str) -> Client | None:
+        """Get a client by hostname."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM clients WHERE hostname = ?", (hostname,)
+            ).fetchone()
+            if row:
+                return self._row_to_client(row)
+        return None
+
+    def update_client_secret(self, client_id: str, secret_hash: str) -> None:
+        """Update a client's secret hash."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE clients SET secret_hash = ? WHERE id = ?",
+                (secret_hash, client_id),
+            )
+
     def get_client_secret_hash(self, client_id: str) -> str | None:
         """Get client's secret hash for auth."""
         with self._connect() as conn:
