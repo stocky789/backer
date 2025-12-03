@@ -49,6 +49,22 @@ TOOL_INFO: dict[str, dict[str, Any]] = {
         },
         "binary_name": {"Linux": "restic", "Darwin": "restic", "Windows": "restic.exe"},
     },
+    "kopia": {
+        "version": "0.17.0",
+        "base_url": "https://github.com/kopia/kopia/releases/download/v{version}/kopia-{version}-{platform}-{arch}.{ext}",
+        "platforms": {
+            "Linux": {"name": "linux", "ext": "tar.gz"},
+            "Darwin": {"name": "macOS", "ext": "tar.gz"},
+            "Windows": {"name": "windows", "ext": "zip"},
+        },
+        "arch_map": {
+            "x86_64": "x64",
+            "AMD64": "x64",
+            "aarch64": "arm64",
+            "arm64": "arm64",
+        },
+        "binary_name": {"Linux": "kopia", "Darwin": "kopia", "Windows": "kopia.exe"},
+    },
     # rsync is NOT supported for agent backups - only for local server-side operations
 }
 
@@ -185,6 +201,8 @@ class ToolManager:
                 extracted = self._extract_rclone(download_path, tmpdir_path)
             elif tool_name == "restic":
                 extracted = self._extract_restic(download_path, tmpdir_path, binary_name)
+            elif tool_name == "kopia":
+                extracted = self._extract_kopia(download_path, tmpdir_path, binary_name)
             else:
                 raise RuntimeError(f"Don't know how to extract {tool_name}")
 
@@ -230,6 +248,34 @@ class ToolManager:
                 shutil.copyfileobj(f_in, f_out)
 
         return extracted_path
+
+    def _extract_kopia(self, archive_path: Path, tmpdir: Path, binary_name: str) -> Path:
+        """Extract kopia from tar.gz or zip archive."""
+        import tarfile
+
+        # Try tar.gz first (Linux/macOS)
+        if str(archive_path).endswith(".tar.gz") or tarfile.is_tarfile(str(archive_path)):
+            try:
+                with tarfile.open(archive_path, "r:gz") as tf:
+                    # Find the kopia binary in the archive
+                    for member in tf.getmembers():
+                        if member.name.endswith("/kopia") or member.name == "kopia":
+                            tf.extract(member, tmpdir)
+                            return tmpdir / member.name
+                raise RuntimeError("Could not find kopia binary in tar archive")
+            except tarfile.TarError:
+                pass
+
+        # Try zip (Windows)
+        try:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                for name in zf.namelist():
+                    if name.endswith("/kopia.exe") or name == "kopia.exe":
+                        zf.extract(name, tmpdir)
+                        return tmpdir / name
+            raise RuntimeError("Could not find kopia binary in zip archive")
+        except zipfile.BadZipFile:
+            raise RuntimeError("Could not extract kopia - unsupported archive format")
 
     def ensure_installed(
         self, tool_name: str, progress_callback: Any | None = None

@@ -9,7 +9,7 @@ from rich.table import Table
 from backer import __version__
 
 # Import backends to register them
-from backer.backends import BackendRegistry, rclone, restic, rsync  # noqa: F401
+from backer.backends import BackendRegistry, rclone, restic, rsync, kopia  # noqa: F401
 from backer.backends.base import BackupDestination, BackupSource
 
 console = Console()
@@ -22,7 +22,7 @@ console = Console()
 def main(ctx: click.Context, config: Path | None) -> None:
     """Backer - Unified backup orchestration.
 
-    Consolidates rsync, rclone, restic and more into one tool.
+    Consolidates rsync, rclone, restic, kopia and more into one tool.
 
     Run 'backer setup' to download and install backup tools.
     """

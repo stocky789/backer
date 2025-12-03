@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from backer.backends.base import BackendResult, BackupDestination, BackupSource, OperationType
+from backer.backends.kopia import KopiaBackend
 from backer.backends.rclone import RcloneBackend
 from backer.backends.registry import BackendRegistry, get_backend
 from backer.backends.restic import ResticBackend
@@ -25,6 +26,11 @@ class TestBackendRegistry:
         backend = get_backend("restic")
         assert isinstance(backend, ResticBackend)
 
+    def test_get_backend_kopia(self) -> None:
+        """Test getting kopia backend."""
+        backend = get_backend("kopia")
+        assert isinstance(backend, KopiaBackend)
+
     def test_get_backend_unknown(self) -> None:
         """Test getting unknown backend raises error."""
         with pytest.raises(ValueError, match="unknown_backend"):
@@ -33,7 +39,7 @@ class TestBackendRegistry:
     def test_available_backends(self) -> None:
         """Test listing available backends."""
         backends = BackendRegistry.available_backends()
-        assert len(backends) >= 2  # At least rclone and restic
+        assert len(backends) >= 3  # At least rclone, restic, and kopia
 
 
 class TestBackendResult:
@@ -201,3 +207,54 @@ class TestBackupDestination:
         """Test remote URI destination."""
         dest = BackupDestination(path="s3:bucket/path")
         assert dest.path == "s3:bucket/path"
+
+
+class TestKopiaBackend:
+    """Tests for kopia backend."""
+
+    def test_password_from_config(self) -> None:
+        """Test password is set from config."""
+        backend = KopiaBackend(config={"password": "test_password"})
+        assert backend._env.get("KOPIA_PASSWORD") == "test_password"
+
+    def test_config_file_from_config(self) -> None:
+        """Test config file path is set from config."""
+        backend = KopiaBackend(config={"config_file": "/path/to/config"})
+        assert backend._env.get("KOPIA_CONFIG_PATH") == "/path/to/config"
+
+    def test_get_repo_type_filesystem(self) -> None:
+        """Test filesystem repository type detection."""
+        backend = KopiaBackend()
+        repo_type, args = backend._get_repo_type("/backup/repo")
+        assert repo_type == "filesystem"
+        assert "--path" in args
+        assert "/backup/repo" in args
+
+    def test_get_repo_type_s3(self) -> None:
+        """Test S3 repository type detection."""
+        backend = KopiaBackend()
+        repo_type, args = backend._get_repo_type("s3://mybucket/prefix")
+        assert repo_type == "s3"
+        assert "--bucket" in args
+        assert "mybucket" in args
+
+    def test_get_repo_type_gcs(self) -> None:
+        """Test GCS repository type detection."""
+        backend = KopiaBackend()
+        repo_type, args = backend._get_repo_type("gs://mybucket/prefix")
+        assert repo_type == "gcs"
+        assert "--bucket" in args
+
+    def test_get_repo_type_azure(self) -> None:
+        """Test Azure repository type detection."""
+        backend = KopiaBackend()
+        repo_type, args = backend._get_repo_type("azure://mycontainer/prefix")
+        assert repo_type == "azure"
+        assert "--container" in args
+
+    def test_get_repo_type_sftp(self) -> None:
+        """Test SFTP repository type detection."""
+        backend = KopiaBackend()
+        repo_type, args = backend._get_repo_type("sftp://server/path")
+        assert repo_type == "sftp"
+        assert "--path" in args
