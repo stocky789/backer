@@ -255,11 +255,71 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return client
 
     @app.delete("/api/v1/clients/{client_id}")
-    def delete_client(client_id: str, storage: Storage = Depends(get_storage)) -> dict[str, str]:
-        """Remove a client."""
+    def delete_client(
+        client_id: str,
+        delete_metadata: bool = True,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Remove a client and optionally clean up repository metadata.
+
+        Args:
+            client_id: The client ID to delete
+            delete_metadata: If True (default), also delete agent metadata from all repositories
+        """
+        from backer.server.repositories import smb_delete_file
+
+        # Get client info before deleting (for hostname matching)
+        client = storage.get_client(client_id)
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        metadata_deleted = 0
+        metadata_errors = []
+
+        # Delete agent metadata from all repositories
+        if delete_metadata:
+            logger.info(f"[DELETE AGENT] Deleting agent '{client_id}' with metadata cleanup")
+            repos = storage.list_repositories()
+            for repo in repos:
+                repo_id = repo.get("id")
+                repo_type = repo.get("repo_type", "smb")
+                server = repo.get("server", "")
+                share = repo.get("share", "")
+                subpath = repo.get("path", "")
+                username = repo.get("username")
+                password = storage.get_repository_password(repo_id) if repo_id else None
+                domain = repo.get("domain")
+
+                # Build path to agent metadata file
+                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+                agent_path = f"{metadata_base}/agents/{client_id}.json"
+
+                try:
+                    if repo_type == "smb":
+                        success, msg = smb_delete_file(
+                            server, share, agent_path,
+                            username, password, domain
+                        )
+                        if success:
+                            metadata_deleted += 1
+                            logger.info(f"[DELETE AGENT] Deleted agent metadata from {server}/{share}: {agent_path}")
+                        elif "already deleted" not in msg.lower() and "no such file" not in msg.lower():
+                            metadata_errors.append(f"{server}/{share}: {msg}")
+                except Exception as e:
+                    metadata_errors.append(f"{server}/{share}: {str(e)}")
+                    logger.warning(f"[DELETE AGENT] Error deleting from {server}/{share}: {e}")
+
+        # Delete client from database
         if not storage.delete_client(client_id):
             raise HTTPException(status_code=404, detail="Client not found")
-        return {"status": "deleted"}
+
+        result: dict[str, Any] = {"status": "deleted"}
+        if metadata_deleted > 0:
+            result["metadata_deleted"] = metadata_deleted
+        if metadata_errors:
+            result["metadata_warnings"] = metadata_errors[:5]
+
+        return result
 
     @app.post("/api/v1/commands/clear")
     def clear_pending_commands(
@@ -512,11 +572,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 if client:
                                     client_hostname = client.hostname
 
+                            job_source_path = job.get("source_path", "")
+                            logger.info(f"[DELETE SNAPSHOTS] Looking for snapshots: hostname={client_hostname}, source_path={job_source_path}")
+
                             # List and delete matching snapshots
                             ok, snap_files = smb_list_files(
                                 server, share, snapshots_path,
                                 username, password, domain
                             )
+                            logger.info(f"[DELETE SNAPSHOTS] Found {len(snap_files) if ok else 0} snapshot files in {snapshots_path}")
                             if ok and snap_files:
                                 for snap_file in snap_files:
                                     if not snap_file.endswith(".json"):
@@ -534,17 +598,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                             # Match by hostname and check if paths overlap
                                             snap_hostname = snap_data.get("hostname", "")
                                             snap_paths = snap_data.get("paths", [])
-                                            job_sources = job.get("sources", [])
 
                                             # Check if this snapshot could be from this job
                                             should_delete = False
                                             if client_hostname and snap_hostname == client_hostname:
                                                 # Same host - check if paths match
-                                                for job_src in job_sources:
-                                                    src_path = job_src.get("path", "")
-                                                    if any(src_path in sp or sp in src_path for sp in snap_paths):
-                                                        should_delete = True
-                                                        break
+                                                if job_source_path:
+                                                    # Normalize paths for comparison
+                                                    norm_job_path = job_source_path.replace("\\", "/").rstrip("/")
+                                                    for sp in snap_paths:
+                                                        norm_snap_path = sp.replace("\\", "/").rstrip("/")
+                                                        logger.debug(f"[DELETE SNAPSHOTS] Comparing: job='{norm_job_path}' vs snap='{norm_snap_path}'")
+                                                        if norm_job_path in norm_snap_path or norm_snap_path in norm_job_path:
+                                                            should_delete = True
+                                                            logger.info(f"[DELETE SNAPSHOTS] Match found! Snapshot {snap_file}: hostname={snap_hostname}, paths={snap_paths}")
+                                                            break
+                                            else:
+                                                logger.debug(f"[DELETE SNAPSHOTS] No hostname match: client={client_hostname}, snap={snap_hostname}")
 
                                             if should_delete:
                                                 del_ok, del_msg = smb_delete_file(
@@ -589,20 +659,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         client_hostname = client.hostname
 
                                 import json as json_module
+                                job_source_path = job.get("source_path", "")
                                 for snap_file in snapshots_dir.glob("*.json"):
                                     try:
                                         snap_data = json_module.loads(snap_file.read_text())
                                         snap_hostname = snap_data.get("hostname", "")
                                         snap_paths = snap_data.get("paths", [])
-                                        job_sources = job.get("sources", [])
 
                                         should_delete = False
                                         if client_hostname and snap_hostname == client_hostname:
-                                            for job_src in job_sources:
-                                                src_path = job_src.get("path", "")
-                                                if any(src_path in sp or sp in src_path for sp in snap_paths):
-                                                    should_delete = True
-                                                    break
+                                            if job_source_path:
+                                                norm_job_path = job_source_path.replace("\\", "/").rstrip("/")
+                                                for sp in snap_paths:
+                                                    norm_snap_path = sp.replace("\\", "/").rstrip("/")
+                                                    if norm_job_path in norm_snap_path or norm_snap_path in norm_job_path:
+                                                        should_delete = True
+                                                        break
 
                                         if should_delete:
                                             snap_file.unlink()
