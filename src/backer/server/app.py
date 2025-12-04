@@ -459,6 +459,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
+        logger.info(f"[DELETE JOB] Deleting job '{job_name}', delete_snapshots={delete_snapshots}")
+
         job_deleted = False
         snapshots_deleted = 0
         job_error = None
@@ -466,8 +468,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Try to delete metadata from repository
         repo_id = job.get("repository_id")
+        logger.info(f"[DELETE JOB] Job repo_id: {repo_id}")
         if repo_id:
             repo = storage.get_repository(repo_id)
+            logger.info(f"[DELETE JOB] Found repo: {repo is not None}")
             if repo:
                 repo_type = repo.get("repo_type", "smb")
                 server = repo.get("server", "")
@@ -485,10 +489,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 try:
                     if repo_type == "smb":
                         # Delete job metadata using SMB
+                        logger.info(f"[DELETE JOB] SMB delete: server={server}, share={share}, path={job_path}")
                         success, msg = smb_delete_directory(
                             server, share, job_path,
                             username, password, domain
                         )
+                        logger.info(f"[DELETE JOB] SMB delete result: success={success}, msg={msg}")
                         if success:
                             job_deleted = True
                             logger.info(f"Deleted job metadata from SMB: {job_path} - {msg}")
