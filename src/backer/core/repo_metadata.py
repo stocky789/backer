@@ -22,6 +22,7 @@ Metadata Structure in Repository:
 
 import json
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,38 @@ logger = logging.getLogger(__name__)
 # Backer metadata directory name
 BACKER_METADATA_DIR = ".backer"
 METADATA_VERSION = "1.0"
+
+
+def normalize_path_for_platform(path: str, repo_type: str = "local") -> str:
+    """Normalize a path for the current platform.
+
+    On Windows:
+    - Converts forward-slash UNC paths (//server/share) to backslash format
+    - Converts NFS-style paths (server:/share) to UNC format for Windows NFS client
+
+    Args:
+        path: The path to normalize
+        repo_type: Type of repository (local, smb, nfs)
+
+    Returns:
+        Normalized path for the current platform
+    """
+    if sys.platform == 'win32':
+        # Convert forward slash UNC paths to backslash format
+        if path.startswith('//'):
+            return path.replace('/', '\\')
+
+        # Convert NFS-style paths (server:/share) to Windows UNC format
+        # Windows NFS client uses UNC paths like \\server\share
+        if repo_type == "nfs" and ':' in path and not path[1:2] == ':':
+            # Looks like server:/path format (not C:\path)
+            parts = path.split(':', 1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                server = parts[0]
+                share_path = parts[1].replace('/', '\\').lstrip('\\')
+                return f"\\\\{server}\\{share_path}"
+
+    return path
 
 
 class RepositoryMetadataError(Exception):
@@ -52,9 +85,13 @@ class RepositoryMetadata:
             repo_path: Path to the repository (local path, SMB share, etc.)
             repo_type: Type of repository (local, smb, nfs, s3)
         """
-        self.repo_path = Path(repo_path) if isinstance(repo_path, str) else repo_path
         self.repo_type = repo_type
+        # Normalize path for the current platform (handles Windows UNC/NFS paths)
+        if isinstance(repo_path, str):
+            repo_path = normalize_path_for_platform(repo_path, repo_type)
+        self.repo_path = Path(repo_path) if isinstance(repo_path, str) else repo_path
         self.metadata_dir = self.repo_path / BACKER_METADATA_DIR
+        logger.debug(f"RepositoryMetadata: path={self.repo_path}, type={repo_type}")
 
     def _ensure_dirs(self) -> None:
         """Ensure metadata directory structure exists."""
@@ -88,7 +125,14 @@ class RepositoryMetadata:
 
     def is_initialized(self) -> bool:
         """Check if repository has Backer metadata."""
-        return (self.metadata_dir / "metadata.json").exists()
+        metadata_file = self.metadata_dir / "metadata.json"
+        exists = metadata_file.exists()
+        logger.debug(f"Checking metadata at {metadata_file}: exists={exists}")
+        if not exists:
+            # Log additional debug info to help diagnose path issues
+            logger.debug(f"  repo_path exists: {self.repo_path.exists() if self.repo_path else False}")
+            logger.debug(f"  metadata_dir exists: {self.metadata_dir.exists() if self.metadata_dir else False}")
+        return exists
 
     def initialize(self, server_id: str | None = None) -> dict[str, Any]:
         """Initialize metadata in the repository.

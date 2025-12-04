@@ -2,7 +2,6 @@
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -318,7 +317,8 @@ class TestResticBackupRestore:
             dest.mkdir()
             (dest / "existing.txt").write_text("old content")
 
-            payload = {
+            # Test payload (kept for documentation/future use)
+            _payload = {
                 "run_id": "test_restore_123",
                 "job_name": "test_job",
                 "source_path": "//server/share/repo",

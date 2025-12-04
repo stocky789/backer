@@ -1,9 +1,10 @@
 """Tests for repository metadata functionality."""
 
-import json
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -11,7 +12,48 @@ from backer.core.repo_metadata import (
     BACKER_METADATA_DIR,
     METADATA_VERSION,
     RepositoryMetadata,
+    normalize_path_for_platform,
 )
+
+
+class TestNormalizePathForPlatform:
+    """Test path normalization for different platforms."""
+
+    def test_smb_path_on_windows(self):
+        """Test SMB paths are converted to backslashes on Windows."""
+        with patch.object(sys, 'platform', 'win32'):
+            result = normalize_path_for_platform("//192.168.0.1/share/path", "smb")
+            assert result == "\\\\192.168.0.1\\share\\path"
+
+    def test_smb_path_on_linux(self):
+        """Test SMB paths are unchanged on Linux."""
+        with patch.object(sys, 'platform', 'linux'):
+            result = normalize_path_for_platform("//192.168.0.1/share/path", "smb")
+            assert result == "//192.168.0.1/share/path"
+
+    def test_nfs_path_on_windows(self):
+        """Test NFS paths are converted to UNC format on Windows."""
+        with patch.object(sys, 'platform', 'win32'):
+            result = normalize_path_for_platform("192.168.0.1:/volume/backup", "nfs")
+            assert result == "\\\\192.168.0.1\\volume\\backup"
+
+    def test_nfs_path_on_linux(self):
+        """Test NFS paths are unchanged on Linux."""
+        with patch.object(sys, 'platform', 'linux'):
+            result = normalize_path_for_platform("192.168.0.1:/volume/backup", "nfs")
+            assert result == "192.168.0.1:/volume/backup"
+
+    def test_local_path_unchanged_on_windows(self):
+        """Test local Windows paths with drive letters are unchanged."""
+        with patch.object(sys, 'platform', 'win32'):
+            result = normalize_path_for_platform("C:\\Users\\test\\backup", "local")
+            assert result == "C:\\Users\\test\\backup"
+
+    def test_local_path_unchanged_on_linux(self):
+        """Test local Linux paths are unchanged."""
+        with patch.object(sys, 'platform', 'linux'):
+            result = normalize_path_for_platform("/home/user/backup", "local")
+            assert result == "/home/user/backup"
 
 
 class TestRepositoryMetadata:

@@ -463,3 +463,110 @@ def browse_directory(
         return LocalBrowser.list_directory(full_path)
     else:
         return False, f"Browsing not supported for {repo_type}"
+
+
+def smb_read_file(
+    server: str,
+    share: str,
+    remote_path: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> tuple[bool, str]:
+    """Read a file from an SMB share using smbclient.
+
+    Args:
+        server: SMB server hostname or IP
+        share: Share name
+        remote_path: Path to file within the share
+        username: Optional username
+        password: Optional password
+        domain: Optional domain
+
+    Returns:
+        Tuple of (success, file_contents or error_message)
+    """
+    # Normalize path
+    remote_path = remote_path.replace("\\", "/").lstrip("/")
+
+    with smb_auth_file(username, password, domain) as auth_path:
+        cmd = ["smbclient", f"//{server}/{share}"]
+
+        if auth_path:
+            cmd.extend(["-A", auth_path])
+        else:
+            cmd.append("-N")
+
+        # Use 'get' command to download to stdout
+        cmd.extend(["-c", f"get {remote_path} /dev/stdout"])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                error = result.stderr.decode("utf-8", errors="replace").strip()
+                if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error:
+                    return False, "File not found"
+                elif "NT_STATUS_ACCESS_DENIED" in error:
+                    return False, "Access denied"
+                else:
+                    return False, error or "Failed to read file"
+
+            return True, result.stdout.decode("utf-8", errors="replace")
+
+        except subprocess.TimeoutExpired:
+            return False, "Connection timed out"
+        except FileNotFoundError:
+            return False, "smbclient not installed"
+        except Exception as e:
+            return False, str(e)
+
+
+def smb_list_files(
+    server: str,
+    share: str,
+    remote_path: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> tuple[bool, list[str] | str]:
+    """List files in a directory on an SMB share.
+
+    Returns:
+        Tuple of (success, list of filenames or error_message)
+    """
+    success, result = SMBBrowser.list_directory(
+        server, share, remote_path, username, password, domain
+    )
+
+    if success:
+        return True, [entry.name for entry in result]
+    return False, result
+
+
+def smb_file_exists(
+    server: str,
+    share: str,
+    remote_path: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> bool:
+    """Check if a file/directory exists on an SMB share."""
+    # Get the parent directory and filename
+    remote_path = remote_path.replace("\\", "/").strip("/")
+    if "/" in remote_path:
+        parent = "/".join(remote_path.split("/")[:-1])
+        filename = remote_path.split("/")[-1]
+    else:
+        parent = ""
+        filename = remote_path
+
+    success, entries = smb_list_files(server, share, parent, username, password, domain)
+    if success:
+        return filename in entries
+    return False

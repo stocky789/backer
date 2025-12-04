@@ -946,37 +946,43 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         This discovers what backups exist in the repository, which can then
         be imported into the server database.
+
+        For SMB shares, uses smbclient to read files directly (no root needed).
+        For local/mounted paths, accesses the filesystem directly.
         """
-        from backer.core.repo_metadata import RepositoryMetadata
+        import json as json_module
+
+        from backer.server.repositories import smb_list_files, smb_read_file
 
         repo = storage.get_repository(repo_id)
         if not repo:
             raise HTTPException(status_code=404, detail="Repository not found")
 
-        # Build repository path
         repo_type = repo.get("repo_type", "smb")
+        subpath = repo.get("path", "")
+        server = repo.get("server", "")
+        share = repo.get("share", "")
+        username = repo.get("username")
+        password = storage.get_repository_password(repo_id)
+        domain = repo.get("domain")
+
+        # Build display path
         if repo_type == "smb":
-            repo_path = f"//{repo['server']}/{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
+            display_path = f"//{server}/{share}"
         elif repo_type == "nfs":
-            repo_path = f"{repo['server']}:{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "local":
-            repo_path = repo.get("share", "") or repo.get("path", "")
+            display_path = f"{server}:{share}"
         else:
-            repo_path = repo.get("share", "") or repo.get("path", "")
+            display_path = share
+        if subpath:
+            display_path = f"{display_path}/{subpath}"
 
-        try:
-            repo_meta = RepositoryMetadata(repo_path, repo_type)
-            discovery = repo_meta.discover_all()
-
+        def format_result(discovery: dict) -> dict[str, Any]:
+            """Format discovery result for API response."""
             return {
                 "success": True,
                 "repository_id": repo_id,
                 "repository_name": repo.get("name"),
-                "path": repo_path,
+                "path": display_path,
                 "initialized": discovery.get("initialized", False),
                 "summary": discovery.get("summary", {}),
                 "agents": discovery.get("agents", []),
@@ -997,9 +1003,137 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         "time": s.get("time"),
                         "paths": s.get("paths", []),
                     }
-                    for s in discovery.get("snapshots", [])[:50]  # Limit to 50 most recent
+                    for s in discovery.get("snapshots", [])[:50]
                 ],
             }
+
+        try:
+            # Use direct filesystem access for local or mounted paths
+            if repo.get("mount_point") or repo_type == "local":
+                from backer.core.repo_metadata import RepositoryMetadata
+
+                if repo.get("mount_point"):
+                    repo_path = repo["mount_point"]
+                    if subpath:
+                        repo_path = repo_path.rstrip("/") + "/" + subpath
+                else:
+                    repo_path = share or repo.get("path", "")
+
+                repo_meta = RepositoryMetadata(repo_path, repo_type)
+                return format_result(repo_meta.discover_all())
+
+            # For SMB shares, use smbclient to read metadata directly (no mount needed)
+            elif repo_type == "smb":
+                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+
+                # Try to read metadata.json
+                success, content = smb_read_file(
+                    server, share, f"{metadata_base}/metadata.json",
+                    username, password, domain
+                )
+
+                if not success:
+                    # No metadata found
+                    return format_result({
+                        "initialized": False,
+                        "agents": [],
+                        "jobs": [],
+                        "snapshots": [],
+                        "summary": {"agent_count": 0, "job_count": 0, "snapshot_count": 0, "total_runs": 0},
+                    })
+
+                # Parse metadata
+                try:
+                    metadata = json_module.loads(content)
+                except json_module.JSONDecodeError:
+                    metadata = {}
+
+                # Read agents
+                agents = []
+                ok, agent_files = smb_list_files(
+                    server, share, f"{metadata_base}/agents", username, password, domain
+                )
+                if ok:
+                    for f in agent_files:
+                        if f.endswith(".json"):
+                            ok2, c = smb_read_file(
+                                server, share, f"{metadata_base}/agents/{f}",
+                                username, password, domain
+                            )
+                            if ok2:
+                                try:
+                                    agents.append(json_module.loads(c))
+                                except json_module.JSONDecodeError:
+                                    pass
+
+                # Read jobs
+                jobs = []
+                ok, job_dirs = smb_list_files(
+                    server, share, f"{metadata_base}/jobs", username, password, domain
+                )
+                if ok:
+                    for d in job_dirs:
+                        ok2, c = smb_read_file(
+                            server, share, f"{metadata_base}/jobs/{d}/config.json",
+                            username, password, domain
+                        )
+                        if ok2:
+                            try:
+                                job = json_module.loads(c)
+                                # Count runs
+                                ok3, runs = smb_list_files(
+                                    server, share, f"{metadata_base}/jobs/{d}/runs",
+                                    username, password, domain
+                                )
+                                run_count = len([r for r in runs if r.endswith(".json")])
+                                job["run_count"] = run_count if ok3 else 0
+                                jobs.append(job)
+                            except json_module.JSONDecodeError:
+                                pass
+
+                # Read snapshots
+                snapshots = []
+                ok, snap_files = smb_list_files(
+                    server, share, f"{metadata_base}/snapshots", username, password, domain
+                )
+                if ok:
+                    for f in snap_files:
+                        if f.endswith(".json"):
+                            ok2, c = smb_read_file(
+                                server, share, f"{metadata_base}/snapshots/{f}",
+                                username, password, domain
+                            )
+                            if ok2:
+                                try:
+                                    snapshots.append(json_module.loads(c))
+                                except json_module.JSONDecodeError:
+                                    pass
+
+                return format_result({
+                    "initialized": True,
+                    "metadata": metadata,
+                    "agents": agents,
+                    "jobs": jobs,
+                    "snapshots": snapshots,
+                    "summary": {
+                        "agent_count": len(agents),
+                        "job_count": len(jobs),
+                        "snapshot_count": len(snapshots),
+                        "total_runs": sum(j.get("run_count", 0) for j in jobs),
+                    },
+                })
+
+            else:
+                # NFS without mount_point - not supported
+                return {
+                    "success": False,
+                    "error": "NFS scanning requires mount_point to be set",
+                    "repository_id": repo_id,
+                    "repository_name": repo.get("name"),
+                    "path": display_path,
+                    "hint": "Mount the NFS share and set the mount_point field",
+                }
+
         except Exception as e:
             logger.error(f"Failed to scan repository {repo_id}: {e}")
             return {
