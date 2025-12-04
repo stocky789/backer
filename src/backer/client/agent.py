@@ -4,12 +4,15 @@ import os
 import platform
 import signal
 import socket
+import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import httpx
 
@@ -227,7 +230,6 @@ class BackerAgent:
                 self.execute_restore(payload, dry_run=dry_run)
             elif cmd_type == "browse_filesystem":
                 self._execute_browse_filesystem(payload)
-                return  # Don't acknowledge browse commands
             else:
                 print(f"Unknown command: {cmd_type}")
                 return
@@ -386,6 +388,157 @@ class BackerAgent:
         except Exception as e:
             print(f"Failed to report progress: {e}")
 
+    def _is_smb_path(self, path: str) -> bool:
+        """Check if a path is an SMB/UNC path."""
+        return path.startswith("//") or path.startswith("\\\\")
+
+    def _parse_smb_path(self, path: str) -> tuple[str, str, str]:
+        """Parse an SMB path into (server, share, subpath).
+
+        Examples:
+            //192.168.0.254/HomeNetwork/Backer -> (192.168.0.254, HomeNetwork, Backer)
+            //server/share -> (server, share, "")
+        """
+        # Normalize to forward slashes
+        path = path.replace("\\", "/").lstrip("/")
+        parts = path.split("/")
+
+        server = parts[0] if len(parts) > 0 else ""
+        share = parts[1] if len(parts) > 1 else ""
+        subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
+
+        return server, share, subpath
+
+    @contextmanager
+    def _smb_mount_context(
+        self,
+        server: str,
+        share: str,
+        username: str | None = None,
+        password: str | None = None,
+        domain: str | None = None,
+    ) -> Generator[Path, None, None]:
+        """Context manager that mounts an SMB share and yields the mount path.
+
+        Used for restic on Linux, which needs a local filesystem path.
+        """
+        mount_point = Path(tempfile.mkdtemp(prefix="backer_smb_"))
+
+        try:
+            # Build mount command
+            smb_url = f"//{server}/{share}"
+            cmd = ["mount", "-t", "cifs", smb_url, str(mount_point)]
+
+            # Build mount options
+            opts = ["rw"]
+            if username:
+                opts.append(f"username={username}")
+            if password:
+                opts.append(f"password={password}")
+            if domain:
+                opts.append(f"domain={domain}")
+            if not username and not password:
+                opts.append("guest")
+
+            cmd.extend(["-o", ",".join(opts)])
+
+            print(f"[SMB] Mounting {smb_url} to {mount_point}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to mount SMB share: {result.stderr.strip()}")
+
+            print(f"[SMB] Mounted successfully")
+            yield mount_point
+
+        finally:
+            # Unmount
+            print(f"[SMB] Unmounting {mount_point}")
+            try:
+                subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=30)
+            except Exception as e:
+                print(f"[SMB] Warning: unmount failed: {e}")
+
+            # Clean up mount point directory
+            try:
+                mount_point.rmdir()
+            except Exception:
+                pass
+
+    def _prepare_destination_for_backend(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+    ) -> tuple[str, Any]:
+        """Prepare the destination path for the backend.
+
+        On Linux, SMB paths need special handling:
+        - For rclone: Use on-the-fly SMB backend config
+        - For restic: Mount the share first
+
+        Returns:
+            Tuple of (destination_path, cleanup_context_or_none)
+        """
+        dest_path = job.get("destination_path", "")
+
+        # Windows can use UNC paths directly
+        if sys.platform == "win32":
+            return dest_path, None
+
+        # Not an SMB path, use as-is
+        if not self._is_smb_path(dest_path):
+            return dest_path, None
+
+        # Linux with SMB path
+        server, share, subpath = self._parse_smb_path(dest_path)
+
+        # Get credentials from job (passed by server)
+        smb_username = job.get("smb_username")
+        smb_password = job.get("smb_password")
+        smb_domain = job.get("smb_domain")
+
+        if backend_name == "rclone":
+            # rclone can use on-the-fly SMB backend with connection string
+            # Format: :smb:host/share/path
+            # But we need to pass credentials via environment or config
+
+            # Build rclone SMB connection URL
+            # For SMB, we can use :smb,host=x,user=y,pass=z:share/path format
+            smb_opts = [f"host={server}"]
+            if smb_username:
+                smb_opts.append(f"user={smb_username}")
+            if smb_password:
+                smb_opts.append(f"pass={smb_password}")
+            if smb_domain:
+                smb_opts.append(f"domain={smb_domain}")
+
+            # rclone on-the-fly backend format
+            rclone_path = f":smb,{','.join(smb_opts)}:{share}"
+            if subpath:
+                rclone_path += f"/{subpath}"
+
+            print(f"[SMB] Using rclone SMB backend: :smb:***/{share}/{subpath or ''}")
+            return rclone_path, None
+
+        elif backend_name == "restic":
+            # restic needs a mounted filesystem path
+            # We'll mount the share and return the mount path with subpath
+            ctx = self._smb_mount_context(
+                server=server,
+                share=share,
+                username=smb_username,
+                password=smb_password,
+                domain=smb_domain,
+            )
+            mount_path = ctx.__enter__()
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            return full_path, ctx
+
+        else:
+            # Unknown backend, try using path as-is
+            print(f"[SMB] Warning: Unknown backend '{backend_name}', using path as-is")
+            return dest_path, None
+
     def execute_backup(
         self,
         job: dict[str, Any],
@@ -404,15 +557,20 @@ class BackerAgent:
             message="Initializing backup...",
         )
 
+        smb_cleanup_ctx = None
         try:
+            backend_name = job.get("backend", "rclone")
             backend = get_backend(
-                job.get("backend", "rclone"),  # rclone default (rsync not supported for agents)
+                backend_name,  # rclone default (rsync not supported for agents)
                 job.get("backend_options", {}),
             )
 
             available, message = backend.check_available()
             if not available:
                 raise RuntimeError(f"Backend not available: {message}")
+
+            # Prepare destination path (handles SMB on Linux)
+            dest_path, smb_cleanup_ctx = self._prepare_destination_for_backend(job, backend_name)
 
             self._report_progress(
                 run_id=run_id,
@@ -426,7 +584,7 @@ class BackerAgent:
                 excludes=job.get("excludes", []),
             )
 
-            destination = BackupDestination(path=job["destination_path"])
+            destination = BackupDestination(path=dest_path)
 
             # Create progress callback for backends that support it
             def progress_callback(
@@ -525,6 +683,14 @@ class BackerAgent:
                 pass
 
             return report
+
+        finally:
+            # Clean up SMB mount if used
+            if smb_cleanup_ctx is not None:
+                try:
+                    smb_cleanup_ctx.__exit__(None, None, None)
+                except Exception as cleanup_err:
+                    print(f"[SMB] Cleanup error: {cleanup_err}")
 
     def execute_restore(
         self,

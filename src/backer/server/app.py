@@ -47,6 +47,60 @@ def get_storage() -> Storage:
     return _storage
 
 
+def _build_backup_command_payload(
+    job: dict[str, Any],
+    job_name: str,
+    run_id: str,
+    dry_run: bool = False,
+    storage: Storage | None = None,
+) -> dict[str, Any]:
+    """Build the backup command payload with repository credentials.
+
+    This ensures SMB credentials are included for Linux agents that
+    need them to access network shares.
+    """
+    storage = storage or _storage
+    if storage is None:
+        raise RuntimeError("Storage not initialized")
+
+    # Start with basic payload
+    payload = {
+        "job_name": job_name,
+        "run_id": run_id,
+        "source_path": job.get("source_path"),
+        "destination_path": job.get("destination_path"),
+        "backend": job.get("backend", "rclone"),
+        "excludes": job.get("excludes", []),
+        "backend_options": job.get("backend_options", {}).copy(),
+        "dry_run": dry_run,
+    }
+
+    # If job has a repository, include SMB/NFS credentials for agents
+    repository_id = job.get("repository_id")
+    if repository_id:
+        repo = storage.get_repository(repository_id)
+        if repo:
+            repo_type = repo.get("repo_type", "")
+
+            if repo_type == "smb":
+                # Include SMB connection info for agents
+                payload["smb_server"] = repo.get("server")
+                payload["smb_share"] = repo.get("share")
+                payload["smb_username"] = repo.get("username")
+                payload["smb_domain"] = repo.get("domain")
+                # Get decrypted password
+                password = storage.get_repository_password(repository_id)
+                if password:
+                    payload["smb_password"] = password
+
+            elif repo_type == "nfs":
+                # NFS info (no password needed typically)
+                payload["nfs_server"] = repo.get("server")
+                payload["nfs_export"] = repo.get("share")
+
+    return payload
+
+
 def trigger_job_internal(job_name: str) -> None:
     """Internal function to trigger a job (used by scheduler).
 
@@ -90,17 +144,13 @@ def trigger_job_internal(job_name: str) -> None:
         client_id=client_id,
     )
 
-    # Queue the backup command for the client
-    command_payload = {
-        "job_name": job_name,
-        "run_id": run_id,
-        "source_path": job.get("source_path"),
-        "destination_path": job.get("destination_path"),
-        "backend": job.get("backend", "rclone"),
-        "excludes": job.get("excludes", []),
-        "backend_options": job.get("backend_options", {}),  # Includes restic_password
-        "dry_run": False,
-    }
+    # Build and queue the backup command with repository credentials
+    command_payload = _build_backup_command_payload(
+        job=job,
+        job_name=job_name,
+        run_id=run_id,
+        dry_run=False,
+    )
 
     _storage.queue_command(
         client_id=client_id,
@@ -759,17 +809,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             client_id=client_id,
         )
 
-        # Queue the backup command for the client
-        command_payload = {
-            "job_name": job_name,
-            "run_id": run_id,
-            "source_path": job.get("source_path"),
-            "destination_path": job.get("destination_path"),
-            "backend": job.get("backend", "rclone"),
-            "excludes": job.get("excludes", []),
-            "backend_options": job.get("backend_options", {}),  # Includes restic_password
-            "dry_run": request.dry_run,
-        }
+        # Build and queue the backup command with repository credentials
+        command_payload = _build_backup_command_payload(
+            job=job,
+            job_name=job_name,
+            run_id=run_id,
+            dry_run=request.dry_run,
+            storage=storage,
+        )
 
         storage.queue_command(
             client_id=client_id,
@@ -778,7 +825,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         logger.info(f"[JOB RUN] Job '{job_name}' queued for agent '{client_id}' (run_id: {run_id})")
-        logger.debug(f"[JOB RUN] Command payload: {command_payload}")
 
         return JobRunResponse(
             run_id=run_id,
