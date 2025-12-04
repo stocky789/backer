@@ -618,6 +618,90 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     console.print("[green]Agent uninstalled successfully.[/green]")
 
 
+@agent.command("logs")
+@click.option("-f", "--follow", is_flag=True, help="Follow log output (tail -f style)")
+@click.option("-n", "--lines", default=50, help="Number of lines to show (default: 50)")
+@click.option("--since", help="Show logs since time (e.g., '1h', '30m', '2024-01-01')")
+def agent_logs(follow: bool, lines: int, since: str | None) -> None:
+    """View agent logs.
+
+    On Linux, shows systemd journal logs for the backer-agent service.
+    On Windows, shows where to find logs.
+
+    Examples:
+        backer agent logs              # Show last 50 lines
+        backer agent logs -f           # Follow logs in real-time
+        backer agent logs -n 100       # Show last 100 lines
+        backer agent logs --since 1h   # Show logs from last hour
+    """
+    import subprocess
+
+    from backer.client.windows_service import is_windows
+
+    if is_windows():
+        # Windows doesn't have journald - point to Event Viewer
+        console.print("[bold]Windows Agent Logs[/bold]")
+        console.print()
+        console.print("Agent logs can be found in:")
+        console.print("  1. [cyan]Event Viewer[/cyan] > Windows Logs > Application")
+        console.print("     Filter by source 'BackerAgent'")
+        console.print()
+        console.print("  2. [cyan]Task Scheduler[/cyan] > Task Scheduler Library > Backer")
+        console.print("     Right-click > View History")
+        console.print()
+        console.print("For real-time logs, run the agent in foreground mode:")
+        console.print("  [dim]backer agent start[/dim]")
+        return
+
+    # Linux - use journalctl
+    user_service = Path.home() / ".config" / "systemd" / "user" / "backer-agent.service"
+    system_service = Path("/etc/systemd/system/backer-agent.service")
+
+    # Determine which service type is installed
+    if user_service.exists():
+        cmd = ["journalctl", "--user", "-u", "backer-agent"]
+    elif system_service.exists():
+        cmd = ["journalctl", "-u", "backer-agent"]
+    else:
+        console.print("[yellow]No systemd service found.[/yellow]")
+        console.print()
+        console.print("If running the agent manually, logs appear in the terminal.")
+        console.print("To install as a service: [cyan]backer agent install --method systemd[/cyan]")
+        return
+
+    # Add options
+    if follow:
+        cmd.append("-f")
+    else:
+        cmd.extend(["-n", str(lines)])
+
+    if since:
+        cmd.extend(["--since", since])
+
+    # Add output formatting
+    cmd.append("--no-pager")
+
+    try:
+        # Run journalctl - use exec for follow mode to allow Ctrl+C
+        if follow:
+            console.print("[dim]Following logs (Ctrl+C to stop)...[/dim]")
+            console.print()
+            subprocess.run(cmd)
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.stdout:
+                console.print(result.stdout)
+            if result.stderr and "No entries" not in result.stderr:
+                console.print(f"[yellow]{result.stderr}[/yellow]")
+            if not result.stdout and not result.stderr:
+                console.print("[dim]No log entries found.[/dim]")
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] journalctl not found. Is systemd installed?")
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+
+
 # ============ Job commands (for use with server) ============
 
 

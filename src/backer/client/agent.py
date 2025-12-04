@@ -84,7 +84,7 @@ class BackerAgent:
             self._http_client = httpx.Client(
                 base_url=self.server_url,
                 auth=auth,
-                timeout=30.0,
+                timeout=35.0,  # Server uses 25s long-polling, need longer timeout
             )
         return self._http_client
 
@@ -174,7 +174,15 @@ class BackerAgent:
         return response.json()
 
     def _heartbeat_loop(self, interval: int = 60) -> None:
-        """Background heartbeat loop."""
+        """Background heartbeat loop.
+
+        Uses long-polling: the server holds the heartbeat request until
+        a command is available (up to 25s), so we get commands instantly.
+        We only sleep briefly between heartbeats to allow quick shutdown.
+
+        The interval parameter is only used on connection errors to avoid
+        hammering the server.
+        """
         while self._running:
             try:
                 result = self.heartbeat()
@@ -183,12 +191,17 @@ class BackerAgent:
                     self._handle_command(cmd)
             except Exception as e:
                 print(f"Heartbeat failed: {e}")
+                # On error, wait before retry to avoid hammering server
+                for _ in range(5):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+                continue
 
-            # Sleep in small increments to allow quick shutdown
-            for _ in range(interval):
-                if not self._running:
-                    break
-                time.sleep(1)
+            # Brief pause between heartbeats (server handles the waiting)
+            if not self._running:
+                break
+            time.sleep(1)
 
     def _handle_command(self, command: dict[str, Any]) -> None:
         """Handle a command from the server."""
