@@ -398,8 +398,18 @@ def agent_setup() -> None:
     """Run the interactive setup wizard.
 
     Guides you through connecting to a server and registering this machine.
+    Automatically removes any existing configuration to start fresh.
     """
+    import shutil
+
+    from backer.client.agent import get_config_dir
     from backer.client.setup_wizard import run_wizard
+
+    # Remove existing config to start fresh - if running setup, you want a clean slate
+    config_dir = get_config_dir()
+    if config_dir.exists():
+        console.print(f"[yellow]Removing existing config: {config_dir}[/yellow]")
+        shutil.rmtree(config_dir)
 
     success = run_wizard()
     if not success:
