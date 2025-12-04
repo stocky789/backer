@@ -196,12 +196,10 @@ uninstall() {
     rm -f /usr/local/bin/backer
     rm -rf "$INSTALL_DIR"
 
+    # Always remove config on uninstall - old config causes auth issues on reinstall
     if [[ -d "$CONFIG_DIR" ]]; then
-        read -p "Remove configuration in $CONFIG_DIR? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$CONFIG_DIR"
-        fi
+        info "Removing configuration in $CONFIG_DIR"
+        rm -rf "$CONFIG_DIR"
     fi
 
     success "Backer Agent uninstalled"
