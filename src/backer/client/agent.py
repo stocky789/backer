@@ -540,8 +540,11 @@ class BackerAgent:
             if smb_domain:
                 smb_opts.append(f"domain={smb_domain}")
 
-            # Path is relative to share root
-            rclone_path = f":smb,{','.join(smb_opts)}:/{subpath}" if subpath else f":smb,{','.join(smb_opts)}:/"
+            # Path is relative to share root (empty string should still use root path)
+            if subpath and subpath.strip():
+                rclone_path = f":smb,{','.join(smb_opts)}:/{subpath}"
+            else:
+                rclone_path = f":smb,{','.join(smb_opts)}:/"
 
             print(f"[SMB] Using rclone SMB backend for //{server}/{share}/{subpath or ''}")
             return rclone_path, None

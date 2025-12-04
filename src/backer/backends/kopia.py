@@ -253,9 +253,10 @@ class KopiaBackend(BackendBase):
             if dry_run:
                 cmd.append("--dry-run")
 
-            # Add excludes
+            # Add excludes - use --exclude-path for glob patterns
+            # Note: Kopia uses --exclude-path for simple globs, --ignore-rules for .gitignore-style rules
             for exclude in source.excludes or []:
-                cmd.extend(["--ignore-rules", exclude])
+                cmd.extend(["--exclude-path", exclude])
 
             # Add tags from config
             for tag in self.config.get("tags", []):

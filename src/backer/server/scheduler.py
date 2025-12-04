@@ -53,6 +53,10 @@ class BackupScheduler:
         self._timezone_cache_time: datetime | None = None
         self._timezone_cache_ttl = 300  # Refresh timezone cache every 5 minutes
 
+        # Cleanup tracking
+        self._last_cleanup: datetime | None = None
+        self._cleanup_interval = 300  # Run cleanup every 5 minutes
+
     def _get_timezone(self) -> ZoneInfo:
         """Get the configured timezone from storage with caching.
 
@@ -115,6 +119,7 @@ class BackupScheduler:
         while self._running:
             try:
                 self._check_and_run_jobs()
+                self._run_cleanup_if_due()
             except Exception as e:
                 logger.error(f"Scheduler error: {e}")
 
@@ -123,6 +128,32 @@ class BackupScheduler:
                 if not self._running:
                     break
                 threading.Event().wait(1)
+
+    def _run_cleanup_if_due(self) -> None:
+        """Run periodic cleanup tasks if enough time has passed."""
+        now = datetime.now()
+
+        # Check if cleanup is due
+        if self._last_cleanup is not None:
+            since_last = (now - self._last_cleanup).total_seconds()
+            if since_last < self._cleanup_interval:
+                return
+
+        try:
+            # Clean up stale browse requests (older than 10 minutes)
+            browse_cleaned = self.storage.cleanup_old_browse_requests(max_age_minutes=10)
+            if browse_cleaned > 0:
+                logger.debug(f"Cleaned up {browse_cleaned} stale browse requests")
+
+            # Clean up stale progress records (older than 60 minutes)
+            progress_cleaned = self.storage.cleanup_stale_progress(max_age_minutes=60)
+            if progress_cleaned > 0:
+                logger.debug(f"Cleaned up {progress_cleaned} stale progress records")
+
+            self._last_cleanup = now
+
+        except Exception as e:
+            logger.warning(f"Cleanup error: {e}")
 
     def _check_and_run_jobs(self) -> None:
         """Check all jobs and run any that are due."""
