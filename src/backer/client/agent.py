@@ -227,7 +227,6 @@ class BackerAgent:
                 self.execute_restore(payload, dry_run=dry_run)
             elif cmd_type == "browse_filesystem":
                 self._execute_browse_filesystem(payload)
-                return  # Don't acknowledge browse commands
             else:
                 print(f"Unknown command: {cmd_type}")
                 return
