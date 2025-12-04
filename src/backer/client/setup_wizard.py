@@ -81,7 +81,7 @@ def discover_servers() -> list[str]:
             progress.update(task, advance=1, description=f"Trying {host}...")
             try:
                 response = httpx.get(
-                    f"http://{host}/api/v1/health",
+                    f"http://{host}/health",
                     timeout=2.0,
                 )
                 if response.status_code == 200:
@@ -110,7 +110,7 @@ def test_server_connection(url: str) -> tuple[bool, str]:
         if ":" not in url.split("//")[1]:
             url = f"{url}:8420"
 
-        response = httpx.get(f"{url}/api/v1/health", timeout=10.0)
+        response = httpx.get(f"{url}/health", timeout=10.0)
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "ok":
