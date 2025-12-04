@@ -154,58 +154,36 @@ Use Windows Settings > Apps > Backer Agent, or run the installer again and choos
 
 ### Linux Agent
 
-**Option 1: Install Script (Recommended)**
-
 ```bash
-# Download and run installer (installs for current user)
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | bash
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash
 ```
 
 This will:
-- Install backer to `~/.local/share/backer`
-- Run the interactive setup wizard to connect to your server
-- Create a systemd user service
-
-The agent runs as your user, so it can backup your personal files in `/home`.
-
-**For system-wide backups (all users/files):**
-
-```bash
-# Install with root access
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash -s -- --system
-```
-
-**Option 2: Manual Install with pip**
-
-```bash
-pip install backer[client]
-backer agent setup              # Interactive wizard
-# Or use CLI flags:
-backer agent register --server http://your-server:8420
-backer agent install --method systemd
-```
+- Install backer to `/opt/backer`
+- Run the setup wizard to connect to your server
+- Create and start a systemd service
 
 **Agent Commands:**
 
 ```bash
-backer agent setup        # Run setup wizard (connect to server)
 backer agent status       # Check connection status
-backer agent start        # Start agent manually
-systemctl --user start backer-agent    # Start via systemd (user mode)
-sudo systemctl start backer-agent      # Start via systemd (system mode)
+backer agent logs         # View agent logs
+backer agent logs -f      # Follow logs in real-time
+sudo backer agent setup   # Re-run setup wizard
 ```
 
-**Uninstall Linux Agent:**
+**Service Management:**
 
 ```bash
-# Option 1: Use the CLI (recommended)
-backer agent uninstall
+sudo systemctl status backer-agent   # Check status
+sudo systemctl restart backer-agent  # Restart
+sudo systemctl stop backer-agent     # Stop
+```
 
-# Option 2: Use the uninstall script (auto-detects install mode)
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/uninstall-agent.sh | bash
+**Uninstall:**
 
-# Option 3: System-wide uninstall (if installed with --system)
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/uninstall-agent.sh | sudo bash
+```bash
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash -s -- --uninstall
 ```
 
 ---
