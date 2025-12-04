@@ -205,7 +205,7 @@ class BackerAgent:
 
     def _handle_command(self, command: dict[str, Any]) -> None:
         """Handle a command from the server."""
-        cmd_type = command.get("command")
+        cmd_type = command.get("command_type")
         cmd_id = command.get("id")
         payload = command.get("payload", {})
 
