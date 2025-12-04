@@ -465,89 +465,108 @@ def browse_directory(
         return False, f"Browsing not supported for {repo_type}"
 
 
-@contextmanager
-def temporary_mount(
-    repo_type: str,
+def smb_read_file(
     server: str,
     share: str,
+    remote_path: str,
     username: str | None = None,
     password: str | None = None,
     domain: str | None = None,
-) -> Generator[tuple[bool, str], None, None]:
-    """Temporarily mount an SMB or NFS share for filesystem access.
+) -> tuple[bool, str]:
+    """Read a file from an SMB share using smbclient.
 
-    This context manager mounts the share, yields the mount path, then unmounts.
+    Args:
+        server: SMB server hostname or IP
+        share: Share name
+        remote_path: Path to file within the share
+        username: Optional username
+        password: Optional password
+        domain: Optional domain
 
-    Yields:
-        Tuple of (success, mount_path or error_message)
+    Returns:
+        Tuple of (success, file_contents or error_message)
     """
-    if repo_type == "local":
-        # Local paths don't need mounting
-        yield True, share
-        return
+    # Normalize path
+    remote_path = remote_path.replace("\\", "/").lstrip("/")
 
-    mount_point = Path(tempfile.mkdtemp(prefix="backer_mount_"))
+    with smb_auth_file(username, password, domain) as auth_path:
+        cmd = ["smbclient", f"//{server}/{share}"]
 
-    try:
-        if repo_type == "smb":
-            # Mount SMB/CIFS share
-            mount_cmd = ["mount", "-t", "cifs", f"//{server}/{share}", str(mount_point)]
-
-            if username and password:
-                # Create temporary credentials file for security
-                with smb_auth_file(username, password, domain) as auth_path:
-                    if auth_path:
-                        mount_cmd.extend(["-o", f"credentials={auth_path}"])
-                    result = subprocess.run(
-                        mount_cmd, capture_output=True, text=True, timeout=30
-                    )
-            else:
-                mount_cmd.extend(["-o", "guest"])
-                result = subprocess.run(
-                    mount_cmd, capture_output=True, text=True, timeout=30
-                )
-
-        elif repo_type == "nfs":
-            # Mount NFS export
-            mount_cmd = ["mount", "-t", "nfs", f"{server}:{share}", str(mount_point)]
-            result = subprocess.run(
-                mount_cmd, capture_output=True, text=True, timeout=30
-            )
-
+        if auth_path:
+            cmd.extend(["-A", auth_path])
         else:
-            yield False, f"Unsupported repo type: {repo_type}"
-            return
+            cmd.append("-N")
 
-        if result.returncode != 0:
-            error = result.stderr.strip()
-            if "permission denied" in error.lower():
-                yield False, "Permission denied - may need root access or check credentials"
-            elif "not found" in error.lower() or "no such" in error.lower():
-                yield False, f"Share not found: //{server}/{share}"
-            else:
-                yield False, f"Mount failed: {error}"
-            return
+        # Use 'get' command to download to stdout
+        cmd.extend(["-c", f"get {remote_path} /dev/stdout"])
 
-        yield True, str(mount_point)
-
-    except subprocess.TimeoutExpired:
-        yield False, "Mount timed out"
-    except PermissionError:
-        yield False, "Permission denied - may need root access"
-    except Exception as e:
-        yield False, str(e)
-
-    finally:
-        # Always try to unmount and cleanup
         try:
-            subprocess.run(
-                ["umount", str(mount_point)],
+            result = subprocess.run(
+                cmd,
                 capture_output=True,
-                timeout=10,
+                timeout=30,
             )
-        except Exception:
-            pass
-        try:
-            mount_point.rmdir()
-        except Exception:
-            pass
+
+            if result.returncode != 0:
+                error = result.stderr.decode("utf-8", errors="replace").strip()
+                if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error:
+                    return False, "File not found"
+                elif "NT_STATUS_ACCESS_DENIED" in error:
+                    return False, "Access denied"
+                else:
+                    return False, error or "Failed to read file"
+
+            return True, result.stdout.decode("utf-8", errors="replace")
+
+        except subprocess.TimeoutExpired:
+            return False, "Connection timed out"
+        except FileNotFoundError:
+            return False, "smbclient not installed"
+        except Exception as e:
+            return False, str(e)
+
+
+def smb_list_files(
+    server: str,
+    share: str,
+    remote_path: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> tuple[bool, list[str] | str]:
+    """List files in a directory on an SMB share.
+
+    Returns:
+        Tuple of (success, list of filenames or error_message)
+    """
+    success, result = SMBBrowser.list_directory(
+        server, share, remote_path, username, password, domain
+    )
+
+    if success:
+        return True, [entry.name for entry in result]
+    return False, result
+
+
+def smb_file_exists(
+    server: str,
+    share: str,
+    remote_path: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> bool:
+    """Check if a file/directory exists on an SMB share."""
+    # Get the parent directory and filename
+    remote_path = remote_path.replace("\\", "/").strip("/")
+    if "/" in remote_path:
+        parent = "/".join(remote_path.split("/")[:-1])
+        filename = remote_path.split("/")[-1]
+    else:
+        parent = ""
+        filename = remote_path
+
+    success, entries = smb_list_files(server, share, parent, username, password, domain)
+    if success:
+        return filename in entries
+    return False
