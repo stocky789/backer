@@ -770,10 +770,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/jobs/{job_name}/run", response_model=JobRunResponse)
     def run_job(
         job_name: str,
-        request: JobRunRequest,
+        request: JobRunRequest | None = None,
         storage: Storage = Depends(get_storage),
     ) -> JobRunResponse:
         """Trigger a job to run."""
+        # Default to non-dry-run if no request body provided
+        dry_run = request.dry_run if request else False
+
         job = storage.get_job(job_name)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -814,7 +817,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             job=job,
             job_name=job_name,
             run_id=run_id,
-            dry_run=request.dry_run,
+            dry_run=dry_run,
             storage=storage,
         )
 
@@ -831,7 +834,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             job_name=job_name,
             status="pending",
             started_at=started_at,
-            message=f"Backup queued for agent '{client_id}'" + (" (dry run)" if request.dry_run else ""),
+            message=f"Backup queued for agent '{client_id}'" + (" (dry run)" if dry_run else ""),
         )
 
     @app.get("/api/v1/jobs/{job_name}/runs")
