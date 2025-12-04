@@ -499,13 +499,9 @@ class BackerAgent:
         smb_domain = job.get("smb_domain")
 
         if backend_name == "rclone":
-            # rclone can use on-the-fly SMB backend with connection string
-            # Format: :smb:host/share/path
-            # But we need to pass credentials via environment or config
-
-            # Build rclone SMB connection URL
-            # For SMB, we can use :smb,host=x,user=y,pass=z:share/path format
-            smb_opts = [f"host={server}"]
+            # rclone on-the-fly SMB backend format:
+            # :smb,host=x,share=y,user=z,pass=w:/path/on/share
+            smb_opts = [f"host={server}", f"share={share}"]
             if smb_username:
                 smb_opts.append(f"user={smb_username}")
             if smb_password:
@@ -513,12 +509,10 @@ class BackerAgent:
             if smb_domain:
                 smb_opts.append(f"domain={smb_domain}")
 
-            # rclone on-the-fly backend format
-            rclone_path = f":smb,{','.join(smb_opts)}:{share}"
-            if subpath:
-                rclone_path += f"/{subpath}"
+            # Path is relative to share root
+            rclone_path = f":smb,{','.join(smb_opts)}:/{subpath}" if subpath else f":smb,{','.join(smb_opts)}:/"
 
-            print(f"[SMB] Using rclone SMB backend: :smb:***/{share}/{subpath or ''}")
+            print(f"[SMB] Using rclone SMB backend for //{server}/{share}/{subpath or ''}")
             return rclone_path, None
 
         elif backend_name == "restic":
