@@ -570,3 +570,74 @@ def smb_file_exists(
     if success:
         return filename in entries
     return False
+
+
+def smb_delete_directory(
+    server: str,
+    share: str,
+    remote_path: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> tuple[bool, str]:
+    """Recursively delete a directory on an SMB share.
+
+    Args:
+        server: SMB server hostname/IP
+        share: Share name
+        remote_path: Path to directory within share
+        username: Optional username
+        password: Optional password
+        domain: Optional domain
+
+    Returns:
+        Tuple of (success, message)
+    """
+    import subprocess
+
+    remote_path = remote_path.replace("\\", "/").strip("/")
+
+    # Build smbclient commands to delete directory recursively
+    # First delete all files, then the directory itself
+    smb_commands = f'cd "{remote_path}"; recurse ON; prompt OFF; mdelete *; cd /; rmdir "{remote_path}"'
+
+    try:
+        cmd = ["smbclient", f"//{server}/{share}"]
+
+        # Add authentication
+        if username and password:
+            with smb_auth_file(username, password, domain) as auth_path:
+                cmd.extend(["-A", auth_path])
+                cmd.extend(["-c", smb_commands])
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+        else:
+            cmd.extend(["-N"])  # No password
+            cmd.extend(["-c", smb_commands])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+        # smbclient may return non-zero even on partial success
+        # Check if directory is gone
+        if not smb_file_exists(server, share, remote_path, username, password, domain):
+            return True, "Directory deleted successfully"
+        else:
+            # Directory still exists - might be partial deletion or failure
+            if result.returncode != 0:
+                return False, f"Failed to delete: {result.stderr}"
+            return False, "Directory still exists after deletion attempt"
+
+    except subprocess.TimeoutExpired:
+        return False, "Command timed out"
+    except Exception as e:
+        return False, str(e)
