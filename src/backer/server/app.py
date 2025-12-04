@@ -613,6 +613,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get backup source path (this is the backup destination in the job)
         backup_source = job.get("destination_path")
+        if not backup_source:
+            raise HTTPException(
+                status_code=400,
+                detail="Job is missing destination_path - cannot restore. "
+                       "Please re-import or reconfigure the job."
+            )
         backend = job.get("backend", "rclone")
         source_subfolder = data.get("source_subfolder", "")
 
@@ -1286,6 +1292,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     return {"error": "Repository has no Backer metadata"}
 
                 # Read and import jobs
+                # Build the repository path for imported jobs
+                repo_path = f"//{server}/{share}"
+                if subpath:
+                    repo_path = f"{repo_path}/{subpath}"
+
                 ok, job_dirs = smb_list_files(
                     server, share, f"{metadata_base}/jobs", username, password, domain
                 )
@@ -1307,6 +1318,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         config["repository_id"] = repo_id
                                         config["imported_at"] = dt.now().isoformat()
                                         config["imported_from_repo"] = True
+                                        # Set destination_path to repo path for restores
+                                        if not config.get("destination_path"):
+                                            config["destination_path"] = repo_path
+                                        # Set backend if not present
+                                        if not config.get("backend"):
+                                            config["backend"] = "kopia"
                                         storage.save_job(job_name, config)
                                         imported["jobs"] += 1
 
