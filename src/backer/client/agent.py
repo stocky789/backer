@@ -423,6 +423,37 @@ class BackerAgent:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
+    def _rclone_obscure_password(self, password: str) -> str | None:
+        """Obscure a password for use with rclone on-the-fly backends.
+
+        Rclone requires passwords to be "obscured" when used in connection strings.
+        This runs 'rclone obscure <password>' to get the obscured form.
+        """
+        try:
+            from backer.tools.manager import get_tool_manager
+            tool_manager = get_tool_manager()
+            rclone_path = tool_manager.get_tool_path("rclone")
+
+            if not rclone_path:
+                print("[SMB] Warning: rclone not found, cannot obscure password")
+                return None
+
+            result = subprocess.run(
+                [str(rclone_path), "obscure", password],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode == 0:
+                return result.stdout.strip()
+            else:
+                print(f"[SMB] Warning: rclone obscure failed: {result.stderr}")
+                return None
+        except Exception as e:
+            print(f"[SMB] Warning: Failed to obscure password: {e}")
+            return None
+
     @contextmanager
     def _smb_mount_context(
         self,
@@ -532,11 +563,18 @@ class BackerAgent:
         if backend_name == "rclone":
             # rclone on-the-fly SMB backend format:
             # :smb,host=x,share=y,user=z,pass=w:/path/on/share
+            # NOTE: rclone requires passwords to be "obscured" for on-the-fly backends
             smb_opts = [f"host={server}", f"share={share}"]
             if smb_username:
                 smb_opts.append(f"user={smb_username}")
             if smb_password:
-                smb_opts.append(f"pass={smb_password}")
+                # Obscure the password for rclone (required for on-the-fly backends)
+                obscured_pass = self._rclone_obscure_password(smb_password)
+                if obscured_pass:
+                    smb_opts.append(f"pass={obscured_pass}")
+                else:
+                    print("[SMB] Warning: Could not obscure password, trying plaintext")
+                    smb_opts.append(f"pass={smb_password}")
             if smb_domain:
                 smb_opts.append(f"domain={smb_domain}")
 
