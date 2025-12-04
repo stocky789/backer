@@ -112,10 +112,10 @@ install_backer() {
 
     step "Installing backer from GitHub..."
     if [[ "$BACKER_VERSION" == "latest" ]]; then
-        pip install "backer[client] @ git+https://github.com/stocky789/backer.git" || \
+        pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git" || \
             error "Failed to install backer"
     else
-        pip install "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" || \
+        pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" || \
             error "Failed to install backer version $BACKER_VERSION"
     fi
 
@@ -196,12 +196,10 @@ uninstall() {
     rm -f /usr/local/bin/backer
     rm -rf "$INSTALL_DIR"
 
+    # Always remove config on uninstall - old config causes auth issues on reinstall
     if [[ -d "$CONFIG_DIR" ]]; then
-        read -p "Remove configuration in $CONFIG_DIR? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$CONFIG_DIR"
-        fi
+        info "Removing configuration in $CONFIG_DIR"
+        rm -rf "$CONFIG_DIR"
     fi
 
     success "Backer Agent uninstalled"
