@@ -1274,8 +1274,39 @@ class AgentService:
                 'error': f"Failed to connect to repository: {result.stderr}",
             }
 
-        # Use provided snapshot or latest
-        snapshot_id = snapshot if snapshot else 'latest'
+        # Use provided snapshot or get the latest one
+        snapshot_id = snapshot
+        if not snapshot_id:
+            # Query for the latest snapshot
+            logger.info("[KOPIA] No snapshot specified, querying for latest...")
+            list_cmd = [str(kopia), 'snapshot', 'list', '--json']
+            list_result = subprocess.run(
+                list_cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                creationflags=get_subprocess_flags(),
+            )
+            if list_result.returncode == 0:
+                try:
+                    import json as json_module
+                    snapshots = json_module.loads(list_result.stdout)
+                    if snapshots:
+                        # Get the most recent snapshot (last in list)
+                        latest = snapshots[-1]
+                        snapshot_id = latest.get('id') or latest.get('rootID')
+                        logger.info(f"[KOPIA] Found latest snapshot: {snapshot_id}")
+                except (json_module.JSONDecodeError, KeyError, IndexError) as e:
+                    logger.warning(f"[KOPIA] Failed to parse snapshot list: {e}")
+
+        if not snapshot_id:
+            return {
+                'success': False,
+                'output': 'No snapshots found in repository',
+                'bytes': 0,
+                'files': 0,
+                'error': 'No snapshots found in repository. Run a backup first.',
+            }
 
         # Build restore command
         # kopia snapshot restore <snapshot-id> <destination>
