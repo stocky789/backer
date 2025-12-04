@@ -141,15 +141,51 @@ class RcloneBackend(BackendBase):
         return cmd
 
     def _parse_output(self, output: str) -> dict[str, Any]:
-        """Parse rclone output for stats."""
+        """Parse rclone output for stats.
+
+        Rclone outputs lines like:
+            Transferred:   	  1.234 GiB / 5.678 GiB, 22%, 10.5 MiB/s, ETA 5m30s
+            Transferred:        123 / 456, 27%
+            Errors:                 0
+            Checks:              1234
+            Transferred:          456
+            Elapsed time:       1m23s
+        """
+        import re
+
         stats: dict[str, Any] = {}
 
         lines = output.strip().split("\n")
         for line in lines:
-            if "Transferred:" in line and "Errors:" not in line:
+            # Parse bytes transferred line: "Transferred: X GiB / Y GiB, ..."
+            if "Transferred:" in line and "/" in line and "Errors:" not in line:
                 parts = line.split(",")
                 if len(parts) >= 1:
                     stats["transfer_summary"] = parts[0].replace("Transferred:", "").strip()
+                    # Try to extract bytes from "X GiB / Y GiB" or "X MiB / Y MiB" format
+                    match = re.search(r'Transferred:\s*([\d.]+)\s*(\w+)\s*/\s*([\d.]+)\s*(\w+)', line)
+                    if match:
+                        done_val, done_unit, total_val, total_unit = match.groups()
+                        stats["bytes_transferred"] = self._parse_size(done_val, done_unit)
+                        stats["total_bytes"] = self._parse_size(total_val, total_unit)
+
+            # Parse file count line: "Transferred: 123 / 456, 27%" (no unit = files)
+            elif (
+                "Transferred:" in line and "/" in line
+                and "GiB" not in line and "MiB" not in line and "KiB" not in line
+            ):
+                match = re.search(r'Transferred:\s*(\d+)\s*/\s*(\d+)', line)
+                if match:
+                    stats["files_transferred"] = int(match.group(1))
+                    stats["total_files"] = int(match.group(2))
+
+            # Parse standalone "Transferred: 456" (file count without total)
+            elif "Transferred:" in line and "/" not in line:
+                match = re.search(r'Transferred:\s*(\d+)', line)
+                if match and "files_transferred" not in stats:
+                    stats["files_transferred"] = int(match.group(1))
+
+            # Parse errors count
             if "Errors:" in line:
                 try:
                     error_count = int(line.split(":")[1].strip().split()[0])
@@ -157,7 +193,39 @@ class RcloneBackend(BackendBase):
                 except (ValueError, IndexError):
                     pass
 
+            # Parse checks (verified files)
+            if "Checks:" in line:
+                try:
+                    checks_count = int(line.split(":")[1].strip().split()[0])
+                    stats["checks"] = checks_count
+                except (ValueError, IndexError):
+                    pass
+
         return stats
+
+    def _parse_size(self, value: str, unit: str) -> int:
+        """Parse a size value with unit to bytes.
+
+        Args:
+            value: Numeric value as string (e.g., "1.234")
+            unit: Unit string (e.g., "GiB", "MiB", "KiB", "Bytes")
+
+        Returns:
+            Size in bytes
+        """
+        try:
+            num = float(value)
+            unit_lower = unit.lower()
+            if "gib" in unit_lower or "gb" in unit_lower:
+                return int(num * 1024 * 1024 * 1024)
+            elif "mib" in unit_lower or "mb" in unit_lower:
+                return int(num * 1024 * 1024)
+            elif "kib" in unit_lower or "kb" in unit_lower:
+                return int(num * 1024)
+            else:
+                return int(num)
+        except (ValueError, TypeError):
+            return 0
 
     def backup(
         self,
@@ -207,6 +275,8 @@ class RcloneBackend(BackendBase):
                 operation=OperationType.BACKUP,
                 started_at=started_at,
                 finished_at=finished_at,
+                bytes_transferred=stats.get("bytes_transferred", 0),
+                files_transferred=stats.get("files_transferred", 0),
                 errors=errors,
                 output=result.stdout + result.stderr,
                 return_code=result.returncode,
@@ -280,6 +350,8 @@ class RcloneBackend(BackendBase):
                 operation=OperationType.RESTORE,
                 started_at=started_at,
                 finished_at=finished_at,
+                bytes_transferred=stats.get("bytes_transferred", 0),
+                files_transferred=stats.get("files_transferred", 0),
                 errors=errors,
                 output=result.stdout + result.stderr,
                 return_code=result.returncode,
