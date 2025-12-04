@@ -77,23 +77,24 @@ setup_packages() {
     case "$DISTRO_ID" in
         debian|ubuntu|linuxmint|pop)
             apt-get update -qq
-            apt-get install -y -qq python3 python3-pip python3-venv curl ca-certificates
+            apt-get install -y -qq python3 python3-pip python3-venv curl ca-certificates cifs-utils nfs-common
             ;;
         fedora)
-            dnf install -y -q python3 python3-pip curl ca-certificates
+            dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils
             ;;
         rhel|centos|rocky|almalinux)
-            dnf install -y -q python3 python3-pip curl ca-certificates || \
-            yum install -y -q python3 python3-pip curl ca-certificates
+            dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils || \
+            yum install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils
             ;;
         arch|manjaro)
-            pacman -Sy --noconfirm --needed python python-pip curl ca-certificates
+            pacman -Sy --noconfirm --needed python python-pip curl ca-certificates cifs-utils nfs-utils
             ;;
         opensuse*)
-            zypper install -y -q python3 python3-pip curl ca-certificates
+            zypper install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-client
             ;;
         *)
             warn "Unknown distro: $DISTRO_ID - assuming python3 is available"
+            warn "You may need to manually install: cifs-utils nfs-common"
             ;;
     esac
 }
