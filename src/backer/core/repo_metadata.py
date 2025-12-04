@@ -34,16 +34,35 @@ BACKER_METADATA_DIR = ".backer"
 METADATA_VERSION = "1.0"
 
 
-def normalize_path_for_platform(path: str) -> str:
+def normalize_path_for_platform(path: str, repo_type: str = "local") -> str:
     """Normalize a path for the current platform.
 
-    On Windows, converts forward-slash UNC paths (//server/share) to
-    backslash format (\\\\server\\share) which Windows requires.
+    On Windows:
+    - Converts forward-slash UNC paths (//server/share) to backslash format
+    - Converts NFS-style paths (server:/share) to UNC format for Windows NFS client
+
+    Args:
+        path: The path to normalize
+        repo_type: Type of repository (local, smb, nfs)
+
+    Returns:
+        Normalized path for the current platform
     """
     if sys.platform == 'win32':
         # Convert forward slash UNC paths to backslash format
         if path.startswith('//'):
             return path.replace('/', '\\')
+
+        # Convert NFS-style paths (server:/share) to Windows UNC format
+        # Windows NFS client uses UNC paths like \\server\share
+        if repo_type == "nfs" and ':' in path and not path[1:2] == ':':
+            # Looks like server:/path format (not C:\path)
+            parts = path.split(':', 1)
+            if len(parts) == 2 and parts[0] and parts[1]:
+                server = parts[0]
+                share_path = parts[1].replace('/', '\\').lstrip('\\')
+                return f"\\\\{server}\\{share_path}"
+
     return path
 
 
@@ -66,13 +85,13 @@ class RepositoryMetadata:
             repo_path: Path to the repository (local path, SMB share, etc.)
             repo_type: Type of repository (local, smb, nfs, s3)
         """
-        # Normalize path for the current platform (handles Windows UNC paths)
-        if isinstance(repo_path, str):
-            repo_path = normalize_path_for_platform(repo_path)
-        self.repo_path = Path(repo_path) if isinstance(repo_path, str) else repo_path
         self.repo_type = repo_type
+        # Normalize path for the current platform (handles Windows UNC/NFS paths)
+        if isinstance(repo_path, str):
+            repo_path = normalize_path_for_platform(repo_path, repo_type)
+        self.repo_path = Path(repo_path) if isinstance(repo_path, str) else repo_path
         self.metadata_dir = self.repo_path / BACKER_METADATA_DIR
-        logger.debug(f"RepositoryMetadata initialized: repo_path={self.repo_path}, metadata_dir={self.metadata_dir}")
+        logger.debug(f"RepositoryMetadata: path={self.repo_path}, type={repo_type}")
 
     def _ensure_dirs(self) -> None:
         """Ensure metadata directory structure exists."""

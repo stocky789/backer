@@ -463,3 +463,91 @@ def browse_directory(
         return LocalBrowser.list_directory(full_path)
     else:
         return False, f"Browsing not supported for {repo_type}"
+
+
+@contextmanager
+def temporary_mount(
+    repo_type: str,
+    server: str,
+    share: str,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> Generator[tuple[bool, str], None, None]:
+    """Temporarily mount an SMB or NFS share for filesystem access.
+
+    This context manager mounts the share, yields the mount path, then unmounts.
+
+    Yields:
+        Tuple of (success, mount_path or error_message)
+    """
+    if repo_type == "local":
+        # Local paths don't need mounting
+        yield True, share
+        return
+
+    mount_point = Path(tempfile.mkdtemp(prefix="backer_mount_"))
+
+    try:
+        if repo_type == "smb":
+            # Mount SMB/CIFS share
+            mount_cmd = ["mount", "-t", "cifs", f"//{server}/{share}", str(mount_point)]
+
+            if username and password:
+                # Create temporary credentials file for security
+                with smb_auth_file(username, password, domain) as auth_path:
+                    if auth_path:
+                        mount_cmd.extend(["-o", f"credentials={auth_path}"])
+                    result = subprocess.run(
+                        mount_cmd, capture_output=True, text=True, timeout=30
+                    )
+            else:
+                mount_cmd.extend(["-o", "guest"])
+                result = subprocess.run(
+                    mount_cmd, capture_output=True, text=True, timeout=30
+                )
+
+        elif repo_type == "nfs":
+            # Mount NFS export
+            mount_cmd = ["mount", "-t", "nfs", f"{server}:{share}", str(mount_point)]
+            result = subprocess.run(
+                mount_cmd, capture_output=True, text=True, timeout=30
+            )
+
+        else:
+            yield False, f"Unsupported repo type: {repo_type}"
+            return
+
+        if result.returncode != 0:
+            error = result.stderr.strip()
+            if "permission denied" in error.lower():
+                yield False, "Permission denied - may need root access or check credentials"
+            elif "not found" in error.lower() or "no such" in error.lower():
+                yield False, f"Share not found: //{server}/{share}"
+            else:
+                yield False, f"Mount failed: {error}"
+            return
+
+        yield True, str(mount_point)
+
+    except subprocess.TimeoutExpired:
+        yield False, "Mount timed out"
+    except PermissionError:
+        yield False, "Permission denied - may need root access"
+    except Exception as e:
+        yield False, str(e)
+
+    finally:
+        # Always try to unmount and cleanup
+        try:
+            subprocess.run(
+                ["umount", str(mount_point)],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
+        try:
+            mount_point.rmdir()
+        except Exception:
+            pass

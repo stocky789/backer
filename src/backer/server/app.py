@@ -946,37 +946,45 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         This discovers what backups exist in the repository, which can then
         be imported into the server database.
+
+        For SMB/NFS repositories, this will temporarily mount the share if needed.
         """
         from backer.core.repo_metadata import RepositoryMetadata
+        from backer.server.repositories import temporary_mount
 
         repo = storage.get_repository(repo_id)
         if not repo:
             raise HTTPException(status_code=404, detail="Repository not found")
 
-        # Build repository path
         repo_type = repo.get("repo_type", "smb")
-        if repo_type == "smb":
-            repo_path = f"//{repo['server']}/{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "nfs":
-            repo_path = f"{repo['server']}:{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "local":
-            repo_path = repo.get("share", "") or repo.get("path", "")
-        else:
-            repo_path = repo.get("share", "") or repo.get("path", "")
+        subpath = repo.get("path", "")
 
-        try:
-            repo_meta = RepositoryMetadata(repo_path, repo_type)
+        # Determine how to access the repository
+        if repo.get("mount_point"):
+            # Use existing mount point
+            repo_path = repo["mount_point"]
+            if subpath:
+                repo_path = repo_path.rstrip("/") + "/" + subpath
+            use_temp_mount = False
+        elif repo_type == "local":
+            # Local repository - use share or path field
+            repo_path = repo.get("share", "") or repo.get("path", "")
+            use_temp_mount = False
+        else:
+            # Need to temporarily mount SMB/NFS share
+            use_temp_mount = True
+            repo_path = None
+
+        def do_scan(scan_path: str) -> dict[str, Any]:
+            """Perform the actual scan."""
+            repo_meta = RepositoryMetadata(scan_path, repo_type)
             discovery = repo_meta.discover_all()
 
             return {
                 "success": True,
                 "repository_id": repo_id,
                 "repository_name": repo.get("name"),
-                "path": repo_path,
+                "path": scan_path,
                 "initialized": discovery.get("initialized", False),
                 "summary": discovery.get("summary", {}),
                 "agents": discovery.get("agents", []),
@@ -997,9 +1005,41 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         "time": s.get("time"),
                         "paths": s.get("paths", []),
                     }
-                    for s in discovery.get("snapshots", [])[:50]  # Limit to 50 most recent
+                    for s in discovery.get("snapshots", [])[:50]
                 ],
             }
+
+        try:
+            if use_temp_mount:
+                # Get credentials for mounting
+                password = storage.get_repository_password(repo_id)
+
+                with temporary_mount(
+                    repo_type=repo_type,
+                    server=repo.get("server", ""),
+                    share=repo.get("share", ""),
+                    username=repo.get("username"),
+                    password=password,
+                    domain=repo.get("domain"),
+                ) as (success, mount_result):
+                    if not success:
+                        return {
+                            "success": False,
+                            "error": mount_result,
+                            "repository_id": repo_id,
+                            "repository_name": repo.get("name"),
+                            "hint": "Ensure the server is running as root or has mount permissions",
+                        }
+
+                    # Build full path with subpath
+                    scan_path = mount_result
+                    if subpath:
+                        scan_path = mount_result.rstrip("/") + "/" + subpath
+
+                    return do_scan(scan_path)
+            else:
+                return do_scan(repo_path)
+
         except Exception as e:
             logger.error(f"Failed to scan repository {repo_id}: {e}")
             return {
