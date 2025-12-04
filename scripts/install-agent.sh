@@ -348,12 +348,25 @@ install_backer() {
     pip install --upgrade pip wheel setuptools -q
 
     # Install backer with client dependencies
+    info "Installing backer package..."
     if [[ "$BACKER_VERSION" == "latest" ]]; then
-        pip install "backer[client]" -q 2>/dev/null || \
-        pip install git+https://github.com/stocky789/backer.git#egg=backer[client] -q
+        # Try PyPI first, then fall back to git
+        if ! pip install "backer[client]" 2>/dev/null; then
+            info "Package not on PyPI, installing from GitHub..."
+            pip install "backer[client] @ git+https://github.com/stocky789/backer.git" || \
+                error "Failed to install backer. Check your internet connection."
+        fi
     else
-        pip install "backer[client]==$BACKER_VERSION" -q 2>/dev/null || \
-        pip install "git+https://github.com/stocky789/backer.git@v$BACKER_VERSION#egg=backer[client]" -q
+        if ! pip install "backer[client]==$BACKER_VERSION" 2>/dev/null; then
+            info "Version not on PyPI, installing from GitHub..."
+            pip install "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" || \
+                error "Failed to install backer version $BACKER_VERSION"
+        fi
+    fi
+
+    # Verify installation
+    if ! python -c "import backer" 2>/dev/null; then
+        error "Backer installation failed - module not found"
     fi
 
     deactivate
