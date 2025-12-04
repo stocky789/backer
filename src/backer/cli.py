@@ -393,10 +393,23 @@ def agent() -> None:
     pass
 
 
+@agent.command("setup")
+def agent_setup() -> None:
+    """Run the interactive setup wizard.
+
+    Guides you through connecting to a server and registering this machine.
+    """
+    from backer.client.setup_wizard import run_wizard
+
+    success = run_wizard()
+    if not success:
+        raise SystemExit(1)
+
+
 @agent.command("register")
 @click.option("--server", "-s", required=True, help="Server URL (e.g., http://backup-server:8420)")
 def agent_register(server: str) -> None:
-    """Register this machine as a backup client."""
+    """Register this machine as a backup client (use 'setup' for interactive mode)."""
     from backer.client.agent import BackerAgent
 
     console.print(f"Registering with server: {server}")
