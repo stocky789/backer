@@ -529,8 +529,13 @@ def agent_install(method: str) -> None:
 
 
 @agent.command("uninstall")
-def agent_uninstall() -> None:
-    """Remove agent from system startup."""
+@click.option("--keep-config", is_flag=True, help="Keep configuration files")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
+def agent_uninstall(keep_config: bool, yes: bool) -> None:
+    """Remove agent from system startup and optionally uninstall."""
+    import shutil
+    import subprocess
+    from backer.client.agent import get_config_dir, get_data_dir
     from backer.client.windows_service import is_windows, uninstall_service
 
     if is_windows():
@@ -539,9 +544,77 @@ def agent_uninstall() -> None:
             console.print(f"[green]✓ {message}[/green]")
         else:
             console.print(f"[yellow]{message}[/yellow]")
-    else:
-        console.print("Run: systemctl --user disable backer-agent")
-        console.print("Then delete ~/.config/systemd/user/backer-agent.service")
+        return
+
+    # Linux uninstall
+    config_dir = get_config_dir()
+    data_dir = get_data_dir()
+    user_service = Path.home() / ".config" / "systemd" / "user" / "backer-agent.service"
+    user_bin = Path.home() / ".local" / "bin" / "backer"
+
+    console.print("[bold]Backer Agent Uninstall[/bold]")
+    console.print()
+
+    # Check what exists
+    has_service = user_service.exists()
+    has_config = config_dir.exists()
+    has_data = data_dir.exists()
+
+    if not has_service and not has_config and not has_data:
+        console.print("[yellow]No agent installation found.[/yellow]")
+        return
+
+    if has_service:
+        console.print(f"  Service: {user_service}")
+    if has_config:
+        console.print(f"  Config: {config_dir}")
+    if has_data:
+        console.print(f"  Data: {data_dir}")
+    console.print()
+
+    if not yes:
+        if not click.confirm("Uninstall the agent?", default=False):
+            console.print("Cancelled.")
+            return
+
+    # Stop and disable systemd service
+    if has_service:
+        console.print("Stopping service...")
+        subprocess.run(
+            ["systemctl", "--user", "stop", "backer-agent"],
+            capture_output=True
+        )
+        subprocess.run(
+            ["systemctl", "--user", "disable", "backer-agent"],
+            capture_output=True
+        )
+        user_service.unlink(missing_ok=True)
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True
+        )
+        console.print("[green]✓ Service removed[/green]")
+
+    # Remove symlink
+    if user_bin.exists() or user_bin.is_symlink():
+        user_bin.unlink(missing_ok=True)
+        console.print("[green]✓ Removed ~/.local/bin/backer[/green]")
+
+    # Remove data directory
+    if has_data:
+        shutil.rmtree(data_dir, ignore_errors=True)
+        console.print(f"[green]✓ Removed {data_dir}[/green]")
+
+    # Remove config if requested
+    if has_config and not keep_config:
+        if yes or click.confirm("Also remove configuration?", default=False):
+            shutil.rmtree(config_dir, ignore_errors=True)
+            console.print(f"[green]✓ Removed {config_dir}[/green]")
+        else:
+            console.print(f"[dim]Kept configuration at {config_dir}[/dim]")
+
+    console.print()
+    console.print("[green]Agent uninstalled successfully.[/green]")
 
 
 # ============ Job commands (for use with server) ============

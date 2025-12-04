@@ -198,11 +198,14 @@ sudo systemctl start backer-agent      # Start via systemd (system mode)
 **Uninstall Linux Agent:**
 
 ```bash
-# User mode
-bash <(curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh) --uninstall
+# Option 1: Use the CLI (recommended)
+backer agent uninstall
 
-# System mode
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh) --uninstall --system
+# Option 2: Use the uninstall script (auto-detects install mode)
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/uninstall-agent.sh | bash
+
+# Option 3: System-wide uninstall (if installed with --system)
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/uninstall-agent.sh | sudo bash
 ```
 
 ---
