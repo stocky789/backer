@@ -6,19 +6,17 @@ connecting to a server, and registering automatically.
 
 import socket
 import sys
-from pathlib import Path
 from typing import Any
 
 import httpx
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
 
 from backer import __version__
-from backer.client.agent import get_config_dir, BackerAgent
-
+from backer.client.agent import get_config_dir
 
 console = Console()
 
@@ -64,7 +62,6 @@ def discover_servers() -> list[str]:
 
     # Also try the local hostname's domain
     try:
-        hostname = socket.gethostname()
         fqdn = socket.getfqdn()
         if "." in fqdn:
             domain = ".".join(fqdn.split(".")[1:])
