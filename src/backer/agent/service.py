@@ -1430,31 +1430,60 @@ class AgentService:
                 if not browse_path.is_dir():
                     raise NotADirectoryError(f"Path is not a directory: {path}")
 
-                # List directory contents
+                # Windows system folders to skip (they can hang or cause errors)
+                skip_names = {
+                    '$recycle.bin', 'system volume information', '$windows.~bt',
+                    '$windows.~ws', 'recovery', 'config.msi', 'msocache',
+                    '$syswol', 'found.000', 'found.001',
+                }
+
+                # Use os.scandir for better performance (caches stat info)
+                dirs = []
+                files = []
+
                 try:
-                    items = sorted(browse_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+                    with os.scandir(str(browse_path)) as scanner:
+                        for entry in scanner:
+                            try:
+                                # Skip hidden system folders on Windows
+                                name_lower = entry.name.lower()
+                                if name_lower in skip_names:
+                                    continue
+
+                                # Use cached is_dir from scandir (much faster)
+                                is_dir = entry.is_dir(follow_symlinks=False)
+
+                                item_entry = {
+                                    'name': entry.name,
+                                    'path': entry.path,
+                                    'is_dir': is_dir,
+                                    'size': 0,
+                                }
+
+                                if is_dir:
+                                    dirs.append(item_entry)
+                                else:
+                                    # Get file size from cached stat
+                                    try:
+                                        item_entry['size'] = entry.stat().st_size
+                                    except (OSError, PermissionError):
+                                        pass
+                                    files.append(item_entry)
+
+                                # Stop early if we have enough entries
+                                if len(dirs) + len(files) >= 500:
+                                    break
+
+                            except (OSError, PermissionError):
+                                # Skip items we can't access
+                                continue
                 except PermissionError:
                     raise PermissionError(f"Permission denied: {path}")
 
-                for item in items[:200]:  # Limit to 200 items
-                    try:
-                        is_dir = item.is_dir()
-                        size = 0
-                        if not is_dir:
-                            try:
-                                size = item.stat().st_size
-                            except (OSError, PermissionError):
-                                pass
-
-                        entries.append({
-                            'name': item.name,
-                            'path': str(item),
-                            'is_dir': is_dir,
-                            'size': size,
-                        })
-                    except (OSError, PermissionError):
-                        # Skip items we can't access
-                        continue
+                # Sort directories and files by name, then combine (dirs first)
+                dirs.sort(key=lambda x: x['name'].lower())
+                files.sort(key=lambda x: x['name'].lower())
+                entries = (dirs + files)[:200]
 
             # Report results to server
             self._make_request(
