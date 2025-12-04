@@ -18,7 +18,6 @@ from rich.table import Table
 from backer import __version__
 from backer.client.agent import get_config_dir
 
-
 console = Console()
 
 
