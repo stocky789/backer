@@ -121,6 +121,20 @@ class Storage:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS browse_requests (
+                    request_id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    path TEXT DEFAULT '',
+                    status TEXT DEFAULT 'pending',
+                    entries TEXT DEFAULT '[]',
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (client_id) REFERENCES clients(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_browse_requests_status ON browse_requests(status);
             """)
 
     @contextmanager
@@ -762,3 +776,82 @@ class Storage:
         with self._connect() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
             return {row["key"]: row["value"] for row in rows}
+
+    # Browse request operations
+    def save_browse_request(
+        self,
+        request_id: str,
+        client_id: str,
+        path: str,
+    ) -> None:
+        """Save a new browse request."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO browse_requests
+                    (request_id, client_id, path, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'pending', ?, ?)
+                """,
+                (request_id, client_id, path, now, now),
+            )
+
+    def save_browse_result(
+        self,
+        request_id: str,
+        status: str,
+        entries: list[dict[str, Any]],
+        error: str | None = None,
+        path: str | None = None,
+    ) -> None:
+        """Save browse results from agent."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            if path is not None:
+                conn.execute(
+                    """
+                    UPDATE browse_requests
+                    SET status = ?, entries = ?, error = ?, path = ?, updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (status, json.dumps(entries), error, path, now, request_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE browse_requests
+                    SET status = ?, entries = ?, error = ?, updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (status, json.dumps(entries), error, now, request_id),
+                )
+
+    def get_browse_result(self, request_id: str) -> dict[str, Any] | None:
+        """Get browse request result."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM browse_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row:
+                return {
+                    "request_id": row["request_id"],
+                    "client_id": row["client_id"],
+                    "path": row["path"],
+                    "status": row["status"],
+                    "entries": json.loads(row["entries"]) if row["entries"] else [],
+                    "error": row["error"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+        return None
+
+    def cleanup_old_browse_requests(self, max_age_minutes: int = 10) -> int:
+        """Clean up old browse requests."""
+        cutoff = (datetime.now() - timedelta(minutes=max_age_minutes)).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM browse_requests WHERE created_at < ?",
+                (cutoff,),
+            )
+            return cursor.rowcount
