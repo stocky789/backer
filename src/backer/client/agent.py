@@ -236,10 +236,8 @@ class BackerAgent:
                 return
 
             # Acknowledge command was processed
-            print(f"[DEBUG] About to acknowledge command {cmd_id}")
             if cmd_id:
                 self._acknowledge_command(cmd_id)
-                print(f"[DEBUG] Acknowledged command {cmd_id}")
 
         except Exception as e:
             print(f"Command {cmd_id} failed: {e}")
