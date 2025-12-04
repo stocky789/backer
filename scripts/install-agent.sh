@@ -480,6 +480,16 @@ run_wizard() {
         return
     fi
 
+    # Check if stdin is a terminal (interactive mode)
+    if [[ ! -t 0 ]]; then
+        echo
+        warn "Non-interactive mode detected (piped install)"
+        info "Run the setup wizard manually after install:"
+        echo "    $INSTALL_DIR/venv/bin/backer agent setup"
+        echo
+        return
+    fi
+
     echo
     step "Running setup wizard..."
     echo
@@ -572,10 +582,18 @@ print_instructions() {
         echo "  journalctl --user -u backer-agent -f"
     fi
 
+    # If non-interactive, remind about setup wizard
+    if [[ ! -t 0 ]]; then
+        echo
+        echo -e "${YELLOW}Next step - Connect to your server:${NC}"
+        echo "  backer agent setup"
+        echo
+    fi
+
     echo
     echo -e "${BLUE}Useful commands:${NC}"
     echo "  backer agent status    - Show agent status"
-    echo "  backer agent setup     - Run setup wizard again"
+    echo "  backer agent setup     - Run setup wizard"
     echo "  backer tools           - List installed backup tools"
     echo
 }
