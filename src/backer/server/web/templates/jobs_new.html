@@ -25,7 +25,10 @@
 
         <form action="/jobs/create" method="POST">
             <div class="form-group">
-                <label class="form-label">Backup Name *</label>
+                <label class="form-label">
+                    Backup Name *
+                    <span class="tooltip-icon" data-tooltip="Choose a descriptive name that helps you identify this backup. Examples: 'daily-documents', 'weekly-photos', 'dev-projects'">?</span>
+                </label>
                 <input type="text" name="name" class="form-input" required
                        placeholder="e.g., daily-documents" pattern="^(?!restore:).*$"
                        title="Job name cannot start with 'restore:'">
@@ -33,11 +36,14 @@
             </div>
 
             <div class="form-group">
-                <label class="form-label">Agent *</label>
-                <select name="client_id" class="form-input" required>
+                <label class="form-label">
+                    Agent *
+                    <span class="tooltip-icon" data-tooltip="Select the computer where your files are located. The agent software must be installed and connected on that computer.">?</span>
+                </label>
+                <select name="client_id" class="form-input" required id="agentSelect" onchange="onAgentChange()">
                     <option value="">Select an agent...</option>
                     {% for agent in agents %}
-                    <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.hostname }})</option>
+                    <option value="{{ agent.id }}" data-os="{{ agent.os_info|default('', true) }}">{{ agent.name }} ({{ agent.hostname }})</option>
                     {% endfor %}
                 </select>
                 <div class="form-hint">Which computer to backup</div>
@@ -49,16 +55,27 @@
             </div>
 
             <div class="form-group">
-                <label class="form-label">Source Path *</label>
-                <input type="text" name="source_path" class="form-input" required
-                       placeholder="C:\Users\John\Documents or /home/john">
+                <label class="form-label">
+                    Source Path *
+                    <span class="tooltip-icon" data-tooltip="The folder on the agent's computer that you want to back up. Use the Browse button to explore the agent's filesystem.">?</span>
+                </label>
+                <div class="input-with-btn">
+                    <input type="text" name="source_path" class="form-input" required id="sourcePathInput"
+                           placeholder="C:\Users\John\Documents or /home/john">
+                    <button type="button" class="btn btn-secondary" onclick="openFileBrowser()" id="browseBtn" disabled>
+                        Browse
+                    </button>
+                </div>
                 <div class="form-hint">Folder on the agent's computer to backup</div>
             </div>
 
             <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
 
             <div class="form-group">
-                <label class="form-label">Destination Repository *</label>
+                <label class="form-label">
+                    Destination Repository *
+                    <span class="tooltip-icon" data-tooltip="Where your backups will be stored. This is typically a network share (SMB/NFS) or cloud storage. Configure repositories in the Storage section.">?</span>
+                </label>
                 <select name="repository_id" class="form-input" required id="repoSelect" onchange="onRepoChange()">
                     <option value="">Select a storage repository...</option>
                     {% for repo in repositories %}
@@ -79,7 +96,10 @@
             </div>
 
             <div class="form-group">
-                <label class="form-label">Subfolder (optional)</label>
+                <label class="form-label">
+                    Subfolder (optional)
+                    <span class="tooltip-icon" data-tooltip="Organize your backups by adding a subfolder path. Useful for keeping different machines or backup jobs separate within the same repository.">?</span>
+                </label>
                 <input type="text" name="dest_subfolder" class="form-input" id="destSubfolder"
                        placeholder="backups/workstation-1">
                 <div class="form-hint">Additional path within the repository</div>
@@ -95,19 +115,53 @@
 
             <div class="form-group">
                 <label class="form-label">Backup Method</label>
-                <select name="backend" class="form-input" id="backendSelect" onchange="onBackendChange()">
-                    <option value="rclone">rclone (recommended - fast, supports SMB/NFS/Cloud)</option>
-                    <option value="restic">restic (encrypted, deduplicated snapshots)</option>
-                    <option value="kopia">kopia (modern backup with compression)</option>
-                </select>
-                <div class="form-hint">
-                    <strong>rclone</strong>: Best for most use cases - supports local, SMB, NFS, S3, and 50+ cloud providers<br>
-                    <strong>restic</strong>: Best for encrypted backups with versioning and deduplication<br>
-                    <strong>kopia</strong>: Modern backup solution with encryption, compression, and deduplication
+                <div class="backup-method-cards" id="backendCards">
+                    <label class="backup-method-card selected" data-value="kopia">
+                        <input type="radio" name="backend" value="kopia" checked style="display: none;">
+                        <div class="method-header">
+                            <span class="method-name">Kopia</span>
+                            <span class="method-badge recommended">Recommended</span>
+                        </div>
+                        <div class="method-desc">Modern backup with encryption, compression & deduplication</div>
+                        <ul class="method-features">
+                            <li>✓ Encrypted & secure</li>
+                            <li>✓ Fast incremental backups</li>
+                            <li>✓ Point-in-time recovery</li>
+                            <li>✓ Works on Windows, Mac & Linux</li>
+                        </ul>
+                    </label>
+                    <label class="backup-method-card" data-value="restic">
+                        <input type="radio" name="backend" value="restic" style="display: none;">
+                        <div class="method-header">
+                            <span class="method-name">Restic</span>
+                            <span class="method-badge">Established</span>
+                        </div>
+                        <div class="method-desc">Battle-tested encrypted backup with deduplication</div>
+                        <ul class="method-features">
+                            <li>✓ Encrypted & secure</li>
+                            <li>✓ Snapshot-based versioning</li>
+                            <li>✓ Wide platform support</li>
+                            <li>✓ Large community</li>
+                        </ul>
+                    </label>
+                    <label class="backup-method-card" data-value="rclone">
+                        <input type="radio" name="backend" value="rclone" style="display: none;">
+                        <div class="method-header">
+                            <span class="method-name">Rclone</span>
+                            <span class="method-badge">Sync Tool</span>
+                        </div>
+                        <div class="method-desc">Fast file sync to cloud storage & network shares</div>
+                        <ul class="method-features">
+                            <li>✓ 50+ cloud providers</li>
+                            <li>✓ Very fast transfers</li>
+                            <li>✓ No versioning (mirror sync)</li>
+                            <li>✓ Best for cloud storage</li>
+                        </ul>
+                    </label>
                 </div>
-                <div class="form-hint" style="margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border-radius: 4px;">
-                    <strong>Note:</strong> rsync backend is not currently supported for agent-based backups.
-                    Use rclone instead - it provides similar functionality with broader compatibility.
+                <div class="form-hint" style="margin-top: 12px;">
+                    <strong>Kopia</strong> and <strong>Restic</strong> create versioned backups - you can restore files from any point in time.<br>
+                    <strong>Rclone</strong> mirrors files to the destination - best for syncing to cloud storage like S3, Google Drive, etc.
                 </div>
             </div>
 
@@ -122,14 +176,20 @@
             </div>
 
             <div class="form-group">
-                <label class="form-label">Exclude Patterns</label>
+                <label class="form-label">
+                    Exclude Patterns
+                    <span class="tooltip-icon" data-tooltip="Files and folders matching these patterns will be skipped during backup. Use wildcards like *.tmp for file types or exact folder names like node_modules.">?</span>
+                </label>
                 <input type="text" name="excludes" class="form-input"
                        placeholder="*.tmp, .cache, node_modules, Thumbs.db">
                 <div class="form-hint">Files/folders to skip (comma-separated)</div>
             </div>
 
             <div class="form-group">
-                <label class="form-label">Schedule</label>
+                <label class="form-label">
+                    Schedule
+                    <span class="tooltip-icon" data-tooltip="Set when backups should run automatically. Leave as 'Manual only' if you want to trigger backups yourself.">?</span>
+                </label>
                 <select name="schedule_preset" class="form-input" id="schedulePreset" onchange="onScheduleChange()">
                     <option value="">Manual only (no automatic backups)</option>
                     <option value="0 2 * * *">Daily at 2:00 AM</option>
@@ -154,7 +214,10 @@
             <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
 
             <div class="form-group">
-                <label class="form-label">Retention Policy</label>
+                <label class="form-label">
+                    Retention Policy
+                    <span class="tooltip-icon" data-tooltip="Controls how many old backups to keep. Standard is recommended for most users - it keeps 7 days of daily backups plus 4 weekly snapshots.">?</span>
+                </label>
                 <select name="retention_preset" class="form-input" id="retentionPreset" onchange="onRetentionChange()">
                     <option value="forever">Keep all backups (no automatic cleanup)</option>
                     <option value="minimal">Minimal (keep last 3 backups)</option>
@@ -193,6 +256,28 @@
                 <a href="/jobs" class="btn btn-secondary">Cancel</a>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- File Browser Modal -->
+<div class="modal-overlay file-browser-modal" id="fileBrowserModal">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">Browse Agent Filesystem</span>
+            <button class="modal-close" onclick="closeFileBrowser()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="file-browser-path" id="fileBrowserPath">
+                <span>/</span>
+            </div>
+            <div class="file-browser-list" id="fileBrowserList">
+                <div class="file-browser-loading">Select an agent first</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeFileBrowser()">Cancel</button>
+            <button class="btn btn-primary" onclick="selectPath()" id="selectPathBtn" disabled>Select Folder</button>
+        </div>
     </div>
 </div>
 
@@ -252,7 +337,8 @@ function onRetentionChange() {
 document.getElementById('destSubfolder').addEventListener('input', updateDestPath);
 
 function onBackendChange() {
-    const backend = document.getElementById('backendSelect').value;
+    const selectedCard = document.querySelector('.backup-method-card.selected');
+    const backend = selectedCard ? selectedCard.dataset.value : 'kopia';
     const passwordGroup = document.getElementById('resticPasswordGroup');
     const passwordLabel = document.getElementById('repoPasswordLabel');
 
@@ -264,7 +350,239 @@ function onBackendChange() {
     }
 }
 
+// Setup backup method card selection
+document.querySelectorAll('.backup-method-card').forEach(card => {
+    card.addEventListener('click', function() {
+        // Remove selected from all cards
+        document.querySelectorAll('.backup-method-card').forEach(c => c.classList.remove('selected'));
+        // Add selected to clicked card
+        this.classList.add('selected');
+        // Check the radio input
+        this.querySelector('input[type="radio"]').checked = true;
+        // Trigger backend change handler
+        onBackendChange();
+    });
+});
+
+// File Browser state
+let currentBrowsePath = '';
+let currentBrowseRequestId = null;
+let pollInterval = null;
+let selectedBrowsePath = '';
+
+// Helper to escape HTML to prevent XSS
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function onAgentChange() {
+    const agentSelect = document.getElementById('agentSelect');
+    const browseBtn = document.getElementById('browseBtn');
+    browseBtn.disabled = !agentSelect.value;
+}
+
+function openFileBrowser() {
+    const agentSelect = document.getElementById('agentSelect');
+    if (!agentSelect.value) {
+        alert('Please select an agent first');
+        return;
+    }
+
+    document.getElementById('fileBrowserModal').classList.add('active');
+    currentBrowsePath = '';
+    selectedBrowsePath = '';
+    document.getElementById('selectPathBtn').disabled = true;
+    browsePath('');
+}
+
+function closeFileBrowser() {
+    document.getElementById('fileBrowserModal').classList.remove('active');
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+}
+
+function browsePath(path) {
+    const agentSelect = document.getElementById('agentSelect');
+    const clientId = agentSelect.value;
+    const listEl = document.getElementById('fileBrowserList');
+
+    listEl.innerHTML = '<div class="file-browser-loading">Loading...</div>';
+    currentBrowsePath = path;
+    updateBreadcrumb(path);
+
+    // Request browse from server
+    fetch(`/api/v1/agents/${clientId}/browse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path })
+    })
+    .then(r => r.json())
+    .then(data => {
+        currentBrowseRequestId = data.request_id;
+        // Poll for results
+        startPolling();
+    })
+    .catch(err => {
+        listEl.innerHTML = `<div class="file-browser-error">Error: ${escapeHtml(err.message)}</div>`;
+    });
+}
+
+function startPolling() {
+    if (pollInterval) clearInterval(pollInterval);
+
+    let attempts = 0;
+    pollInterval = setInterval(() => {
+        attempts++;
+        if (attempts > 30) { // 15 second timeout
+            clearInterval(pollInterval);
+            pollInterval = null;
+            document.getElementById('fileBrowserList').innerHTML =
+                '<div class="file-browser-error">Request timed out. Agent may be offline.</div>';
+            return;
+        }
+
+        fetch(`/api/v1/browse/${currentBrowseRequestId}`)
+        .then(r => {
+            if (!r.ok) throw new Error(`Server error: ${r.status}`);
+            return r.json();
+        })
+        .then(data => {
+            if (data.status === 'completed') {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                renderFileList(data.entries, data.path);
+            } else if (data.status === 'error') {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                document.getElementById('fileBrowserList').innerHTML =
+                    `<div class="file-browser-error">${escapeHtml(data.error || 'Unknown error')}</div>`;
+            }
+            // else still pending, continue polling
+        })
+        .catch(err => {
+            console.error('Poll error:', err);
+        });
+    }, 500);
+}
+
+function renderFileList(entries, path) {
+    const listEl = document.getElementById('fileBrowserList');
+    listEl.innerHTML = '';
+
+    // Add parent directory option if not at root
+    if (path && path !== '/') {
+        const parentPath = path.includes('\\')
+            ? path.substring(0, path.lastIndexOf('\\')) || path.substring(0, 3)
+            : path.substring(0, path.lastIndexOf('/')) || '/';
+
+        // For Windows drives like C:\, go back to empty (show all drives)
+        const goBackPath = (path.match(/^[A-Z]:\\?$/i)) ? '' : parentPath;
+
+        const parentItem = document.createElement('div');
+        parentItem.className = 'file-browser-item';
+        parentItem.innerHTML = `
+            <span class="file-browser-icon folder">📁</span>
+            <span class="file-browser-name">..</span>
+        `;
+        parentItem.onclick = () => browsePath(goBackPath);
+        listEl.appendChild(parentItem);
+    }
+
+    // Filter to only show directories for backup source selection
+    const dirs = entries.filter(e => e.is_dir);
+
+    if (dirs.length === 0 && !path) {
+        listEl.innerHTML = '<div class="file-browser-error">No directories found</div>';
+        return;
+    }
+
+    dirs.forEach(entry => {
+        const item = document.createElement('div');
+        item.className = 'file-browser-item';
+        item.dataset.path = entry.path;
+
+        const icon = document.createElement('span');
+        icon.className = 'file-browser-icon folder';
+        icon.textContent = '📁';
+
+        const name = document.createElement('span');
+        name.className = 'file-browser-name';
+        name.textContent = entry.name;
+
+        item.appendChild(icon);
+        item.appendChild(name);
+
+        // Single click to select, double click to open
+        item.onclick = (e) => {
+            document.querySelectorAll('.file-browser-item.selected')
+                .forEach(el => el.classList.remove('selected'));
+            item.classList.add('selected');
+            selectedBrowsePath = entry.path;
+            document.getElementById('selectPathBtn').disabled = false;
+        };
+
+        item.ondblclick = () => {
+            browsePath(entry.path);
+        };
+
+        listEl.appendChild(item);
+    });
+}
+
+function updateBreadcrumb(path) {
+    const pathEl = document.getElementById('fileBrowserPath');
+    pathEl.innerHTML = '';
+
+    // Root segment
+    const rootSeg = document.createElement('span');
+    rootSeg.className = 'file-browser-path-segment';
+    rootSeg.textContent = 'Root';
+    rootSeg.onclick = () => browsePath('');
+    pathEl.appendChild(rootSeg);
+
+    if (!path) return;
+
+    const separator = path.includes('\\') ? '\\' : '/';
+    const parts = path.split(separator).filter(p => p);
+    let currentPath = '';
+
+    parts.forEach((part, i) => {
+        if (separator === '\\' && i === 0) {
+            // Windows drive letter
+            currentPath = part + '\\';
+        } else {
+            currentPath += separator + part;
+        }
+        const fullPath = currentPath;
+
+        // Add separator
+        const sep = document.createElement('span');
+        sep.style.color = 'var(--text-muted)';
+        sep.textContent = ` ${separator} `;
+        pathEl.appendChild(sep);
+
+        // Add clickable path segment
+        const seg = document.createElement('span');
+        seg.className = 'file-browser-path-segment';
+        seg.textContent = part;
+        seg.onclick = () => browsePath(fullPath);
+        pathEl.appendChild(seg);
+    });
+}
+
+function selectPath() {
+    if (selectedBrowsePath) {
+        document.getElementById('sourcePathInput').value = selectedBrowsePath;
+        closeFileBrowser();
+    }
+}
+
 // Initialize
+onAgentChange();
 onScheduleChange();
 onRetentionChange();
 onBackendChange();

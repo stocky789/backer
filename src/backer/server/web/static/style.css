@@ -486,3 +486,223 @@ pre {
     .stats-grid { grid-template-columns: 1fr; }
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
 }
+
+/* Backup Method Cards */
+.backup-method-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.backup-method-card {
+    background: var(--bg-dark);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.backup-method-card:hover {
+    border-color: var(--text-muted);
+    background: var(--bg-hover);
+}
+
+.backup-method-card.selected {
+    border-color: var(--accent);
+    background: rgba(88, 166, 255, 0.08);
+}
+
+.method-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.method-name {
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.method-badge {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 12px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+}
+
+.method-badge.recommended {
+    background: rgba(63, 185, 80, 0.2);
+    color: var(--success);
+}
+
+.method-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    line-height: 1.4;
+}
+
+.method-features {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.method-features li {
+    padding: 2px 0;
+}
+
+.backup-method-card.selected .method-features li {
+    color: var(--text);
+}
+
+@media (max-width: 900px) {
+    .backup-method-cards {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Tooltips */
+.tooltip-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 11px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    border-radius: 50%;
+    cursor: help;
+    margin-left: 6px;
+    position: relative;
+}
+
+.tooltip-icon:hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 100;
+    margin-bottom: 8px;
+    color: var(--text);
+    max-width: 280px;
+    white-space: normal;
+    text-align: left;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* File Browser */
+.file-browser-modal .modal {
+    max-width: 600px;
+}
+
+.file-browser-path {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 14px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    font-family: monospace;
+    overflow-x: auto;
+}
+
+.file-browser-path-segment {
+    color: var(--accent);
+    cursor: pointer;
+}
+
+.file-browser-path-segment:hover {
+    text-decoration: underline;
+}
+
+.file-browser-list {
+    max-height: 350px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.file-browser-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+}
+
+.file-browser-item:last-child {
+    border-bottom: none;
+}
+
+.file-browser-item:hover {
+    background: var(--bg-hover);
+}
+
+.file-browser-item.selected {
+    background: rgba(88, 166, 255, 0.15);
+}
+
+.file-browser-icon {
+    font-size: 16px;
+    width: 20px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.file-browser-icon.folder {
+    color: var(--warning);
+}
+
+.file-browser-name {
+    flex: 1;
+    font-size: 13px;
+}
+
+.file-browser-loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+}
+
+.file-browser-error {
+    text-align: center;
+    padding: 20px;
+    color: var(--error);
+    font-size: 13px;
+}
+
+/* Input with button */
+.input-with-btn {
+    display: flex;
+    gap: 8px;
+}
+
+.input-with-btn .form-input {
+    flex: 1;
+}
+
+.input-with-btn .btn {
+    white-space: nowrap;
+}

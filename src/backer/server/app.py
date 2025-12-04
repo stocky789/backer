@@ -585,6 +585,87 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found")
         return progress
 
+    # ============ Agent Filesystem Browsing ============
+
+    @app.post("/api/v1/agents/{client_id}/browse")
+    async def browse_agent_filesystem(
+        client_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Request filesystem listing from an agent.
+
+        Body:
+        - path: Directory path to browse (optional, defaults to root/home)
+        """
+        client = storage.get_client(client_id)
+        if not client:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        path = data.get("path", "")
+
+        # Generate a unique request ID
+        request_id = f"browse_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+
+        # Queue the browse command for the agent
+        storage.queue_command(
+            client_id=client_id,
+            command_type="browse_filesystem",
+            payload={
+                "request_id": request_id,
+                "path": path,
+            },
+        )
+
+        # Store pending browse request
+        storage.save_browse_request(request_id, client_id, path)
+
+        logger.info(f"[BROWSE] Queued filesystem browse for agent '{client_id}', path='{path}', request_id={request_id}")
+
+        return {
+            "request_id": request_id,
+            "status": "pending",
+            "client_id": client_id,
+            "path": path,
+        }
+
+    @app.get("/api/v1/browse/{request_id}")
+    def get_browse_results(
+        request_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Get results of a filesystem browse request."""
+        result = storage.get_browse_result(request_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Browse request not found")
+        return result
+
+    @app.post("/api/v1/browse/{request_id}/results")
+    async def report_browse_results(
+        request_id: str,
+        request: Request,
+        client: Client = Depends(verify_client),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, str]:
+        """Agent reports filesystem browse results."""
+        data = await request.json()
+
+        storage.save_browse_result(
+            request_id=request_id,
+            status="completed" if data.get("success", True) else "error",
+            entries=data.get("entries", []),
+            error=data.get("error"),
+            path=data.get("path", ""),
+        )
+
+        logger.info(f"[BROWSE] Results received for request_id={request_id}, entries={len(data.get('entries', []))}")
+
+        return {"status": "recorded"}
+
     # ============ Restore Operations ============
 
     @app.post("/api/v1/restore")

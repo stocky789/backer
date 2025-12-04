@@ -324,6 +324,8 @@ class AgentService:
                 self._execute_backup(payload)
             elif cmd_type == 'restore':
                 self._execute_restore(payload)
+            elif cmd_type == 'browse_filesystem':
+                self._execute_browse_filesystem(payload)
             else:
                 logger.warning(f"[COMMAND] Unknown command type: {cmd_type}")
 
@@ -1365,6 +1367,124 @@ class AgentService:
             'files': 0,
             'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
         }
+
+    def _execute_browse_filesystem(self, payload: dict[str, Any]):
+        """Execute filesystem browse command and report results."""
+        request_id = payload.get('request_id')
+        if not request_id:
+            logger.error("[BROWSE] Missing request_id in payload")
+            return
+
+        path = payload.get('path', '')
+
+        logger.info(f"[BROWSE] Browsing filesystem at: {path or '(root)'}")
+
+        try:
+            entries = []
+
+            if not path:
+                # Return root directories based on platform
+                if sys.platform == 'win32':
+                    # List available drives on Windows
+                    import ctypes
+                    drives = []
+                    bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+                    for letter in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+                        if bitmask & 1:
+                            drives.append(f"{letter}:\\")
+                        bitmask >>= 1
+
+                    for drive in drives:
+                        entries.append({
+                            'name': drive,
+                            'path': drive,
+                            'is_dir': True,
+                            'size': 0,
+                        })
+                else:
+                    # On Unix, start from /home or /
+                    home = Path.home()
+                    if home.exists():
+                        entries.append({
+                            'name': 'Home',
+                            'path': str(home),
+                            'is_dir': True,
+                            'size': 0,
+                        })
+                    entries.append({
+                        'name': '/',
+                        'path': '/',
+                        'is_dir': True,
+                        'size': 0,
+                    })
+
+                actual_path = ''
+            else:
+                # List contents of the specified path
+                browse_path = Path(path)
+                actual_path = str(browse_path)
+
+                if not browse_path.exists():
+                    raise FileNotFoundError(f"Path does not exist: {path}")
+
+                if not browse_path.is_dir():
+                    raise NotADirectoryError(f"Path is not a directory: {path}")
+
+                # List directory contents
+                try:
+                    items = sorted(browse_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+                except PermissionError:
+                    raise PermissionError(f"Permission denied: {path}")
+
+                for item in items[:200]:  # Limit to 200 items
+                    try:
+                        is_dir = item.is_dir()
+                        size = 0
+                        if not is_dir:
+                            try:
+                                size = item.stat().st_size
+                            except (OSError, PermissionError):
+                                pass
+
+                        entries.append({
+                            'name': item.name,
+                            'path': str(item),
+                            'is_dir': is_dir,
+                            'size': size,
+                        })
+                    except (OSError, PermissionError):
+                        # Skip items we can't access
+                        continue
+
+            # Report results to server
+            self._make_request(
+                f'/api/v1/browse/{request_id}/results',
+                method='POST',
+                data={
+                    'success': True,
+                    'path': actual_path,
+                    'entries': entries,
+                },
+            )
+
+            logger.info(f"[BROWSE] Sent {len(entries)} entries for path: {path or '(root)'}")
+
+        except Exception as e:
+            logger.error(f"[BROWSE] Failed to browse {path}: {e}")
+            # Report error to server
+            try:
+                self._make_request(
+                    f'/api/v1/browse/{request_id}/results',
+                    method='POST',
+                    data={
+                        'success': False,
+                        'path': path,
+                        'entries': [],
+                        'error': str(e),
+                    },
+                )
+            except Exception as report_err:
+                logger.error(f"[BROWSE] Failed to report error: {report_err}")
 
     def _report_progress(
         self,
