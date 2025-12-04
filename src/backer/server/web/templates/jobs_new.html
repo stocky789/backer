@@ -127,7 +127,7 @@
                             <li>✓ Encrypted & secure</li>
                             <li>✓ Fast incremental backups</li>
                             <li>✓ Point-in-time recovery</li>
-                            <li>✓ Works on Windows, Mac & Linux</li>
+                            <li>✓ Best compression ratio</li>
                         </ul>
                     </label>
                     <label class="backup-method-card" data-value="restic">
@@ -140,28 +140,28 @@
                         <ul class="method-features">
                             <li>✓ Encrypted & secure</li>
                             <li>✓ Snapshot-based versioning</li>
-                            <li>✓ Wide platform support</li>
-                            <li>✓ Large community</li>
+                            <li>✓ Point-in-time recovery</li>
+                            <li>✓ Mature & well-tested</li>
                         </ul>
                     </label>
                     <label class="backup-method-card" data-value="rclone">
                         <input type="radio" name="backend" value="rclone" style="display: none;">
                         <div class="method-header">
                             <span class="method-name">Rclone</span>
-                            <span class="method-badge">Sync Tool</span>
+                            <span class="method-badge">Simple Sync</span>
                         </div>
-                        <div class="method-desc">Fast file sync to cloud storage & network shares</div>
+                        <div class="method-desc">Fast file sync to network shares (no encryption)</div>
                         <ul class="method-features">
-                            <li>✓ 50+ cloud providers</li>
                             <li>✓ Very fast transfers</li>
-                            <li>✓ No versioning (mirror sync)</li>
-                            <li>✓ Best for cloud storage</li>
+                            <li>✓ Simple mirror copy</li>
+                            <li>✗ No versioning</li>
+                            <li>✗ No encryption</li>
                         </ul>
                     </label>
                 </div>
                 <div class="form-hint" style="margin-top: 12px;">
                     <strong>Kopia</strong> and <strong>Restic</strong> create versioned backups - you can restore files from any point in time.<br>
-                    <strong>Rclone</strong> mirrors files to the destination - best for syncing to cloud storage like S3, Google Drive, etc.
+                    <strong>Rclone</strong> mirrors files to the destination - overwrites previous backups (no history).
                 </div>
             </div>
 
