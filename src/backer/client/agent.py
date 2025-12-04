@@ -393,6 +393,20 @@ class BackerAgent:
         """Check if a path is an SMB/UNC path."""
         return path.startswith("//") or path.startswith("\\\\")
 
+    def _is_nfs_path(self, path: str) -> bool:
+        """Check if a path is an NFS path (server:/export format)."""
+        # NFS paths look like: server:/export/path or 192.168.1.1:/share/path
+        # But NOT like /local/path or C:\path
+        if path.startswith("/") or path.startswith("\\"):
+            return False
+        if ":" in path:
+            # Check it's not a Windows drive letter (C:)
+            parts = path.split(":", 1)
+            if len(parts) == 2 and len(parts[0]) > 1:
+                # More than one char before colon, likely NFS
+                return parts[1].startswith("/")
+        return False
+
     def _parse_smb_path(self, path: str) -> tuple[str, str, str]:
         """Parse an SMB path into (server, share, subpath).
 
@@ -410,6 +424,24 @@ class BackerAgent:
 
         return server, share, subpath
 
+    def _parse_nfs_path(self, path: str) -> tuple[str, str, str]:
+        """Parse an NFS path into (server, export, subpath).
+
+        Examples:
+            192.168.0.254:/exports/backup/data -> (192.168.0.254, /exports/backup, data)
+            server:/share -> (server, /share, "")
+        """
+        # Split on first colon
+        parts = path.split(":", 1)
+        server = parts[0]
+        export_path = parts[1] if len(parts) > 1 else "/"
+
+        # The export is typically the first part, subpath is the rest
+        # Common pattern: server:/export/subpath
+        # We'll treat the entire path after : as the export initially
+        # The actual export point is determined by the NFS server
+        return server, export_path, ""
+
     def _check_cifs_available(self) -> bool:
         """Check if cifs-utils is installed for SMB mounting."""
         try:
@@ -422,6 +454,22 @@ class BackerAgent:
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
+
+    def _check_nfs_available(self) -> bool:
+        """Check if NFS mount tools are installed."""
+        try:
+            # Check for mount.nfs (provided by nfs-common on Debian/Ubuntu)
+            result = subprocess.run(
+                ["mount.nfs", "-V"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # mount.nfs might not have -V, try checking if it exists
+            import shutil
+            return shutil.which("mount.nfs") is not None
 
     def _rclone_obscure_password(self, password: str) -> str | None:
         """Obscure a password for use with rclone on-the-fly backends.
@@ -530,6 +578,69 @@ class BackerAgent:
             except Exception:
                 pass
 
+    @contextmanager
+    def _nfs_mount_context(
+        self,
+        server: str,
+        export_path: str,
+    ) -> Generator[Path, None, None]:
+        """Context manager that mounts an NFS export and yields the mount path.
+
+        Used for restic/kopia on Linux, which need a local filesystem path.
+        Requires nfs-common (Debian/Ubuntu) or nfs-utils (RHEL/Fedora) to be installed.
+        """
+        # Check if NFS tools are available
+        if not self._check_nfs_available():
+            raise RuntimeError(
+                "NFS mount tools not installed. Install with:\n"
+                "  Debian/Ubuntu: sudo apt install nfs-common\n"
+                "  RHEL/Fedora: sudo dnf install nfs-utils\n"
+                "  Arch: sudo pacman -S nfs-utils"
+            )
+
+        mount_point = Path(tempfile.mkdtemp(prefix="backer_nfs_"))
+
+        try:
+            # Build NFS mount command
+            nfs_url = f"{server}:{export_path}"
+            cmd = ["mount", "-t", "nfs", nfs_url, str(mount_point)]
+
+            # Add common NFS mount options for reliability
+            cmd.extend(["-o", "rw,soft,timeo=30,retrans=3"])
+
+            print(f"[NFS] Mounting {nfs_url} to {mount_point}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip()
+                if "Permission denied" in error_msg or "access denied" in error_msg.lower():
+                    raise RuntimeError(f"NFS mount permission denied: {nfs_url}")
+                elif "No such file or directory" in error_msg:
+                    raise RuntimeError(f"NFS export not found: {nfs_url}")
+                elif "Connection refused" in error_msg or "Host is down" in error_msg:
+                    raise RuntimeError(f"Cannot connect to NFS server: {server}")
+                elif "not responding" in error_msg.lower():
+                    raise RuntimeError(f"NFS server not responding: {server}")
+                else:
+                    raise RuntimeError(f"Failed to mount NFS export: {error_msg}")
+
+            print("[NFS] Mounted successfully")
+            yield mount_point
+
+        finally:
+            # Unmount
+            print(f"[NFS] Unmounting {mount_point}")
+            try:
+                subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=30)
+            except Exception as e:
+                print(f"[NFS] Warning: unmount failed: {e}")
+
+            # Clean up mount point directory
+            try:
+                mount_point.rmdir()
+            except Exception:
+                pass
+
     def _prepare_destination_for_backend(
         self,
         job: dict[str, Any],
@@ -537,9 +648,10 @@ class BackerAgent:
     ) -> tuple[str, Any]:
         """Prepare the destination path for the backend.
 
-        On Linux, SMB paths need special handling:
-        - For rclone: Use on-the-fly SMB backend config
-        - For restic: Mount the share first
+        On Linux, SMB and NFS paths need special handling:
+        - For rclone with SMB: Use on-the-fly SMB backend config
+        - For rclone with NFS: Mount the export first
+        - For restic/kopia: Mount the share/export first
 
         Returns:
             Tuple of (destination_path, cleanup_context_or_none)
@@ -550,11 +662,33 @@ class BackerAgent:
         if sys.platform == "win32":
             return dest_path, None
 
-        # Not an SMB path, use as-is
-        if not self._is_smb_path(dest_path):
-            return dest_path, None
+        # Handle SMB paths
+        if self._is_smb_path(dest_path):
+            return self._prepare_smb_destination(job, backend_name, dest_path)
 
-        # Linux with SMB path
+        # Handle NFS paths
+        if self._is_nfs_path(dest_path):
+            return self._prepare_nfs_destination(job, backend_name, dest_path)
+
+        # Check if NFS credentials were passed (job linked to NFS repository)
+        nfs_server = job.get("nfs_server")
+        nfs_export = job.get("nfs_export")
+        if nfs_server and nfs_export:
+            # Build NFS path from repository info
+            nfs_path = f"{nfs_server}:{nfs_export}"
+            print(f"[NFS] Using NFS repository: {nfs_path}")
+            return self._prepare_nfs_destination(job, backend_name, nfs_path)
+
+        # Local path, use as-is
+        return dest_path, None
+
+    def _prepare_smb_destination(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+        dest_path: str,
+    ) -> tuple[str, Any]:
+        """Prepare SMB destination path for the backend."""
         server, share, subpath = self._parse_smb_path(dest_path)
 
         # Get credentials from job (passed by server)
@@ -609,6 +743,40 @@ class BackerAgent:
             # Unknown backend, try using path as-is
             print(f"[SMB] Warning: Unknown backend '{backend_name}', using path as-is")
             return dest_path, None
+
+    def _prepare_nfs_destination(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+        dest_path: str,
+    ) -> tuple[str, Any]:
+        """Prepare NFS destination path for the backend."""
+        server, export_path, _ = self._parse_nfs_path(dest_path)
+
+        if backend_name == "rclone":
+            # For rclone with NFS, we need to mount first as rclone doesn't have
+            # native NFS support (unlike SMB). Could use SFTP if SSH is available,
+            # but mounting is more reliable.
+            print(f"[NFS] Mounting NFS export for rclone backend")
+            ctx = self._nfs_mount_context(server=server, export_path=export_path)
+            mount_path = ctx.__enter__()
+            print(f"[NFS] Using mounted path: {mount_path}")
+            return str(mount_path), ctx
+
+        elif backend_name in ("restic", "kopia"):
+            # restic and kopia need a mounted filesystem path
+            print(f"[NFS] Mounting NFS export for {backend_name} backend")
+            ctx = self._nfs_mount_context(server=server, export_path=export_path)
+            mount_path = ctx.__enter__()
+            print(f"[NFS] Using mounted path: {mount_path}")
+            return str(mount_path), ctx
+
+        else:
+            # Unknown backend, try mounting anyway
+            print(f"[NFS] Warning: Unknown backend '{backend_name}', mounting NFS export")
+            ctx = self._nfs_mount_context(server=server, export_path=export_path)
+            mount_path = ctx.__enter__()
+            return str(mount_path), ctx
 
     def execute_backup(
         self,
