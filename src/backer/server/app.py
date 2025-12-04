@@ -57,30 +57,37 @@ def _build_backup_command_payload(
     """Build the backup command payload with repository credentials.
 
     This ensures SMB credentials are included for Linux agents that
-    need them to access network shares.
+    need them to access network shares, and repository passwords are
+    included for restic/kopia backends.
     """
     storage = storage or _storage
     if storage is None:
         raise RuntimeError("Storage not initialized")
 
     # Start with basic payload
+    backend_options = job.get("backend_options", {}).copy()
+    backend = job.get("backend", "rclone")
+
     payload = {
         "job_name": job_name,
         "run_id": run_id,
         "source_path": job.get("source_path"),
         "destination_path": job.get("destination_path"),
-        "backend": job.get("backend", "rclone"),
+        "backend": backend,
         "excludes": job.get("excludes", []),
-        "backend_options": job.get("backend_options", {}).copy(),
+        "backend_options": backend_options,
         "dry_run": dry_run,
     }
 
-    # If job has a repository, include SMB/NFS credentials for agents
+    # If job has a repository, include credentials for agents
     repository_id = job.get("repository_id")
     if repository_id:
         repo = storage.get_repository(repository_id)
         if repo:
             repo_type = repo.get("repo_type", "")
+
+            # Get decrypted repository password
+            repo_password = storage.get_repository_password(repository_id)
 
             if repo_type == "smb":
                 # Include SMB connection info for agents
@@ -88,15 +95,30 @@ def _build_backup_command_payload(
                 payload["smb_share"] = repo.get("share")
                 payload["smb_username"] = repo.get("username")
                 payload["smb_domain"] = repo.get("domain")
-                # Get decrypted password
-                password = storage.get_repository_password(repository_id)
-                if password:
-                    payload["smb_password"] = password
+                if repo_password:
+                    payload["smb_password"] = repo_password
 
             elif repo_type == "nfs":
                 # NFS info (no password needed typically)
                 payload["nfs_server"] = repo.get("server")
                 payload["nfs_export"] = repo.get("share")
+
+            # For restic/kopia backends, include the repository password
+            # This is needed for the agent to authenticate with the backup repository
+            if backend in ("restic", "kopia") and repo_password:
+                # Only set if not already provided in backend_options
+                if "password" not in backend_options:
+                    payload["backend_options"]["password"] = repo_password
+                    logger.debug(f"[BACKUP] Added repository password to backend_options for {backend} backend")
+
+    # Also check if password is directly in job's backend_options (legacy/manual config)
+    # This handles cases where the password was set directly on the job config
+    if backend in ("restic", "kopia"):
+        if "password" not in payload["backend_options"]:
+            # Check for password in job's backend_options
+            job_password = job.get("backend_options", {}).get("password")
+            if job_password:
+                payload["backend_options"]["password"] = job_password
 
     return payload
 

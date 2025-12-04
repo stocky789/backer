@@ -159,6 +159,10 @@ SyslogIdentifier=backer-agent
 
 # Config location
 Environment="BACKER_CONFIG_DIR=/etc/backer"
+# Ensure tools directory is found (tools are downloaded to /root/.local/share/backer/tools/)
+Environment="HOME=/root"
+# Data directory for tools
+Environment="XDG_DATA_HOME=/root/.local/share"
 
 [Install]
 WantedBy=multi-user.target

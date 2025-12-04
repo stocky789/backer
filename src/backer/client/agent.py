@@ -619,6 +619,12 @@ class BackerAgent:
         # Use run_id from command payload if provided, otherwise generate one
         run_id = job.get("run_id") or datetime.now().strftime("%Y%m%d_%H%M%S")
         started_at = datetime.now()
+        job_name = job.get("job_name", "unknown")
+        backend_name = job.get("backend", "rclone")
+
+        print(f"[BACKUP] Starting job '{job_name}' with backend '{backend_name}'")
+        print(f"[BACKUP] Source: {job.get('source_path')}")
+        print(f"[BACKUP] Destination: {job.get('destination_path')}")
 
         # Report that we're starting
         self._report_progress(
@@ -630,18 +636,30 @@ class BackerAgent:
 
         smb_cleanup_ctx = None
         try:
-            backend_name = job.get("backend", "rclone")
+            backend_options = job.get("backend_options", {})
+
+            # Log backend options (without password)
+            safe_options = {k: v for k, v in backend_options.items() if k != "password"}
+            if "password" in backend_options:
+                safe_options["password"] = "***"
+            print(f"[BACKUP] Backend options: {safe_options}")
+
             backend = get_backend(
                 backend_name,  # rclone default (rsync not supported for agents)
-                job.get("backend_options", {}),
+                backend_options,
             )
 
+            print(f"[BACKUP] Checking backend availability...")
             available, message = backend.check_available()
             if not available:
+                print(f"[BACKUP] Backend not available: {message}")
                 raise RuntimeError(f"Backend not available: {message}")
+            print(f"[BACKUP] Backend ready: {message}")
 
             # Prepare destination path (handles SMB on Linux)
+            print(f"[BACKUP] Preparing destination path for {backend_name} backend...")
             dest_path, smb_cleanup_ctx = self._prepare_destination_for_backend(job, backend_name)
+            print(f"[BACKUP] Using destination: {dest_path}")
 
             self._report_progress(
                 run_id=run_id,
@@ -686,6 +704,8 @@ class BackerAgent:
                 hasattr(backend.backup, '__code__') and
                 'progress_callback' in backend.backup.__code__.co_varnames
             )
+
+            print(f"[BACKUP] Executing backup: {source.path} -> {dest_path}")
             result = backend.backup(
                 source=source,
                 destination=destination,
@@ -694,6 +714,18 @@ class BackerAgent:
             )
 
             finished_at = datetime.now()
+
+            # Log the result
+            if result.success:
+                print(f"[BACKUP] Job '{job_name}' completed successfully")
+                print(f"[BACKUP] Transferred: {result.bytes_transferred} bytes, {result.files_transferred} files")
+            else:
+                print(f"[BACKUP] Job '{job_name}' completed with errors")
+                print(f"[BACKUP] Return code: {result.return_code}")
+                if result.errors:
+                    print(f"[BACKUP] Errors: {result.errors[:5]}")  # First 5 errors
+                if result.output:
+                    print(f"[BACKUP] Output (last 1000 chars): {result.output[-1000:]}")
 
             self._report_progress(
                 run_id=run_id,
@@ -705,7 +737,7 @@ class BackerAgent:
             # Report result to server
             report = {
                 "run_id": run_id,
-                "job_name": job.get("job_name", "unknown"),
+                "job_name": job_name,
                 "client_id": self.client_id,
                 "success": result.success,
                 "started_at": started_at.isoformat(),
@@ -725,33 +757,40 @@ class BackerAgent:
             return report
 
         except Exception as e:
+            import traceback
+
             finished_at = datetime.now()
+            error_msg = str(e)
+            error_trace = traceback.format_exc()
+
+            print(f"[BACKUP] Job '{job_name}' FAILED: {error_msg}")
+            print(f"[BACKUP] Traceback:\n{error_trace}")
 
             self._report_progress(
                 run_id=run_id,
                 status="failed",
                 progress_percent=0,
-                message=str(e)[:200],
+                message=error_msg[:200],
             )
 
             report = {
                 "run_id": run_id,
-                "job_name": job.get("job_name", "unknown"),
+                "job_name": job_name,
                 "client_id": self.client_id,
                 "success": False,
                 "started_at": started_at.isoformat(),
                 "finished_at": finished_at.isoformat(),
                 "bytes_transferred": 0,
                 "files_transferred": 0,
-                "errors": [str(e)],
-                "output": "",
+                "errors": [error_msg],
+                "output": error_trace[:5000],
             }
 
             try:
                 client = self._get_client()
                 client.post("/api/v1/results", json=report)
-            except Exception:
-                pass
+            except Exception as report_err:
+                print(f"[BACKUP] Failed to report error to server: {report_err}")
 
             return report
 
