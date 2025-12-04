@@ -557,12 +557,16 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
             console.print(f"[yellow]{message}[/yellow]")
         return
 
-    # Linux uninstall
-    config_dir = get_config_dir()
-    data_dir = get_data_dir()
+    # Linux uninstall - check all possible installation locations
+    config_dir = get_config_dir()  # /etc/backer
+    data_dir = get_data_dir()  # ~/.local/share/backer
     user_service = Path.home() / ".config" / "systemd" / "user" / "backer-agent.service"
     system_service = Path("/etc/systemd/system/backer-agent.service")
     user_bin = Path.home() / ".local" / "bin" / "backer"
+
+    # Also check for install-agent.sh locations
+    install_dir = Path("/opt/backer")
+    system_bin = Path("/usr/local/bin/backer")
 
     console.print("[bold]Backer Agent Uninstall[/bold]")
     console.print()
@@ -572,8 +576,11 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     has_system_service = system_service.exists()
     has_config = config_dir.exists()
     has_data = data_dir.exists()
+    has_install_dir = install_dir.exists()
+    has_system_bin = system_bin.exists() or system_bin.is_symlink()
 
-    if not has_user_service and not has_system_service and not has_config and not has_data:
+    if not any([has_user_service, has_system_service, has_config, has_data,
+                has_install_dir, has_system_bin]):
         console.print("[yellow]No agent installation found.[/yellow]")
         return
 
@@ -581,6 +588,10 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
         console.print(f"  System Service: {system_service}")
     if has_user_service:
         console.print(f"  User Service: {user_service}")
+    if has_install_dir:
+        console.print(f"  Install Dir: {install_dir}")
+    if has_system_bin:
+        console.print(f"  Binary: {system_bin}")
     if has_config:
         console.print(f"  Config: {config_dir}")
     if has_data:
@@ -635,10 +646,40 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
         )
         console.print("[green]✓ User service removed[/green]")
 
-    # Remove symlink
+    # Remove user symlink (~/.local/bin/backer)
     if user_bin.exists() or user_bin.is_symlink():
         user_bin.unlink(missing_ok=True)
         console.print("[green]✓ Removed ~/.local/bin/backer[/green]")
+
+    # Remove system symlink (/usr/local/bin/backer)
+    if has_system_bin:
+        try:
+            system_bin.unlink(missing_ok=True)
+            console.print(f"[green]✓ Removed {system_bin}[/green]")
+        except PermissionError:
+            result = subprocess.run(
+                ["sudo", "rm", "-f", str(system_bin)],
+                capture_output=True
+            )
+            if result.returncode == 0:
+                console.print(f"[green]✓ Removed {system_bin}[/green]")
+            else:
+                console.print(f"[yellow]Could not remove {system_bin} (permission denied)[/yellow]")
+
+    # Remove installation directory (/opt/backer)
+    if has_install_dir:
+        try:
+            shutil.rmtree(install_dir, ignore_errors=False)
+            console.print(f"[green]✓ Removed {install_dir}[/green]")
+        except PermissionError:
+            result = subprocess.run(
+                ["sudo", "rm", "-rf", str(install_dir)],
+                capture_output=True
+            )
+            if result.returncode == 0:
+                console.print(f"[green]✓ Removed {install_dir}[/green]")
+            else:
+                console.print(f"[yellow]Could not remove {install_dir} (permission denied)[/yellow]")
 
     # Remove data directory
     if has_data:
