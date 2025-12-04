@@ -118,46 +118,69 @@ Install agents on each machine you want to backup.
 
 ### Windows Agent
 
-**Option 1: Download Pre-built Executable (Recommended)**
+**Option 1: Installer (Recommended)**
 
 1. Go to [Releases](https://github.com/stocky789/backer/releases)
-2. Download `backer-agent-windows-amd64.zip`
-3. Extract and run Command Prompt **as Administrator**:
-
-```cmd
-backer-agent.exe register --server http://your-server:8420
-backer-agent.exe install
-```
+2. Download `backer-agent-setup.exe`
+3. Run the installer
+4. When the app opens, enter your server URL (e.g., `http://your-server:8420`)
+5. Click **Connect**
 
 The agent will:
-- Register with your Backer server
-- Install as a Windows service (runs at startup)
+- Register with your Backer server automatically
+- Create a scheduled task to run at startup
 - Appear in the Web UI under "Agents"
 
-**Option 2: Install from Python**
+**Option 2: Portable (No Install)**
+
+1. Download `backer-agent-windows-portable.zip` from Releases
+2. Extract to a folder
+3. Run `backer-agent.exe`
+4. Enter your server URL and click Connect
+
+**Option 3: Install from Python (CLI)**
 
 ```powershell
 pip install backer[client]
+backer agent setup                # Interactive wizard (recommended)
+# Or manually:
 backer agent register --server http://your-server:8420
-backer agent install
+backer agent install              # Creates scheduled task
 ```
 
 **Uninstall Windows Agent:**
 
-Use Windows Settings > Apps > Backer Agent, or:
-
-```cmd
-backer-agent.exe uninstall
-```
+Use Windows Settings > Apps > Backer Agent, or run the installer again and choose Uninstall.
 
 ### Linux Agent
 
-```bash
-# Quick install
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash -s -- --agent
+**Option 1: Install Script (Recommended)**
 
-# Or manual install
+```bash
+# Download and run installer (installs for current user)
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | bash
+```
+
+This will:
+- Install backer to `~/.local/share/backer`
+- Run the interactive setup wizard to connect to your server
+- Create a systemd user service
+
+The agent runs as your user, so it can backup your personal files in `/home`.
+
+**For system-wide backups (all users/files):**
+
+```bash
+# Install with root access
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash -s -- --system
+```
+
+**Option 2: Manual Install with pip**
+
+```bash
 pip install backer[client]
+backer agent setup              # Interactive wizard
+# Or use CLI flags:
 backer agent register --server http://your-server:8420
 backer agent install --method systemd
 ```
@@ -165,9 +188,21 @@ backer agent install --method systemd
 **Agent Commands:**
 
 ```bash
+backer agent setup        # Run setup wizard (connect to server)
 backer agent status       # Check connection status
 backer agent start        # Start agent manually
-backer agent register     # Register with server
+systemctl --user start backer-agent    # Start via systemd (user mode)
+sudo systemctl start backer-agent      # Start via systemd (system mode)
+```
+
+**Uninstall Linux Agent:**
+
+```bash
+# User mode
+bash <(curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh) --uninstall
+
+# System mode
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh) --uninstall --system
 ```
 
 ---
@@ -244,10 +279,12 @@ Server:
   backer server uninstall   Uninstall server from system
 
 Agent:
-  backer agent register     Register agent with server
+  backer agent setup        Interactive setup wizard (recommended)
+  backer agent register     Register agent with server (CLI mode)
   backer agent start        Start agent daemon
   backer agent status       Check connection status
-  backer agent install      Install as system service
+  backer agent install      Install as system service/scheduled task
+  backer agent uninstall    Remove from system startup
 
 Jobs:
   backer job list           List all jobs
@@ -262,10 +299,22 @@ Jobs:
 The server exposes a REST API:
 
 ```bash
+# Health check
 curl http://localhost:8420/health
+
+# List connected agents
 curl http://localhost:8420/api/v1/clients
+
+# List backup jobs
 curl http://localhost:8420/api/v1/jobs
-curl http://localhost:8420/api/v1/jobs/{name}/restore -X POST -d '{"client_id": "..."}'
+
+# Trigger a restore
+curl http://localhost:8420/api/v1/restore -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"job_name": "my-backup", "client_id": "agent-uuid"}'
+
+# Run a backup job
+curl http://localhost:8420/api/v1/jobs/my-backup/run -X POST
 ```
 
 ---
