@@ -313,7 +313,6 @@ def run_wizard() -> bool:
     ))
     console.print()
 
-    # Show next steps
     console.print("[bold]Next Steps:[/bold]")
     console.print()
 
@@ -321,15 +320,18 @@ def run_wizard() -> bool:
         console.print("  Start the agent:")
         console.print("    [cyan]backer agent start[/cyan]")
     else:
-        console.print("  Start the agent manually:")
-        console.print("    [cyan]backer agent start[/cyan]")
+        console.print("  Start the agent service:")
+        console.print("    [cyan]sudo systemctl start backer-agent[/cyan]")
         console.print()
-        console.print("  Or enable as a systemd service:")
-        console.print("    [cyan]systemctl --user enable --now backer-agent[/cyan]")
+        console.print("  Enable on boot:")
+        console.print("    [cyan]sudo systemctl enable backer-agent[/cyan]")
 
     console.print()
     console.print("  View agent status:")
     console.print("    [cyan]backer agent status[/cyan]")
+    console.print()
+    console.print("  View logs:")
+    console.print("    [cyan]backer agent logs[/cyan]")
     console.print()
 
     return True
