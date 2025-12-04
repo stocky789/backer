@@ -430,6 +430,30 @@ class Storage:
                 (datetime.now().isoformat(), command_id),
             )
 
+    def clear_pending_commands(self, client_id: str | None = None) -> int:
+        """Clear all pending commands, optionally for a specific client.
+
+        Returns the number of commands cleared.
+        """
+        with self._connect() as conn:
+            if client_id:
+                cursor = conn.execute(
+                    """
+                    UPDATE command_queue SET status = 'cancelled', executed_at = ?
+                    WHERE client_id = ? AND status = 'pending'
+                    """,
+                    (datetime.now().isoformat(), client_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE command_queue SET status = 'cancelled', executed_at = ?
+                    WHERE status = 'pending'
+                    """,
+                    (datetime.now().isoformat(),),
+                )
+            return cursor.rowcount
+
     # Repository operations
     def add_repository(
         self,

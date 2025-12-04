@@ -261,6 +261,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Client not found")
         return {"status": "deleted"}
 
+    @app.post("/api/v1/commands/clear")
+    def clear_pending_commands(
+        storage: Storage = Depends(get_storage),
+        client_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Clear all pending commands from the queue.
+
+        Optionally filter by client_id to only clear commands for a specific agent.
+        This is useful for clearing stuck restore/backup commands.
+        """
+        count = storage.clear_pending_commands(client_id)
+        return {
+            "status": "ok",
+            "cleared": count,
+            "client_id": client_id,
+        }
+
     @app.post("/api/v1/clients/heartbeat")
     def client_heartbeat(
         heartbeat: ClientHeartbeat,
@@ -613,10 +630,25 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get backup source path (this is the backup destination in the job)
         backup_source = job.get("destination_path")
+
+        # For imported jobs, destination_path might be missing - look up from repository
+        if not backup_source and job.get("repository_id"):
+            repo = storage.get_repository(job["repository_id"])
+            if repo:
+                repo_type = repo.get("repo_type", "smb")
+                if repo_type == "smb":
+                    backup_source = f"//{repo['server']}/{repo['share']}"
+                elif repo_type == "nfs":
+                    backup_source = f"{repo['server']}:{repo['share']}"
+                else:
+                    backup_source = repo.get("share", "") or repo.get("path", "")
+                if backup_source and repo.get("path"):
+                    backup_source = f"{backup_source}/{repo['path']}"
+
         if not backup_source:
             raise HTTPException(
                 status_code=400,
-                detail="Job is missing destination_path - cannot restore. "
+                detail="Job is missing destination_path and no repository configured. "
                        "Please re-import or reconfigure the job."
             )
         backend = job.get("backend", "rclone")
