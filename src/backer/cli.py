@@ -535,6 +535,7 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     """Remove agent from system startup and optionally uninstall."""
     import shutil
     import subprocess
+
     from backer.client.agent import get_config_dir, get_data_dir
     from backer.client.windows_service import is_windows, uninstall_service
 
