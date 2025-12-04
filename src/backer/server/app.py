@@ -528,8 +528,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         username, password, domain
                                     )
                                     if ok2:
+                                        import json as json_module
                                         try:
-                                            import json as json_module
                                             snap_data = json_module.loads(content)
                                             # Match by hostname and check if paths overlap
                                             snap_hostname = snap_data.get("hostname", "")
@@ -557,7 +557,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                 else:
                                                     snapshot_errors.append(f"{snap_file}: {del_msg}")
 
-                                        except (json.JSONDecodeError, KeyError):
+                                        except (json_module.JSONDecodeError, KeyError):
                                             pass
 
                     elif repo_type == "local" or repo.get("mount_point"):
@@ -588,9 +588,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     if client:
                                         client_hostname = client.get("hostname")
 
+                                import json as json_module
                                 for snap_file in snapshots_dir.glob("*.json"):
                                     try:
-                                        import json as json_module
                                         snap_data = json_module.loads(snap_file.read_text())
                                         snap_hostname = snap_data.get("hostname", "")
                                         snap_paths = snap_data.get("paths", [])
@@ -607,7 +607,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         if should_delete:
                                             snap_file.unlink()
                                             snapshots_deleted += 1
-                                    except (json.JSONDecodeError, OSError):
+                                    except (json_module.JSONDecodeError, OSError):
                                         pass
 
                     # NFS - similar to local if mounted

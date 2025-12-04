@@ -697,7 +697,7 @@ def smb_delete_directory(
             deleted_files.append(runs_path)
         elif "NT_STATUS_DIRECTORY_NOT_EMPTY" in err:
             errors.append(f"rmdir {runs_path}: directory not empty")
-            logger.warning(f"SMB delete: runs dir not empty")
+            logger.warning("SMB delete: runs dir not empty")
         else:
             errors.append(f"rmdir {runs_path}: {err.strip()}")
 
@@ -715,7 +715,7 @@ def smb_delete_directory(
             deleted_files.append(remote_path)
         elif "NT_STATUS_DIRECTORY_NOT_EMPTY" in err:
             errors.append(f"rmdir {remote_path}: directory not empty")
-            logger.warning(f"SMB delete: job dir not empty - may have extra files")
+            logger.warning("SMB delete: job dir not empty - may have extra files")
         else:
             errors.append(f"rmdir {remote_path}: {err.strip()}")
             logger.warning(f"SMB delete failed: rmdir {remote_path}: {err.strip()}")
