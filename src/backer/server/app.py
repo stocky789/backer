@@ -624,7 +624,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Store pending browse request
         storage.save_browse_request(request_id, client_id, path)
 
-        logger.info(f"[BROWSE] Queued filesystem browse for agent '{client_id}', path='{path}', request_id={request_id}")
+        logger.info(f"[BROWSE] Queued browse for agent '{client_id}', path='{path}', id={request_id}")
 
         return {
             "request_id": request_id,
