@@ -432,10 +432,12 @@ class BackerAgent:
         try:
             from backer.tools.manager import get_tool_manager
             tool_manager = get_tool_manager()
-            rclone_path = tool_manager.get_tool_path("rclone")
 
-            if not rclone_path:
-                print("[SMB] Warning: rclone not found, cannot obscure password")
+            # Use ensure_installed to auto-download rclone if not present
+            try:
+                rclone_path = tool_manager.ensure_installed("rclone")
+            except Exception as e:
+                print(f"[SMB] Warning: Failed to get rclone: {e}")
                 return None
 
             result = subprocess.run(
