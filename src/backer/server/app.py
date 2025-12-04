@@ -1231,35 +1231,165 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         This imports jobs, runs, and agent references from the repository
         metadata into the server's database, enabling management of
         previously-created backups.
+
+        For SMB shares, uses smbclient to read files directly (no root needed).
+        For local/mounted paths, accesses the filesystem directly.
         """
-        from backer.server.repo_metadata import import_repository_metadata
+        import json as json_module
+        from datetime import datetime as dt
+
+        from backer.server.repositories import smb_list_files, smb_read_file
 
         repo = storage.get_repository(repo_id)
         if not repo:
             raise HTTPException(status_code=404, detail="Repository not found")
 
-        # Build repository path
         repo_type = repo.get("repo_type", "smb")
-        if repo_type == "smb":
-            repo_path = f"//{repo['server']}/{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "nfs":
-            repo_path = f"{repo['server']}:{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "local":
-            repo_path = repo.get("share", "") or repo.get("path", "")
-        else:
-            repo_path = repo.get("share", "") or repo.get("path", "")
+        subpath = repo.get("path", "")
+        server = repo.get("server", "")
+        share = repo.get("share", "")
+        username = repo.get("username")
+        password = storage.get_repository_password(repo_id)
+        domain = repo.get("domain")
 
         try:
-            result = import_repository_metadata(repo_path, storage, repo_id)
-            return {
-                "repository_id": repo_id,
-                "repository_name": repo.get("name"),
-                **result,
-            }
+            # Use direct filesystem access for local or mounted paths
+            if repo.get("mount_point") or repo_type == "local":
+                from backer.server.repo_metadata import import_repository_metadata
+
+                if repo.get("mount_point"):
+                    repo_path = repo["mount_point"]
+                    if subpath:
+                        repo_path = repo_path.rstrip("/") + "/" + subpath
+                else:
+                    repo_path = share or repo.get("path", "")
+
+                result = import_repository_metadata(repo_path, storage, repo_id)
+                return {
+                    "repository_id": repo_id,
+                    "repository_name": repo.get("name"),
+                    **result,
+                }
+
+            # For SMB shares, use smbclient to read metadata directly
+            elif repo_type == "smb":
+                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+                imported = {"agents": 0, "jobs": 0, "runs": 0}
+
+                # Check if repository has backer metadata
+                success, content = smb_read_file(
+                    server, share, f"{metadata_base}/metadata.json",
+                    username, password, domain
+                )
+
+                if not success:
+                    return {"error": "Repository has no Backer metadata"}
+
+                # Read and import jobs
+                ok, job_dirs = smb_list_files(
+                    server, share, f"{metadata_base}/jobs", username, password, domain
+                )
+                if ok:
+                    for job_dir in job_dirs:
+                        ok2, job_content = smb_read_file(
+                            server, share, f"{metadata_base}/jobs/{job_dir}/config.json",
+                            username, password, domain
+                        )
+                        if ok2:
+                            try:
+                                job_data = json_module.loads(job_content)
+                                job_name = job_data.get("job_name")
+                                config = job_data.get("config", {})
+
+                                if job_name:
+                                    existing = storage.get_job(job_name)
+                                    if not existing:
+                                        config["repository_id"] = repo_id
+                                        config["imported_at"] = dt.now().isoformat()
+                                        config["imported_from_repo"] = True
+                                        storage.save_job(job_name, config)
+                                        imported["jobs"] += 1
+
+                                        # Import job runs
+                                        ok3, run_files = smb_list_files(
+                                            server, share,
+                                            f"{metadata_base}/jobs/{job_dir}/runs",
+                                            username, password, domain
+                                        )
+                                        if ok3:
+                                            for run_file in run_files:
+                                                if run_file.endswith(".json"):
+                                                    ok4, run_content = smb_read_file(
+                                                        server, share,
+                                                        f"{metadata_base}/jobs/{job_dir}/runs/{run_file}",
+                                                        username, password, domain
+                                                    )
+                                                    if ok4:
+                                                        try:
+                                                            run = json_module.loads(run_content)
+                                                            run_id = run.get("run_id")
+                                                            if run_id:
+                                                                started_at = dt.now()
+                                                                finished_at = None
+                                                                if run.get("started_at"):
+                                                                    try:
+                                                                        started_at = dt.fromisoformat(
+                                                                            run["started_at"]
+                                                                        )
+                                                                    except (ValueError, TypeError):
+                                                                        pass
+                                                                if run.get("finished_at"):
+                                                                    try:
+                                                                        finished_at = dt.fromisoformat(
+                                                                            run["finished_at"]
+                                                                        )
+                                                                    except (ValueError, TypeError):
+                                                                        pass
+                                                                storage.save_job_run(
+                                                                    run_id=run_id,
+                                                                    job_name=job_name,
+                                                                    status=run.get("status", "unknown"),
+                                                                    started_at=started_at,
+                                                                    finished_at=finished_at,
+                                                                    bytes_transferred=run.get(
+                                                                        "bytes_transferred", 0
+                                                                    ),
+                                                                    files_transferred=run.get(
+                                                                        "files_transferred", 0
+                                                                    ),
+                                                                    snapshot_id=run.get("snapshot_id"),
+                                                                )
+                                                                imported["runs"] += 1
+                                                        except json_module.JSONDecodeError:
+                                                            pass
+                            except json_module.JSONDecodeError:
+                                pass
+
+                # Read agents (just count them - we can't fully import without secrets)
+                ok, agent_files = smb_list_files(
+                    server, share, f"{metadata_base}/agents", username, password, domain
+                )
+                if ok:
+                    imported["agents"] = len([f for f in agent_files if f.endswith(".json")])
+                    logger.info(f"Discovered {imported['agents']} agents in repository metadata")
+
+                return {
+                    "success": True,
+                    "repository_id": repo_id,
+                    "repository_name": repo.get("name"),
+                    "imported": imported,
+                }
+
+            else:
+                # NFS without mount_point - not supported
+                return {
+                    "success": False,
+                    "error": "NFS import requires mount_point to be set",
+                    "repository_id": repo_id,
+                    "repository_name": repo.get("name"),
+                    "hint": "Mount the NFS share and set the mount_point field",
+                }
+
         except Exception as e:
             logger.error(f"Failed to import metadata from repository {repo_id}: {e}")
             return {
