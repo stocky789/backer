@@ -562,12 +562,14 @@ class AgentService:
             logger.warning(f"[RESTIC] Could not query snapshot paths: {e}")
         return []
 
-    def _normalize_windows_path(self, path: str) -> str:
+    def _normalize_windows_path(self, path: str | None) -> str:
         """Normalize path for Windows - convert forward slashes to backslashes for UNC paths.
 
         On Windows, UNC paths must use backslashes (\\\\server\\share), but our server
         stores them with forward slashes (//server/share) for cross-platform compatibility.
         """
+        if path is None:
+            raise ValueError("Path cannot be None - job may be missing destination_path")
         if sys.platform == 'win32':
             # Convert forward slash UNC paths to backslash format
             if path.startswith('//'):
