@@ -313,25 +313,18 @@ def run_wizard() -> bool:
     ))
     console.print()
 
-    # Show next steps based on config location
-    config_path = get_config_dir()
-    is_system_install = str(config_path) == "/etc/backer"
-
     console.print("[bold]Next Steps:[/bold]")
     console.print()
 
     if sys.platform == "win32":
         console.print("  Start the agent:")
         console.print("    [cyan]backer agent start[/cyan]")
-    elif is_system_install:
+    else:
         console.print("  Start the agent service:")
         console.print("    [cyan]sudo systemctl start backer-agent[/cyan]")
         console.print()
         console.print("  Enable on boot:")
         console.print("    [cyan]sudo systemctl enable backer-agent[/cyan]")
-    else:
-        console.print("  Start the agent manually:")
-        console.print("    [cyan]backer agent start[/cyan]")
 
     console.print()
     console.print("  View agent status:")
