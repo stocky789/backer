@@ -393,6 +393,20 @@ class BackerAgent:
         """Check if a path is an SMB/UNC path."""
         return path.startswith("//") or path.startswith("\\\\")
 
+    def _is_nfs_path(self, path: str) -> bool:
+        """Check if a path is an NFS path (server:/export format)."""
+        # NFS paths look like: server:/export/path or 192.168.1.1:/share/path
+        # But NOT like /local/path or C:\path
+        if path.startswith("/") or path.startswith("\\"):
+            return False
+        if ":" in path:
+            # Check it's not a Windows drive letter (C:)
+            parts = path.split(":", 1)
+            if len(parts) == 2 and len(parts[0]) > 1:
+                # More than one char before colon, likely NFS
+                return parts[1].startswith("/")
+        return False
+
     def _parse_smb_path(self, path: str) -> tuple[str, str, str]:
         """Parse an SMB path into (server, share, subpath).
 
@@ -410,6 +424,24 @@ class BackerAgent:
 
         return server, share, subpath
 
+    def _parse_nfs_path(self, path: str) -> tuple[str, str, str]:
+        """Parse an NFS path into (server, export, subpath).
+
+        Examples:
+            192.168.0.254:/exports/backup/data -> (192.168.0.254, /exports/backup, data)
+            server:/share -> (server, /share, "")
+        """
+        # Split on first colon
+        parts = path.split(":", 1)
+        server = parts[0]
+        export_path = parts[1] if len(parts) > 1 else "/"
+
+        # The export is typically the first part, subpath is the rest
+        # Common pattern: server:/export/subpath
+        # We'll treat the entire path after : as the export initially
+        # The actual export point is determined by the NFS server
+        return server, export_path, ""
+
     def _check_cifs_available(self) -> bool:
         """Check if cifs-utils is installed for SMB mounting."""
         try:
@@ -422,6 +454,22 @@ class BackerAgent:
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
+
+    def _check_nfs_available(self) -> bool:
+        """Check if NFS mount tools are installed."""
+        try:
+            # Check for mount.nfs (provided by nfs-common on Debian/Ubuntu)
+            result = subprocess.run(
+                ["mount.nfs", "-V"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # mount.nfs might not have -V, try checking if it exists
+            import shutil
+            return shutil.which("mount.nfs") is not None
 
     def _rclone_obscure_password(self, password: str) -> str | None:
         """Obscure a password for use with rclone on-the-fly backends.
@@ -530,6 +578,69 @@ class BackerAgent:
             except Exception:
                 pass
 
+    @contextmanager
+    def _nfs_mount_context(
+        self,
+        server: str,
+        export_path: str,
+    ) -> Generator[Path, None, None]:
+        """Context manager that mounts an NFS export and yields the mount path.
+
+        Used for restic/kopia on Linux, which need a local filesystem path.
+        Requires nfs-common (Debian/Ubuntu) or nfs-utils (RHEL/Fedora) to be installed.
+        """
+        # Check if NFS tools are available
+        if not self._check_nfs_available():
+            raise RuntimeError(
+                "NFS mount tools not installed. Install with:\n"
+                "  Debian/Ubuntu: sudo apt install nfs-common\n"
+                "  RHEL/Fedora: sudo dnf install nfs-utils\n"
+                "  Arch: sudo pacman -S nfs-utils"
+            )
+
+        mount_point = Path(tempfile.mkdtemp(prefix="backer_nfs_"))
+
+        try:
+            # Build NFS mount command
+            nfs_url = f"{server}:{export_path}"
+            cmd = ["mount", "-t", "nfs", nfs_url, str(mount_point)]
+
+            # Add common NFS mount options for reliability
+            cmd.extend(["-o", "rw,soft,timeo=30,retrans=3"])
+
+            print(f"[NFS] Mounting {nfs_url} to {mount_point}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip()
+                if "Permission denied" in error_msg or "access denied" in error_msg.lower():
+                    raise RuntimeError(f"NFS mount permission denied: {nfs_url}")
+                elif "No such file or directory" in error_msg:
+                    raise RuntimeError(f"NFS export not found: {nfs_url}")
+                elif "Connection refused" in error_msg or "Host is down" in error_msg:
+                    raise RuntimeError(f"Cannot connect to NFS server: {server}")
+                elif "not responding" in error_msg.lower():
+                    raise RuntimeError(f"NFS server not responding: {server}")
+                else:
+                    raise RuntimeError(f"Failed to mount NFS export: {error_msg}")
+
+            print("[NFS] Mounted successfully")
+            yield mount_point
+
+        finally:
+            # Unmount
+            print(f"[NFS] Unmounting {mount_point}")
+            try:
+                subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=30)
+            except Exception as e:
+                print(f"[NFS] Warning: unmount failed: {e}")
+
+            # Clean up mount point directory
+            try:
+                mount_point.rmdir()
+            except Exception:
+                pass
+
     def _prepare_destination_for_backend(
         self,
         job: dict[str, Any],
@@ -537,9 +648,10 @@ class BackerAgent:
     ) -> tuple[str, Any]:
         """Prepare the destination path for the backend.
 
-        On Linux, SMB paths need special handling:
-        - For rclone: Use on-the-fly SMB backend config
-        - For restic: Mount the share first
+        On Linux, SMB and NFS paths need special handling:
+        - For rclone with SMB: Use on-the-fly SMB backend config
+        - For rclone with NFS: Mount the export first
+        - For restic/kopia: Mount the share/export first
 
         Returns:
             Tuple of (destination_path, cleanup_context_or_none)
@@ -550,11 +662,33 @@ class BackerAgent:
         if sys.platform == "win32":
             return dest_path, None
 
-        # Not an SMB path, use as-is
-        if not self._is_smb_path(dest_path):
-            return dest_path, None
+        # Handle SMB paths
+        if self._is_smb_path(dest_path):
+            return self._prepare_smb_destination(job, backend_name, dest_path)
 
-        # Linux with SMB path
+        # Handle NFS paths
+        if self._is_nfs_path(dest_path):
+            return self._prepare_nfs_destination(job, backend_name, dest_path)
+
+        # Check if NFS credentials were passed (job linked to NFS repository)
+        nfs_server = job.get("nfs_server")
+        nfs_export = job.get("nfs_export")
+        if nfs_server and nfs_export:
+            # Build NFS path from repository info
+            nfs_path = f"{nfs_server}:{nfs_export}"
+            print(f"[NFS] Using NFS repository: {nfs_path}")
+            return self._prepare_nfs_destination(job, backend_name, nfs_path)
+
+        # Local path, use as-is
+        return dest_path, None
+
+    def _prepare_smb_destination(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+        dest_path: str,
+    ) -> tuple[str, Any]:
+        """Prepare SMB destination path for the backend."""
         server, share, subpath = self._parse_smb_path(dest_path)
 
         # Get credentials from job (passed by server)
@@ -610,6 +744,40 @@ class BackerAgent:
             print(f"[SMB] Warning: Unknown backend '{backend_name}', using path as-is")
             return dest_path, None
 
+    def _prepare_nfs_destination(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+        dest_path: str,
+    ) -> tuple[str, Any]:
+        """Prepare NFS destination path for the backend."""
+        server, export_path, _ = self._parse_nfs_path(dest_path)
+
+        if backend_name == "rclone":
+            # For rclone with NFS, we need to mount first as rclone doesn't have
+            # native NFS support (unlike SMB). Could use SFTP if SSH is available,
+            # but mounting is more reliable.
+            print(f"[NFS] Mounting NFS export for rclone backend")
+            ctx = self._nfs_mount_context(server=server, export_path=export_path)
+            mount_path = ctx.__enter__()
+            print(f"[NFS] Using mounted path: {mount_path}")
+            return str(mount_path), ctx
+
+        elif backend_name in ("restic", "kopia"):
+            # restic and kopia need a mounted filesystem path
+            print(f"[NFS] Mounting NFS export for {backend_name} backend")
+            ctx = self._nfs_mount_context(server=server, export_path=export_path)
+            mount_path = ctx.__enter__()
+            print(f"[NFS] Using mounted path: {mount_path}")
+            return str(mount_path), ctx
+
+        else:
+            # Unknown backend, try mounting anyway
+            print(f"[NFS] Warning: Unknown backend '{backend_name}', mounting NFS export")
+            ctx = self._nfs_mount_context(server=server, export_path=export_path)
+            mount_path = ctx.__enter__()
+            return str(mount_path), ctx
+
     def execute_backup(
         self,
         job: dict[str, Any],
@@ -619,6 +787,12 @@ class BackerAgent:
         # Use run_id from command payload if provided, otherwise generate one
         run_id = job.get("run_id") or datetime.now().strftime("%Y%m%d_%H%M%S")
         started_at = datetime.now()
+        job_name = job.get("job_name", "unknown")
+        backend_name = job.get("backend", "rclone")
+
+        print(f"[BACKUP] Starting job '{job_name}' with backend '{backend_name}'")
+        print(f"[BACKUP] Source: {job.get('source_path')}")
+        print(f"[BACKUP] Destination: {job.get('destination_path')}")
 
         # Report that we're starting
         self._report_progress(
@@ -630,18 +804,30 @@ class BackerAgent:
 
         smb_cleanup_ctx = None
         try:
-            backend_name = job.get("backend", "rclone")
+            backend_options = job.get("backend_options", {})
+
+            # Log backend options (without password)
+            safe_options = {k: v for k, v in backend_options.items() if k != "password"}
+            if "password" in backend_options:
+                safe_options["password"] = "***"
+            print(f"[BACKUP] Backend options: {safe_options}")
+
             backend = get_backend(
                 backend_name,  # rclone default (rsync not supported for agents)
-                job.get("backend_options", {}),
+                backend_options,
             )
 
+            print(f"[BACKUP] Checking backend availability...")
             available, message = backend.check_available()
             if not available:
+                print(f"[BACKUP] Backend not available: {message}")
                 raise RuntimeError(f"Backend not available: {message}")
+            print(f"[BACKUP] Backend ready: {message}")
 
             # Prepare destination path (handles SMB on Linux)
+            print(f"[BACKUP] Preparing destination path for {backend_name} backend...")
             dest_path, smb_cleanup_ctx = self._prepare_destination_for_backend(job, backend_name)
+            print(f"[BACKUP] Using destination: {dest_path}")
 
             self._report_progress(
                 run_id=run_id,
@@ -686,6 +872,8 @@ class BackerAgent:
                 hasattr(backend.backup, '__code__') and
                 'progress_callback' in backend.backup.__code__.co_varnames
             )
+
+            print(f"[BACKUP] Executing backup: {source.path} -> {dest_path}")
             result = backend.backup(
                 source=source,
                 destination=destination,
@@ -694,6 +882,18 @@ class BackerAgent:
             )
 
             finished_at = datetime.now()
+
+            # Log the result
+            if result.success:
+                print(f"[BACKUP] Job '{job_name}' completed successfully")
+                print(f"[BACKUP] Transferred: {result.bytes_transferred} bytes, {result.files_transferred} files")
+            else:
+                print(f"[BACKUP] Job '{job_name}' completed with errors")
+                print(f"[BACKUP] Return code: {result.return_code}")
+                if result.errors:
+                    print(f"[BACKUP] Errors: {result.errors[:5]}")  # First 5 errors
+                if result.output:
+                    print(f"[BACKUP] Output (last 1000 chars): {result.output[-1000:]}")
 
             self._report_progress(
                 run_id=run_id,
@@ -705,7 +905,7 @@ class BackerAgent:
             # Report result to server
             report = {
                 "run_id": run_id,
-                "job_name": job.get("job_name", "unknown"),
+                "job_name": job_name,
                 "client_id": self.client_id,
                 "success": result.success,
                 "started_at": started_at.isoformat(),
@@ -725,33 +925,40 @@ class BackerAgent:
             return report
 
         except Exception as e:
+            import traceback
+
             finished_at = datetime.now()
+            error_msg = str(e)
+            error_trace = traceback.format_exc()
+
+            print(f"[BACKUP] Job '{job_name}' FAILED: {error_msg}")
+            print(f"[BACKUP] Traceback:\n{error_trace}")
 
             self._report_progress(
                 run_id=run_id,
                 status="failed",
                 progress_percent=0,
-                message=str(e)[:200],
+                message=error_msg[:200],
             )
 
             report = {
                 "run_id": run_id,
-                "job_name": job.get("job_name", "unknown"),
+                "job_name": job_name,
                 "client_id": self.client_id,
                 "success": False,
                 "started_at": started_at.isoformat(),
                 "finished_at": finished_at.isoformat(),
                 "bytes_transferred": 0,
                 "files_transferred": 0,
-                "errors": [str(e)],
-                "output": "",
+                "errors": [error_msg],
+                "output": error_trace[:5000],
             }
 
             try:
                 client = self._get_client()
                 client.post("/api/v1/results", json=report)
-            except Exception:
-                pass
+            except Exception as report_err:
+                print(f"[BACKUP] Failed to report error to server: {report_err}")
 
             return report
 

@@ -91,6 +91,7 @@ class ToolManager:
         """Get the path to a tool binary.
 
         Returns the path if the tool is installed, None otherwise.
+        Checks multiple locations for Linux to handle systemd service context.
         """
         if tool_name not in TOOL_INFO:
             return None
@@ -100,9 +101,22 @@ class ToolManager:
         if not binary_name:
             return None
 
+        # Check the configured tools directory first
         tool_path = self.tools_dir / binary_name
         if tool_path.exists():
             return tool_path
+
+        # On Linux, also check /root/.local/share/backer/tools/ (for systemd service)
+        # This handles cases where HOME might not be set correctly
+        if self._system == "Linux":
+            root_tools_path = Path("/root/.local/share/backer/tools") / binary_name
+            if root_tools_path.exists():
+                return root_tools_path
+
+            # Also check /opt/backer/tools/ as a fallback system-wide location
+            opt_tools_path = Path("/opt/backer/tools") / binary_name
+            if opt_tools_path.exists():
+                return opt_tools_path
 
         # Check if tool is available system-wide
         system_path = shutil.which(tool_name)
