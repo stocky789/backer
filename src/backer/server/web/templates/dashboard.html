@@ -138,8 +138,8 @@
             <tr>
                 <td><strong>{{ job.name }}</strong></td>
                 <td>{{ job.client_id or 'Any' }}</td>
-                <td><code>{{ job.source_path[:25] }}{% if job.source_path|length > 25 %}...{% endif %}</code></td>
-                <td><code>{{ job.destination_path[:25] }}{% if job.destination_path|length > 25 %}...{% endif %}</code></td>
+                <td><code>{% if job.source_path %}{{ job.source_path[:25] }}{% if job.source_path|length > 25 %}...{% endif %}{% else %}-{% endif %}</code></td>
+                <td><code>{% if job.destination_path %}{{ job.destination_path[:25] }}{% if job.destination_path|length > 25 %}...{% endif %}{% else %}-{% endif %}</code></td>
                 <td>
                     {% if job.last_status == 'success' %}
                     <span class="badge badge-success">Success</span>

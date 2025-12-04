@@ -29,7 +29,7 @@
             <tr class="{% if not job.enabled %}row-disabled{% endif %}">
                 <td>
                     <strong>{{ job.name }}</strong>
-                    <br><small style="color: var(--text-muted);">{{ job.backend }}</small>
+                    <br><small style="color: var(--text-muted);">{{ job.backend or 'imported' }}</small>
                 </td>
                 <td>
                     {% if job.client_id %}
@@ -39,7 +39,11 @@
                     {% endif %}
                 </td>
                 <td>
+                    {% if job.source_path %}
                     <code title="{{ job.source_path }}">{{ job.source_path[:30] }}{% if job.source_path|length > 30 %}...{% endif %}</code>
+                    {% else %}
+                    <span style="color: var(--text-muted);">-</span>
+                    {% endif %}
                 </td>
                 <td>
                     {% if job.schedule_cron %}
