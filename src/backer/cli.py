@@ -561,22 +561,26 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     config_dir = get_config_dir()
     data_dir = get_data_dir()
     user_service = Path.home() / ".config" / "systemd" / "user" / "backer-agent.service"
+    system_service = Path("/etc/systemd/system/backer-agent.service")
     user_bin = Path.home() / ".local" / "bin" / "backer"
 
     console.print("[bold]Backer Agent Uninstall[/bold]")
     console.print()
 
     # Check what exists
-    has_service = user_service.exists()
+    has_user_service = user_service.exists()
+    has_system_service = system_service.exists()
     has_config = config_dir.exists()
     has_data = data_dir.exists()
 
-    if not has_service and not has_config and not has_data:
+    if not has_user_service and not has_system_service and not has_config and not has_data:
         console.print("[yellow]No agent installation found.[/yellow]")
         return
 
-    if has_service:
-        console.print(f"  Service: {user_service}")
+    if has_system_service:
+        console.print(f"  System Service: {system_service}")
+    if has_user_service:
+        console.print(f"  User Service: {user_service}")
     if has_config:
         console.print(f"  Config: {config_dir}")
     if has_data:
@@ -588,9 +592,34 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
             console.print("Cancelled.")
             return
 
-    # Stop and disable systemd service
-    if has_service:
-        console.print("Stopping service...")
+    # Stop and disable system service (installed via install-agent.sh)
+    if has_system_service:
+        console.print("Stopping system service...")
+        subprocess.run(
+            ["systemctl", "stop", "backer-agent"],
+            capture_output=True
+        )
+        subprocess.run(
+            ["systemctl", "disable", "backer-agent"],
+            capture_output=True
+        )
+        try:
+            system_service.unlink(missing_ok=True)
+        except PermissionError:
+            # Try with sudo via shell
+            subprocess.run(
+                ["sudo", "rm", "-f", str(system_service)],
+                capture_output=True
+            )
+        subprocess.run(
+            ["systemctl", "daemon-reload"],
+            capture_output=True
+        )
+        console.print("[green]✓ System service removed[/green]")
+
+    # Stop and disable user systemd service (legacy/manual install)
+    if has_user_service:
+        console.print("Stopping user service...")
         subprocess.run(
             ["systemctl", "--user", "stop", "backer-agent"],
             capture_output=True
@@ -604,7 +633,7 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
             ["systemctl", "--user", "daemon-reload"],
             capture_output=True
         )
-        console.print("[green]✓ Service removed[/green]")
+        console.print("[green]✓ User service removed[/green]")
 
     # Remove symlink
     if user_bin.exists() or user_bin.is_symlink():
@@ -616,13 +645,17 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
         shutil.rmtree(data_dir, ignore_errors=True)
         console.print(f"[green]✓ Removed {data_dir}[/green]")
 
-    # Remove config if requested
-    if has_config and not keep_config:
-        if yes or click.confirm("Also remove configuration?", default=False):
+    # Always remove config on uninstall (no prompting - causes issues with curl|bash)
+    if has_config:
+        try:
             shutil.rmtree(config_dir, ignore_errors=True)
-            console.print(f"[green]✓ Removed {config_dir}[/green]")
-        else:
-            console.print(f"[dim]Kept configuration at {config_dir}[/dim]")
+        except PermissionError:
+            # /etc/backer needs sudo
+            subprocess.run(
+                ["sudo", "rm", "-rf", str(config_dir)],
+                capture_output=True
+            )
+        console.print(f"[green]✓ Removed {config_dir}[/green]")
 
     console.print()
     console.print("[green]Agent uninstalled successfully.[/green]")
