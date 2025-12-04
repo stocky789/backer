@@ -165,6 +165,32 @@ class ResticBackend(BackendBase):
                 return_code=-1,
             )
 
+        # Check if repository exists, initialize if not
+        try:
+            binary = self._get_binary()
+            check_cmd = [str(binary), "-r", destination.path, "snapshots", "--json"]
+            check_result = subprocess.run(
+                check_cmd,
+                capture_output=True,
+                text=True,
+                env=self._env,
+                timeout=30,
+            )
+            if check_result.returncode != 0 and "repository does not exist" in check_result.stderr.lower():
+                print(f"[RESTIC] Repository not found, attempting to initialize at {destination.path}")
+                init_result = self.init_repo(destination)
+                if not init_result.success:
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.BACKUP,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=[f"Failed to initialize repository: {init_result.errors}"],
+                        return_code=-1,
+                    )
+        except Exception as e:
+            print(f"[RESTIC] Warning: Could not check repository: {e}")
+
         try:
             result = subprocess.run(
                 cmd,
