@@ -37,6 +37,9 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Application icon
+SetupIconFile=..\assets\backer.ico
+UninstallDisplayIcon={app}\backer.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -49,18 +52,22 @@ Name: "startupicon"; Description: "Start Backer Agent when Windows starts"; Grou
 ; Main executable
 Source: "..\dist\backer-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; Backup tools (rclone and restic)
+; Application icon (for GUI window and shortcuts)
+Source: "..\assets\backer.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+; Backup tools (rclone, restic, and kopia)
 Source: "..\dist\tools\rclone.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "..\dist\tools\restic.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
+Source: "..\dist\tools\kopia.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; License and readme
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\backer.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\backer.ico"; Tasks: desktopicon
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startupicon
 
 [Run]

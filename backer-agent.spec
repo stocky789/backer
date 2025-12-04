@@ -23,7 +23,9 @@ a = Analysis(
     pathex=['src'],
     binaries=[],
     datas=[
-        # Include assets if they exist
+        # Include icon file at root level (where GUI looks for it)
+        ('assets/backer.ico', '.'),
+        # Include assets folder for other resources
         ('assets', 'assets') if os.path.exists('assets') else ('README.md', '.'),
     ],
     hiddenimports=[

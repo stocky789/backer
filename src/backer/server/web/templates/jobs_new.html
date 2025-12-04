@@ -437,7 +437,7 @@ function startPolling() {
     let attempts = 0;
     pollInterval = setInterval(() => {
         attempts++;
-        if (attempts > 30) { // 15 second timeout
+        if (attempts > 60) { // 30 second timeout (agent polls every 10s)
             clearInterval(pollInterval);
             pollInterval = null;
             document.getElementById('fileBrowserList').innerHTML =
