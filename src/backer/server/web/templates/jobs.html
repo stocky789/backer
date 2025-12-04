@@ -94,10 +94,8 @@
                                 data-job-name="{{ job.name }}">
                             Edit
                         </button>
-                        <button class="btn btn-danger btn-sm"
-                                hx-delete="/api/v1/jobs/{{ job.name|urlencode }}"
-                                hx-confirm="Delete job '{{ job.name }}'? This cannot be undone."
-                                hx-on::after-request="location.reload()">
+                        <button class="btn btn-danger btn-sm delete-job-btn"
+                                data-job-name="{{ job.name }}">
                             Delete
                         </button>
                     </div>
@@ -246,6 +244,35 @@
     </div>
 </div>
 
+<!-- Delete Job Modal -->
+<div id="deleteModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 450px;">
+        <div class="modal-header">
+            <h3>Delete Job</h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideDeleteModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p>Are you sure you want to delete job <strong id="deleteJobName"></strong>?</p>
+            <p style="color: var(--warning); margin-top: 10px;">This will remove the job configuration and metadata from the repository.</p>
+
+            <div class="form-group" style="margin-top: 15px;">
+                <label class="form-label">
+                    <input type="checkbox" id="deleteSnapshots"> Also delete snapshot metadata
+                </label>
+                <div class="form-hint">Delete snapshot records associated with this job from the repository</div>
+            </div>
+
+            <div id="deleteError" class="error-msg" style="display: none; margin-top: 10px;"></div>
+
+            <input type="hidden" id="deleteJobNameInput">
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <button type="button" class="btn btn-danger" onclick="confirmDeleteJob()">Delete</button>
+                <button type="button" class="btn btn-secondary" onclick="hideDeleteModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <style>
 .btn-group {
     display: flex;
@@ -334,6 +361,11 @@ document.addEventListener('DOMContentLoaded', function() {
     // Edit buttons
     document.querySelectorAll('.job-edit-btn').forEach(btn => {
         btn.addEventListener('click', () => editJob(btn.dataset.jobName));
+    });
+
+    // Delete buttons
+    document.querySelectorAll('.delete-job-btn').forEach(btn => {
+        btn.addEventListener('click', () => showDeleteModal(btn.dataset.jobName));
     });
 });
 
@@ -559,6 +591,62 @@ async function submitRestore(event) {
 // Close restore modal on background click
 document.getElementById('restoreModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideRestoreModal();
+});
+
+// Delete job functions
+function showDeleteModal(jobName) {
+    document.getElementById('deleteJobName').textContent = jobName;
+    document.getElementById('deleteJobNameInput').value = jobName;
+    document.getElementById('deleteSnapshots').checked = false;
+    document.getElementById('deleteError').style.display = 'none';
+    document.getElementById('deleteModal').style.display = 'flex';
+}
+
+function hideDeleteModal() {
+    document.getElementById('deleteModal').style.display = 'none';
+}
+
+async function confirmDeleteJob() {
+    const jobName = document.getElementById('deleteJobNameInput').value;
+    const deleteSnapshots = document.getElementById('deleteSnapshots').checked;
+    const errorDiv = document.getElementById('deleteError');
+
+    errorDiv.style.display = 'none';
+
+    try {
+        const url = `/api/v1/jobs/${encodeURIComponent(jobName)}?delete_snapshots=${deleteSnapshots}`;
+        const response = await fetch(url, {
+            method: 'DELETE'
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            let message = 'Job deleted successfully.';
+            if (data.metadata_deleted) {
+                message += ' Repository metadata cleaned up.';
+            }
+            if (data.snapshots_deleted) {
+                message += ` ${data.snapshots_deleted} snapshot(s) deleted.`;
+            }
+            if (data.metadata_warning) {
+                message += '\n\nWarning: ' + data.metadata_warning;
+            }
+            alert(message);
+            location.reload();
+        } else {
+            errorDiv.textContent = data.detail || 'Failed to delete job';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+// Close delete modal on background click
+document.getElementById('deleteModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideDeleteModal();
 });
 </script>
 {% endblock %}
