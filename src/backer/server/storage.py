@@ -14,8 +14,8 @@ from backer.server.models import Client, ClientStatus
 class Storage:
     """SQLite-based storage for server data."""
 
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
+    def __init__(self, db_path: Path | str):
+        self.db_path = Path(db_path) if isinstance(db_path, str) else db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
