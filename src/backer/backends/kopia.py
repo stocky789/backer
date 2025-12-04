@@ -234,17 +234,32 @@ class KopiaBackend(BackendBase):
                 return_code=-1,
             )
 
-        # Connect to repository first
+        # Connect to repository first, or initialize if it doesn't exist
         connected, err = self._connect_repo(destination.path)
         if not connected:
-            return BackendResult(
-                success=False,
-                operation=OperationType.BACKUP,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                errors=[f"Failed to connect to repository: {err}"],
-                return_code=-1,
-            )
+            # Repository might not exist - try to initialize it
+            print(f"[KOPIA] Repository not found, attempting to initialize at {destination.path}")
+            init_result = self.init_repo(destination)
+            if not init_result.success:
+                return BackendResult(
+                    success=False,
+                    operation=OperationType.BACKUP,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    errors=[f"Failed to initialize repository: {init_result.errors}"],
+                    return_code=-1,
+                )
+            # Now try to connect again
+            connected, err = self._connect_repo(destination.path)
+            if not connected:
+                return BackendResult(
+                    success=False,
+                    operation=OperationType.BACKUP,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    errors=[f"Failed to connect to repository after init: {err}"],
+                    return_code=-1,
+                )
 
         try:
             # Build snapshot command
