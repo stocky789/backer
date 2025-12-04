@@ -58,8 +58,9 @@ class BackerAgentApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Backer Agent")
-        self.root.geometry("450x420")
-        self.root.resizable(False, False)
+        self.root.geometry("450x460")
+        self.root.resizable(True, True)
+        self.root.minsize(400, 400)
 
         # Set icon if available
         icon_path = APP_DIR / "backer.ico"
