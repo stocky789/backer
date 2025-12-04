@@ -410,6 +410,19 @@ class BackerAgent:
 
         return server, share, subpath
 
+    def _check_cifs_available(self) -> bool:
+        """Check if cifs-utils is installed for SMB mounting."""
+        try:
+            result = subprocess.run(
+                ["mount.cifs", "-V"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
     @contextmanager
     def _smb_mount_context(
         self,
@@ -421,8 +434,18 @@ class BackerAgent:
     ) -> Generator[Path, None, None]:
         """Context manager that mounts an SMB share and yields the mount path.
 
-        Used for restic on Linux, which needs a local filesystem path.
+        Used for restic/kopia on Linux, which need a local filesystem path.
+        Requires cifs-utils to be installed.
         """
+        # Check if cifs-utils is available
+        if not self._check_cifs_available():
+            raise RuntimeError(
+                "cifs-utils not installed. Install it with:\n"
+                "  Debian/Ubuntu: sudo apt install cifs-utils\n"
+                "  RHEL/Fedora: sudo dnf install cifs-utils\n"
+                "  Arch: sudo pacman -S cifs-utils"
+            )
+
         mount_point = Path(tempfile.mkdtemp(prefix="backer_smb_"))
 
         try:
@@ -447,7 +470,15 @@ class BackerAgent:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to mount SMB share: {result.stderr.strip()}")
+                error_msg = result.stderr.strip()
+                if "Permission denied" in error_msg:
+                    raise RuntimeError(f"SMB mount permission denied. Check credentials for //{server}/{share}")
+                elif "No such file or directory" in error_msg:
+                    raise RuntimeError(f"SMB share not found: //{server}/{share}")
+                elif "Connection refused" in error_msg or "Host is down" in error_msg:
+                    raise RuntimeError(f"Cannot connect to SMB server: {server}")
+                else:
+                    raise RuntimeError(f"Failed to mount SMB share: {error_msg}")
 
             print("[SMB] Mounted successfully")
             yield mount_point
@@ -515,9 +546,10 @@ class BackerAgent:
             print(f"[SMB] Using rclone SMB backend for //{server}/{share}/{subpath or ''}")
             return rclone_path, None
 
-        elif backend_name == "restic":
-            # restic needs a mounted filesystem path
+        elif backend_name in ("restic", "kopia"):
+            # restic and kopia need a mounted filesystem path
             # We'll mount the share and return the mount path with subpath
+            print(f"[SMB] Mounting share for {backend_name} backend")
             ctx = self._smb_mount_context(
                 server=server,
                 share=share,
@@ -527,6 +559,7 @@ class BackerAgent:
             )
             mount_path = ctx.__enter__()
             full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            print(f"[SMB] Using mounted path: {full_path}")
             return full_path, ctx
 
         else:
