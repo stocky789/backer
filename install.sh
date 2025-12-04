@@ -119,7 +119,7 @@ source "$INSTALL_DIR/venv/bin/activate"
 
 # Install backer
 pip install --quiet --upgrade pip
-pip install --quiet -e "$INSTALL_DIR[server]"
+pip install --quiet --no-cache-dir --force-reinstall -e "$INSTALL_DIR[server]"
 success "Backer installed"
 
 # Download backup tools (rclone + restic)
