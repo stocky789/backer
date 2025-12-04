@@ -1371,6 +1371,10 @@ class AgentService:
     def _execute_browse_filesystem(self, payload: dict[str, Any]):
         """Execute filesystem browse command and report results."""
         request_id = payload.get('request_id')
+        if not request_id:
+            logger.error("[BROWSE] Missing request_id in payload")
+            return
+
         path = payload.get('path', '')
 
         logger.info(f"[BROWSE] Browsing filesystem at: {path or '(root)'}")

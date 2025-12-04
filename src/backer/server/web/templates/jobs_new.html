@@ -370,6 +370,13 @@ let currentBrowseRequestId = null;
 let pollInterval = null;
 let selectedBrowsePath = '';
 
+// Helper to escape HTML to prevent XSS
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 function onAgentChange() {
     const agentSelect = document.getElementById('agentSelect');
     const browseBtn = document.getElementById('browseBtn');
@@ -420,7 +427,7 @@ function browsePath(path) {
         startPolling();
     })
     .catch(err => {
-        listEl.innerHTML = `<div class="file-browser-error">Error: ${err.message}</div>`;
+        listEl.innerHTML = `<div class="file-browser-error">Error: ${escapeHtml(err.message)}</div>`;
     });
 }
 
@@ -432,21 +439,27 @@ function startPolling() {
         attempts++;
         if (attempts > 30) { // 15 second timeout
             clearInterval(pollInterval);
+            pollInterval = null;
             document.getElementById('fileBrowserList').innerHTML =
                 '<div class="file-browser-error">Request timed out. Agent may be offline.</div>';
             return;
         }
 
         fetch(`/api/v1/browse/${currentBrowseRequestId}`)
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error(`Server error: ${r.status}`);
+            return r.json();
+        })
         .then(data => {
             if (data.status === 'completed') {
                 clearInterval(pollInterval);
+                pollInterval = null;
                 renderFileList(data.entries, data.path);
             } else if (data.status === 'error') {
                 clearInterval(pollInterval);
+                pollInterval = null;
                 document.getElementById('fileBrowserList').innerHTML =
-                    `<div class="file-browser-error">${data.error || 'Unknown error'}</div>`;
+                    `<div class="file-browser-error">${escapeHtml(data.error || 'Unknown error')}</div>`;
             }
             // else still pending, continue polling
         })
@@ -491,10 +504,17 @@ function renderFileList(entries, path) {
         const item = document.createElement('div');
         item.className = 'file-browser-item';
         item.dataset.path = entry.path;
-        item.innerHTML = `
-            <span class="file-browser-icon folder">📁</span>
-            <span class="file-browser-name">${entry.name}</span>
-        `;
+
+        const icon = document.createElement('span');
+        icon.className = 'file-browser-icon folder';
+        icon.textContent = '📁';
+
+        const name = document.createElement('span');
+        name.className = 'file-browser-name';
+        name.textContent = entry.name;
+
+        item.appendChild(icon);
+        item.appendChild(name);
 
         // Single click to select, double click to open
         item.onclick = (e) => {
@@ -515,16 +535,19 @@ function renderFileList(entries, path) {
 
 function updateBreadcrumb(path) {
     const pathEl = document.getElementById('fileBrowserPath');
+    pathEl.innerHTML = '';
 
-    if (!path) {
-        pathEl.innerHTML = '<span class="file-browser-path-segment" onclick="browsePath(\'\')">Root</span>';
-        return;
-    }
+    // Root segment
+    const rootSeg = document.createElement('span');
+    rootSeg.className = 'file-browser-path-segment';
+    rootSeg.textContent = 'Root';
+    rootSeg.onclick = () => browsePath('');
+    pathEl.appendChild(rootSeg);
+
+    if (!path) return;
 
     const separator = path.includes('\\') ? '\\' : '/';
     const parts = path.split(separator).filter(p => p);
-
-    let html = '<span class="file-browser-path-segment" onclick="browsePath(\'\')">Root</span>';
     let currentPath = '';
 
     parts.forEach((part, i) => {
@@ -535,11 +558,20 @@ function updateBreadcrumb(path) {
             currentPath += separator + part;
         }
         const fullPath = currentPath;
-        html += ` <span style="color: var(--text-muted);">${separator}</span> `;
-        html += `<span class="file-browser-path-segment" onclick="browsePath('${fullPath.replace(/\\/g, '\\\\')}')">${part}</span>`;
-    });
 
-    pathEl.innerHTML = html;
+        // Add separator
+        const sep = document.createElement('span');
+        sep.style.color = 'var(--text-muted)';
+        sep.textContent = ` ${separator} `;
+        pathEl.appendChild(sep);
+
+        // Add clickable path segment
+        const seg = document.createElement('span');
+        seg.className = 'file-browser-path-segment';
+        seg.textContent = part;
+        seg.onclick = () => browsePath(fullPath);
+        pathEl.appendChild(seg);
+    });
 }
 
 function selectPath() {

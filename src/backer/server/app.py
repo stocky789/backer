@@ -602,7 +602,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
         path = data.get("path", "")
 
         # Generate a unique request ID
