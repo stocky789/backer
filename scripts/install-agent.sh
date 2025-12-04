@@ -31,7 +31,7 @@ NC='\033[0m' # No Color
 
 # Defaults
 SYSTEM_MODE=false
-VERSION="latest"
+BACKER_VERSION="latest"
 NO_WIZARD=false
 UNINSTALL=false
 CURRENT_USER=$(whoami)
@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version)
-            VERSION="$2"
+            BACKER_VERSION="$2"
             shift 2
             ;;
         --no-wizard)
@@ -348,12 +348,12 @@ install_backer() {
     pip install --upgrade pip wheel setuptools -q
 
     # Install backer with client dependencies
-    if [[ "$VERSION" == "latest" ]]; then
+    if [[ "$BACKER_VERSION" == "latest" ]]; then
         pip install "backer[client]" -q 2>/dev/null || \
         pip install git+https://github.com/stocky789/backer.git#egg=backer[client] -q
     else
-        pip install "backer[client]==$VERSION" -q 2>/dev/null || \
-        pip install "git+https://github.com/stocky789/backer.git@v$VERSION#egg=backer[client]" -q
+        pip install "backer[client]==$BACKER_VERSION" -q 2>/dev/null || \
+        pip install "git+https://github.com/stocky789/backer.git@v$BACKER_VERSION#egg=backer[client]" -q
     fi
 
     deactivate
