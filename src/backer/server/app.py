@@ -510,7 +510,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             if client_id:
                                 client = storage.get_client(client_id)
                                 if client:
-                                    client_hostname = client.get("hostname")
+                                    client_hostname = client.hostname
 
                             # List and delete matching snapshots
                             ok, snap_files = smb_list_files(
@@ -586,7 +586,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 if client_id:
                                     client = storage.get_client(client_id)
                                     if client:
-                                        client_hostname = client.get("hostname")
+                                        client_hostname = client.hostname
 
                                 import json as json_module
                                 for snap_file in snapshots_dir.glob("*.json"):
