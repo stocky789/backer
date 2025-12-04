@@ -152,12 +152,33 @@ backer-agent.exe uninstall
 
 ### Linux Agent
 
-```bash
-# Quick install
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash -s -- --agent
+**Option 1: Install Script (Recommended)**
 
-# Or manual install
+```bash
+# Download and run installer (installs for current user)
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | bash
+```
+
+This will:
+- Install backer to `~/.local/share/backer`
+- Run the interactive setup wizard to connect to your server
+- Create a systemd user service
+
+The agent runs as your user, so it can backup your personal files in `/home`.
+
+**For system-wide backups (all users/files):**
+
+```bash
+# Install with root access
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash -s -- --system
+```
+
+**Option 2: Manual Install with pip**
+
+```bash
 pip install backer[client]
+backer agent setup              # Interactive wizard
+# Or use CLI flags:
 backer agent register --server http://your-server:8420
 backer agent install --method systemd
 ```
@@ -165,9 +186,21 @@ backer agent install --method systemd
 **Agent Commands:**
 
 ```bash
+backer agent setup        # Run setup wizard (connect to server)
 backer agent status       # Check connection status
 backer agent start        # Start agent manually
-backer agent register     # Register with server
+systemctl --user start backer-agent    # Start via systemd (user mode)
+sudo systemctl start backer-agent      # Start via systemd (system mode)
+```
+
+**Uninstall Linux Agent:**
+
+```bash
+# User mode
+bash <(curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh) --uninstall
+
+# System mode
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh) --uninstall --system
 ```
 
 ---
@@ -244,7 +277,8 @@ Server:
   backer server uninstall   Uninstall server from system
 
 Agent:
-  backer agent register     Register agent with server
+  backer agent setup        Interactive setup wizard (recommended)
+  backer agent register     Register agent with server (CLI mode)
   backer agent start        Start agent daemon
   backer agent status       Check connection status
   backer agent install      Install as system service
