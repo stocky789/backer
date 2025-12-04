@@ -325,7 +325,7 @@ def run_wizard() -> bool:
         console.print("    [cyan]backer agent start[/cyan]")
         console.print()
         console.print("  Or enable as a systemd service:")
-        console.print("    [cyan]sudo systemctl enable --now backer-agent[/cyan]")
+        console.print("    [cyan]systemctl --user enable --now backer-agent[/cyan]")
 
     console.print()
     console.print("  View agent status:")
