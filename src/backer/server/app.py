@@ -573,14 +573,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     client_hostname = client.hostname
 
                             job_source_path = job.get("source_path", "")
-                            logger.info(f"[DELETE SNAPSHOTS] Looking for snapshots: hostname={client_hostname}, source_path={job_source_path}")
+                            logger.info(
+                                f"[DELETE SNAPSHOTS] Looking for snapshots: "
+                                f"hostname={client_hostname}, source_path={job_source_path}"
+                            )
 
                             # List and delete matching snapshots
                             ok, snap_files = smb_list_files(
                                 server, share, snapshots_path,
                                 username, password, domain
                             )
-                            logger.info(f"[DELETE SNAPSHOTS] Found {len(snap_files) if ok else 0} snapshot files in {snapshots_path}")
+                            snap_count = len(snap_files) if ok else 0
+                            logger.info(f"[DELETE SNAPSHOTS] Found {snap_count} files in {snapshots_path}")
                             if ok and snap_files:
                                 for snap_file in snap_files:
                                     if not snap_file.endswith(".json"):
@@ -605,16 +609,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                 # Same host - check if paths match
                                                 if job_source_path:
                                                     # Normalize paths for comparison
-                                                    norm_job_path = job_source_path.replace("\\", "/").rstrip("/")
+                                                    norm_job = job_source_path.replace("\\", "/").rstrip("/")
                                                     for sp in snap_paths:
-                                                        norm_snap_path = sp.replace("\\", "/").rstrip("/")
-                                                        logger.debug(f"[DELETE SNAPSHOTS] Comparing: job='{norm_job_path}' vs snap='{norm_snap_path}'")
-                                                        if norm_job_path in norm_snap_path or norm_snap_path in norm_job_path:
+                                                        norm_snap = sp.replace("\\", "/").rstrip("/")
+                                                        if norm_job in norm_snap or norm_snap in norm_job:
                                                             should_delete = True
-                                                            logger.info(f"[DELETE SNAPSHOTS] Match found! Snapshot {snap_file}: hostname={snap_hostname}, paths={snap_paths}")
+                                                            logger.info(
+                                                                f"[DELETE SNAPSHOTS] Match: {snap_file}"
+                                                            )
                                                             break
                                             else:
-                                                logger.debug(f"[DELETE SNAPSHOTS] No hostname match: client={client_hostname}, snap={snap_hostname}")
+                                                pass  # No hostname match - skip silently
 
                                             if should_delete:
                                                 del_ok, del_msg = smb_delete_file(
@@ -669,10 +674,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         should_delete = False
                                         if client_hostname and snap_hostname == client_hostname:
                                             if job_source_path:
-                                                norm_job_path = job_source_path.replace("\\", "/").rstrip("/")
+                                                norm_job = job_source_path.replace("\\", "/").rstrip("/")
                                                 for sp in snap_paths:
-                                                    norm_snap_path = sp.replace("\\", "/").rstrip("/")
-                                                    if norm_job_path in norm_snap_path or norm_snap_path in norm_job_path:
+                                                    norm_snap = sp.replace("\\", "/").rstrip("/")
+                                                    if norm_job in norm_snap or norm_snap in norm_job:
                                                         should_delete = True
                                                         break
 
