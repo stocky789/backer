@@ -91,7 +91,7 @@ class AgentService:
         client_id: str,
         client_secret: str,
         tools_dir: Path | None = None,
-        poll_interval: int = 30,
+        poll_interval: int = 10,
         status_callback: Callable[[str], None] | None = None,
     ):
         self.server_url = server_url.rstrip('/')
@@ -227,6 +227,7 @@ class AgentService:
         endpoint: str,
         method: str = 'GET',
         data: dict | None = None,
+        timeout: int = 30,
     ) -> dict[str, Any]:
         """Make authenticated request to server."""
         url = f"{self.server_url}{endpoint}"
@@ -241,7 +242,7 @@ class AgentService:
         req.add_header('Content-Type', 'application/json')
         req.add_header('User-Agent', 'Backer-Agent/1.0')
 
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode('utf-8'))
 
     def _update_status(self, status: str):
@@ -268,22 +269,36 @@ class AgentService:
         logger.info("Agent service stopped")
 
     def _run_loop(self):
-        """Main service loop."""
+        """Main service loop.
+
+        Uses long-polling: the server holds the heartbeat request until
+        a command is available (up to 25s), so we get commands instantly.
+        We only sleep briefly between heartbeats to allow quick shutdown.
+        """
         while self._running:
             try:
                 self._heartbeat()
             except Exception as e:
                 logger.error(f"Heartbeat failed: {e}")
                 self._update_status(f"Error: {e}")
+                # On error, wait before retry to avoid hammering server
+                for _ in range(5):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+                continue
 
-            # Sleep in small increments to allow quick shutdown
-            for _ in range(self.poll_interval):
-                if not self._running:
-                    break
-                time.sleep(1)
+            # Brief pause between heartbeats (server handles the waiting)
+            if not self._running:
+                break
+            time.sleep(1)
 
     def _heartbeat(self):
-        """Send heartbeat to server and process any commands."""
+        """Send heartbeat to server and process any commands.
+
+        Uses long-polling with 35 second timeout - the server holds the
+        connection until a command arrives (up to 25 seconds).
+        """
         self._update_status("Checking for jobs...")
 
         try:
@@ -294,6 +309,7 @@ class AgentService:
                     'client_id': self.client_id,
                     'status': 'online',
                 },
+                timeout=35,  # Server waits up to 25s, so we need longer timeout
             )
 
             commands = response.get('commands', [])

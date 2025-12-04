@@ -279,23 +279,45 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         }
 
     @app.post("/api/v1/clients/heartbeat")
-    def client_heartbeat(
+    async def client_heartbeat(
         heartbeat: ClientHeartbeat,
         req: Request,
         client: Client = Depends(verify_client),
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Receive heartbeat from a client."""
+        """Receive heartbeat from a client.
+
+        Uses long-polling: if no commands are pending, waits up to 25 seconds
+        for a command to arrive before returning. This gives near-instant
+        command delivery for interactive operations like file browsing.
+        """
+        import asyncio
+
         storage.update_client_status(
             client.id, ClientStatus.ONLINE, ip_address=req.client.host if req.client else None
         )
-        # Get pending commands for this client
+
+        # Check for pending commands immediately
         commands = storage.get_pending_commands(client.id)
         if commands:
             logger.info(f"[HEARTBEAT] Agent '{client.id}' receiving {len(commands)} command(s)")
             for cmd in commands:
                 logger.debug(f"[HEARTBEAT] Command: {cmd}")
-        return {"status": "ok", "commands": commands}
+            return {"status": "ok", "commands": commands}
+
+        # Long-polling: wait up to 25 seconds for a command to arrive
+        # Check every 0.5 seconds for new commands
+        for _ in range(50):  # 50 * 0.5s = 25 seconds max wait
+            await asyncio.sleep(0.5)
+            commands = storage.get_pending_commands(client.id)
+            if commands:
+                logger.info(f"[HEARTBEAT] Agent '{client.id}' receiving {len(commands)} command(s) (long-poll)")
+                for cmd in commands:
+                    logger.debug(f"[HEARTBEAT] Command: {cmd}")
+                return {"status": "ok", "commands": commands}
+
+        # No commands after timeout - return empty
+        return {"status": "ok", "commands": []}
 
     # ============ Job Management ============
 
