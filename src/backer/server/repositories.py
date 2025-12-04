@@ -597,44 +597,71 @@ def smb_delete_directory(
 
     remote_path = remote_path.replace("\\", "/").strip("/")
 
-    # Build smbclient commands to delete directory recursively
-    # First delete all files, then the directory itself
-    smb_commands = f'cd "{remote_path}"; recurse ON; prompt OFF; mdelete *; cd /; rmdir "{remote_path}"'
+    # smbclient doesn't have recursive delete, so we need to:
+    # 1. Delete files in subdirectories first
+    # 2. Delete subdirectories
+    # 3. Delete files in main directory
+    # 4. Delete main directory
 
-    try:
+    def run_smb_command(commands: str) -> tuple[int, str, str]:
+        """Run smbclient with given commands."""
         cmd = ["smbclient", f"//{server}/{share}"]
 
-        # Add authentication
         if username and password:
             with smb_auth_file(username, password, domain) as auth_path:
                 cmd.extend(["-A", auth_path])
-                cmd.extend(["-c", smb_commands])
-
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
+                cmd.extend(["-c", commands])
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                return result.returncode, result.stdout, result.stderr
         else:
-            cmd.extend(["-N"])  # No password
-            cmd.extend(["-c", smb_commands])
+            cmd.extend(["-N"])
+            cmd.extend(["-c", commands])
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            return result.returncode, result.stdout, result.stderr
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+    try:
+        # First, check if directory exists
+        if not smb_file_exists(server, share, remote_path, username, password, domain):
+            return True, "Directory does not exist (already deleted)"
 
-        # smbclient may return non-zero even on partial success
-        # Check if directory is gone
+        # For backer job metadata, we know the structure:
+        # {job_name}/config.json
+        # {job_name}/runs/*.json
+        # So we can delete in the right order
+
+        errors = []
+
+        # Delete files in runs/ subdirectory
+        runs_path = f"{remote_path}/runs"
+        success, files = smb_list_files(server, share, runs_path, username, password, domain)
+        if success and files:
+            for f in files:
+                rc, _, err = run_smb_command(f'del "{runs_path}/{f}"')
+                if rc != 0 and "NT_STATUS_NO_SUCH_FILE" not in err:
+                    errors.append(f"Failed to delete {runs_path}/{f}")
+
+        # Delete runs directory
+        rc, _, err = run_smb_command(f'rmdir "{runs_path}"')
+        # Ignore "not found" errors
+        if rc != 0 and "NT_STATUS_NO_SUCH_FILE" not in err and "NT_STATUS_OBJECT_NAME_NOT_FOUND" not in err:
+            errors.append("Failed to delete runs dir")
+
+        # Delete config.json
+        rc, _, err = run_smb_command(f'del "{remote_path}/config.json"')
+        if rc != 0 and "NT_STATUS_NO_SUCH_FILE" not in err and "NT_STATUS_OBJECT_NAME_NOT_FOUND" not in err:
+            errors.append("Failed to delete config.json")
+
+        # Delete the job directory itself
+        rc, _, err = run_smb_command(f'rmdir "{remote_path}"')
+        if rc != 0 and "NT_STATUS_NO_SUCH_FILE" not in err and "NT_STATUS_OBJECT_NAME_NOT_FOUND" not in err:
+            errors.append(f"Failed to delete job dir: {err.strip()}")
+
+        # Verify deletion
         if not smb_file_exists(server, share, remote_path, username, password, domain):
             return True, "Directory deleted successfully"
+        elif errors:
+            return False, f"Deletion errors: {'; '.join(errors)}"
         else:
-            # Directory still exists - might be partial deletion or failure
-            if result.returncode != 0:
-                return False, f"Failed to delete: {result.stderr}"
             return False, "Directory still exists after deletion attempt"
 
     except subprocess.TimeoutExpired:
