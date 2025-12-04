@@ -207,6 +207,9 @@ class BackerAgent:
             elif cmd_type == "restore":
                 dry_run = payload.get("dry_run", False)
                 self.execute_restore(payload, dry_run=dry_run)
+            elif cmd_type == "browse_filesystem":
+                self._execute_browse_filesystem(payload)
+                return  # Don't acknowledge browse commands
             else:
                 print(f"Unknown command: {cmd_type}")
                 return
@@ -225,6 +228,120 @@ class BackerAgent:
             client.post(f"/api/v1/commands/{command_id}/ack")
         except Exception as e:
             print(f"Failed to acknowledge command {command_id}: {e}")
+
+    def _execute_browse_filesystem(self, payload: dict[str, Any]) -> None:
+        """Execute filesystem browse command and report results."""
+        request_id = payload.get("request_id")
+        if not request_id:
+            print("[BROWSE] Missing request_id in payload")
+            return
+
+        path = payload.get("path", "")
+        print(f"[BROWSE] Browsing filesystem at: {path or '(root)'}")
+
+        try:
+            entries = []
+
+            if not path:
+                # Return root directories - Home and /
+                home = Path.home()
+                if home.exists():
+                    entries.append({
+                        "name": "Home",
+                        "path": str(home),
+                        "is_dir": True,
+                        "size": 0,
+                    })
+                entries.append({
+                    "name": "/",
+                    "path": "/",
+                    "is_dir": True,
+                    "size": 0,
+                })
+                actual_path = ""
+            else:
+                # List contents of the specified path
+                browse_path = Path(path)
+                actual_path = str(browse_path)
+
+                if not browse_path.exists():
+                    raise FileNotFoundError(f"Path does not exist: {path}")
+
+                if not browse_path.is_dir():
+                    raise NotADirectoryError(f"Path is not a directory: {path}")
+
+                # Use os.scandir for better performance
+                dirs = []
+                files = []
+
+                try:
+                    with os.scandir(str(browse_path)) as scanner:
+                        for entry in scanner:
+                            try:
+                                # Use cached is_dir from scandir (much faster)
+                                is_dir = entry.is_dir(follow_symlinks=False)
+
+                                item_entry = {
+                                    "name": entry.name,
+                                    "path": entry.path,
+                                    "is_dir": is_dir,
+                                    "size": 0,
+                                }
+
+                                if is_dir:
+                                    dirs.append(item_entry)
+                                else:
+                                    # Get file size from cached stat
+                                    try:
+                                        item_entry["size"] = entry.stat().st_size
+                                    except (OSError, PermissionError):
+                                        pass
+                                    files.append(item_entry)
+
+                                # Stop early if we have enough entries
+                                if len(dirs) + len(files) >= 500:
+                                    break
+
+                            except (OSError, PermissionError):
+                                # Skip items we can't access
+                                continue
+                except PermissionError:
+                    raise PermissionError(f"Permission denied: {path}")
+
+                # Sort directories and files by name, then combine (dirs first)
+                dirs.sort(key=lambda x: x["name"].lower())
+                files.sort(key=lambda x: x["name"].lower())
+                entries = (dirs + files)[:200]
+
+            # Report results to server
+            client = self._get_client()
+            client.post(
+                f"/api/v1/browse/{request_id}/results",
+                json={
+                    "success": True,
+                    "path": actual_path,
+                    "entries": entries,
+                },
+            )
+
+            print(f"[BROWSE] Sent {len(entries)} entries for path: {path or '(root)'}")
+
+        except Exception as e:
+            print(f"[BROWSE] Failed to browse {path}: {e}")
+            # Report error to server
+            try:
+                client = self._get_client()
+                client.post(
+                    f"/api/v1/browse/{request_id}/results",
+                    json={
+                        "success": False,
+                        "path": path,
+                        "entries": [],
+                        "error": str(e),
+                    },
+                )
+            except Exception as report_err:
+                print(f"[BROWSE] Failed to report error: {report_err}")
 
     def _report_progress(
         self,
