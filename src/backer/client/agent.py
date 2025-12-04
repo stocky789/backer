@@ -9,10 +9,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import httpx
 
@@ -448,7 +449,7 @@ class BackerAgent:
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to mount SMB share: {result.stderr.strip()}")
 
-            print(f"[SMB] Mounted successfully")
+            print("[SMB] Mounted successfully")
             yield mount_point
 
         finally:
