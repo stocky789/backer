@@ -433,11 +433,92 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {"name": job_name, "enabled": existing["enabled"]}
 
     @app.delete("/api/v1/jobs/{job_name}")
-    def delete_job(job_name: str, storage: Storage = Depends(get_storage)) -> dict[str, str]:
-        """Delete a job."""
+    def delete_job(job_name: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
+        """Delete a job and its repository metadata."""
+        import shutil
+        from pathlib import Path as PathLib
+
+        from backer.server.repositories import smb_delete_directory
+
+        # Get job config before deleting (to find repository)
+        job = storage.get_job(job_name)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        metadata_deleted = False
+        metadata_error = None
+
+        # Try to delete metadata from repository
+        repo_id = job.get("repository_id")
+        if repo_id:
+            repo = storage.get_repository(repo_id)
+            if repo:
+                repo_type = repo.get("repo_type", "smb")
+                server = repo.get("server", "")
+                share = repo.get("share", "")
+                subpath = repo.get("path", "")
+                username = repo.get("username")
+                password = storage.get_repository_password(repo_id)
+                domain = repo.get("domain")
+
+                # Build path to job metadata folder
+                metadata_path = f"{subpath}/.backer/jobs/{job_name}" if subpath else f".backer/jobs/{job_name}"
+
+                try:
+                    if repo_type == "smb":
+                        # Use SMB client to delete
+                        success, msg = smb_delete_directory(
+                            server, share, metadata_path,
+                            username, password, domain
+                        )
+                        if success:
+                            metadata_deleted = True
+                            logger.info(f"Deleted job metadata from SMB: {metadata_path}")
+                        else:
+                            metadata_error = msg
+                            logger.warning(f"Failed to delete job metadata from SMB: {msg}")
+
+                    elif repo_type == "local" or repo.get("mount_point"):
+                        # Direct filesystem access
+                        if repo.get("mount_point"):
+                            base_path = PathLib(repo["mount_point"])
+                        else:
+                            base_path = PathLib(share or repo.get("path", ""))
+
+                        if subpath:
+                            base_path = base_path / subpath
+
+                        job_metadata_path = base_path / ".backer" / "jobs" / job_name
+                        if job_metadata_path.exists():
+                            shutil.rmtree(job_metadata_path)
+                            metadata_deleted = True
+                            logger.info(f"Deleted job metadata: {job_metadata_path}")
+
+                    # NFS - similar to local if mounted
+                    elif repo_type == "nfs" and repo.get("mount_point"):
+                        base_path = PathLib(repo["mount_point"])
+                        if subpath:
+                            base_path = base_path / subpath
+                        job_metadata_path = base_path / ".backer" / "jobs" / job_name
+                        if job_metadata_path.exists():
+                            shutil.rmtree(job_metadata_path)
+                            metadata_deleted = True
+
+                except Exception as e:
+                    metadata_error = str(e)
+                    logger.warning(f"Error deleting job metadata: {e}")
+
+        # Delete job from database
         if not storage.delete_job(job_name):
             raise HTTPException(status_code=404, detail="Job not found")
-        return {"status": "deleted"}
+
+        result: dict[str, Any] = {"status": "deleted"}
+        if metadata_deleted:
+            result["metadata_deleted"] = True
+        if metadata_error:
+            result["metadata_warning"] = f"Job deleted but metadata cleanup failed: {metadata_error}"
+
+        return result
 
     @app.post("/api/v1/jobs/{job_name}/run", response_model=JobRunResponse)
     def run_job(
