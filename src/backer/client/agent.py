@@ -21,13 +21,21 @@ from backer.backends.base import BackupDestination, BackupSource
 def get_config_dir() -> Path:
     """Get platform-appropriate config directory.
 
-    Checks BACKER_CONFIG_DIR env var first (for system-wide installs),
-    then falls back to platform defaults.
+    Priority:
+    1. BACKER_CONFIG_DIR env var (if set)
+    2. /etc/backer (if exists - system-wide install)
+    3. Platform default (~/.config/backer on Linux)
     """
-    # Check environment variable first (set by systemd service)
+    # Check environment variable first (set by systemd service or installer)
     env_config = os.environ.get("BACKER_CONFIG_DIR")
     if env_config:
         return Path(env_config)
+
+    # On Linux, check for system-wide install first
+    if sys.platform != "win32":
+        system_config = Path("/etc/backer")
+        if system_config.exists():
+            return system_config
 
     if sys.platform == "win32":
         # Use APPDATA on Windows
