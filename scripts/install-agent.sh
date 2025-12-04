@@ -127,6 +127,17 @@ install_backer() {
     success "Backer installed to $INSTALL_DIR"
 }
 
+# Install backup tools (rclone, restic, kopia)
+install_tools() {
+    step "Downloading backup tools (rclone, restic, kopia)..."
+
+    # Run backer setup to download the tools
+    # The tools are installed to ~/.local/share/backer/tools/ for root user
+    "$INSTALL_DIR/venv/bin/backer" setup || warn "Some tools may not have installed correctly"
+
+    success "Backup tools installed"
+}
+
 # Create systemd service
 create_service() {
     step "Creating systemd service..."
@@ -240,6 +251,7 @@ main() {
 
     setup_packages
     install_backer
+    install_tools
     create_service
     run_wizard
     print_done
