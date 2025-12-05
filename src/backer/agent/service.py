@@ -1634,6 +1634,12 @@ class AgentService:
                 and smb_share
             )
 
+            logger.info(
+                f"[METADATA] Writing metadata: platform={sys.platform}, "
+                f"smb_server={smb_server}, smb_share={smb_share}, "
+                f"use_smb={use_smb}, repo_path={repo_path}"
+            )
+
             if use_smb:
                 self._write_repo_metadata_smb(
                     smb_server=smb_server,
@@ -1763,8 +1769,10 @@ class AgentService:
         started_at: datetime,
         finished_at: datetime,
     ) -> None:
-        """Write metadata to SMB share using smbclient (for Linux agents)."""
-        import json
+        """Write metadata to SMB share by mounting it temporarily (for Linux agents).
+
+        Uses CIFS mount like the backup does, then writes using local filesystem.
+        """
         import tempfile
 
         # Extract subpath from repo_path (e.g., //server/share/subpath -> subpath)
@@ -1775,155 +1783,87 @@ class AgentService:
             if len(path_parts) > 2:
                 subpath = "/".join(path_parts[2:])
 
-        # Build base path for metadata
-        metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+        logger.info(f"[METADATA-SMB] Writing metadata to //{smb_server}/{smb_share}/{subpath}")
 
-        logger.info(f"[METADATA-SMB] Writing metadata to //{smb_server}/{smb_share}/{metadata_base}")
+        # Check if mount.cifs is available
+        try:
+            subprocess.run(["which", "mount.cifs"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.error("[METADATA-SMB] cifs-utils not installed - cannot mount SMB share")
+            logger.error("[METADATA-SMB] Install with: apt install cifs-utils")
+            return
 
-        def smb_write_file(remote_path: str, content: str) -> bool:
-            """Write content to a file on SMB share using smbclient."""
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                f.write(content)
-                local_path = f.name
+        # Create temporary mount point
+        mount_point = tempfile.mkdtemp(prefix="backer_meta_")
 
-            try:
-                # Build smbclient command
-                cmd = ["smbclient", f"//{smb_server}/{smb_share}", "-t", "10"]
+        try:
+            # Build mount command (use sudo if not running as root)
+            smb_url = f"//{smb_server}/{smb_share}"
+            if os.geteuid() == 0:
+                cmd = ["mount", "-t", "cifs", smb_url, mount_point]
+            else:
+                cmd = ["sudo", "mount", "-t", "cifs", smb_url, mount_point]
 
-                # Add authentication
-                if smb_username and smb_password:
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False) as auth_file:
-                        auth_file.write(f"username={smb_username}\n")
-                        auth_file.write(f"password={smb_password}\n")
-                        if smb_domain:
-                            auth_file.write(f"domain={smb_domain}\n")
-                        auth_path = auth_file.name
-                    cmd.extend(["-A", auth_path])
-                else:
-                    cmd.append("-N")  # No password
+            # Build mount options
+            opts = ["rw"]
+            if smb_username:
+                opts.append(f"username={smb_username}")
+            if smb_password:
+                opts.append(f"password={smb_password}")
+            if smb_domain:
+                opts.append(f"domain={smb_domain}")
+            if not smb_username and not smb_password:
+                opts.append("guest")
 
-                # Ensure parent directory exists and upload file
-                parent_dir = "/".join(remote_path.split("/")[:-1])
-                filename = remote_path.split("/")[-1]
+            cmd.extend(["-o", ",".join(opts)])
 
-                # Create directories and upload
-                smb_commands = []
-                # Create each directory level
-                dirs_to_create = []
-                current = ""
-                for part in parent_dir.split("/"):
-                    if part:
-                        current = f"{current}/{part}" if current else part
-                        dirs_to_create.append(current)
-                for d in dirs_to_create:
-                    smb_commands.append(f"mkdir {d}")
-                smb_commands.append(f"cd {parent_dir}")
-                smb_commands.append(f"put {local_path} {filename}")
+            logger.info(f"[METADATA-SMB] Mounting {smb_url} to {mount_point}")
+            mount_result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
-                cmd.extend(["-c", "; ".join(smb_commands)])
+            if mount_result.returncode != 0:
+                logger.error(f"[METADATA-SMB] Failed to mount: {mount_result.stderr}")
+                return
 
-                proc_result = subprocess.run(cmd, capture_output=True, timeout=30)
+            logger.info("[METADATA-SMB] Mount successful")
 
-                # Clean up auth file if created
-                if smb_username and smb_password:
-                    try:
-                        os.unlink(auth_path)
-                    except Exception:
-                        pass
+            # Build the local path for metadata
+            if subpath:
+                local_repo_path = os.path.join(mount_point, subpath)
+            else:
+                local_repo_path = mount_point
 
-                if proc_result.returncode != 0:
-                    stderr = proc_result.stderr.decode('utf-8', errors='replace')
-                    # mkdir errors are ok (directory might exist)
-                    if "NT_STATUS" in stderr and "NT_STATUS_OBJECT_NAME_COLLISION" not in stderr:
-                        logger.warning(f"[METADATA-SMB] smbclient error: {stderr}")
-                        return False
+            logger.info(f"[METADATA-SMB] Writing metadata to local path: {local_repo_path}")
 
-                return True
-
-            finally:
-                try:
-                    os.unlink(local_path)
-                except Exception:
-                    pass
-
-        # Write metadata.json
-        metadata = {
-            "version": "1.0",
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "repo_type": "smb",
-        }
-        smb_write_file(f"{metadata_base}/metadata.json", json.dumps(metadata, indent=2))
-
-        # Write agent info
-        agent_data = {
-            "agent_id": self.client_id,
-            "hostname": socket.gethostname(),
-            "platform": sys.platform,
-            "os_info": f"{platform.system()} {platform.release()}",
-            "python_version": platform.python_version(),
-            "first_seen": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-        }
-        smb_write_file(
-            f"{metadata_base}/agents/{self.client_id}.json",
-            json.dumps(agent_data, indent=2)
-        )
-
-        # Write job config
-        job_data = {
-            "job_name": job_name,
-            "config": {
-                "source_path": source_path,
-                "backend": backend,
-                "client_id": self.client_id,
-            },
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-        }
-        safe_job_name = job_name.replace("/", "_").replace("\\", "_")
-        smb_write_file(
-            f"{metadata_base}/jobs/{safe_job_name}/config.json",
-            json.dumps(job_data, indent=2)
-        )
-
-        # Write run record
-        run_data = {
-            "run_id": run_id,
-            "job_name": job_name,
-            "status": "success" if result.get("success") else "failed",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "bytes_transferred": result.get("bytes", 0),
-            "files_transferred": result.get("files", 0),
-            "snapshot_id": result.get("snapshot_id"),
-            "agent_id": self.client_id,
-            "hostname": socket.gethostname(),
-            "recorded_at": datetime.now().isoformat(),
-        }
-        safe_run_id = run_id.replace("/", "_").replace("\\", "_")
-        smb_write_file(
-            f"{metadata_base}/jobs/{safe_job_name}/runs/{safe_run_id}.json",
-            json.dumps(run_data, indent=2)
-        )
-
-        # Write snapshot metadata for restic/kopia
-        snapshot_id = result.get("snapshot_id")
-        if snapshot_id and backend in ("restic", "kopia"):
-            snapshot_data = {
-                "snapshot_id": snapshot_id,
-                "job_name": job_name,
-                "run_id": run_id,
-                "hostname": socket.gethostname(),
-                "paths": [source_path],
-                "time": finished_at.isoformat(),
-                "backend": backend,
-                "recorded_at": datetime.now().isoformat(),
-            }
-            short_id = snapshot_id[:12] if len(snapshot_id) > 12 else snapshot_id
-            smb_write_file(
-                f"{metadata_base}/snapshots/{short_id}.json",
-                json.dumps(snapshot_data, indent=2)
+            # Use the local metadata writing method
+            self._write_repo_metadata_local(
+                repo_path=local_repo_path,
+                job_name=job_name,
+                run_id=run_id,
+                source_path=source_path,
+                backend=backend,
+                result=result,
+                started_at=started_at,
+                finished_at=finished_at,
             )
 
-        logger.info(f"[METADATA-SMB] Successfully wrote metadata to //{smb_server}/{smb_share}/{metadata_base}")
+            logger.info(f"[METADATA-SMB] Successfully wrote metadata to //{smb_server}/{smb_share}")
+
+        except Exception as e:
+            logger.error(f"[METADATA-SMB] Error writing metadata: {e}")
+
+        finally:
+            # Unmount (use sudo if not running as root)
+            logger.info(f"[METADATA-SMB] Unmounting {mount_point}")
+            try:
+                if os.geteuid() == 0:
+                    subprocess.run(["umount", mount_point], capture_output=True, timeout=30)
+                else:
+                    subprocess.run(["sudo", "umount", mount_point], capture_output=True, timeout=30)
+            except Exception as e:
+                logger.warning(f"[METADATA-SMB] Unmount failed: {e}")
+
+            # Clean up mount point directory
+            try:
+                os.rmdir(mount_point)
+            except Exception:
+                pass
