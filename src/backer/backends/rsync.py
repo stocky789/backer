@@ -45,7 +45,8 @@ class RsyncBackend(BackendBase):
                 text=True,
                 timeout=10,
             )
-            version_line = result.stdout.split("\n")[0]
+            lines = result.stdout.strip().split("\n")
+            version_line = lines[0] if lines else "rsync (unknown version)"
             return True, version_line
         except (subprocess.TimeoutExpired, OSError) as e:
             return False, str(e)

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -244,13 +245,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS configuration
+    # Note: allow_credentials=True with allow_origins=["*"] is insecure
+    # For local deployments, we allow all origins but without credentials
+    # If you need cross-origin requests with credentials, specify exact origins
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,  # Credentials require specific origins, not wildcard
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Global exception handler for malformed JSON requests
+    @app.exception_handler(json.JSONDecodeError)
+    async def json_decode_error_handler(
+        request: Request, exc: json.JSONDecodeError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Invalid JSON in request body: {exc.msg}"},
+        )
 
     # Health check
     @app.get("/health")
