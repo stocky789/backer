@@ -698,36 +698,9 @@ class BackerAgent:
         smb_password = job.get("smb_password")
         smb_domain = job.get("smb_domain")
 
-        if backend_name == "rclone":
-            # rclone on-the-fly SMB backend format:
-            # :smb,host=x,share=y,user=z,pass=w:/path/on/share
-            # NOTE: rclone requires passwords to be "obscured" for on-the-fly backends
-            smb_opts = [f"host={server}", f"share={share}"]
-            if smb_username:
-                smb_opts.append(f"user={smb_username}")
-            if smb_password:
-                # Obscure the password for rclone (required for on-the-fly backends)
-                obscured_pass = self._rclone_obscure_password(smb_password)
-                if obscured_pass:
-                    smb_opts.append(f"pass={obscured_pass}")
-                else:
-                    print("[SMB] Warning: Could not obscure password, trying plaintext")
-                    smb_opts.append(f"pass={smb_password}")
-            if smb_domain:
-                smb_opts.append(f"domain={smb_domain}")
-
-            # Path is relative to share root (empty string should still use root path)
-            if subpath and subpath.strip():
-                rclone_path = f":smb,{','.join(smb_opts)}:/{subpath}"
-            else:
-                rclone_path = f":smb,{','.join(smb_opts)}:/"
-
-            print(f"[SMB] Using rclone SMB backend for //{server}/{share}/{subpath or ''}")
-            return rclone_path, None
-
-        elif backend_name in ("restic", "kopia"):
-            # restic and kopia need a mounted filesystem path
-            # We'll mount the share and return the mount path with subpath
+        if backend_name in ("rclone", "restic", "kopia"):
+            # All backends use mounted filesystem path for SMB on Linux
+            # (rclone's on-the-fly SMB has compatibility issues with some NAS devices)
             print(f"[SMB] Mounting share for {backend_name} backend")
             ctx = self._smb_mount_context(
                 server=server,
@@ -1285,7 +1258,7 @@ class BackerAgent:
         try:
             print(f"[METADATA] Writing metadata to repository: {dest_path}")
 
-            job_name = job.get("name", "unknown")
+            job_name = job.get("job_name", "unknown")
             run_id = job.get("run_id", "unknown")
             source_path = job.get("source_path", "")
 
