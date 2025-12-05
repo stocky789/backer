@@ -115,9 +115,8 @@ class RcloneBackend(BackendBase):
 
         # Common flags
         cmd.extend([
-            "--progress",
-            "--stats", "1s",
-            "--stats-one-line",
+            "-v",  # Verbose - shows transfer summary
+            "--stats", "0",  # Disable periodic stats, just show final summary
         ])
 
         if dry_run:
@@ -147,7 +146,7 @@ class RcloneBackend(BackendBase):
     def _parse_output(self, output: str) -> dict[str, Any]:
         """Parse rclone output for stats.
 
-        Rclone outputs lines like:
+        Rclone verbose output includes lines like:
             Transferred:   	  1.234 GiB / 5.678 GiB, 22%, 10.5 MiB/s, ETA 5m30s
             Transferred:        123 / 456, 27%
             Errors:                 0
@@ -159,51 +158,52 @@ class RcloneBackend(BackendBase):
 
         stats: dict[str, Any] = {}
 
+        # Handle both \n and \r as line separators (--stats-one-line uses \r)
+        output = output.replace("\r", "\n")
         lines = output.strip().split("\n")
+
         for line in lines:
-            # Parse bytes transferred line: "Transferred: X GiB / Y GiB, ..."
-            if "Transferred:" in line and "/" in line and "Errors:" not in line:
-                parts = line.split(",")
-                if len(parts) >= 1:
-                    stats["transfer_summary"] = parts[0].replace("Transferred:", "").strip()
-                    # Try to extract bytes from "X GiB / Y GiB" or "X MiB / Y MiB" format
-                    match = re.search(r'Transferred:\s*([\d.]+)\s*(\w+)\s*/\s*([\d.]+)\s*(\w+)', line)
-                    if match:
-                        done_val, done_unit, total_val, total_unit = match.groups()
+            # Parse bytes transferred line: "Transferred: X GiB / Y GiB, ..." or "X B / Y B"
+            if "Transferred:" in line and "/" in line:
+                # Try to extract bytes with unit (GiB, MiB, KiB, B)
+                match = re.search(r'Transferred:\s*([\d.]+)\s*(\w+)\s*/\s*([\d.]+)\s*(\w+)', line)
+                if match:
+                    done_val, done_unit, total_val, total_unit = match.groups()
+                    # Only update if this looks like bytes (has a size unit)
+                    if any(u in done_unit.lower() for u in ['b', 'gib', 'mib', 'kib', 'byte']):
                         stats["bytes_transferred"] = self._parse_size(done_val, done_unit)
                         stats["total_bytes"] = self._parse_size(total_val, total_unit)
-
-            # Parse file count line: "Transferred: 123 / 456, 27%" (no unit = files)
-            elif (
-                "Transferred:" in line and "/" in line
-                and "GiB" not in line and "MiB" not in line and "KiB" not in line
-            ):
-                match = re.search(r'Transferred:\s*(\d+)\s*/\s*(\d+)', line)
-                if match:
-                    stats["files_transferred"] = int(match.group(1))
-                    stats["total_files"] = int(match.group(2))
+                    else:
+                        # No unit = file count (e.g., "3 / 3")
+                        try:
+                            stats["files_transferred"] = int(float(done_val))
+                            stats["total_files"] = int(float(total_val))
+                        except ValueError:
+                            pass
+                else:
+                    # Try simpler pattern for file count: "Transferred: 3 / 3, 100%"
+                    match = re.search(r'Transferred:\s*(\d+)\s*/\s*(\d+)', line)
+                    if match and "files_transferred" not in stats:
+                        stats["files_transferred"] = int(match.group(1))
+                        stats["total_files"] = int(match.group(2))
 
             # Parse standalone "Transferred: 456" (file count without total)
             elif "Transferred:" in line and "/" not in line:
-                match = re.search(r'Transferred:\s*(\d+)', line)
+                match = re.search(r'Transferred:\s*(\d+)\s*$', line)
                 if match and "files_transferred" not in stats:
                     stats["files_transferred"] = int(match.group(1))
 
             # Parse errors count
             if "Errors:" in line:
-                try:
-                    error_count = int(line.split(":")[1].strip().split()[0])
-                    stats["error_count"] = error_count
-                except (ValueError, IndexError):
-                    pass
+                match = re.search(r'Errors:\s*(\d+)', line)
+                if match:
+                    stats["error_count"] = int(match.group(1))
 
             # Parse checks (verified files)
             if "Checks:" in line:
-                try:
-                    checks_count = int(line.split(":")[1].strip().split()[0])
-                    stats["checks"] = checks_count
-                except (ValueError, IndexError):
-                    pass
+                match = re.search(r'Checks:\s*(\d+)', line)
+                if match:
+                    stats["checks"] = int(match.group(1))
 
         return stats
 
