@@ -41,9 +41,7 @@
                 <td style="color: var(--text-muted)">{{ agent.last_seen_ago }}</td>
                 <td>
                     <button class="btn btn-danger btn-sm"
-                            hx-delete="/api/v1/clients/{{ agent.id }}"
-                            hx-confirm="Remove agent '{{ agent.name }}'? It will need to re-register."
-                            hx-on::after-request="location.reload()">
+                            onclick="removeAgent('{{ agent.id }}', '{{ agent.name }}')">
                         Remove
                     </button>
                 </td>
@@ -120,4 +118,27 @@ backer agent start</pre>
         </p>
     </div>
 </div>
+
+<script>
+async function removeAgent(agentId, agentName) {
+    if (!confirm(`Remove agent '${agentName}'? It will need to re-register.`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/v1/clients/${agentId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            window.location.replace(window.location.pathname);
+        } else {
+            const data = await response.json();
+            alert('Failed to remove agent: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Remove failed: ' + e.message);
+    }
+}
+</script>
 {% endblock %}

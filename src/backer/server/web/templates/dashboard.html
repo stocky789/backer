@@ -153,11 +153,7 @@
                 </td>
                 <td>
                     <button class="btn btn-primary btn-sm"
-                            hx-post="/api/v1/jobs/{{ job.name }}/run"
-                            hx-headers='{"Content-Type": "application/json"}'
-                            hx-vals='{"dry_run": false}'
-                            hx-swap="none"
-                            hx-on::after-request="alert('Backup job started!')">
+                            onclick="runJob('{{ job.name }}')">
                         Run Now
                     </button>
                 </td>
@@ -274,5 +270,25 @@ function escapeHtml(text) {
 // Initial load and poll every 2 seconds
 updateRunningJobs();
 setInterval(updateRunningJobs, 2000);
+
+async function runJob(jobName) {
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/run`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dry_run: false})
+        });
+
+        if (response.ok) {
+            alert('Backup job started!');
+            updateRunningJobs();
+        } else {
+            const data = await response.json();
+            alert('Failed to start job: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Failed to start job: ' + e.message);
+    }
+}
 </script>
 {% endblock %}
