@@ -44,6 +44,11 @@ class Task:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
+        # Don't include result if it's a function (before task runs)
+        result_value = None
+        if self.result is not None and not callable(self.result):
+            result_value = self.result
+
         return {
             "id": self.id,
             "task_type": self.task_type,
@@ -51,6 +56,7 @@ class Task:
             "status": self.status.value,
             "progress": self.progress,
             "message": self.message,
+            "result": result_value,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -147,7 +153,7 @@ class TaskManager:
                 del self._tasks[task_id]
 
     def _process_queue(self) -> None:
-        """Background thread that processes the task queue."""
+        """Background thread that dispatches tasks to worker threads."""
         while not self._shutdown:
             task_id = None
 
@@ -160,12 +166,25 @@ class TaskManager:
             if task_id:
                 task = self._tasks.get(task_id)
                 if task:
-                    self._run_task(task)
-                with self._lock:
-                    self._running_count -= 1
+                    # Run task in a separate thread so we can process more tasks
+                    worker = threading.Thread(
+                        target=self._run_task_wrapper,
+                        args=(task,),
+                        daemon=True,
+                        name=f"TaskWorker-{task_id}",
+                    )
+                    worker.start()
             else:
                 # No work to do, sleep briefly
                 time.sleep(0.1)
+
+    def _run_task_wrapper(self, task: Task) -> None:
+        """Wrapper to run a task and decrement running count when done."""
+        try:
+            self._run_task(task)
+        finally:
+            with self._lock:
+                self._running_count -= 1
 
     def _run_task(self, task: Task) -> None:
         """Execute a single task."""
