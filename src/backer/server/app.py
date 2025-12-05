@@ -1137,8 +1137,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         command_payload = {
             "job_name": job_name,
             "run_id": f"restore_{restore_id}",
-            "source_path": backup_source,  # Restore FROM backup location
+            "source_path": backup_source,  # Restore FROM backup location (repository)
             "destination_path": destination_path,  # Restore TO this location
+            "original_source_path": job.get("source_path"),  # Original path that was backed up (for kopia/restic snapshot lookup)
             "backend": backend,
             "backend_options": backend_options,
             "snapshot": data.get("snapshot"),

@@ -352,6 +352,71 @@ class KopiaBackend(BackendBase):
         finally:
             self._disconnect_repo()
 
+    def _find_latest_snapshot_for_source(self, source_path: str) -> str | None:
+        """Find the latest snapshot ID for a given source path.
+
+        Args:
+            source_path: The original source path that was backed up
+
+        Returns:
+            The snapshot ID if found, None otherwise
+        """
+        try:
+            binary = self._get_binary()
+
+            # List snapshots filtered by source path
+            # kopia snapshot list --json returns snapshots with source info
+            result = subprocess.run(
+                [str(binary), "snapshot", "list", "--json", "--all"],
+                capture_output=True,
+                text=True,
+                env=self._env,
+                timeout=60,
+            )
+
+            if result.returncode != 0 or not result.stdout.strip():
+                print(f"[KOPIA] Failed to list snapshots: {result.stderr}")
+                return None
+
+            snapshots = json.loads(result.stdout)
+
+            # Filter snapshots by source path and find the latest
+            matching_snapshots = []
+            for snap in snapshots:
+                snap_source = snap.get("source", {}).get("path", "")
+                # Check if the source path matches (normalize paths)
+                if snap_source.rstrip("/") == source_path.rstrip("/"):
+                    matching_snapshots.append(snap)
+
+            if not matching_snapshots:
+                print(f"[KOPIA] No snapshots found for source path: {source_path}")
+                # Try a more lenient match (in case of hostname differences)
+                for snap in snapshots:
+                    snap_source = snap.get("source", {}).get("path", "")
+                    if snap_source and source_path.endswith(snap_source.split("/")[-1]):
+                        matching_snapshots.append(snap)
+
+            if not matching_snapshots:
+                print(f"[KOPIA] Still no matching snapshots. Available sources:")
+                for snap in snapshots[:5]:  # Show first 5
+                    print(f"  - {snap.get('source', {}).get('path', 'unknown')}")
+                return None
+
+            # Sort by start time (most recent first)
+            matching_snapshots.sort(
+                key=lambda x: x.get("startTime", ""),
+                reverse=True
+            )
+
+            latest = matching_snapshots[0]
+            snapshot_id = latest.get("id")
+            print(f"[KOPIA] Found {len(matching_snapshots)} matching snapshot(s), using latest: {snapshot_id}")
+            return snapshot_id
+
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as e:
+            print(f"[KOPIA] Error finding snapshot: {e}")
+            return None
+
     def restore(
         self,
         source: BackupDestination,
@@ -359,6 +424,7 @@ class KopiaBackend(BackendBase):
         snapshot: str | None = None,
         dry_run: bool = False,
         progress_callback: Any | None = None,
+        original_source_path: str | None = None,
     ) -> BackendResult:
         """Restore from kopia snapshot."""
         started_at = datetime.now()
@@ -388,8 +454,27 @@ class KopiaBackend(BackendBase):
             )
 
         try:
-            # Use latest snapshot if not specified
-            snapshot_id = snapshot or "latest"
+            # Determine the snapshot identifier to restore
+            # For kopia, "latest" needs to be qualified with the source path
+            # Format: user@host:/path/to/source or just the source path
+            snapshot_id = snapshot
+
+            if not snapshot_id or snapshot_id == "latest":
+                if original_source_path:
+                    # Use the original source path to find the latest snapshot
+                    # Kopia can restore using: kopia snapshot restore <source-path>@latest <target>
+                    # Or we can look up the latest snapshot ID for this source
+                    print(f"[KOPIA] Looking up latest snapshot for source: {original_source_path}")
+                    latest_id = self._find_latest_snapshot_for_source(original_source_path)
+                    if latest_id:
+                        snapshot_id = latest_id
+                        print(f"[KOPIA] Found latest snapshot: {snapshot_id}")
+                    else:
+                        # Fall back to using the source path directly
+                        snapshot_id = f"{original_source_path}@latest"
+                        print(f"[KOPIA] Using source path qualifier: {snapshot_id}")
+                else:
+                    snapshot_id = "latest"
 
             # Kopia restore syntax: kopia snapshot restore <snapshot-id> <target-path>
             cmd = [
@@ -397,6 +482,8 @@ class KopiaBackend(BackendBase):
                 snapshot_id,
                 str(destination),
             ]
+
+            print(f"[KOPIA] Running restore command: {' '.join(cmd)}")
 
             # Kopia doesn't have a direct --dry-run for restore
             # We could use --skip-existing or similar

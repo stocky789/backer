@@ -1132,11 +1132,17 @@ class BackerAgent:
             source = BackupDestination(path=source_path)
             destination = Path(job["destination_path"])
 
+            # Pass original_source_path for kopia/restic snapshot lookup
+            original_source_path = job.get("original_source_path")
+            if original_source_path:
+                print(f"[RESTORE] Original source path for snapshot lookup: {original_source_path}")
+
             result = backend.restore(
                 source=source,
                 destination=destination,
                 snapshot=job.get("snapshot"),
                 dry_run=dry_run,
+                original_source_path=original_source_path,
             )
 
             finished_at = datetime.now()
