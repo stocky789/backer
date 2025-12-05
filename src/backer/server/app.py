@@ -1131,18 +1131,48 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         # Queue restore command for the agent
+        # Include SMB/NFS credentials for agents that need to mount the backup source
+        backend_options = job.get("backend_options", {}).copy()
+
         command_payload = {
             "job_name": job_name,
             "run_id": f"restore_{restore_id}",
             "source_path": backup_source,  # Restore FROM backup location
             "destination_path": destination_path,  # Restore TO this location
             "backend": backend,
-            "backend_options": job.get("backend_options", {}),  # Includes restic_password
+            "backend_options": backend_options,
             "snapshot": data.get("snapshot"),
             "source_subfolder": source_subfolder if backend == "restic" else "",  # For restic --include
             "clean_restore": data.get("clean_restore", False),  # Delete extra files at destination
             "dry_run": data.get("dry_run", False),
         }
+
+        # Add repository credentials for SMB/NFS access
+        repository_id = job.get("repository_id")
+        if repository_id:
+            repo = storage.get_repository(repository_id)
+            if repo:
+                repo_type = repo.get("repo_type", "")
+                repo_password = storage.get_repository_password(repository_id)
+
+                if repo_type == "smb":
+                    # Include SMB connection info for agents
+                    command_payload["smb_server"] = repo.get("server")
+                    command_payload["smb_share"] = repo.get("share")
+                    command_payload["smb_username"] = repo.get("username")
+                    command_payload["smb_domain"] = repo.get("domain")
+                    if repo_password:
+                        command_payload["smb_password"] = repo_password
+
+                elif repo_type == "nfs":
+                    # NFS info (no password needed typically)
+                    command_payload["nfs_server"] = repo.get("server")
+                    command_payload["nfs_export"] = repo.get("share")
+
+                # For restic/kopia backends, include the repository password
+                if backend in ("restic", "kopia") and repo_password:
+                    if "password" not in backend_options:
+                        command_payload["backend_options"]["password"] = repo_password
 
         storage.queue_command(
             client_id=client_id,
