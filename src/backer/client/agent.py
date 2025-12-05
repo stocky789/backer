@@ -970,6 +970,108 @@ class BackerAgent:
                 except Exception as cleanup_err:
                     print(f"[SMB] Cleanup error: {cleanup_err}")
 
+    def _prepare_source_for_backend(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+    ) -> tuple[str, Any]:
+        """Prepare source path for the backend, mounting SMB/NFS if needed.
+
+        Returns:
+            Tuple of (prepared_path, cleanup_context).
+            cleanup_context should be used to unmount if not None.
+        """
+        source_path = job.get("source_path", "")
+
+        # Check for NFS path (server:/export format)
+        if self._is_nfs_path(source_path):
+            nfs_path = source_path
+            # Also check if nfs_server/nfs_export are provided explicitly
+            if job.get("nfs_server") and job.get("nfs_export"):
+                nfs_path = f"{job['nfs_server']}:{job['nfs_export']}"
+            print(f"[RESTORE] Detected NFS source path: {nfs_path}")
+            return self._prepare_nfs_source(job, backend_name, nfs_path)
+
+        # Check for SMB path (//server/share or \\server\share format)
+        if self._is_smb_path(source_path):
+            print(f"[RESTORE] Detected SMB source path: {source_path}")
+            return self._prepare_smb_source(job, backend_name, source_path)
+
+        # Local path, use as-is
+        return source_path, None
+
+    def _prepare_smb_source(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+        source_path: str,
+    ) -> tuple[str, Any]:
+        """Prepare SMB source path for restore."""
+        server, share, subpath = self._parse_smb_path(source_path)
+
+        # Get credentials from job (passed by server)
+        smb_username = job.get("smb_username")
+        smb_password = job.get("smb_password")
+        smb_domain = job.get("smb_domain")
+
+        if backend_name == "rclone":
+            # rclone on-the-fly SMB backend format
+            smb_opts = [f"host={server}", f"share={share}"]
+            if smb_username:
+                smb_opts.append(f"user={smb_username}")
+            if smb_password:
+                obscured_pass = self._rclone_obscure_password(smb_password)
+                if obscured_pass:
+                    smb_opts.append(f"pass={obscured_pass}")
+                else:
+                    print("[RESTORE] Warning: Could not obscure password, trying plaintext")
+                    smb_opts.append(f"pass={smb_password}")
+            if smb_domain:
+                smb_opts.append(f"domain={smb_domain}")
+
+            if subpath and subpath.strip():
+                rclone_path = f":smb,{','.join(smb_opts)}:/{subpath}"
+            else:
+                rclone_path = f":smb,{','.join(smb_opts)}:/"
+
+            print(f"[RESTORE] Using rclone SMB backend for //{server}/{share}/{subpath or ''}")
+            return rclone_path, None
+
+        elif backend_name in ("restic", "kopia"):
+            # restic and kopia need a mounted filesystem path
+            print(f"[RESTORE] Mounting SMB share for {backend_name} backend")
+            ctx = self._smb_mount_context(
+                server=server,
+                share=share,
+                username=smb_username,
+                password=smb_password,
+                domain=smb_domain,
+            )
+            mount_path = ctx.__enter__()
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            print(f"[RESTORE] Using mounted path: {full_path}")
+            return full_path, ctx
+
+        else:
+            print(f"[RESTORE] Warning: Unknown backend '{backend_name}', using path as-is")
+            return source_path, None
+
+    def _prepare_nfs_source(
+        self,
+        job: dict[str, Any],
+        backend_name: str,
+        source_path: str,
+    ) -> tuple[str, Any]:
+        """Prepare NFS source path for restore."""
+        server, export_path, _ = self._parse_nfs_path(source_path)
+
+        # All backends need mounted path for NFS
+        print(f"[RESTORE] Mounting NFS export for {backend_name} backend")
+        ctx = self._nfs_mount_context(server=server, export_path=export_path)
+        mount_path = ctx.__enter__()
+        print(f"[RESTORE] Using mounted path: {mount_path}")
+        return str(mount_path), ctx
+
     def execute_restore(
         self,
         job: dict[str, Any],
@@ -979,6 +1081,11 @@ class BackerAgent:
         run_id = job.get("run_id") or f"restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         started_at = datetime.now()
         job_name = job.get("job_name", "unknown")
+        backend_name = job.get("backend", "rclone")
+
+        print(f"[RESTORE] Starting restore for job '{job_name}' with backend '{backend_name}'")
+        print(f"[RESTORE] Source (backup repo): {job.get('source_path')}")
+        print(f"[RESTORE] Destination: {job.get('destination_path')}")
 
         # Report that we're starting restore
         self._report_progress(
@@ -988,15 +1095,32 @@ class BackerAgent:
             message="Initializing restore...",
         )
 
+        mount_cleanup_ctx = None
         try:
+            backend_options = job.get("backend_options", {})
+
+            # Log backend options (without password)
+            safe_options = {k: v for k, v in backend_options.items() if k != "password"}
+            if "password" in backend_options:
+                safe_options["password"] = "***"
+            print(f"[RESTORE] Backend options: {safe_options}")
+
             backend = get_backend(
-                job.get("backend", "rclone"),  # rclone default (rsync not supported for agents)
-                job.get("backend_options", {}),
+                backend_name,
+                backend_options,
             )
 
+            print("[RESTORE] Checking backend availability...")
             available, message = backend.check_available()
             if not available:
+                print(f"[RESTORE] Backend not available: {message}")
                 raise RuntimeError(f"Backend not available: {message}")
+            print(f"[RESTORE] Backend ready: {message}")
+
+            # Prepare source path (handles SMB/NFS mounting)
+            print(f"[RESTORE] Preparing source path for {backend_name} backend...")
+            source_path, mount_cleanup_ctx = self._prepare_source_for_backend(job, backend_name)
+            print(f"[RESTORE] Prepared source path: {source_path}")
 
             self._report_progress(
                 run_id=run_id,
@@ -1005,7 +1129,7 @@ class BackerAgent:
                 message="Backend ready, starting restore...",
             )
 
-            source = BackupDestination(path=job["source_path"])
+            source = BackupDestination(path=source_path)
             destination = Path(job["destination_path"])
 
             result = backend.restore(
@@ -1076,6 +1200,16 @@ class BackerAgent:
                 pass
 
             return report
+
+        finally:
+            # Clean up any mounted paths
+            if mount_cleanup_ctx:
+                try:
+                    print("[RESTORE] Cleaning up mounted path...")
+                    mount_cleanup_ctx.__exit__(None, None, None)
+                    print("[RESTORE] Mount cleanup complete")
+                except Exception as cleanup_err:
+                    print(f"[RESTORE] Cleanup error: {cleanup_err}")
 
     def run(self, heartbeat_interval: int = 60) -> None:
         """Run the agent in daemon mode."""
