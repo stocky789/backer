@@ -135,6 +135,20 @@ class Storage:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_browse_requests_status ON browse_requests(status);
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    email TEXT,
+                    role TEXT DEFAULT 'admin',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             """)
 
     @contextmanager
@@ -876,3 +890,109 @@ class Storage:
                 (cutoff,),
             )
             return cursor.rowcount
+
+    # User management operations
+    def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        display_name: str,
+        email: str | None = None,
+        role: str = "admin",
+    ) -> int:
+        """Create a new user. Returns user ID."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, password_hash, display_name, email, role, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (username, password_hash, display_name, email, role, now, now),
+            )
+            return cursor.lastrowid or 0
+
+    def get_user(self, user_id: int) -> dict[str, Any] | None:
+        """Get a user by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_user(row)
+        return None
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        """Get a user by username."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            if row:
+                return self._row_to_user(row)
+        return None
+
+    def update_user(
+        self,
+        user_id: int,
+        display_name: str | None = None,
+        email: str | None = None,
+        password_hash: str | None = None,
+    ) -> bool:
+        """Update user information."""
+        updates = ["updated_at = ?"]
+        params: list[Any] = [datetime.now().isoformat()]
+
+        if display_name is not None:
+            updates.append("display_name = ?")
+            params.append(display_name)
+        if email is not None:
+            updates.append("email = ?")
+            params.append(email)
+        if password_hash is not None:
+            updates.append("password_hash = ?")
+            params.append(password_hash)
+
+        params.append(user_id)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE users SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            return cursor.rowcount > 0
+
+    def update_last_login(self, user_id: int) -> None:
+        """Update user's last login timestamp."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET last_login = ? WHERE id = ?",
+                (datetime.now().isoformat(), user_id),
+            )
+
+    def list_users(self) -> list[dict[str, Any]]:
+        """List all users."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM users ORDER BY username"
+            ).fetchall()
+            return [self._row_to_user(row) for row in rows]
+
+    def count_users(self) -> int:
+        """Count total number of users."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) as count FROM users").fetchone()
+            return row["count"] if row else 0
+
+    def _row_to_user(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to a user dict."""
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "email": row["email"],
+            "role": row["role"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "last_login": row["last_login"],
+        }

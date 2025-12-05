@@ -2151,6 +2151,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # Add web authentication middleware
+    from backer.server.web.auth import AuthMiddleware, ensure_default_user
+    app.add_middleware(AuthMiddleware)
+
+    # Ensure default admin user exists
+    ensure_default_user(_storage)
+
     # Include web UI routes
     app.include_router(web_router)
 

@@ -9,6 +9,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from backer.server.storage import Storage
+from backer.server.web.auth import (
+    clear_session_cookie,
+    create_session,
+    get_current_user,
+    hash_password,
+    set_session_cookie,
+    verify_password,
+)
 
 router = APIRouter()
 
@@ -143,6 +151,7 @@ async def dashboard(request: Request):
         "agents": agents,
         "jobs": jobs,
         "recent_runs": recent_runs,
+        "user": get_current_user(request),
     })
 
 
@@ -170,6 +179,7 @@ async def agents_page(request: Request):
         "request": request,
         "active": "agents",
         "agents": agents,
+        "user": get_current_user(request),
     })
 
 
@@ -218,6 +228,7 @@ async def jobs_page(request: Request):
         "active": "jobs",
         "jobs": jobs,
         "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
+        "user": get_current_user(request),
     })
 
 
@@ -233,6 +244,7 @@ async def jobs_new_page(request: Request):
         "active": "jobs",
         "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
         "repositories": repositories,
+        "user": get_current_user(request),
     })
 
 
@@ -379,6 +391,7 @@ async def history_page(request: Request):
         "request": request,
         "active": "history",
         "runs": all_runs,
+        "user": get_current_user(request),
     })
 
 
@@ -392,6 +405,7 @@ async def storage_page(request: Request):
         "request": request,
         "active": "storage",
         "repositories": repositories,
+        "user": get_current_user(request),
     })
 
 
@@ -421,6 +435,7 @@ async def settings_page(request: Request):
         "data_dir": data_dir,
         "timezone": timezone,
         "settings_saved": settings_saved,
+        "user": get_current_user(request),
     })
 
 
@@ -467,4 +482,167 @@ async def restore_page(request: Request):
         "jobs": jobs,
         "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
         "recent_restores": recent_restores,
+        "user": get_current_user(request),
     })
+
+
+# Authentication routes
+@router.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    """Login page."""
+    # If already logged in, redirect to dashboard
+    if get_current_user(request):
+        return RedirectResponse(url="/", status_code=303)
+
+    error = request.query_params.get("error")
+    error_messages = {
+        "invalid": "Invalid username or password",
+        "required": "Please log in to continue",
+    }
+
+    return templates.TemplateResponse("login.html", {
+        "request": request,
+        "error": error_messages.get(error),
+        "username": "",
+    })
+
+
+@router.post("/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    """Handle login form submission."""
+    storage = get_storage(request)
+
+    # Look up user
+    user = storage.get_user_by_username(username)
+    if not user or not verify_password(password, user.get("password_hash", "")):
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "error": "Invalid username or password",
+            "username": username,
+        })
+
+    # Create session
+    token = create_session(
+        user_id=user["id"],
+        username=user["username"],
+        display_name=user["display_name"],
+    )
+
+    # Update last login
+    storage.update_last_login(user["id"])
+
+    # Redirect to dashboard with session cookie
+    response = RedirectResponse(url="/", status_code=303)
+    set_session_cookie(response, token)
+    return response
+
+
+@router.post("/logout")
+async def logout(request: Request):
+    """Handle logout."""
+    from backer.server.web.auth import SESSION_COOKIE_NAME, destroy_session
+
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token:
+        destroy_session(token)
+
+    response = RedirectResponse(url="/login", status_code=303)
+    clear_session_cookie(response)
+    return response
+
+
+@router.get("/profile", response_class=HTMLResponse)
+async def profile_page(request: Request):
+    """Profile page."""
+    storage = get_storage(request)
+    session_user = get_current_user(request)
+
+    if not session_user:
+        return RedirectResponse(url="/login?error=required", status_code=303)
+
+    # Get full user data from database
+    user = storage.get_user(session_user["user_id"])
+    if not user:
+        return RedirectResponse(url="/login?error=required", status_code=303)
+
+    saved = request.query_params.get("saved") == "1"
+    password_changed = request.query_params.get("password_changed") == "1"
+
+    return templates.TemplateResponse("profile.html", {
+        "request": request,
+        "active": "profile",
+        "user": user,
+        "saved": saved,
+        "password_changed": password_changed,
+    })
+
+
+@router.post("/profile")
+async def profile_update(
+    request: Request,
+    action: str = Form(...),
+    display_name: str = Form(None),
+    email: str = Form(None),
+    current_password: str = Form(None),
+    new_password: str = Form(None),
+    confirm_password: str = Form(None),
+):
+    """Handle profile updates."""
+    storage = get_storage(request)
+    session_user = get_current_user(request)
+
+    if not session_user:
+        return RedirectResponse(url="/login?error=required", status_code=303)
+
+    user = storage.get_user(session_user["user_id"])
+    if not user:
+        return RedirectResponse(url="/login?error=required", status_code=303)
+
+    if action == "update_profile":
+        # Update display name and email
+        storage.update_user(
+            user_id=user["id"],
+            display_name=display_name or user["display_name"],
+            email=email if email else None,
+        )
+        return RedirectResponse(url="/profile?saved=1", status_code=303)
+
+    elif action == "change_password":
+        # Verify current password
+        if not current_password or not verify_password(current_password, user.get("password_hash", "")):
+            return templates.TemplateResponse("profile.html", {
+                "request": request,
+                "active": "profile",
+                "user": user,
+                "password_error": "Current password is incorrect",
+            })
+
+        # Check new passwords match
+        if not new_password or new_password != confirm_password:
+            return templates.TemplateResponse("profile.html", {
+                "request": request,
+                "active": "profile",
+                "user": user,
+                "password_error": "New passwords do not match",
+            })
+
+        # Check password length
+        if len(new_password) < 4:
+            return templates.TemplateResponse("profile.html", {
+                "request": request,
+                "active": "profile",
+                "user": user,
+                "password_error": "Password must be at least 4 characters",
+            })
+
+        # Update password
+        new_hash = hash_password(new_password)
+        storage.update_user(user_id=user["id"], password_hash=new_hash)
+
+        return RedirectResponse(url="/profile?password_changed=1", status_code=303)
+
+    return RedirectResponse(url="/profile", status_code=303)

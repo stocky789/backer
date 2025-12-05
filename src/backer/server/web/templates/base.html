@@ -66,6 +66,38 @@
             </div>
             <div class="top-bar-actions">
                 {% block actions %}{% endblock %}
+
+                <!-- Profile Widget -->
+                {% if user %}
+                <div class="profile-widget">
+                    <button class="profile-button" onclick="toggleProfileMenu()">
+                        <span class="profile-avatar">{{ user.display_name[0] | upper }}</span>
+                        <span class="profile-name">{{ user.display_name }}</span>
+                        <span class="profile-arrow">▾</span>
+                    </button>
+                    <div id="profileMenu" class="profile-menu">
+                        <div class="profile-menu-header">
+                            <span class="profile-avatar-lg">{{ user.display_name[0] | upper }}</span>
+                            <div class="profile-menu-info">
+                                <strong>{{ user.display_name }}</strong>
+                                <span>{{ user.username }}</span>
+                            </div>
+                        </div>
+                        <div class="profile-menu-items">
+                            <a href="/profile" class="profile-menu-item">
+                                <span class="profile-menu-icon">⚙</span>
+                                Settings
+                            </a>
+                            <form method="POST" action="/logout" style="margin: 0;">
+                                <button type="submit" class="profile-menu-item profile-menu-logout">
+                                    <span class="profile-menu-icon">↪</span>
+                                    Sign Out
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </header>
 
@@ -162,6 +194,26 @@
         if (tasksPanelOpen && !widget.contains(e.target)) {
             tasksPanelOpen = false;
             document.getElementById('tasksPanel').classList.remove('active');
+        }
+    });
+
+    // Profile Menu
+    let profileMenuOpen = false;
+
+    function toggleProfileMenu() {
+        profileMenuOpen = !profileMenuOpen;
+        const menu = document.getElementById('profileMenu');
+        if (menu) {
+            menu.classList.toggle('active', profileMenuOpen);
+        }
+    }
+
+    // Close profile menu when clicking outside
+    document.addEventListener('click', (e) => {
+        const widget = document.querySelector('.profile-widget');
+        if (widget && profileMenuOpen && !widget.contains(e.target)) {
+            profileMenuOpen = false;
+            document.getElementById('profileMenu').classList.remove('active');
         }
     });
     </script>
