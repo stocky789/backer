@@ -36,12 +36,10 @@ jobs:
           pip install -e ".[dev,server,client]"
 
       - name: Run linting
-        run: |
-          ruff check src/
+        run: ruff check src/ --exit-non-zero-on-fix
 
       - name: Run tests
-        run: |
-          pytest tests/ -v --tb=short || echo "No tests found, skipping"
+        run: pytest tests/ -v --tb=short
 
   # Build Windows agent installer (only on release)
   build-windows-agent:
@@ -61,6 +59,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[client]"
           pip install pyinstaller
+
+      - name: Verify PyInstaller spec exists
+        run: |
+          if (!(Test-Path "backer-agent.spec")) {
+            Write-Error "backer-agent.spec not found!"
+            exit 1
+          }
+        shell: pwsh
 
       - name: Download rclone
         run: |
@@ -191,12 +197,13 @@ jobs:
           fi
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: Backer v${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
+          generate_release_notes: false
           files: |
             release/backer-agent-setup.exe
             release/backer-agent-windows-portable.zip
@@ -231,13 +238,13 @@ jobs:
 
             ```bash
             # One-line install
-            curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sudo bash
             ```
 
             Or with Docker:
             ```bash
-            git clone https://github.com/stocky789/backer.git && cd backer
+            git clone https://github.com/${{ github.repository }}.git && cd backer
             docker compose up -d
             ```
 
-            See the [README](https://github.com/stocky789/backer#readme) for full documentation.
+            See the [README](https://github.com/${{ github.repository }}#readme) for full documentation.
