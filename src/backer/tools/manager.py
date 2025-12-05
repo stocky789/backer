@@ -109,14 +109,20 @@ class ToolManager:
         # On Linux, also check /root/.local/share/backer/tools/ (for systemd service)
         # This handles cases where HOME might not be set correctly
         if self._system == "Linux":
-            root_tools_path = Path("/root/.local/share/backer/tools") / binary_name
-            if root_tools_path.exists():
-                return root_tools_path
+            try:
+                root_tools_path = Path("/root/.local/share/backer/tools") / binary_name
+                if root_tools_path.exists():
+                    return root_tools_path
+            except PermissionError:
+                pass  # Can't access /root, skip this check
 
-            # Also check /opt/backer/tools/ as a fallback system-wide location
-            opt_tools_path = Path("/opt/backer/tools") / binary_name
-            if opt_tools_path.exists():
-                return opt_tools_path
+            try:
+                # Also check /opt/backer/tools/ as a fallback system-wide location
+                opt_tools_path = Path("/opt/backer/tools") / binary_name
+                if opt_tools_path.exists():
+                    return opt_tools_path
+            except PermissionError:
+                pass  # Can't access /opt/backer, skip this check
 
         # Check if tool is available system-wide
         system_path = shutil.which(tool_name)
