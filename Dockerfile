@@ -29,8 +29,9 @@ RUN pip install --no-cache-dir -e ".[server]"
 # Create data directory
 RUN mkdir -p /data/tools /data/logs && chown -R backer:backer /data
 
-# Download rclone and restic
-RUN backer setup --data-dir /data || true
+# Download backup tools (rclone, restic, kopia)
+# This will fail the build if tools cannot be downloaded - intentional for reliability
+RUN backer setup --data-dir /data
 
 # Set environment
 ENV BACKER_DATA_DIR=/data
@@ -42,8 +43,8 @@ USER backer
 # Expose port
 EXPOSE 8420
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Health check (30s start period allows time for server initialization)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8420/health || exit 1
 
 # Run server
