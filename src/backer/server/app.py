@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -34,6 +35,26 @@ from backer.server.storage import Storage
 from backer.server.web.routes import router as web_router
 
 logger = logging.getLogger(__name__)
+
+# Characters not allowed in job names (prevent path traversal and shell injection)
+_UNSAFE_NAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]|\.\.|\.\/')
+
+
+def validate_name(name: str, field: str = "name") -> None:
+    """Validate a name field to prevent path traversal and injection.
+
+    Raises HTTPException if invalid.
+    """
+    if not name or not name.strip():
+        raise HTTPException(status_code=400, detail=f"{field} cannot be empty")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail=f"{field} too long (max 255 chars)")
+    if _UNSAFE_NAME_PATTERN.search(name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} contains invalid characters (no path separators, quotes, or special chars)",
+        )
+
 
 # Global storage instance (initialized in create_app)
 _storage: Storage | None = None
@@ -472,7 +493,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/jobs", response_model=JobResponse)
     def create_job(job: JobCreate, storage: Storage = Depends(get_storage)) -> JobResponse:
         """Create a new backup job."""
-        # Validate job name
+        # Validate job name for security (path traversal, special chars)
+        validate_name(job.name, "Job name")
         if job.name.lower().startswith("restore:"):
             raise HTTPException(status_code=400, detail="Job name cannot start with 'restore:'")
 
@@ -1442,6 +1464,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         name = data.get("name", "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="Name required")
+        # Validate repository name for security
+        validate_name(name, "Repository name")
 
         if storage.get_repository_by_name(name):
             raise HTTPException(status_code=409, detail="Repository name already exists")
