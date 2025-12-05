@@ -706,7 +706,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Capture info needed for background cleanup
         repo_id = job.get("repository_id")
         repo_info = None
-        client_hostname = None
 
         if repo_id:
             repo = storage.get_repository(repo_id)
