@@ -99,6 +99,9 @@ class TaskManager:
             task_type=task_type,
             description=description,
         )
+        # Store the function in result BEFORE adding to queue to avoid race condition
+        # The processor thread retrieves this when running the task
+        task.result = func
 
         with self._lock:
             self._tasks[task_id] = task
@@ -202,11 +205,11 @@ class TaskManager:
         description: str,
         func: Callable[["Task"], Any],
     ) -> Task:
-        """Submit a task with its function."""
-        task = self.submit(task_type, description, func)
-        # Store the function temporarily in result (will be cleared when run)
-        task.result = func
-        return task
+        """Submit a task with its function.
+
+        Note: This is an alias for submit() for backwards compatibility.
+        """
+        return self.submit(task_type, description, func)
 
     def shutdown(self) -> None:
         """Shutdown the task manager."""
