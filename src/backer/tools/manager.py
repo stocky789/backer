@@ -77,10 +77,16 @@ class ToolManager:
 
         Args:
             tools_dir: Directory to store tool binaries.
-                      Defaults to ~/.local/share/backer/tools/
+                      Defaults to $BACKER_DATA_DIR/tools or ~/.local/share/backer/tools/
         """
         if tools_dir is None:
-            tools_dir = Path.home() / ".local" / "share" / "backer" / "tools"
+            # Check for BACKER_DATA_DIR environment variable first
+            import os
+            data_dir_env = os.environ.get("BACKER_DATA_DIR")
+            if data_dir_env:
+                tools_dir = Path(data_dir_env) / "tools"
+            else:
+                tools_dir = Path.home() / ".local" / "share" / "backer" / "tools"
         self.tools_dir = tools_dir
         self.tools_dir.mkdir(parents=True, exist_ok=True)
 

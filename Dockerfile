@@ -29,13 +29,13 @@ RUN pip install --no-cache-dir -e ".[server]"
 # Create data directory
 RUN mkdir -p /data/tools /data/logs && chown -R backer:backer /data
 
-# Download backup tools (rclone, restic, kopia)
-# This will fail the build if tools cannot be downloaded - intentional for reliability
-RUN backer setup --data-dir /data
-
-# Set environment
+# Set environment before setup so tools are downloaded to /data/tools
 ENV BACKER_DATA_DIR=/data
 ENV PYTHONUNBUFFERED=1
+
+# Download backup tools (rclone, restic, kopia)
+# This will fail the build if tools cannot be downloaded - intentional for reliability
+RUN backer setup
 
 # Switch to app user
 USER backer
