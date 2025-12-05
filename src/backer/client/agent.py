@@ -1151,11 +1151,11 @@ class BackerAgent:
                                 shutil.rmtree(item)
                             else:
                                 item.unlink()
-                        print(f"[RESTORE] Wiped destination directory contents")
+                        print("[RESTORE] Wiped destination directory contents")
                     else:
                         # Create the directory if it doesn't exist
                         destination.mkdir(parents=True, exist_ok=True)
-                        print(f"[RESTORE] Created destination directory")
+                        print("[RESTORE] Created destination directory")
                 except Exception as wipe_err:
                     print(f"[RESTORE] Warning: Failed to wipe destination: {wipe_err}")
                     # Continue with restore anyway - better to have extra files than fail
