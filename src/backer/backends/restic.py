@@ -310,7 +310,7 @@ class ResticBackend(BackendBase):
                 # Restoring to original location - use / as target so files go to absolute paths
                 target = "/"
                 include_path = original_source_path
-                logger.info(f"[RESTIC] Restoring to original location, using --target /")
+                logger.info("[RESTIC] Restoring to original location, using --target /")
             else:
                 # Restoring to different location - warn about nested structure
                 logger.info(f"[RESTIC] Restoring to different location: {destination}")
