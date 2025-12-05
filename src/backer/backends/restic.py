@@ -272,7 +272,14 @@ class ResticBackend(BackendBase):
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
     ) -> BackendResult:
-        """Restore from restic snapshot."""
+        """Restore from restic snapshot.
+
+        Restic preserves full absolute paths in snapshots. When restoring:
+        - If destination matches original_source_path, use --target / so files
+          restore to their original absolute locations
+        - Otherwise, restore to destination but files will be nested under the
+          original path structure (e.g., dest/home/user/files/)
+        """
         started_at = datetime.now()
         snapshot_id = snapshot or "latest"
 
@@ -288,12 +295,37 @@ class ResticBackend(BackendBase):
                 return_code=-1,
             )
 
+        # Determine the correct target for restic
+        # Restic stores absolute paths, so restoring with --target /dest creates /dest/original/path
+        # If restoring to the original location, use --target / to restore to absolute paths
+        target = str(destination)
+        include_path = None
+
+        if original_source_path:
+            # Normalize paths for comparison
+            orig_normalized = str(Path(original_source_path).resolve())
+            dest_normalized = str(destination.resolve())
+
+            if dest_normalized == orig_normalized or dest_normalized.rstrip('/') == orig_normalized.rstrip('/'):
+                # Restoring to original location - use / as target so files go to absolute paths
+                target = "/"
+                include_path = original_source_path
+                logger.info(f"[RESTIC] Restoring to original location, using --target /")
+            else:
+                # Restoring to different location - warn about nested structure
+                logger.info(f"[RESTIC] Restoring to different location: {destination}")
+                logger.info(f"[RESTIC] Files will be under: {destination}/{original_source_path.lstrip('/')}")
+
         cmd = [
             str(binary), "restore",
             "--repo", source.path,
-            "--target", str(destination),
+            "--target", target,
             snapshot_id,
         ]
+
+        # Include only the original source path if specified
+        if include_path:
+            cmd.extend(["--include", include_path])
 
         if dry_run:
             cmd.append("--dry-run")
