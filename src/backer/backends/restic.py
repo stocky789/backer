@@ -360,7 +360,9 @@ class ResticBackend(BackendBase):
             bytes_restored = 0
             output = result.stdout + result.stderr
 
-            summary_match = re.search(r'Restored\s+(\d+)\s*/\s*\d+\s+files/dirs\s+\((\d+(?:\.\d+)?)\s*(\w*)\s*/', output)
+            # Pattern: "Restored 6 / 4 files/dirs (66 B / 66 B)"
+            restore_pattern = r'Restored\s+(\d+)\s*/\s*\d+\s+files/dirs\s+\((\d+(?:\.\d+)?)\s*(\w*)\s*/'
+            summary_match = re.search(restore_pattern, output)
             if summary_match:
                 files_restored = int(summary_match.group(1))
                 size_val = float(summary_match.group(2))
