@@ -1634,6 +1634,12 @@ class AgentService:
                 and smb_share
             )
 
+            logger.info(
+                f"[METADATA] Writing metadata: platform={sys.platform}, "
+                f"smb_server={smb_server}, smb_share={smb_share}, "
+                f"use_smb={use_smb}, repo_path={repo_path}"
+            )
+
             if use_smb:
                 self._write_repo_metadata_smb(
                     smb_server=smb_server,
