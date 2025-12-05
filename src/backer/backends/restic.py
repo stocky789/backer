@@ -301,20 +301,28 @@ class ResticBackend(BackendBase):
         target = str(destination)
         include_path = None
 
+        print(f"[RESTIC] original_source_path: {original_source_path}")
+        print(f"[RESTIC] destination: {destination}")
+
         if original_source_path:
             # Normalize paths for comparison
             orig_normalized = str(Path(original_source_path).resolve())
             dest_normalized = str(destination.resolve())
 
+            print(f"[RESTIC] orig_normalized: {orig_normalized}")
+            print(f"[RESTIC] dest_normalized: {dest_normalized}")
+
             if dest_normalized == orig_normalized or dest_normalized.rstrip('/') == orig_normalized.rstrip('/'):
                 # Restoring to original location - use / as target so files go to absolute paths
                 target = "/"
                 include_path = original_source_path
-                logger.info("[RESTIC] Restoring to original location, using --target /")
+                print("[RESTIC] Detected restore to original location, using --target /")
             else:
-                # Restoring to different location - warn about nested structure
-                logger.info(f"[RESTIC] Restoring to different location: {destination}")
-                logger.info(f"[RESTIC] Files will be under: {destination}/{original_source_path.lstrip('/')}")
+                # Restoring to different location
+                print(f"[RESTIC] Restoring to different location: {destination}")
+                print(f"[RESTIC] Files will be under: {destination}/{original_source_path.lstrip('/')}")
+        else:
+            print("[RESTIC] No original_source_path provided")
 
         cmd = [
             str(binary), "restore",
@@ -326,6 +334,8 @@ class ResticBackend(BackendBase):
         # Include only the original source path if specified
         if include_path:
             cmd.extend(["--include", include_path])
+
+        print(f"[RESTIC] Running command: {' '.join(cmd)}")
 
         if dry_run:
             cmd.append("--dry-run")
