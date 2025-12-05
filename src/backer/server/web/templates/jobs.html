@@ -257,9 +257,9 @@
 
             <div class="form-group" style="margin-top: 15px;">
                 <label class="form-label">
-                    <input type="checkbox" id="deleteSnapshots"> Also delete snapshot metadata
+                    <input type="checkbox" id="deleteSnapshots"> Also delete all backup data
                 </label>
-                <div class="form-hint">Delete snapshot records associated with this job from the repository</div>
+                <div class="form-hint">Delete the entire job folder from the repository, including all backup snapshots</div>
             </div>
 
             <div id="deleteError" class="error-msg" style="display: none; margin-top: 10px;"></div>
@@ -636,14 +636,8 @@ async function confirmDeleteJob() {
         if (response.ok) {
             const data = await response.json();
             let message = 'Job deleted successfully.';
-            if (data.metadata_deleted) {
-                message += ' Repository metadata cleaned up.';
-            }
-            if (data.snapshots_deleted) {
-                message += ` ${data.snapshots_deleted} snapshot(s) deleted.`;
-            }
-            if (data.metadata_warning) {
-                message += '\n\nWarning: ' + data.metadata_warning;
+            if (data.message) {
+                message += ' ' + data.message;
             }
             alert(message);
             location.reload();

@@ -739,20 +739,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Schedule metadata cleanup as a background task if we have a repository
         if repo_info:
+            # Get the job subfolder name for potential full deletion
+            job_subfolder = _get_job_subfolder(job_name)
+
             def cleanup_job_metadata(task: Task) -> dict[str, Any]:
-                """Background task to clean up job metadata from repository."""
+                """Background task to clean up job metadata from repository.
+
+                If delete_snapshots is True, deletes the entire job subfolder
+                (including all backup data). Otherwise, only deletes metadata.
+                """
                 import shutil
                 from pathlib import Path as PathLib
 
                 from backer.server.repositories import (
                     smb_delete_directory,
-                    smb_delete_file,
-                    smb_list_files,
-                    smb_read_file,
                 )
 
                 job_deleted = False
-                snapshots_deleted = 0
+                subfolder_deleted = False
                 errors = []
 
                 repo_type = repo_info["repo_type"]
@@ -763,75 +767,43 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 password = repo_info["password"]
                 domain = repo_info["domain"]
 
-                # Build paths
-                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
-                job_path = f"{metadata_base}/jobs/{job_name}"
-                snapshots_path = f"{metadata_base}/snapshots"
+                # Job subfolder path (where all backup data lives)
+                job_subfolder_path = f"{subpath}/{job_subfolder}" if subpath else job_subfolder
 
-                task.message = "Deleting job metadata..."
+                # Metadata path within the job subfolder
+                metadata_job_path = f"{job_subfolder_path}/.backer/jobs/{job_name}"
+
+                task.message = "Deleting job data..." if delete_snapshots else "Deleting job metadata..."
                 task.progress = 10
 
                 try:
                     if repo_type == "smb":
-                        # Delete job metadata using SMB
-                        success, msg = smb_delete_directory(
-                            server, share, job_path,
-                            username, password, domain
-                        )
-                        if success:
-                            job_deleted = True
-                            logger.info(f"Deleted job metadata from SMB: {job_path}")
-                        elif "no such file" not in msg.lower():
-                            errors.append(f"Job metadata: {msg}")
-
-                        task.progress = 30
-
-                        # Delete associated snapshots if requested
-                        if delete_snapshots and client_hostname:
-                            task.message = "Scanning for snapshots..."
-                            ok, snap_files = smb_list_files(
-                                server, share, snapshots_path,
+                        if delete_snapshots:
+                            # Delete the entire job subfolder (all backup data + metadata)
+                            task.message = f"Deleting job subfolder '{job_subfolder}'..."
+                            success, msg = smb_delete_directory(
+                                server, share, job_subfolder_path,
                                 username, password, domain
                             )
-                            if ok and snap_files:
-                                json_files = [f for f in snap_files if f.endswith(".json")]
-                                total = len(json_files)
-                                for i, snap_file in enumerate(json_files):
-                                    task.progress = 30 + int((i / total) * 60) if total > 0 else 90
-                                    task.message = f"Checking snapshot {i + 1} of {total}..."
+                            if success:
+                                subfolder_deleted = True
+                                job_deleted = True
+                                logger.info(f"Deleted entire job subfolder from SMB: {job_subfolder_path}")
+                            elif "no such file" not in msg.lower() and "not found" not in msg.lower():
+                                errors.append(f"Job subfolder: {msg}")
+                        else:
+                            # Only delete job metadata, keep backup data
+                            success, msg = smb_delete_directory(
+                                server, share, metadata_job_path,
+                                username, password, domain
+                            )
+                            if success:
+                                job_deleted = True
+                                logger.info(f"Deleted job metadata from SMB: {metadata_job_path}")
+                            elif "no such file" not in msg.lower() and "not found" not in msg.lower():
+                                errors.append(f"Job metadata: {msg}")
 
-                                    ok2, content = smb_read_file(
-                                        server, share, f"{snapshots_path}/{snap_file}",
-                                        username, password, domain
-                                    )
-                                    if ok2:
-                                        import json as json_module
-                                        try:
-                                            snap_data = json_module.loads(content)
-                                            snap_hostname = snap_data.get("hostname", "")
-                                            snap_paths = snap_data.get("paths", [])
-
-                                            should_delete = False
-                                            if snap_hostname == client_hostname and job_source_path:
-                                                norm_job = job_source_path.replace("\\", "/").rstrip("/")
-                                                for sp in snap_paths:
-                                                    norm_snap = sp.replace("\\", "/").rstrip("/")
-                                                    if norm_job in norm_snap or norm_snap in norm_job:
-                                                        should_delete = True
-                                                        break
-
-                                            if should_delete:
-                                                del_ok, del_msg = smb_delete_file(
-                                                    server, share, f"{snapshots_path}/{snap_file}",
-                                                    username, password, domain
-                                                )
-                                                if del_ok:
-                                                    snapshots_deleted += 1
-                                                else:
-                                                    errors.append(f"{snap_file}: {del_msg}")
-
-                                        except (json_module.JSONDecodeError, KeyError):
-                                            pass
+                        task.progress = 90
 
                     elif repo_type == "local" or repo_info.get("mount_point"):
                         # Direct filesystem access
@@ -843,51 +815,40 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         if subpath:
                             base_path = base_path / subpath
 
-                        job_metadata_path = base_path / ".backer" / "jobs" / job_name
-                        if job_metadata_path.exists():
-                            shutil.rmtree(job_metadata_path)
-                            job_deleted = True
+                        if delete_snapshots:
+                            # Delete entire job subfolder
+                            job_folder_path = base_path / job_subfolder
+                            if job_folder_path.exists():
+                                shutil.rmtree(job_folder_path)
+                                subfolder_deleted = True
+                                job_deleted = True
+                                logger.info(f"Deleted entire job subfolder: {job_folder_path}")
+                        else:
+                            # Only delete metadata
+                            job_metadata_path = base_path / job_subfolder / ".backer" / "jobs" / job_name
+                            if job_metadata_path.exists():
+                                shutil.rmtree(job_metadata_path)
+                                job_deleted = True
 
-                        task.progress = 30
-
-                        # Delete snapshots if requested
-                        if delete_snapshots and client_hostname:
-                            snapshots_dir = base_path / ".backer" / "snapshots"
-                            if snapshots_dir.exists():
-                                import json as json_module
-                                snap_files = list(snapshots_dir.glob("*.json"))
-                                total = len(snap_files)
-                                for i, snap_file in enumerate(snap_files):
-                                    task.progress = 30 + int((i / total) * 60) if total > 0 else 90
-                                    try:
-                                        snap_data = json_module.loads(snap_file.read_text())
-                                        snap_hostname = snap_data.get("hostname", "")
-                                        snap_paths = snap_data.get("paths", [])
-
-                                        should_delete = False
-                                        if snap_hostname == client_hostname and job_source_path:
-                                            norm_job = job_source_path.replace("\\", "/").rstrip("/")
-                                            for sp in snap_paths:
-                                                norm_snap = sp.replace("\\", "/").rstrip("/")
-                                                if norm_job in norm_snap or norm_snap in norm_job:
-                                                    should_delete = True
-                                                    break
-
-                                        if should_delete:
-                                            snap_file.unlink()
-                                            snapshots_deleted += 1
-                                    except (json_module.JSONDecodeError, OSError) as e:
-                                        errors.append(f"{snap_file.name}: {e}")
+                        task.progress = 90
 
                     # NFS - similar to local if mounted
                     elif repo_type == "nfs" and repo_info.get("mount_point"):
                         base_path = PathLib(repo_info["mount_point"])
                         if subpath:
                             base_path = base_path / subpath
-                        job_metadata_path = base_path / ".backer" / "jobs" / job_name
-                        if job_metadata_path.exists():
-                            shutil.rmtree(job_metadata_path)
-                            job_deleted = True
+
+                        if delete_snapshots:
+                            job_folder_path = base_path / job_subfolder
+                            if job_folder_path.exists():
+                                shutil.rmtree(job_folder_path)
+                                subfolder_deleted = True
+                                job_deleted = True
+                        else:
+                            job_metadata_path = base_path / job_subfolder / ".backer" / "jobs" / job_name
+                            if job_metadata_path.exists():
+                                shutil.rmtree(job_metadata_path)
+                                job_deleted = True
 
                 except Exception as e:
                     errors.append(str(e))
@@ -895,18 +856,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 return {
                     "job_deleted": job_deleted,
-                    "snapshots_deleted": snapshots_deleted,
+                    "subfolder_deleted": subfolder_deleted,
                     "errors": errors,
                 }
 
             task_manager = get_task_manager()
+            task_desc = (
+                f"Deleting all data for job '{job_name}'"
+                if delete_snapshots
+                else f"Cleaning up metadata for job '{job_name}'"
+            )
             task = task_manager.submit(
-                task_type="delete_job_metadata",
-                description=f"Cleaning up metadata for job '{job_name}'",
+                task_type="delete_job_data" if delete_snapshots else "delete_job_metadata",
+                description=task_desc,
                 func=cleanup_job_metadata,
             )
             result["cleanup_task_id"] = task.id
-            result["message"] = "Job deleted. Metadata cleanup running in background."
+            result["message"] = (
+                "Job deleted. Backup data cleanup running in background."
+                if delete_snapshots
+                else "Job deleted. Metadata cleanup running in background."
+            )
 
         return result
 
