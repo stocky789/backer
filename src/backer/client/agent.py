@@ -2,6 +2,7 @@
 
 import os
 import platform
+import shutil
 import signal
 import socket
 import subprocess
@@ -1131,6 +1132,33 @@ class BackerAgent:
 
             source = BackupDestination(path=source_path)
             destination = Path(job["destination_path"])
+
+            # Handle clean restore - wipe destination directory first
+            clean_restore = job.get("clean_restore", False)
+            if clean_restore and not dry_run:
+                print(f"[RESTORE] Clean restore enabled - wiping destination: {destination}")
+                self._report_progress(
+                    run_id=run_id,
+                    status="running",
+                    progress_percent=3,
+                    message="Clean restore: removing existing files...",
+                )
+                try:
+                    if destination.exists():
+                        # Remove all contents but keep the directory
+                        for item in destination.iterdir():
+                            if item.is_dir():
+                                shutil.rmtree(item)
+                            else:
+                                item.unlink()
+                        print(f"[RESTORE] Wiped destination directory contents")
+                    else:
+                        # Create the directory if it doesn't exist
+                        destination.mkdir(parents=True, exist_ok=True)
+                        print(f"[RESTORE] Created destination directory")
+                except Exception as wipe_err:
+                    print(f"[RESTORE] Warning: Failed to wipe destination: {wipe_err}")
+                    # Continue with restore anyway - better to have extra files than fail
 
             # Pass original_source_path for kopia/restic snapshot lookup
             original_source_path = job.get("original_source_path")
