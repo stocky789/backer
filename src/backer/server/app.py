@@ -1427,6 +1427,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Discover available shares on a server."""
+        import asyncio
+
         from backer.server.repositories import (
             RepositoryType,
         )
@@ -1450,7 +1452,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid type: {repo_type}")
 
-        success, result = do_discover(rtype, server, username, password, domain)
+        # Run blocking SMB operation in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        success, result = await loop.run_in_executor(
+            None, lambda: do_discover(rtype, server, username, password, domain)
+        )
 
         if success:
             return {
@@ -1466,6 +1472,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Browse a directory on a share."""
+        import asyncio
+
         from backer.server.repositories import (
             RepositoryType,
             browse_directory,
@@ -1489,7 +1497,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid type: {repo_type}")
 
-        success, result = browse_directory(rtype, server, share, path, username, password, domain)
+        # Run blocking SMB operation in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        success, result = await loop.run_in_executor(
+            None, lambda: browse_directory(rtype, server, share, path, username, password, domain)
+        )
 
         if success:
             return {
