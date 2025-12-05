@@ -2,7 +2,9 @@
 
 Open-source backup management with web UI - like Veeam/UrBackup but simpler.
 
-**Self-contained**: Backer automatically downloads rclone and restic - no manual tool installation required.
+**Self-contained**: Backer automatically downloads rclone, restic, and kopia - no manual tool installation required.
+
+**Default Login**: `admin` / `admin` (change after first login)
 
 ## How It Works
 
@@ -54,13 +56,28 @@ This installs:
 
 **Access Web UI:** `http://your-server:8420`
 
-### Option 2: Docker
+### Option 2: Docker (Recommended for Containers)
+
+**Using pre-built image:**
+
+```bash
+docker run -d --name backer \
+  -p 8420:8420 \
+  -v backer-data:/data \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  ghcr.io/stocky789/backer:latest
+```
+
+**Or using Docker Compose:**
 
 ```bash
 git clone https://github.com/stocky789/backer.git
 cd backer
 docker compose up -d
 ```
+
+> **Note:** `SYS_ADMIN` capability is required for mounting SMB/NFS shares inside the container. If you don't need network storage, you can omit these options.
 
 **Access Web UI:** `http://localhost:8420`
 
@@ -192,12 +209,14 @@ curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/insta
 
 Once the server is running, access `http://your-server:8420` to:
 
-- **Dashboard**: Overview of all backups and agent status
-- **Agents**: View connected agents, see online/offline status
-- **Storage**: Configure backup destinations (SMB shares, NFS, local paths)
-- **Backups**: Create and manage backup jobs with schedules
-- **History**: View backup run history and logs
-- **Restore**: Restore files from backups (supports subfolder restore)
+- **Dashboard**: Overview of all backups and agent status with statistics
+- **Agents**: View connected agents, online/offline status, OS info, and version
+- **Jobs**: Create and manage backup jobs with cron schedules
+- **Storage**: Configure backup destinations (SMB shares, NFS, local paths, S3 via rclone)
+- **History**: View backup run history with detailed logs and progress
+- **Restore**: Point-in-time restore with subfolder selection and dry-run option
+- **Settings**: Configure timezone and view server information
+- **Profile**: Manage your account, change password
 
 ---
 
@@ -207,9 +226,10 @@ Once the server is running, access `http://your-server:8420` to:
 |---------|--------|----------|
 | **rclone** | ✅ Recommended | Most use cases. Supports SMB, NFS, S3, and 50+ cloud providers. Fast file sync. |
 | **restic** | ✅ Supported | Encrypted, deduplicated backups with versioning. Select specific snapshots to restore. |
+| **kopia** | ✅ Supported | Modern encrypted backup with deduplication. Alternative to restic. |
 | **rsync** | ❌ Not Available | Not supported for agent-based backups. Use rclone instead. |
 
-**Note:** Backup tools are automatically downloaded to agents - no manual installation required.
+**Note:** Backup tools (rclone, restic, kopia) are automatically downloaded - no manual installation required.
 
 ### Restic Encryption
 
@@ -266,6 +286,7 @@ Agent:
   backer agent status       Check connection status
   backer agent install      Install as system service/scheduled task
   backer agent uninstall    Remove from system startup
+  backer agent logs         View agent logs (-f to follow, -n for line count)
 
 Jobs:
   backer job list           List all jobs
@@ -277,10 +298,12 @@ Jobs:
 
 ## API
 
-The server exposes a REST API:
+The server exposes a REST API at `http://your-server:8420/api/v1/`.
+
+**Authentication:** API endpoints require HTTP Basic Auth with agent credentials (client_id:client_secret) or session cookie from web login.
 
 ```bash
-# Health check
+# Health check (no auth required)
 curl http://localhost:8420/health
 
 # List connected agents
@@ -289,14 +312,19 @@ curl http://localhost:8420/api/v1/clients
 # List backup jobs
 curl http://localhost:8420/api/v1/jobs
 
+# Get scheduler status and upcoming jobs
+curl http://localhost:8420/api/v1/scheduler/status
+
+# Run a backup job
+curl http://localhost:8420/api/v1/jobs/my-backup/run -X POST
+
 # Trigger a restore
 curl http://localhost:8420/api/v1/restore -X POST \
   -H "Content-Type: application/json" \
   -d '{"job_name": "my-backup", "client_id": "agent-uuid"}'
-
-# Run a backup job
-curl http://localhost:8420/api/v1/jobs/my-backup/run -X POST
 ```
+
+See the full API by browsing the server routes in the source code.
 
 ---
 
@@ -351,9 +379,11 @@ git push && git push --tags
 ```
 
 This will:
-1. Build Windows agent executable
-2. Build Python packages
-3. Create GitHub release with downloads
+1. Run tests on Linux and Windows
+2. Build Windows agent installer (`.exe`)
+3. Build Docker image and push to `ghcr.io`
+4. Build Python packages (`.whl`, `.tar.gz`)
+5. Create GitHub release with all downloads
 
 ---
 
