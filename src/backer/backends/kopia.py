@@ -397,7 +397,7 @@ class KopiaBackend(BackendBase):
                         matching_snapshots.append(snap)
 
             if not matching_snapshots:
-                print(f"[KOPIA] Still no matching snapshots. Available sources:")
+                print("[KOPIA] Still no matching snapshots. Available sources:")
                 for snap in snapshots[:5]:  # Show first 5
                     print(f"  - {snap.get('source', {}).get('path', 'unknown')}")
                 return None
