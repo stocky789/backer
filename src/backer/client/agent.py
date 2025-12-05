@@ -21,6 +21,7 @@ import httpx
 from backer import __version__
 from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
+from backer.core.repo_metadata import RepositoryMetadata
 
 
 def get_config_dir() -> Path:
@@ -931,6 +932,19 @@ class BackerAgent:
             except Exception as e:
                 print(f"Failed to report result: {e}")
 
+            # Write metadata to repository for discovery (only on success)
+            if result.success:
+                original_dest = job.get("destination_path", "")
+                self._write_repo_metadata(
+                    job=job,
+                    dest_path=original_dest,
+                    backend_name=backend_name,
+                    result=result,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    snapshot_id=snapshot_id,
+                )
+
             return report
 
         except Exception as e:
@@ -1252,6 +1266,131 @@ class BackerAgent:
                     print("[RESTORE] Mount cleanup complete")
                 except Exception as cleanup_err:
                     print(f"[RESTORE] Cleanup error: {cleanup_err}")
+
+    def _write_repo_metadata(
+        self,
+        job: dict[str, Any],
+        dest_path: str,
+        backend_name: str,
+        result: Any,
+        started_at: datetime,
+        finished_at: datetime,
+        snapshot_id: str | None,
+    ) -> None:
+        """Write backup metadata to the repository for discovery.
+
+        Enables a new Backer server to discover existing backups when pointed
+        to a repository. For SMB shares on Linux, mounts the share first.
+        """
+        try:
+            print(f"[METADATA] Writing metadata to repository: {dest_path}")
+
+            job_name = job.get("name", "unknown")
+            run_id = job.get("run_id", "unknown")
+            source_path = job.get("source_path", "")
+
+            # For SMB paths on Linux, we need to mount first
+            if sys.platform != "win32" and self._is_smb_path(dest_path):
+                server, share, subpath = self._parse_smb_path(dest_path)
+                smb_username = job.get("smb_username")
+                smb_password = job.get("smb_password")
+                smb_domain = job.get("smb_domain")
+
+                print(f"[METADATA] Mounting SMB share //{server}/{share} for metadata")
+                with self._smb_mount_context(
+                    server=server,
+                    share=share,
+                    username=smb_username,
+                    password=smb_password,
+                    domain=smb_domain,
+                ) as mount_point:
+                    if subpath:
+                        local_path = mount_point / subpath
+                    else:
+                        local_path = mount_point
+                    self._write_metadata_to_path(
+                        local_path, job_name, run_id, source_path, backend_name,
+                        result, started_at, finished_at, snapshot_id,
+                    )
+            else:
+                # Local path or Windows UNC path
+                self._write_metadata_to_path(
+                    Path(dest_path), job_name, run_id, source_path, backend_name,
+                    result, started_at, finished_at, snapshot_id,
+                )
+
+            print(f"[METADATA] Successfully wrote metadata to: {dest_path}")
+
+        except Exception as e:
+            # Don't fail the backup just because metadata writing failed
+            print(f"[METADATA] Warning - failed to write metadata: {e}")
+
+    def _write_metadata_to_path(
+        self,
+        repo_path: Path,
+        job_name: str,
+        run_id: str,
+        source_path: str,
+        backend_name: str,
+        result: Any,
+        started_at: datetime,
+        finished_at: datetime,
+        snapshot_id: str | None,
+    ) -> None:
+        """Write metadata files to a local path."""
+        repo = RepositoryMetadata(repo_path)
+
+        # Initialize repository metadata if needed
+        if not repo.is_initialized():
+            print(f"[METADATA] Initializing metadata directory at {repo.metadata_dir}")
+            repo.initialize()
+
+        # Save agent information
+        repo.save_agent(
+            agent_id=self.client_id,
+            agent_data={
+                "hostname": socket.gethostname(),
+                "platform": sys.platform,
+                "os_info": f"{platform.system()} {platform.release()}",
+            },
+        )
+
+        # Save job configuration
+        repo.save_job(
+            job_name=job_name,
+            job_config={
+                "source_path": source_path,
+                "backend": backend_name,
+                "client_id": self.client_id,
+            },
+        )
+
+        # Save run record
+        run_data = {
+            "status": "success" if result.success else "failed",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "bytes_transferred": result.bytes_transferred,
+            "files_transferred": result.files_transferred,
+            "snapshot_id": snapshot_id,
+            "agent_id": self.client_id,
+            "hostname": socket.gethostname(),
+        }
+        repo.save_job_run(job_name, run_id, run_data)
+
+        # For restic/kopia, also save snapshot metadata
+        if snapshot_id and backend_name in ("restic", "kopia"):
+            repo.save_snapshot(
+                snapshot_id=snapshot_id,
+                snapshot_data={
+                    "job_name": job_name,
+                    "run_id": run_id,
+                    "hostname": socket.gethostname(),
+                    "paths": [source_path],
+                    "time": finished_at.isoformat(),
+                    "backend": backend_name,
+                },
+            )
 
     def run(self, heartbeat_interval: int = 60) -> None:
         """Run the agent in daemon mode."""
