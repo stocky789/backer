@@ -1,5 +1,6 @@
 """Storage repository management - SMB/NFS share discovery and browsing."""
 
+import logging
 import os
 import re
 import subprocess
@@ -10,6 +11,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -509,12 +512,28 @@ def smb_read_file(
 
             if result.returncode != 0:
                 error = result.stderr.decode("utf-8", errors="replace").strip()
-                if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error:
+                stdout_msg = result.stdout.decode("utf-8", errors="replace").strip()
+
+                # Log full details for debugging
+                logger.debug(f"smbclient read failed: returncode={result.returncode}, stderr={error!r}, stdout={stdout_msg!r}")
+
+                if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in stdout_msg:
                     return False, "File not found"
-                elif "NT_STATUS_ACCESS_DENIED" in error:
+                elif "NT_STATUS_ACCESS_DENIED" in error or "NT_STATUS_ACCESS_DENIED" in stdout_msg:
                     return False, "Access denied"
+                elif "NT_STATUS_BAD_NETWORK_NAME" in error or "NT_STATUS_BAD_NETWORK_NAME" in stdout_msg:
+                    return False, "Share not found (bad network name)"
+                elif "NT_STATUS_OBJECT_PATH_NOT_FOUND" in error or "NT_STATUS_OBJECT_PATH_NOT_FOUND" in stdout_msg:
+                    return False, "Path not found"
+                elif "NT_STATUS_LOGON_FAILURE" in error or "NT_STATUS_LOGON_FAILURE" in stdout_msg:
+                    return False, "Authentication failed"
+                elif error:
+                    return False, error
+                elif stdout_msg:
+                    # Sometimes errors go to stdout instead of stderr
+                    return False, stdout_msg
                 else:
-                    return False, error or "Failed to read file"
+                    return False, f"Command failed with exit code {result.returncode}"
 
             return True, result.stdout.decode("utf-8", errors="replace")
 
