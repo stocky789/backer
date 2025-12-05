@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -353,13 +354,37 @@ class ResticBackend(BackendBase):
             if result.returncode != 0:
                 errors = [line for line in result.stderr.split("\n") if line.strip()]
 
+            # Parse restore stats from output
+            # Format: "Summary: Restored 6 / 4 files/dirs (66 B / 66 B) in 0:00"
+            files_restored = 0
+            bytes_restored = 0
+            output = result.stdout + result.stderr
+
+            summary_match = re.search(r'Restored\s+(\d+)\s*/\s*\d+\s+files/dirs\s+\((\d+(?:\.\d+)?)\s*(\w*)\s*/', output)
+            if summary_match:
+                files_restored = int(summary_match.group(1))
+                size_val = float(summary_match.group(2))
+                size_unit = summary_match.group(3).upper() if summary_match.group(3) else 'B'
+
+                # Convert to bytes
+                if 'KIB' in size_unit or 'KB' in size_unit:
+                    bytes_restored = int(size_val * 1024)
+                elif 'MIB' in size_unit or 'MB' in size_unit:
+                    bytes_restored = int(size_val * 1024 * 1024)
+                elif 'GIB' in size_unit or 'GB' in size_unit:
+                    bytes_restored = int(size_val * 1024 * 1024 * 1024)
+                else:
+                    bytes_restored = int(size_val)
+
             return BackendResult(
                 success=result.returncode == 0,
                 operation=OperationType.RESTORE,
                 started_at=started_at,
                 finished_at=datetime.now(),
+                files_transferred=files_restored,
+                bytes_transferred=bytes_restored,
                 errors=errors,
-                output=result.stdout + result.stderr,
+                output=output,
                 return_code=result.returncode,
                 metadata={"snapshot": snapshot_id},
             )
