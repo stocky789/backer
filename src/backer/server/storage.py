@@ -380,6 +380,27 @@ class Storage:
         runs = self.get_job_runs(job_name, limit=1)
         return runs[0] if runs else None
 
+    def get_job_run(self, run_id: str) -> dict[str, Any] | None:
+        """Get a specific job run by its run_id."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_all_job_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Get recent runs across all jobs."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM job_runs
+                ORDER BY started_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     # Command queue operations
     def queue_command(
         self,
