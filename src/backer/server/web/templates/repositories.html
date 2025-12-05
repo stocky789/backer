@@ -562,25 +562,31 @@ async function deleteRepo(repoId, repoName) {
         return;
     }
 
+    // Show loading state
+    console.log('[DELETE] Starting delete for', repoId);
+    const startTime = Date.now();
+
     try {
         const response = await fetch(`/api/v1/repositories/${repoId}`, {
             method: 'DELETE'
         });
 
+        console.log('[DELETE] Response received in', Date.now() - startTime, 'ms, status:', response.status);
+
         if (response.ok) {
-            // Small delay to ensure server has processed the delete
-            setTimeout(() => {
-                location.reload();
-            }, 100);
+            console.log('[DELETE] Success, reloading page...');
+            // Use replace instead of reload to avoid caching issues
+            window.location.replace(window.location.pathname);
         } else {
             const data = await response.json();
             alert('Failed to delete repository: ' + (data.detail || 'Unknown error'));
         }
     } catch (e) {
+        console.error('[DELETE] Error after', Date.now() - startTime, 'ms:', e);
         alert('Delete failed: ' + e.message);
         // Still try to reload in case it succeeded
         setTimeout(() => {
-            location.reload();
+            window.location.replace(window.location.pathname);
         }, 500);
     }
 }
