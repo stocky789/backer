@@ -435,7 +435,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        client_name = client.get("name", client_id)
+        client_name = client.name or client_id
 
         # Delete client from database immediately
         if not storage.delete_client(client_id):

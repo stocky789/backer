@@ -283,8 +283,15 @@ async function runJob(jobName) {
             alert('Backup job started!');
             updateRunningJobs();
         } else {
-            const data = await response.json();
-            alert('Failed to start job: ' + (data.detail || 'Unknown error'));
+            let errorMsg = 'Unknown error';
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Failed to start job: ' + errorMsg);
         }
     } catch (e) {
         alert('Failed to start job: ' + e.message);

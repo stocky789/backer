@@ -579,8 +579,15 @@ async function deleteRepo(repoId, repoName) {
             // Use replace instead of reload to avoid caching issues
             window.location.replace(window.location.pathname);
         } else {
-            const data = await response.json();
-            alert('Failed to delete repository: ' + (data.detail || 'Unknown error'));
+            let errorMsg = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Failed to delete repository: ' + errorMsg);
         }
     } catch (e) {
         console.error('[DELETE] Error after', Date.now() - startTime, 'ms:', e);

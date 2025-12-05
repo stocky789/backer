@@ -133,8 +133,16 @@ async function removeAgent(agentId, agentName) {
         if (response.ok) {
             window.location.replace(window.location.pathname);
         } else {
-            const data = await response.json();
-            alert('Failed to remove agent: ' + (data.detail || 'Unknown error'));
+            let errorMsg = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                // Response wasn't JSON, try text
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Failed to remove agent: ' + errorMsg);
         }
     } catch (e) {
         alert('Remove failed: ' + e.message);

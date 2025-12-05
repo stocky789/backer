@@ -377,13 +377,20 @@ async function runJob(jobName) {
             body: JSON.stringify({dry_run: false})
         });
 
-        const data = await response.json();
-
         if (response.ok) {
+            const data = await response.json();
             alert(`Backup started!\nRun ID: ${data.run_id}\n${data.message}`);
             location.reload();
         } else {
-            alert('Error: ' + (data.detail || 'Failed to start job'));
+            let errorMsg = 'Failed to start job';
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Error: ' + errorMsg);
         }
     } catch (e) {
         alert('Error: ' + e.message);
@@ -399,8 +406,15 @@ async function toggleJob(jobName) {
         if (response.ok) {
             location.reload();
         } else {
-            const data = await response.json();
-            alert('Error: ' + (data.detail || 'Failed to toggle job'));
+            let errorMsg = 'Failed to toggle job';
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Error: ' + errorMsg);
         }
     } catch (e) {
         alert('Error: ' + e.message);
@@ -619,9 +633,8 @@ async function confirmDeleteJob() {
             method: 'DELETE'
         });
 
-        const data = await response.json();
-
         if (response.ok) {
+            const data = await response.json();
             let message = 'Job deleted successfully.';
             if (data.metadata_deleted) {
                 message += ' Repository metadata cleaned up.';
@@ -635,7 +648,15 @@ async function confirmDeleteJob() {
             alert(message);
             location.reload();
         } else {
-            errorDiv.textContent = data.detail || 'Failed to delete job';
+            let errorMsg = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            errorDiv.textContent = errorMsg;
             errorDiv.style.display = 'block';
         }
     } catch (e) {
