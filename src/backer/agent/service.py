@@ -372,6 +372,13 @@ class AgentService:
         backend_options = payload.get('backend_options', {})
         dry_run = payload.get('dry_run', False)
 
+        # SMB credentials for metadata writing
+        smb_server = payload.get('smb_server')
+        smb_share = payload.get('smb_share')
+        smb_username = payload.get('smb_username')
+        smb_password = payload.get('smb_password')
+        smb_domain = payload.get('smb_domain')
+
         self._update_status(f"Backing up: {job_name}")
         logger.info(f"[BACKUP] Starting backup job '{job_name}' (run_id: {run_id})")
         logger.info(f"[BACKUP] Source: {source_path}")
@@ -380,6 +387,8 @@ class AgentService:
         logger.info(f"[BACKUP] Tools directory: {self.tools_dir}")
         logger.info(f"[BACKUP] Excludes: {excludes}")
         logger.info(f"[BACKUP] Dry run: {dry_run}")
+        if smb_server:
+            logger.info(f"[BACKUP] SMB: //{smb_server}/{smb_share}")
 
         started_at = datetime.now()
 
@@ -432,6 +441,11 @@ class AgentService:
                     result=result,
                     started_at=started_at,
                     finished_at=finished_at,
+                    smb_server=smb_server,
+                    smb_share=smb_share,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
                 )
             else:
                 self._update_status(f"Backup failed: {job_name}")
@@ -1598,72 +1612,308 @@ class AgentService:
         result: dict[str, Any],
         started_at: datetime,
         finished_at: datetime,
+        smb_server: str | None = None,
+        smb_share: str | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> None:
         """Write backup metadata to the repository for discovery.
 
         This enables a new Backer server to discover existing backups
         when pointed to a repository.
+
+        For SMB shares on Linux, uses smbclient to write files directly.
+        For local paths or Windows, uses direct filesystem access.
         """
         try:
-            # Normalize path for metadata
-            repo_path = self._normalize_windows_path(repo_path)
-            repo = RepositoryMetadata(repo_path)
-
-            # Initialize repository metadata if needed
-            if not repo.is_initialized():
-                repo.initialize()
-
-            # Save agent information
-            repo.save_agent(
-                agent_id=self.client_id,
-                agent_data={
-                    "hostname": socket.gethostname(),
-                    "platform": sys.platform,
-                    "os_info": f"{platform.system()} {platform.release()}",
-                    "python_version": platform.python_version(),
-                },
+            # Check if we need to use SMB for metadata writing (Linux with SMB credentials)
+            use_smb = (
+                sys.platform != 'win32'
+                and smb_server
+                and smb_share
             )
 
-            # Save job configuration
-            repo.save_job(
-                job_name=job_name,
-                job_config={
-                    "source_path": source_path,
-                    "backend": backend,
-                    "client_id": self.client_id,
-                },
-            )
-
-            # Save run record
-            run_data = {
-                "status": "success" if result.get("success") else "failed",
-                "started_at": started_at.isoformat(),
-                "finished_at": finished_at.isoformat(),
-                "bytes_transferred": result.get("bytes", 0),
-                "files_transferred": result.get("files", 0),
-                "snapshot_id": result.get("snapshot_id"),
-                "agent_id": self.client_id,
-                "hostname": socket.gethostname(),
-            }
-            repo.save_job_run(job_name, run_id, run_data)
-
-            # For restic/kopia, also save snapshot metadata
-            snapshot_id = result.get("snapshot_id")
-            if snapshot_id and backend in ("restic", "kopia"):
-                repo.save_snapshot(
-                    snapshot_id=snapshot_id,
-                    snapshot_data={
-                        "job_name": job_name,
-                        "run_id": run_id,
-                        "hostname": socket.gethostname(),
-                        "paths": [source_path],
-                        "time": finished_at.isoformat(),
-                        "backend": backend,
-                    },
+            if use_smb:
+                self._write_repo_metadata_smb(
+                    smb_server=smb_server,
+                    smb_share=smb_share,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
+                    repo_path=repo_path,
+                    job_name=job_name,
+                    run_id=run_id,
+                    source_path=source_path,
+                    backend=backend,
+                    result=result,
+                    started_at=started_at,
+                    finished_at=finished_at,
                 )
-
-            logger.info(f"[METADATA] Wrote backup metadata to repository: {repo_path}")
+            else:
+                # Use local filesystem (works on Windows with UNC paths)
+                self._write_repo_metadata_local(
+                    repo_path=repo_path,
+                    job_name=job_name,
+                    run_id=run_id,
+                    source_path=source_path,
+                    backend=backend,
+                    result=result,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
 
         except Exception as e:
             # Don't fail the backup just because metadata writing failed
             logger.warning(f"[METADATA] Failed to write repository metadata: {e}")
+
+    def _write_repo_metadata_local(
+        self,
+        repo_path: str,
+        job_name: str,
+        run_id: str,
+        source_path: str,
+        backend: str,
+        result: dict[str, Any],
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> None:
+        """Write metadata using local filesystem access."""
+        repo_path = self._normalize_windows_path(repo_path)
+        repo = RepositoryMetadata(repo_path)
+
+        # Initialize repository metadata if needed
+        if not repo.is_initialized():
+            repo.initialize()
+
+        # Save agent information
+        repo.save_agent(
+            agent_id=self.client_id,
+            agent_data={
+                "hostname": socket.gethostname(),
+                "platform": sys.platform,
+                "os_info": f"{platform.system()} {platform.release()}",
+                "python_version": platform.python_version(),
+            },
+        )
+
+        # Save job configuration
+        repo.save_job(
+            job_name=job_name,
+            job_config={
+                "source_path": source_path,
+                "backend": backend,
+                "client_id": self.client_id,
+            },
+        )
+
+        # Save run record
+        run_data = {
+            "status": "success" if result.get("success") else "failed",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "bytes_transferred": result.get("bytes", 0),
+            "files_transferred": result.get("files", 0),
+            "snapshot_id": result.get("snapshot_id"),
+            "agent_id": self.client_id,
+            "hostname": socket.gethostname(),
+        }
+        repo.save_job_run(job_name, run_id, run_data)
+
+        # For restic/kopia, also save snapshot metadata
+        snapshot_id = result.get("snapshot_id")
+        if snapshot_id and backend in ("restic", "kopia"):
+            repo.save_snapshot(
+                snapshot_id=snapshot_id,
+                snapshot_data={
+                    "job_name": job_name,
+                    "run_id": run_id,
+                    "hostname": socket.gethostname(),
+                    "paths": [source_path],
+                    "time": finished_at.isoformat(),
+                    "backend": backend,
+                },
+            )
+
+        logger.info(f"[METADATA] Wrote backup metadata to repository: {repo_path}")
+
+    def _write_repo_metadata_smb(
+        self,
+        smb_server: str,
+        smb_share: str,
+        smb_username: str | None,
+        smb_password: str | None,
+        smb_domain: str | None,
+        repo_path: str,
+        job_name: str,
+        run_id: str,
+        source_path: str,
+        backend: str,
+        result: dict[str, Any],
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> None:
+        """Write metadata to SMB share using smbclient (for Linux agents)."""
+        import json
+        import tempfile
+
+        # Extract subpath from repo_path (e.g., //server/share/subpath -> subpath)
+        subpath = ""
+        if repo_path:
+            # Remove //server/share prefix to get subpath
+            path_parts = repo_path.replace("\\", "/").lstrip("/").split("/")
+            if len(path_parts) > 2:
+                subpath = "/".join(path_parts[2:])
+
+        # Build base path for metadata
+        metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+
+        logger.info(f"[METADATA-SMB] Writing metadata to //{smb_server}/{smb_share}/{metadata_base}")
+
+        def smb_write_file(remote_path: str, content: str) -> bool:
+            """Write content to a file on SMB share using smbclient."""
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                f.write(content)
+                local_path = f.name
+
+            try:
+                # Build smbclient command
+                cmd = ["smbclient", f"//{smb_server}/{smb_share}", "-t", "10"]
+
+                # Add authentication
+                if smb_username and smb_password:
+                    with tempfile.NamedTemporaryFile(mode='w', delete=False) as auth_file:
+                        auth_file.write(f"username={smb_username}\n")
+                        auth_file.write(f"password={smb_password}\n")
+                        if smb_domain:
+                            auth_file.write(f"domain={smb_domain}\n")
+                        auth_path = auth_file.name
+                    cmd.extend(["-A", auth_path])
+                else:
+                    cmd.append("-N")  # No password
+
+                # Ensure parent directory exists and upload file
+                parent_dir = "/".join(remote_path.split("/")[:-1])
+                filename = remote_path.split("/")[-1]
+
+                # Create directories and upload
+                smb_commands = []
+                # Create each directory level
+                dirs_to_create = []
+                current = ""
+                for part in parent_dir.split("/"):
+                    if part:
+                        current = f"{current}/{part}" if current else part
+                        dirs_to_create.append(current)
+                for d in dirs_to_create:
+                    smb_commands.append(f"mkdir {d}")
+                smb_commands.append(f"cd {parent_dir}")
+                smb_commands.append(f"put {local_path} {filename}")
+
+                cmd.extend(["-c", "; ".join(smb_commands)])
+
+                proc_result = subprocess.run(cmd, capture_output=True, timeout=30)
+
+                # Clean up auth file if created
+                if smb_username and smb_password:
+                    try:
+                        os.unlink(auth_path)
+                    except Exception:
+                        pass
+
+                if proc_result.returncode != 0:
+                    stderr = proc_result.stderr.decode('utf-8', errors='replace')
+                    # mkdir errors are ok (directory might exist)
+                    if "NT_STATUS" in stderr and "NT_STATUS_OBJECT_NAME_COLLISION" not in stderr:
+                        logger.warning(f"[METADATA-SMB] smbclient error: {stderr}")
+                        return False
+
+                return True
+
+            finally:
+                try:
+                    os.unlink(local_path)
+                except Exception:
+                    pass
+
+        # Write metadata.json
+        metadata = {
+            "version": "1.0",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "repo_type": "smb",
+        }
+        smb_write_file(f"{metadata_base}/metadata.json", json.dumps(metadata, indent=2))
+
+        # Write agent info
+        agent_data = {
+            "agent_id": self.client_id,
+            "hostname": socket.gethostname(),
+            "platform": sys.platform,
+            "os_info": f"{platform.system()} {platform.release()}",
+            "python_version": platform.python_version(),
+            "first_seen": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        smb_write_file(
+            f"{metadata_base}/agents/{self.client_id}.json",
+            json.dumps(agent_data, indent=2)
+        )
+
+        # Write job config
+        job_data = {
+            "job_name": job_name,
+            "config": {
+                "source_path": source_path,
+                "backend": backend,
+                "client_id": self.client_id,
+            },
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        safe_job_name = job_name.replace("/", "_").replace("\\", "_")
+        smb_write_file(
+            f"{metadata_base}/jobs/{safe_job_name}/config.json",
+            json.dumps(job_data, indent=2)
+        )
+
+        # Write run record
+        run_data = {
+            "run_id": run_id,
+            "job_name": job_name,
+            "status": "success" if result.get("success") else "failed",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "bytes_transferred": result.get("bytes", 0),
+            "files_transferred": result.get("files", 0),
+            "snapshot_id": result.get("snapshot_id"),
+            "agent_id": self.client_id,
+            "hostname": socket.gethostname(),
+            "recorded_at": datetime.now().isoformat(),
+        }
+        safe_run_id = run_id.replace("/", "_").replace("\\", "_")
+        smb_write_file(
+            f"{metadata_base}/jobs/{safe_job_name}/runs/{safe_run_id}.json",
+            json.dumps(run_data, indent=2)
+        )
+
+        # Write snapshot metadata for restic/kopia
+        snapshot_id = result.get("snapshot_id")
+        if snapshot_id and backend in ("restic", "kopia"):
+            snapshot_data = {
+                "snapshot_id": snapshot_id,
+                "job_name": job_name,
+                "run_id": run_id,
+                "hostname": socket.gethostname(),
+                "paths": [source_path],
+                "time": finished_at.isoformat(),
+                "backend": backend,
+                "recorded_at": datetime.now().isoformat(),
+            }
+            short_id = snapshot_id[:12] if len(snapshot_id) > 12 else snapshot_id
+            smb_write_file(
+                f"{metadata_base}/snapshots/{short_id}.json",
+                json.dumps(snapshot_data, indent=2)
+            )
+
+        logger.info(f"[METADATA-SMB] Successfully wrote metadata to //{smb_server}/{smb_share}/{metadata_base}")
