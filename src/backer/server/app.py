@@ -722,15 +722,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "mount_point": repo.get("mount_point"),
                 }
 
-        # Get client hostname for snapshot matching
-        client_id = job.get("client_id")
-        if client_id:
-            client = storage.get_client(client_id)
-            if client:
-                client_hostname = client.hostname
-
-        job_source_path = job.get("source_path", "")
-
         # Delete job from database immediately
         if not storage.delete_job(job_name):
             raise HTTPException(status_code=404, detail="Job not found")
