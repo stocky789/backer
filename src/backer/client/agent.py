@@ -1285,7 +1285,7 @@ class BackerAgent:
         try:
             print(f"[METADATA] Writing metadata to repository: {dest_path}")
 
-            job_name = job.get("name", "unknown")
+            job_name = job.get("job_name", "unknown")
             run_id = job.get("run_id", "unknown")
             source_path = job.get("source_path", "")
 
