@@ -1680,62 +1680,72 @@ class AgentService:
     ) -> None:
         """Write metadata using local filesystem access."""
         repo_path = self._normalize_windows_path(repo_path)
-        repo = RepositoryMetadata(repo_path)
+        logger.info(f"[METADATA-LOCAL] Writing metadata to: {repo_path}")
 
-        # Initialize repository metadata if needed
-        if not repo.is_initialized():
-            repo.initialize()
+        try:
+            repo = RepositoryMetadata(repo_path)
 
-        # Save agent information
-        repo.save_agent(
-            agent_id=self.client_id,
-            agent_data={
-                "hostname": socket.gethostname(),
-                "platform": sys.platform,
-                "os_info": f"{platform.system()} {platform.release()}",
-                "python_version": platform.python_version(),
-            },
-        )
+            # Initialize repository metadata if needed
+            if not repo.is_initialized():
+                logger.info(f"[METADATA-LOCAL] Initializing metadata directory at {repo.metadata_dir}")
+                repo.initialize()
+            else:
+                logger.info(f"[METADATA-LOCAL] Metadata already initialized at {repo.metadata_dir}")
 
-        # Save job configuration
-        repo.save_job(
-            job_name=job_name,
-            job_config={
-                "source_path": source_path,
-                "backend": backend,
-                "client_id": self.client_id,
-            },
-        )
-
-        # Save run record
-        run_data = {
-            "status": "success" if result.get("success") else "failed",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "bytes_transferred": result.get("bytes", 0),
-            "files_transferred": result.get("files", 0),
-            "snapshot_id": result.get("snapshot_id"),
-            "agent_id": self.client_id,
-            "hostname": socket.gethostname(),
-        }
-        repo.save_job_run(job_name, run_id, run_data)
-
-        # For restic/kopia, also save snapshot metadata
-        snapshot_id = result.get("snapshot_id")
-        if snapshot_id and backend in ("restic", "kopia"):
-            repo.save_snapshot(
-                snapshot_id=snapshot_id,
-                snapshot_data={
-                    "job_name": job_name,
-                    "run_id": run_id,
+            # Save agent information
+            repo.save_agent(
+                agent_id=self.client_id,
+                agent_data={
                     "hostname": socket.gethostname(),
-                    "paths": [source_path],
-                    "time": finished_at.isoformat(),
+                    "platform": sys.platform,
+                    "os_info": f"{platform.system()} {platform.release()}",
+                    "python_version": platform.python_version(),
+                },
+            )
+            logger.debug(f"[METADATA-LOCAL] Saved agent info for {self.client_id}")
+
+            # Save job configuration
+            repo.save_job(
+                job_name=job_name,
+                job_config={
+                    "source_path": source_path,
                     "backend": backend,
+                    "client_id": self.client_id,
                 },
             )
 
-        logger.info(f"[METADATA] Wrote backup metadata to repository: {repo_path}")
+            # Save run record
+            run_data = {
+                "status": "success" if result.get("success") else "failed",
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "bytes_transferred": result.get("bytes", 0),
+                "files_transferred": result.get("files", 0),
+                "snapshot_id": result.get("snapshot_id"),
+                "agent_id": self.client_id,
+                "hostname": socket.gethostname(),
+            }
+            repo.save_job_run(job_name, run_id, run_data)
+
+            # For restic/kopia, also save snapshot metadata
+            snapshot_id = result.get("snapshot_id")
+            if snapshot_id and backend in ("restic", "kopia"):
+                repo.save_snapshot(
+                    snapshot_id=snapshot_id,
+                    snapshot_data={
+                        "job_name": job_name,
+                        "run_id": run_id,
+                        "hostname": socket.gethostname(),
+                        "paths": [source_path],
+                        "time": finished_at.isoformat(),
+                        "backend": backend,
+                    },
+                )
+
+            logger.info(f"[METADATA-LOCAL] Successfully wrote metadata to: {repo_path}")
+
+        except Exception as e:
+            logger.error(f"[METADATA-LOCAL] Failed to write metadata to {repo_path}: {e}")
 
     def _write_repo_metadata_smb(
         self,
