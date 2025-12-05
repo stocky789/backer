@@ -71,6 +71,20 @@ def get_storage() -> Storage:
     return _storage
 
 
+def _get_job_subfolder(job_name: str) -> str:
+    """Get a safe subfolder name for a job.
+
+    Each job gets its own subfolder within the repository to prevent conflicts
+    between different backup jobs (especially important for restic/kopia which
+    initialize the repository on first use).
+    """
+    # Sanitize job name for use as folder name
+    # Replace any unsafe characters with underscores
+    import re
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', job_name)
+    return safe_name
+
+
 def _build_backup_command_payload(
     job: dict[str, Any],
     job_name: str,
@@ -83,6 +97,9 @@ def _build_backup_command_payload(
     This ensures SMB credentials are included for Linux agents that
     need them to access network shares, and repository passwords are
     included for restic/kopia backends.
+
+    Each job automatically gets its own subfolder within the destination
+    to prevent conflicts between different backup jobs.
     """
     storage = storage or _storage
     if storage is None:
@@ -92,11 +109,20 @@ def _build_backup_command_payload(
     backend_options = job.get("backend_options", {}).copy()
     backend = job.get("backend", "rclone")
 
+    # Get base destination and append job-specific subfolder
+    base_destination = job.get("destination_path", "")
+    job_subfolder = _get_job_subfolder(job_name)
+    if base_destination:
+        # Normalize path separators and append subfolder
+        destination_path = f"{base_destination.rstrip('/')}/{job_subfolder}"
+    else:
+        destination_path = ""
+
     payload = {
         "job_name": job_name,
         "run_id": run_id,
         "source_path": job.get("source_path"),
-        "destination_path": job.get("destination_path"),
+        "destination_path": destination_path,
         "backend": backend,
         "excludes": job.get("excludes", []),
         "backend_options": backend_options,
@@ -1207,6 +1233,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
 
         # Get backup source path (this is the backup destination in the job)
+        # Note: This is the base path from job config, we need to add job subfolder
         backup_source = job.get("destination_path")
 
         # For imported jobs, destination_path might be missing - look up from repository
@@ -1229,6 +1256,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 detail="Job is missing destination_path and no repository configured. "
                        "Please re-import or reconfigure the job."
             )
+
+        # Append job-specific subfolder to backup source
+        # This matches where _build_backup_command_payload puts the backup
+        job_subfolder = _get_job_subfolder(job_name)
+        backup_source = f"{backup_source.rstrip('/')}/{job_subfolder}"
+
         backend = job.get("backend", "rclone")
         source_subfolder = data.get("source_subfolder", "")
 
@@ -1735,115 +1768,147 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 # For SMB shares, use smbclient to read metadata directly
                 elif repo_type == "smb":
-                    metadata_base = f"{subpath}/.backer" if subpath else ".backer"
-                    metadata_path = f"{metadata_base}/metadata.json"
+                    # Scan job subfolders for metadata
+                    # Each job has its own subfolder: repo_root/job_name/.backer/
+                    base_path = subpath if subpath else ""
 
-                    task.message = f"Reading metadata from {metadata_path}..."
-                    task.progress = 20
-                    logger.info(f"[SCAN] Looking for metadata at //{server}/{share}/{metadata_path}")
+                    task.message = "Listing job subfolders..."
+                    task.progress = 15
+                    logger.info(f"[SCAN] Listing job subfolders at //{server}/{share}/{base_path}")
 
-                    # Try to read metadata.json
-                    success, content = smb_read_file(
-                        server, share, metadata_path,
+                    # List directories at the repo root (these are job subfolders)
+                    ok, entries = smb_list_files(
+                        server, share, base_path,
                         username, password, domain
                     )
 
-                    if not success:
-                        # Log detailed error for debugging
-                        logger.info(f"[SCAN] No metadata found at //{server}/{share}/{metadata_path}: {content}")
-                        return format_result({
-                            "initialized": False,
-                            "agents": [],
-                            "jobs": [],
-                            "snapshots": [],
-                            "summary": {"agent_count": 0, "job_count": 0, "snapshot_count": 0, "total_runs": 0},
-                            "scan_path": f"//{server}/{share}/{metadata_path}",
-                            "scan_note": f"Looked for .backer/metadata.json - {content}",
-                        })
+                    all_agents = []
+                    all_jobs = []
+                    all_snapshots = []
+                    found_any_metadata = False
+                    agent_ids_seen = set()
 
-                    try:
-                        metadata = json_module.loads(content)
-                    except json_module.JSONDecodeError:
-                        metadata = {}
-
-                    # Read agents
-                    task.message = "Scanning agents..."
-                    task.progress = 30
-                    agents = []
-                    ok, agent_files = smb_list_files(
-                        server, share, f"{metadata_base}/agents", username, password, domain
-                    )
                     if ok:
-                        for f in agent_files:
-                            if f.endswith(".json"):
-                                ok2, c = smb_read_file(
-                                    server, share, f"{metadata_base}/agents/{f}",
-                                    username, password, domain
-                                )
-                                if ok2:
-                                    try:
-                                        agents.append(json_module.loads(c))
-                                    except json_module.JSONDecodeError:
-                                        pass
+                        # Filter to get just directory names (job subfolders)
+                        job_folders = [e for e in entries if not e.startswith('.') and not e.endswith('.json')]
 
-                    # Read jobs
-                    task.message = "Scanning jobs..."
-                    task.progress = 50
-                    jobs = []
-                    ok, job_dirs = smb_list_files(
-                        server, share, f"{metadata_base}/jobs", username, password, domain
-                    )
-                    if ok:
-                        for d in job_dirs:
-                            ok2, c = smb_read_file(
-                                server, share, f"{metadata_base}/jobs/{d}/config.json",
+                        total_folders = len(job_folders)
+                        for idx, job_folder in enumerate(job_folders):
+                            progress_pct = 20 + int((idx / max(total_folders, 1)) * 60)
+                            task.progress = progress_pct
+                            task.message = f"Scanning job folder: {job_folder}..."
+
+                            folder_path = f"{base_path}/{job_folder}" if base_path else job_folder
+                            metadata_base = f"{folder_path}/.backer"
+
+                            # Check if this folder has .backer metadata
+                            ok2, content = smb_read_file(
+                                server, share, f"{metadata_base}/metadata.json",
                                 username, password, domain
                             )
-                            if ok2:
-                                try:
-                                    job = json_module.loads(c)
-                                    ok3, runs = smb_list_files(
-                                        server, share, f"{metadata_base}/jobs/{d}/runs",
+
+                            if not ok2:
+                                # No metadata in this folder, skip
+                                continue
+
+                            found_any_metadata = True
+                            logger.info(f"[SCAN] Found metadata in job folder: {job_folder}")
+
+                            # Read agents (dedup by agent_id)
+                            ok3, agent_files = smb_list_files(
+                                server, share, f"{metadata_base}/agents", username, password, domain
+                            )
+                            if ok3:
+                                for f in agent_files:
+                                    if f.endswith(".json"):
+                                        ok4, c = smb_read_file(
+                                            server, share, f"{metadata_base}/agents/{f}",
+                                            username, password, domain
+                                        )
+                                        if ok4:
+                                            try:
+                                                agent = json_module.loads(c)
+                                                agent_id = agent.get("agent_id")
+                                                if agent_id and agent_id not in agent_ids_seen:
+                                                    agent_ids_seen.add(agent_id)
+                                                    all_agents.append(agent)
+                                            except json_module.JSONDecodeError:
+                                                pass
+
+                            # Read jobs
+                            ok3, job_dirs = smb_list_files(
+                                server, share, f"{metadata_base}/jobs", username, password, domain
+                            )
+                            if ok3:
+                                for d in job_dirs:
+                                    ok4, c = smb_read_file(
+                                        server, share, f"{metadata_base}/jobs/{d}/config.json",
                                         username, password, domain
                                     )
-                                    run_count = len([r for r in runs if r.endswith(".json")])
-                                    job["run_count"] = run_count if ok3 else 0
-                                    jobs.append(job)
-                                except json_module.JSONDecodeError:
-                                    pass
+                                    if ok4:
+                                        try:
+                                            job = json_module.loads(c)
+                                            # Add job_folder context
+                                            job["job_folder"] = job_folder
+                                            ok5, runs = smb_list_files(
+                                                server, share, f"{metadata_base}/jobs/{d}/runs",
+                                                username, password, domain
+                                            )
+                                            run_count = len([r for r in runs if r.endswith(".json")]) if ok5 else 0
+                                            job["run_count"] = run_count
+                                            all_jobs.append(job)
+                                        except json_module.JSONDecodeError:
+                                            pass
 
-                    # Read snapshots
-                    task.message = "Scanning snapshots..."
-                    task.progress = 70
-                    snapshots = []
-                    ok, snap_files = smb_list_files(
-                        server, share, f"{metadata_base}/snapshots", username, password, domain
-                    )
-                    if ok:
-                        for f in snap_files:
-                            if f.endswith(".json"):
-                                ok2, c = smb_read_file(
-                                    server, share, f"{metadata_base}/snapshots/{f}",
-                                    username, password, domain
-                                )
-                                if ok2:
-                                    try:
-                                        snapshots.append(json_module.loads(c))
-                                    except json_module.JSONDecodeError:
-                                        pass
+                            # Read snapshots
+                            ok3, snap_files = smb_list_files(
+                                server, share, f"{metadata_base}/snapshots", username, password, domain
+                            )
+                            if ok3:
+                                for f in snap_files:
+                                    if f.endswith(".json"):
+                                        ok4, c = smb_read_file(
+                                            server, share, f"{metadata_base}/snapshots/{f}",
+                                            username, password, domain
+                                        )
+                                        if ok4:
+                                            try:
+                                                snap = json_module.loads(c)
+                                                snap["job_folder"] = job_folder
+                                                all_snapshots.append(snap)
+                                            except json_module.JSONDecodeError:
+                                                pass
+
+                    if not found_any_metadata:
+                        # Also check for legacy metadata at root level (backwards compatibility)
+                        metadata_base = f"{base_path}/.backer" if base_path else ".backer"
+                        ok, content = smb_read_file(
+                            server, share, f"{metadata_base}/metadata.json",
+                            username, password, domain
+                        )
+                        if not ok:
+                            logger.info(f"[SCAN] No metadata found in //{server}/{share}/{base_path}")
+                            return format_result({
+                                "initialized": False,
+                                "agents": [],
+                                "jobs": [],
+                                "snapshots": [],
+                                "summary": {"agent_count": 0, "job_count": 0, "snapshot_count": 0, "total_runs": 0},
+                                "scan_path": f"//{server}/{share}/{base_path}",
+                                "scan_note": "Scanned job subfolders for .backer/metadata.json - none found",
+                            })
 
                     task.progress = 90
                     return format_result({
-                        "initialized": True,
-                        "metadata": metadata,
-                        "agents": agents,
-                        "jobs": jobs,
-                        "snapshots": snapshots,
+                        "initialized": found_any_metadata,
+                        "agents": all_agents,
+                        "jobs": all_jobs,
+                        "snapshots": all_snapshots,
                         "summary": {
-                            "agent_count": len(agents),
-                            "job_count": len(jobs),
-                            "snapshot_count": len(snapshots),
-                            "total_runs": sum(j.get("run_count", 0) for j in jobs),
+                            "agent_count": len(all_agents),
+                            "job_count": len(all_jobs),
+                            "snapshot_count": len(all_snapshots),
+                            "total_runs": sum(j.get("run_count", 0) for j in all_jobs),
                         },
                     })
 

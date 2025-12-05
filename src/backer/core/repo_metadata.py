@@ -385,12 +385,72 @@ class RepositoryMetadata:
     def discover_all(self) -> dict[str, Any]:
         """Discover all metadata in the repository.
 
+        Scans job subfolders for metadata since each backup job has its own
+        subfolder within the repository (repo_root/job_name/.backer/).
+
         Returns a complete summary of what's in the repository.
 
         Returns:
             Dict with agents, jobs, runs, snapshots
         """
-        if not self.is_initialized():
+        # First check if we have metadata at the root level (legacy)
+        if self.is_initialized():
+            metadata = self.get_metadata() or {}
+            agents = self.list_agents()
+            jobs = self.list_jobs()
+            snapshots = self.list_snapshots()
+
+            total_runs = sum(job.get("run_count", 0) for job in jobs)
+
+            return {
+                "initialized": True,
+                "metadata": metadata,
+                "agents": agents,
+                "jobs": jobs,
+                "snapshots": snapshots,
+                "summary": {
+                    "agent_count": len(agents),
+                    "job_count": len(jobs),
+                    "snapshot_count": len(snapshots),
+                    "total_runs": total_runs,
+                },
+            }
+
+        # Scan job subfolders for metadata
+        # Each job has its own subfolder: repo_root/job_name/.backer/
+        all_agents = []
+        all_jobs = []
+        all_snapshots = []
+        agent_ids_seen = set()
+        found_any = False
+
+        if self.repo_path.exists():
+            for item in self.repo_path.iterdir():
+                if item.is_dir() and not item.name.startswith('.'):
+                    # Check if this subfolder has .backer metadata
+                    subfolder_meta = RepositoryMetadata(item, self.repo_type)
+                    if subfolder_meta.is_initialized():
+                        found_any = True
+                        logger.debug(f"Found metadata in job folder: {item.name}")
+
+                        # Aggregate agents (dedup by agent_id)
+                        for agent in subfolder_meta.list_agents():
+                            agent_id = agent.get("agent_id")
+                            if agent_id and agent_id not in agent_ids_seen:
+                                agent_ids_seen.add(agent_id)
+                                all_agents.append(agent)
+
+                        # Aggregate jobs
+                        for job in subfolder_meta.list_jobs():
+                            job["job_folder"] = item.name
+                            all_jobs.append(job)
+
+                        # Aggregate snapshots
+                        for snap in subfolder_meta.list_snapshots():
+                            snap["job_folder"] = item.name
+                            all_snapshots.append(snap)
+
+        if not found_any:
             return {
                 "initialized": False,
                 "agents": [],
@@ -398,24 +458,17 @@ class RepositoryMetadata:
                 "snapshots": [],
             }
 
-        metadata = self.get_metadata() or {}
-        agents = self.list_agents()
-        jobs = self.list_jobs()
-        snapshots = self.list_snapshots()
-
-        # Calculate total runs
-        total_runs = sum(job.get("run_count", 0) for job in jobs)
+        total_runs = sum(job.get("run_count", 0) for job in all_jobs)
 
         return {
             "initialized": True,
-            "metadata": metadata,
-            "agents": agents,
-            "jobs": jobs,
-            "snapshots": snapshots,
+            "agents": all_agents,
+            "jobs": all_jobs,
+            "snapshots": all_snapshots,
             "summary": {
-                "agent_count": len(agents),
-                "job_count": len(jobs),
-                "snapshot_count": len(snapshots),
+                "agent_count": len(all_agents),
+                "job_count": len(all_jobs),
+                "snapshot_count": len(all_snapshots),
                 "total_runs": total_runs,
             },
         }

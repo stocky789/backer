@@ -726,7 +726,7 @@ class BackerAgent:
         dest_path: str,
     ) -> tuple[str, Any]:
         """Prepare NFS destination path for the backend."""
-        server, export_path, _ = self._parse_nfs_path(dest_path)
+        server, export_path, subpath = self._parse_nfs_path(dest_path)
 
         if backend_name == "rclone":
             # For rclone with NFS, we need to mount first as rclone doesn't have
@@ -735,23 +735,26 @@ class BackerAgent:
             print("[NFS] Mounting NFS export for rclone backend")
             ctx = self._nfs_mount_context(server=server, export_path=export_path)
             mount_path = ctx.__enter__()
-            print(f"[NFS] Using mounted path: {mount_path}")
-            return str(mount_path), ctx
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            print(f"[NFS] Using mounted path: {full_path}")
+            return full_path, ctx
 
         elif backend_name in ("restic", "kopia"):
             # restic and kopia need a mounted filesystem path
             print(f"[NFS] Mounting NFS export for {backend_name} backend")
             ctx = self._nfs_mount_context(server=server, export_path=export_path)
             mount_path = ctx.__enter__()
-            print(f"[NFS] Using mounted path: {mount_path}")
-            return str(mount_path), ctx
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            print(f"[NFS] Using mounted path: {full_path}")
+            return full_path, ctx
 
         else:
             # Unknown backend, try mounting anyway
             print(f"[NFS] Warning: Unknown backend '{backend_name}', mounting NFS export")
             ctx = self._nfs_mount_context(server=server, export_path=export_path)
             mount_path = ctx.__enter__()
-            return str(mount_path), ctx
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            return full_path, ctx
 
     def execute_backup(
         self,
