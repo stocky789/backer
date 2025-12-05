@@ -32,6 +32,7 @@ from backer.server.models import (
 )
 from backer.server.scheduler import BackupScheduler
 from backer.server.storage import Storage
+from backer.server.tasks import Task, get_task_manager
 from backer.server.web.routes import router as web_router
 
 logger = logging.getLogger(__name__)
@@ -293,6 +294,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def health_check() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
 
+    # ============ Background Tasks ============
+
+    @app.get("/api/v1/tasks")
+    def list_tasks(active_only: bool = False) -> list[dict[str, Any]]:
+        """List background tasks.
+
+        Args:
+            active_only: If true, only return pending/running tasks
+        """
+        task_manager = get_task_manager()
+        if active_only:
+            tasks = task_manager.get_active_tasks()
+        else:
+            tasks = task_manager.get_recent_tasks(limit=20)
+        return [t.to_dict() for t in tasks]
+
+    @app.get("/api/v1/tasks/{task_id}")
+    def get_task(task_id: str) -> dict[str, Any]:
+        """Get status of a specific task."""
+        task_manager = get_task_manager()
+        task = task_manager.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task.to_dict()
+
     # ============ Client Management ============
 
     @app.post("/api/v1/clients/register", response_model=ClientRegisterResponse)
@@ -371,62 +397,89 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Remove a client and optionally clean up repository metadata.
 
+        The client is removed from the database immediately.
+        Metadata cleanup from repositories runs in the background.
+
         Args:
             client_id: The client ID to delete
             delete_metadata: If True (default), also delete agent metadata from all repositories
         """
-        from backer.server.repositories import smb_delete_file
-
         # Get client info before deleting (for hostname matching)
         client = storage.get_client(client_id)
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        metadata_deleted = 0
-        metadata_errors = []
+        client_name = client.get("name", client_id)
 
-        # Delete agent metadata from all repositories
-        if delete_metadata:
-            logger.info(f"[DELETE AGENT] Deleting agent '{client_id}' with metadata cleanup")
-            repos = storage.list_repositories()
-            for repo in repos:
-                repo_id = repo.get("id")
-                repo_type = repo.get("repo_type", "smb")
-                server = repo.get("server", "")
-                share = repo.get("share", "")
-                subpath = repo.get("path", "")
-                username = repo.get("username")
-                password = storage.get_repository_password(repo_id) if repo_id else None
-                domain = repo.get("domain")
-
-                # Build path to agent metadata file
-                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
-                agent_path = f"{metadata_base}/agents/{client_id}.json"
-
-                try:
-                    if repo_type == "smb":
-                        success, msg = smb_delete_file(
-                            server, share, agent_path,
-                            username, password, domain
-                        )
-                        if success:
-                            metadata_deleted += 1
-                            logger.info(f"[DELETE AGENT] Deleted agent metadata from {server}/{share}: {agent_path}")
-                        elif "already deleted" not in msg.lower() and "no such file" not in msg.lower():
-                            metadata_errors.append(f"{server}/{share}: {msg}")
-                except Exception as e:
-                    metadata_errors.append(f"{server}/{share}: {str(e)}")
-                    logger.warning(f"[DELETE AGENT] Error deleting from {server}/{share}: {e}")
-
-        # Delete client from database
+        # Delete client from database immediately
         if not storage.delete_client(client_id):
             raise HTTPException(status_code=404, detail="Client not found")
 
         result: dict[str, Any] = {"status": "deleted"}
-        if metadata_deleted > 0:
-            result["metadata_deleted"] = metadata_deleted
-        if metadata_errors:
-            result["metadata_warnings"] = metadata_errors[:5]
+
+        # Schedule metadata cleanup as a background task
+        if delete_metadata:
+            # Capture repository info for the background task
+            repos = storage.list_repositories()
+            repo_info = []
+            for repo in repos:
+                repo_id = repo.get("id")
+                repo_info.append({
+                    "repo_id": repo_id,
+                    "repo_type": repo.get("repo_type", "smb"),
+                    "server": repo.get("server", ""),
+                    "share": repo.get("share", ""),
+                    "path": repo.get("path", ""),
+                    "username": repo.get("username"),
+                    "password": storage.get_repository_password(repo_id) if repo_id else None,
+                    "domain": repo.get("domain"),
+                })
+
+            def cleanup_agent_metadata(task: Task) -> dict[str, Any]:
+                """Background task to clean up agent metadata from repositories."""
+                from backer.server.repositories import smb_delete_file
+
+                metadata_deleted = 0
+                metadata_errors = []
+                total = len(repo_info)
+
+                for i, repo in enumerate(repo_info):
+                    task.progress = int((i / total) * 100) if total > 0 else 0
+                    task.message = f"Cleaning up repository {i + 1} of {total}..."
+
+                    # Build path to agent metadata file
+                    subpath = repo["path"]
+                    metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+                    agent_path = f"{metadata_base}/agents/{client_id}.json"
+
+                    try:
+                        if repo["repo_type"] == "smb":
+                            success, msg = smb_delete_file(
+                                repo["server"], repo["share"], agent_path,
+                                repo["username"], repo["password"], repo["domain"]
+                            )
+                            if success:
+                                metadata_deleted += 1
+                                logger.info(
+                                    f"[DELETE AGENT] Deleted metadata from "
+                                    f"{repo['server']}/{repo['share']}: {agent_path}"
+                                )
+                            elif "already deleted" not in msg.lower() and "no such file" not in msg.lower():
+                                metadata_errors.append(f"{repo['server']}/{repo['share']}: {msg}")
+                    except Exception as e:
+                        metadata_errors.append(f"{repo['server']}/{repo['share']}: {str(e)}")
+                        logger.warning(f"[DELETE AGENT] Error: {e}")
+
+                return {"deleted": metadata_deleted, "errors": metadata_errors}
+
+            task_manager = get_task_manager()
+            task = task_manager.submit_with_func(
+                task_type="delete_agent_metadata",
+                description=f"Cleaning up metadata for agent '{client_name}'",
+                func=cleanup_agent_metadata,
+            )
+            result["cleanup_task_id"] = task.id
+            result["message"] = "Agent deleted. Metadata cleanup running in background."
 
         return result
 
