@@ -904,6 +904,13 @@ class BackerAgent:
             )
 
             # Report result to server
+            # Extract snapshot_id from backend metadata (for kopia/restic)
+            snapshot_id = None
+            if hasattr(result, "metadata") and result.metadata:
+                snapshot_id = result.metadata.get("snapshot_id")
+            if snapshot_id:
+                print(f"[BACKUP] Captured snapshot ID: {snapshot_id}")
+
             report = {
                 "run_id": run_id,
                 "job_name": job_name,
@@ -915,6 +922,7 @@ class BackerAgent:
                 "files_transferred": result.files_transferred,
                 "errors": result.errors,
                 "output": result.output[:5000],
+                "snapshot_id": snapshot_id,
             }
 
             try:
