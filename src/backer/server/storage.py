@@ -989,6 +989,7 @@ class Storage:
         return {
             "id": row["id"],
             "username": row["username"],
+            "password_hash": row["password_hash"],
             "display_name": row["display_name"],
             "email": row["email"],
             "role": row["role"],
