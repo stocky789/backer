@@ -27,7 +27,7 @@
         </thead>
         <tbody>
             {% for run in runs %}
-            <tr class="run-row" data-run-id="{{ run.run_id }}" style="cursor: pointer;">
+            <tr class="run-row" data-run-id="{{ run.run_id or '' }}" style="cursor: pointer;">
                 <td><strong>{{ run.job_name }}</strong></td>
                 <td>{{ run.client_id or '-' }}</td>
                 <td>
@@ -224,7 +224,8 @@ function getStatusBadge(status) {
 
 function stripAnsi(str) {
     // Remove ANSI escape codes (colors, etc.)
-    return str.replace(/\x1b\[[0-9;]*m/g, '');
+    if (!str) return '';
+    return String(str).replace(/\x1b\[[0-9;]*m/g, '');
 }
 
 async function showJobLogs(runId) {
@@ -265,9 +266,11 @@ async function showJobLogs(runId) {
         // Errors
         const errorsSection = document.getElementById('logsErrorsSection');
         const errorsEl = document.getElementById('logsErrors');
-        if (data.errors && data.errors.length > 0) {
+        if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
             errorsSection.style.display = 'block';
-            errorsEl.textContent = stripAnsi(data.errors.join('\n'));
+            // Convert all error items to strings and strip ANSI codes
+            const errorText = data.errors.map(e => stripAnsi(typeof e === 'string' ? e : JSON.stringify(e))).join('\n');
+            errorsEl.textContent = errorText;
         } else {
             errorsSection.style.display = 'none';
         }
@@ -310,12 +313,16 @@ document.getElementById('logsModal').addEventListener('click', (e) => {
 
 // Add click handlers to all run rows
 document.querySelectorAll('.run-row').forEach(row => {
-    row.addEventListener('click', () => {
-        const runId = row.dataset.runId;
-        if (runId) {
+    const runId = row.dataset.runId;
+    if (runId && runId !== 'None' && runId !== 'undefined') {
+        row.addEventListener('click', () => {
             showJobLogs(runId);
-        }
-    });
+        });
+    } else {
+        // No run_id, make row not clickable
+        row.style.cursor = 'default';
+        row.style.opacity = '0.7';
+    }
 });
 </script>
 {% endblock %}
