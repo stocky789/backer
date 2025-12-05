@@ -53,9 +53,7 @@
                     <button class="btn btn-secondary btn-sm" onclick="testRepo('{{ repo.id }}')">Test</button>
                     <button class="btn btn-secondary btn-sm" onclick="scanRepo('{{ repo.id }}', '{{ repo.name }}')">Scan</button>
                     <button class="btn btn-danger btn-sm"
-                            hx-delete="/api/v1/repositories/{{ repo.id }}"
-                            hx-confirm="Delete repository '{{ repo.name }}'?"
-                            hx-on::after-request="location.reload()">
+                            onclick="deleteRepo('{{ repo.id }}', '{{ repo.name }}')">
                         Delete
                     </button>
                 </td>
@@ -559,6 +557,34 @@ async function testRepo(repoId) {
     }
 }
 
+async function deleteRepo(repoId, repoName) {
+    if (!confirm(`Delete repository '${repoName}'?`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/v1/repositories/${repoId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            // Small delay to ensure server has processed the delete
+            setTimeout(() => {
+                location.reload();
+            }, 100);
+        } else {
+            const data = await response.json();
+            alert('Failed to delete repository: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+        // Still try to reload in case it succeeded
+        setTimeout(() => {
+            location.reload();
+        }, 500);
+    }
+}
+
 // Close modal on background click
 document.getElementById('addModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideAddModal();
@@ -667,11 +693,19 @@ function displayScanResults(data) {
     const summary = data.summary || {};
 
     if (!data.initialized) {
+        let diagnosticHtml = '';
+        if (data.scan_path) {
+            diagnosticHtml += `<p style="color: var(--text-muted); font-size: 12px;">Searched: <code>${escapeHtml(data.scan_path)}</code></p>`;
+        }
+        if (data.scan_note) {
+            diagnosticHtml += `<p style="color: var(--text-muted); font-size: 12px;">Note: ${escapeHtml(data.scan_note)}</p>`;
+        }
         resultsDiv.innerHTML = `
             <div class="scan-section">
                 <h4>No Backer Metadata Found</h4>
                 <p>This repository does not have Backer metadata. Backups will start being tracked after the first backup completes.</p>
                 <p style="color: var(--text-muted);">Path: <code>${escapeHtml(data.path)}</code></p>
+                ${diagnosticHtml}
             </div>
         `;
         return;

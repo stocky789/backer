@@ -1427,6 +1427,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Discover available shares on a server."""
+        import asyncio
+
         from backer.server.repositories import (
             RepositoryType,
         )
@@ -1450,7 +1452,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid type: {repo_type}")
 
-        success, result = do_discover(rtype, server, username, password, domain)
+        # Run blocking SMB operation in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        success, result = await loop.run_in_executor(
+            None, lambda: do_discover(rtype, server, username, password, domain)
+        )
 
         if success:
             return {
@@ -1466,6 +1472,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Browse a directory on a share."""
+        import asyncio
+
         from backer.server.repositories import (
             RepositoryType,
             browse_directory,
@@ -1489,7 +1497,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid type: {repo_type}")
 
-        success, result = browse_directory(rtype, server, share, path, username, password, domain)
+        # Run blocking SMB operation in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        success, result = await loop.run_in_executor(
+            None, lambda: browse_directory(rtype, server, share, path, username, password, domain)
+        )
 
         if success:
             return {
@@ -1666,7 +1678,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             def format_result(discovery: dict) -> dict[str, Any]:
                 """Format discovery result for API response."""
-                return {
+                result = {
                     "success": True,
                     "repository_id": repo_id,
                     "repository_name": repo_name,
@@ -1694,6 +1706,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         for s in discovery.get("snapshots", [])[:50]
                     ],
                 }
+                # Include scan diagnostic info if present
+                if discovery.get("scan_path"):
+                    result["scan_path"] = discovery["scan_path"]
+                if discovery.get("scan_note"):
+                    result["scan_note"] = discovery["scan_note"]
+                return result
 
             try:
                 task.message = "Connecting to repository..."
@@ -1718,23 +1736,29 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # For SMB shares, use smbclient to read metadata directly
                 elif repo_type == "smb":
                     metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+                    metadata_path = f"{metadata_base}/metadata.json"
 
-                    task.message = "Reading metadata..."
+                    task.message = f"Reading metadata from {metadata_path}..."
                     task.progress = 20
+                    logger.info(f"[SCAN] Looking for metadata at //{server}/{share}/{metadata_path}")
 
                     # Try to read metadata.json
                     success, content = smb_read_file(
-                        server, share, f"{metadata_base}/metadata.json",
+                        server, share, metadata_path,
                         username, password, domain
                     )
 
                     if not success:
+                        # Log detailed error for debugging
+                        logger.info(f"[SCAN] No metadata found at //{server}/{share}/{metadata_path}: {content}")
                         return format_result({
                             "initialized": False,
                             "agents": [],
                             "jobs": [],
                             "snapshots": [],
                             "summary": {"agent_count": 0, "job_count": 0, "snapshot_count": 0, "total_runs": 0},
+                            "scan_path": f"//{server}/{share}/{metadata_path}",
+                            "scan_note": f"Looked for .backer/metadata.json - {content}",
                         })
 
                     try:
