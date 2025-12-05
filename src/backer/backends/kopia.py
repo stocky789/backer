@@ -455,15 +455,13 @@ class KopiaBackend(BackendBase):
 
         try:
             # Determine the snapshot identifier to restore
-            # For kopia, "latest" needs to be qualified with the source path
-            # Format: user@host:/path/to/source or just the source path
+            # If user provided a specific snapshot ID, use it directly
+            # Only look up "latest" if no snapshot was specified
             snapshot_id = snapshot
 
             if not snapshot_id or snapshot_id == "latest":
                 if original_source_path:
                     # Use the original source path to find the latest snapshot
-                    # Kopia can restore using: kopia snapshot restore <source-path>@latest <target>
-                    # Or we can look up the latest snapshot ID for this source
                     print(f"[KOPIA] Looking up latest snapshot for source: {original_source_path}")
                     latest_id = self._find_latest_snapshot_for_source(original_source_path)
                     if latest_id:
@@ -475,10 +473,16 @@ class KopiaBackend(BackendBase):
                         print(f"[KOPIA] Using source path qualifier: {snapshot_id}")
                 else:
                     snapshot_id = "latest"
+            else:
+                print(f"[KOPIA] Using user-specified snapshot: {snapshot_id}")
 
             # Kopia restore syntax: kopia snapshot restore <snapshot-id> <target-path>
+            # Add flags to overwrite existing files and restore all content
             cmd = [
                 str(binary), "snapshot", "restore",
+                "--overwrite-files",
+                "--overwrite-directories",
+                "--overwrite-symlinks",
                 snapshot_id,
                 str(destination),
             ]
