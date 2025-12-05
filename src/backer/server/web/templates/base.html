@@ -48,11 +48,11 @@
         <header class="top-bar">
             <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
             <div class="top-bar-center">
-                <!-- Background Tasks Widget -->
-                <div id="tasksWidget" class="tasks-widget" style="display: none;">
+                <!-- Background Tasks Widget - Always visible -->
+                <div id="tasksWidget" class="tasks-widget">
                     <div class="tasks-indicator" onclick="toggleTasksPanel()">
                         <span class="tasks-spinner"></span>
-                        <span id="tasksCount">0</span> task(s) running
+                        <span id="tasksLabel">No background tasks</span>
                     </div>
                     <div id="tasksPanel" class="tasks-panel">
                         <div class="tasks-panel-header">
@@ -97,27 +97,21 @@
 
     function updateTasksWidget(tasks) {
         const widget = document.getElementById('tasksWidget');
-        const countEl = document.getElementById('tasksCount');
+        const labelEl = document.getElementById('tasksLabel');
         const listEl = document.getElementById('tasksList');
 
         // Count active tasks
         const activeTasks = tasks.filter(t => t.status === 'pending' || t.status === 'running');
         const recentTasks = tasks.slice(0, 10);
 
-        // Show/hide widget based on whether there are any tasks
-        if (recentTasks.length > 0) {
-            widget.style.display = 'block';
-            countEl.textContent = activeTasks.length;
-
-            // Update spinner visibility
-            const indicator = widget.querySelector('.tasks-indicator');
-            if (activeTasks.length > 0) {
-                indicator.classList.add('active');
-            } else {
-                indicator.classList.remove('active');
-            }
+        // Update label based on active task count
+        const indicator = widget.querySelector('.tasks-indicator');
+        if (activeTasks.length > 0) {
+            labelEl.textContent = activeTasks.length + ' task(s) running';
+            indicator.classList.add('active');
         } else {
-            widget.style.display = 'none';
+            labelEl.textContent = 'No background tasks';
+            indicator.classList.remove('active');
         }
 
         // Update tasks list

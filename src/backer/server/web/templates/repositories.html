@@ -516,12 +516,44 @@ function showError(elementId, message) {
 
 async function testRepo(repoId) {
     try {
+        // Start the test (returns immediately with task_id)
         const response = await fetch(`/api/v1/repositories/${repoId}/test`, {
             method: 'POST'
         });
         const data = await response.json();
-        alert(data.success ? 'Connection successful!' : 'Connection failed: ' + data.message);
-        if (data.success) location.reload();
+
+        if (data.task_id) {
+            // Poll for task completion
+            const taskId = data.task_id;
+            let attempts = 0;
+            const maxAttempts = 60; // 60 seconds max
+
+            const checkTask = async () => {
+                attempts++;
+                const taskResponse = await fetch(`/api/v1/tasks/${taskId}`);
+                const task = await taskResponse.json();
+
+                if (task.status === 'completed') {
+                    const result = task.result || {};
+                    alert(result.success ? 'Connection successful!' : 'Connection failed: ' + (result.message || 'Unknown error'));
+                    if (result.success) location.reload();
+                } else if (task.status === 'failed') {
+                    alert('Connection test failed: ' + (task.error || 'Unknown error'));
+                } else if (attempts < maxAttempts) {
+                    // Still running, check again in 1 second
+                    setTimeout(checkTask, 1000);
+                } else {
+                    alert('Connection test timed out');
+                }
+            };
+
+            // Start polling
+            setTimeout(checkTask, 500);
+        } else {
+            // Legacy response format (shouldn't happen)
+            alert(data.success ? 'Connection successful!' : 'Connection failed: ' + data.message);
+            if (data.success) location.reload();
+        }
     } catch (e) {
         alert('Test failed: ' + e.message);
     }
@@ -547,17 +579,72 @@ function hideScanModal() {
 async function scanRepo(repoId, repoName) {
     currentScanRepoId = repoId;
     document.getElementById('scanRepoName').textContent = repoName;
-    document.getElementById('scanResults').innerHTML = '<div class="loading">Scanning repository for backup metadata...</div>';
+    document.getElementById('scanResults').innerHTML = '<div class="loading">Starting repository scan...</div>';
     document.getElementById('scanActions').style.display = 'none';
     showScanModal();
 
     try {
+        // Start the scan (returns immediately with task_id)
         const response = await fetch(`/api/v1/repositories/${repoId}/scan`, {
             method: 'POST'
         });
         const data = await response.json();
 
-        if (data.success) {
+        if (data.task_id) {
+            // Poll for task completion
+            const taskId = data.task_id;
+            let attempts = 0;
+            const maxAttempts = 120; // 2 minutes max
+
+            const checkTask = async () => {
+                attempts++;
+                try {
+                    const taskResponse = await fetch(`/api/v1/tasks/${taskId}`);
+                    const task = await taskResponse.json();
+
+                    // Update progress message
+                    if (task.message) {
+                        document.getElementById('scanResults').innerHTML = `<div class="loading">${escapeHtml(task.message)}</div>`;
+                    }
+
+                    if (task.status === 'completed') {
+                        const result = task.result || {};
+                        if (result.success) {
+                            displayScanResults(result);
+                        } else {
+                            document.getElementById('scanResults').innerHTML = `
+                                <div class="error-msg">
+                                    <strong>Scan failed:</strong> ${escapeHtml(result.error || 'Unknown error')}
+                                </div>
+                            `;
+                        }
+                    } else if (task.status === 'failed') {
+                        document.getElementById('scanResults').innerHTML = `
+                            <div class="error-msg">
+                                <strong>Scan failed:</strong> ${escapeHtml(task.error || 'Unknown error')}
+                            </div>
+                        `;
+                    } else if (attempts < maxAttempts) {
+                        // Still running, check again in 1 second
+                        setTimeout(checkTask, 1000);
+                    } else {
+                        document.getElementById('scanResults').innerHTML = `
+                            <div class="error-msg">
+                                <strong>Scan timed out</strong>
+                            </div>
+                        `;
+                    }
+                } catch (pollError) {
+                    if (attempts < maxAttempts) {
+                        setTimeout(checkTask, 1000);
+                    }
+                }
+            };
+
+            // Start polling
+            setTimeout(checkTask, 500);
+        } else if (data.success) {
+            // Legacy response format (shouldn't happen)
             displayScanResults(data);
         } else {
             document.getElementById('scanResults').innerHTML = `
