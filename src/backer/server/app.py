@@ -1,6 +1,7 @@
 """FastAPI application for the Backer server."""
 
 import hashlib
+import json
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -868,6 +869,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
         return storage.get_job_runs(job_name, limit)
 
+    @app.get("/api/v1/runs/{run_id}")
+    def get_run_details(
+        run_id: str, storage: Storage = Depends(get_storage)
+    ) -> dict[str, Any]:
+        """Get details for a specific job run including logs and output."""
+        run = storage.get_job_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        # Parse errors JSON if stored as string
+        errors = run.get("errors", [])
+        if isinstance(errors, str):
+            try:
+                errors = json.loads(errors)
+            except json.JSONDecodeError:
+                errors = [errors] if errors else []
+
+        return {
+            "run_id": run["run_id"],
+            "job_name": run["job_name"],
+            "status": run["status"],
+            "client_id": run.get("client_id"),
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
+            "bytes_transferred": run.get("bytes_transferred", 0),
+            "files_transferred": run.get("files_transferred", 0),
+            "errors": errors,
+            "output": run.get("output", ""),
+            "snapshot_id": run.get("snapshot_id"),
+        }
+
     # ============ Command acknowledgement ============
 
     @app.post("/api/v1/commands/{command_id}/ack")
@@ -1137,8 +1169,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         command_payload = {
             "job_name": job_name,
             "run_id": f"restore_{restore_id}",
-            "source_path": backup_source,  # Restore FROM backup location
+            "source_path": backup_source,  # Restore FROM backup location (repository)
             "destination_path": destination_path,  # Restore TO this location
+            "original_source_path": job.get("source_path"),  # For kopia/restic snapshot lookup
             "backend": backend,
             "backend_options": backend_options,
             "snapshot": data.get("snapshot"),

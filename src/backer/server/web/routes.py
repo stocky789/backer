@@ -345,43 +345,40 @@ async def history_page(request: Request):
     """Backup history page."""
     storage = get_storage(request)
 
-    jobs = storage.list_jobs()
+    # Get all runs (backups and restores) directly from the database
+    # This is more efficient and includes restore jobs which have different job_names
+    runs = storage.get_all_job_runs(limit=100)
     all_runs = []
 
-    for job in jobs:
-        runs = storage.get_job_runs(job["name"], limit=50)
-        for run in runs:
-            started = run.get("started_at")
-            finished = run.get("finished_at")
+    for run in runs:
+        started = run.get("started_at")
+        finished = run.get("finished_at")
 
-            duration = None
-            if started and finished:
-                try:
-                    start_dt = datetime.fromisoformat(started)
-                    end_dt = datetime.fromisoformat(finished)
-                    diff = (end_dt - start_dt).total_seconds()
-                    if diff < 60:
-                        duration = f"{diff:.0f}s"
-                    else:
-                        duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
-                except ValueError:
-                    pass
+        duration = None
+        if started and finished:
+            try:
+                start_dt = datetime.fromisoformat(started)
+                end_dt = datetime.fromisoformat(finished)
+                diff = (end_dt - start_dt).total_seconds()
+                if diff < 60:
+                    duration = f"{diff:.0f}s"
+                else:
+                    duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
+            except ValueError:
+                pass
 
-            all_runs.append({
-                **run,
-                "started_at_formatted": started[:19].replace("T", " ") if started else "-",
-                "started_at_ago": time_ago(started),
-                "duration": duration,
-                "bytes_formatted": format_bytes(run.get("bytes_transferred", 0)),
-            })
-
-    # Sort by time, most recent first
-    all_runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+        all_runs.append({
+            **run,
+            "started_at_formatted": started[:19].replace("T", " ") if started else "-",
+            "started_at_ago": time_ago(started),
+            "duration": duration,
+            "bytes_formatted": format_bytes(run.get("bytes_transferred", 0)),
+        })
 
     return templates.TemplateResponse("history.html", {
         "request": request,
         "active": "history",
-        "runs": all_runs[:100],
+        "runs": all_runs,
     })
 
 

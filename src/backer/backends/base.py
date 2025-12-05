@@ -118,6 +118,7 @@ class BackendBase(ABC):
         snapshot: str | None = None,
         dry_run: bool = False,
         progress_callback: Any | None = None,
+        original_source_path: str | None = None,
     ) -> BackendResult:
         """Restore from a backup.
 
@@ -127,6 +128,7 @@ class BackendBase(ABC):
             snapshot: Specific snapshot/version to restore (if supported)
             dry_run: If True, simulate the restore without making changes
             progress_callback: Optional callback for progress updates
+            original_source_path: The original path that was backed up (for kopia/restic snapshot lookup)
 
         Returns:
             BackendResult with operation details

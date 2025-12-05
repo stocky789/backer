@@ -10,6 +10,7 @@
 <div class="card">
     <div class="card-header">
         <span class="card-title">Recent Backups</span>
+        <span class="card-hint" style="color: var(--text-muted); font-size: 12px;">Click a row to view logs</span>
     </div>
     {% if runs %}
     <table>
@@ -26,7 +27,7 @@
         </thead>
         <tbody>
             {% for run in runs %}
-            <tr>
+            <tr class="run-row" data-run-id="{{ run.run_id or '' }}" style="cursor: pointer;">
                 <td><strong>{{ run.job_name }}</strong></td>
                 <td>{{ run.client_id or '-' }}</td>
                 <td>
@@ -55,4 +56,273 @@
     </div>
     {% endif %}
 </div>
+
+<!-- Job Logs Modal -->
+<div id="logsModal" class="modal-overlay">
+    <div class="modal logs-modal">
+        <div class="modal-header">
+            <span class="modal-title" id="logsModalTitle">Job Logs</span>
+            <button class="modal-close" onclick="closeLogsModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="logsLoading" class="logs-loading">
+                <span class="loading">Loading logs...</span>
+            </div>
+            <div id="logsContent" style="display: none;">
+                <div class="logs-meta">
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Run ID:</span>
+                        <code id="logsRunId"></code>
+                    </div>
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Status:</span>
+                        <span id="logsStatus"></span>
+                    </div>
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Agent:</span>
+                        <span id="logsAgent"></span>
+                    </div>
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Started:</span>
+                        <span id="logsStarted"></span>
+                    </div>
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Finished:</span>
+                        <span id="logsFinished"></span>
+                    </div>
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Files:</span>
+                        <span id="logsFiles"></span>
+                    </div>
+                    <div class="logs-meta-row">
+                        <span class="logs-meta-label">Size:</span>
+                        <span id="logsSize"></span>
+                    </div>
+                    <div class="logs-meta-row" id="logsSnapshotRow" style="display: none;">
+                        <span class="logs-meta-label">Snapshot:</span>
+                        <code id="logsSnapshot"></code>
+                    </div>
+                </div>
+
+                <div id="logsErrorsSection" style="display: none;">
+                    <h4 class="logs-section-title logs-section-error">Errors</h4>
+                    <pre id="logsErrors" class="logs-output logs-errors"></pre>
+                </div>
+
+                <div id="logsOutputSection">
+                    <h4 class="logs-section-title">Output</h4>
+                    <pre id="logsOutput" class="logs-output"></pre>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeLogsModal()">Close</button>
+        </div>
+    </div>
+</div>
+
+<style>
+.logs-modal {
+    max-width: 800px;
+    width: 90%;
+}
+
+.logs-loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+}
+
+.logs-meta {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px 20px;
+    padding: 15px;
+    background: var(--bg-dark);
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.logs-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.logs-meta-label {
+    color: var(--text-muted);
+    font-size: 13px;
+    min-width: 70px;
+}
+
+.logs-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--text);
+}
+
+.logs-section-title.logs-section-error {
+    color: var(--error);
+}
+
+.logs-output {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 15px;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 15px;
+}
+
+.logs-errors {
+    border-color: var(--error);
+    background: rgba(248, 81, 73, 0.05);
+}
+
+.logs-empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+@media (max-width: 600px) {
+    .logs-meta {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatDate(dateStr) {
+    if (!dateStr) return '-';
+    return dateStr.replace('T', ' ').substring(0, 19);
+}
+
+function getStatusBadge(status) {
+    const classes = {
+        'success': 'badge-success',
+        'failed': 'badge-error',
+        'running': 'badge-info'
+    };
+    return `<span class="badge ${classes[status] || 'badge-muted'}">${status}</span>`;
+}
+
+function stripAnsi(str) {
+    // Remove ANSI escape codes (colors, etc.)
+    if (!str) return '';
+    return String(str).replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+async function showJobLogs(runId) {
+    const modal = document.getElementById('logsModal');
+    const loading = document.getElementById('logsLoading');
+    const content = document.getElementById('logsContent');
+
+    modal.classList.add('active');
+    loading.style.display = 'block';
+    content.style.display = 'none';
+
+    try {
+        const response = await fetch(`/api/v1/runs/${encodeURIComponent(runId)}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch logs');
+        }
+
+        const data = await response.json();
+
+        // Update modal content
+        document.getElementById('logsModalTitle').textContent = `Logs: ${data.job_name}`;
+        document.getElementById('logsRunId').textContent = data.run_id;
+        document.getElementById('logsStatus').innerHTML = getStatusBadge(data.status);
+        document.getElementById('logsAgent').textContent = data.client_id || '-';
+        document.getElementById('logsStarted').textContent = formatDate(data.started_at);
+        document.getElementById('logsFinished').textContent = formatDate(data.finished_at);
+        document.getElementById('logsFiles').textContent = data.files_transferred || '0';
+        document.getElementById('logsSize').textContent = formatBytes(data.bytes_transferred || 0);
+
+        // Snapshot
+        if (data.snapshot_id) {
+            document.getElementById('logsSnapshotRow').style.display = 'flex';
+            document.getElementById('logsSnapshot').textContent = data.snapshot_id;
+        } else {
+            document.getElementById('logsSnapshotRow').style.display = 'none';
+        }
+
+        // Errors
+        const errorsSection = document.getElementById('logsErrorsSection');
+        const errorsEl = document.getElementById('logsErrors');
+        if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
+            errorsSection.style.display = 'block';
+            // Convert all error items to strings and strip ANSI codes
+            const errorText = data.errors.map(e => stripAnsi(typeof e === 'string' ? e : JSON.stringify(e))).join('\n');
+            errorsEl.textContent = errorText;
+        } else {
+            errorsSection.style.display = 'none';
+        }
+
+        // Output
+        const outputEl = document.getElementById('logsOutput');
+        if (data.output && data.output.trim()) {
+            outputEl.textContent = stripAnsi(data.output);
+            outputEl.classList.remove('logs-empty');
+        } else {
+            outputEl.textContent = 'No output captured';
+            outputEl.classList.add('logs-empty');
+        }
+
+        loading.style.display = 'none';
+        content.style.display = 'block';
+
+    } catch (error) {
+        loading.innerHTML = `<span style="color: var(--error);">Error loading logs: ${error.message}</span>`;
+    }
+}
+
+function closeLogsModal() {
+    document.getElementById('logsModal').classList.remove('active');
+}
+
+// Close modal on escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeLogsModal();
+    }
+});
+
+// Close modal on backdrop click
+document.getElementById('logsModal').addEventListener('click', (e) => {
+    if (e.target.classList.contains('modal-overlay')) {
+        closeLogsModal();
+    }
+});
+
+// Add click handlers to all run rows
+document.querySelectorAll('.run-row').forEach(row => {
+    const runId = row.dataset.runId;
+    if (runId && runId !== 'None' && runId !== 'undefined') {
+        row.addEventListener('click', () => {
+            showJobLogs(runId);
+        });
+    } else {
+        // No run_id, make row not clickable
+        row.style.cursor = 'default';
+        row.style.opacity = '0.7';
+    }
+});
+</script>
 {% endblock %}

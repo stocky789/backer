@@ -182,6 +182,7 @@ class RsyncBackend(BackendBase):
         snapshot: str | None = None,
         dry_run: bool = False,
         progress_callback: Any | None = None,
+        original_source_path: str | None = None,
     ) -> BackendResult:
         """Restore from rsync backup.
 
