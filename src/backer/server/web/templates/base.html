@@ -47,6 +47,24 @@
     <main class="main-content">
         <header class="top-bar">
             <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+            <div class="top-bar-center">
+                <!-- Background Tasks Widget -->
+                <div id="tasksWidget" class="tasks-widget" style="display: none;">
+                    <div class="tasks-indicator" onclick="toggleTasksPanel()">
+                        <span class="tasks-spinner"></span>
+                        <span id="tasksCount">0</span> task(s) running
+                    </div>
+                    <div id="tasksPanel" class="tasks-panel">
+                        <div class="tasks-panel-header">
+                            <strong>Background Tasks</strong>
+                            <button class="tasks-close" onclick="toggleTasksPanel()">&times;</button>
+                        </div>
+                        <div id="tasksList" class="tasks-list">
+                            <!-- Tasks will be populated here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div class="top-bar-actions">
                 {% block actions %}{% endblock %}
             </div>
@@ -56,6 +74,104 @@
             {% block content %}{% endblock %}
         </div>
     </main>
+
+    <!-- Background Tasks JavaScript -->
+    <script>
+    let tasksPanelOpen = false;
+    let tasksPollingInterval = null;
+
+    function toggleTasksPanel() {
+        tasksPanelOpen = !tasksPanelOpen;
+        document.getElementById('tasksPanel').classList.toggle('active', tasksPanelOpen);
+    }
+
+    async function fetchTasks() {
+        try {
+            const response = await fetch('/api/v1/tasks?active_only=false');
+            const tasks = await response.json();
+            updateTasksWidget(tasks);
+        } catch (e) {
+            console.error('Failed to fetch tasks:', e);
+        }
+    }
+
+    function updateTasksWidget(tasks) {
+        const widget = document.getElementById('tasksWidget');
+        const countEl = document.getElementById('tasksCount');
+        const listEl = document.getElementById('tasksList');
+
+        // Count active tasks
+        const activeTasks = tasks.filter(t => t.status === 'pending' || t.status === 'running');
+        const recentTasks = tasks.slice(0, 10);
+
+        // Show/hide widget based on whether there are any tasks
+        if (recentTasks.length > 0) {
+            widget.style.display = 'block';
+            countEl.textContent = activeTasks.length;
+
+            // Update spinner visibility
+            const indicator = widget.querySelector('.tasks-indicator');
+            if (activeTasks.length > 0) {
+                indicator.classList.add('active');
+            } else {
+                indicator.classList.remove('active');
+            }
+        } else {
+            widget.style.display = 'none';
+        }
+
+        // Update tasks list
+        listEl.innerHTML = recentTasks.map(task => {
+            let statusClass = 'task-pending';
+            let statusIcon = '◷';
+            if (task.status === 'running') {
+                statusClass = 'task-running';
+                statusIcon = '↻';
+            } else if (task.status === 'completed') {
+                statusClass = 'task-completed';
+                statusIcon = '✓';
+            } else if (task.status === 'failed') {
+                statusClass = 'task-failed';
+                statusIcon = '✗';
+            }
+
+            return `
+                <div class="task-item ${statusClass}">
+                    <span class="task-icon">${statusIcon}</span>
+                    <div class="task-info">
+                        <div class="task-desc">${escapeHtml(task.description)}</div>
+                        <div class="task-status">${escapeHtml(task.message || task.status)}</div>
+                        ${task.status === 'running' ? `<div class="task-progress"><div class="task-progress-bar" style="width: ${task.progress}%"></div></div>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('') || '<div class="tasks-empty">No recent tasks</div>';
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Start polling for tasks
+    function startTasksPolling() {
+        fetchTasks();
+        tasksPollingInterval = setInterval(fetchTasks, 2000);
+    }
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', startTasksPolling);
+
+    // Close panel when clicking outside
+    document.addEventListener('click', (e) => {
+        const widget = document.getElementById('tasksWidget');
+        if (tasksPanelOpen && !widget.contains(e.target)) {
+            tasksPanelOpen = false;
+            document.getElementById('tasksPanel').classList.remove('active');
+        }
+    });
+    </script>
 
     {% block scripts %}{% endblock %}
 </body>

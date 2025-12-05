@@ -1,6 +1,7 @@
 """Restic backend implementation."""
 
 import json
+import logging
 import os
 import subprocess
 from datetime import datetime
@@ -17,6 +18,8 @@ from backer.backends.base import (
 )
 from backer.backends.registry import BackendRegistry
 from backer.tools.manager import get_tool_manager
+
+logger = logging.getLogger(__name__)
 
 
 @BackendRegistry.register(BackendType.RESTIC)
@@ -363,8 +366,8 @@ class ResticBackend(BackendBase):
                     }
                     for snap in snapshots
                 ]
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError):
-            pass
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as e:
+            logger.warning(f"[RESTIC] Failed to list snapshots: {e}")
 
         return []
 

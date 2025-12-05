@@ -1,6 +1,7 @@
 """Kopia backend implementation."""
 
 import json
+import logging
 import os
 import subprocess
 from datetime import datetime
@@ -17,6 +18,8 @@ from backer.backends.base import (
 )
 from backer.backends.registry import BackendRegistry
 from backer.tools.manager import get_tool_manager
+
+logger = logging.getLogger(__name__)
 
 
 @BackendRegistry.register(BackendType.KOPIA)
@@ -573,8 +576,8 @@ class KopiaBackend(BackendBase):
             finally:
                 self._disconnect_repo()
 
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError):
-            pass
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as e:
+            logger.warning(f"[KOPIA] Failed to list snapshots: {e}")
 
         return []
 
@@ -784,7 +787,7 @@ class KopiaBackend(BackendBase):
             finally:
                 self._disconnect_repo()
 
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError):
-            pass
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as e:
+            logger.warning(f"[KOPIA] Failed to get snapshot files: {e}")
 
         return []

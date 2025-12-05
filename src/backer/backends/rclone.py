@@ -1,6 +1,7 @@
 """Rclone backend implementation."""
 
 import json
+import logging
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from backer.backends.base import (
 )
 from backer.backends.registry import BackendRegistry
 from backer.tools.manager import get_tool_manager
+
+logger = logging.getLogger(__name__)
 
 
 @BackendRegistry.register(BackendType.RCLONE)
@@ -75,7 +78,8 @@ class RcloneBackend(BackendBase):
             )
             if result.returncode != 0:
                 return False, f"rclone version check failed: {result.stderr.strip()}"
-            version_line = result.stdout.split("\n")[0]
+            lines = result.stdout.strip().split("\n")
+            version_line = lines[0] if lines else "rclone (unknown version)"
             return True, version_line
         except (subprocess.TimeoutExpired, OSError) as e:
             return False, str(e)
@@ -92,8 +96,8 @@ class RcloneBackend(BackendBase):
             )
             if result.returncode == 0:
                 return [r.strip() for r in result.stdout.strip().split("\n") if r.strip()]
-        except (subprocess.TimeoutExpired, OSError, RuntimeError):
-            pass
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
+            logger.warning(f"[RCLONE] Failed to list remotes: {e}")
         return []
 
     def _build_command(
@@ -400,8 +404,8 @@ class RcloneBackend(BackendBase):
                     }
                     for item in items
                 ]
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError):
-            pass
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as e:
+            logger.warning(f"[RCLONE] Failed to list snapshots: {e}")
 
         return [{"id": "current", "path": destination.path, "note": "Current backup state"}]
 

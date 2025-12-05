@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -30,9 +32,30 @@ from backer.server.models import (
 )
 from backer.server.scheduler import BackupScheduler
 from backer.server.storage import Storage
+from backer.server.tasks import Task, get_task_manager
 from backer.server.web.routes import router as web_router
 
 logger = logging.getLogger(__name__)
+
+# Characters not allowed in job names (prevent path traversal and shell injection)
+_UNSAFE_NAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]|\.\.|\.\/')
+
+
+def validate_name(name: str, field: str = "name") -> None:
+    """Validate a name field to prevent path traversal and injection.
+
+    Raises HTTPException if invalid.
+    """
+    if not name or not name.strip():
+        raise HTTPException(status_code=400, detail=f"{field} cannot be empty")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail=f"{field} too long (max 255 chars)")
+    if _UNSAFE_NAME_PATTERN.search(name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} contains invalid characters (no path separators, quotes, or special chars)",
+        )
+
 
 # Global storage instance (initialized in create_app)
 _storage: Storage | None = None
@@ -244,18 +267,57 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS configuration
+    # Note: allow_credentials=True with allow_origins=["*"] is insecure
+    # For local deployments, we allow all origins but without credentials
+    # If you need cross-origin requests with credentials, specify exact origins
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,  # Credentials require specific origins, not wildcard
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Global exception handler for malformed JSON requests
+    @app.exception_handler(json.JSONDecodeError)
+    async def json_decode_error_handler(
+        request: Request, exc: json.JSONDecodeError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Invalid JSON in request body: {exc.msg}"},
+        )
 
     # Health check
     @app.get("/health")
     def health_check() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    # ============ Background Tasks ============
+
+    @app.get("/api/v1/tasks")
+    def list_tasks(active_only: bool = False) -> list[dict[str, Any]]:
+        """List background tasks.
+
+        Args:
+            active_only: If true, only return pending/running tasks
+        """
+        task_manager = get_task_manager()
+        if active_only:
+            tasks = task_manager.get_active_tasks()
+        else:
+            tasks = task_manager.get_recent_tasks(limit=20)
+        return [t.to_dict() for t in tasks]
+
+    @app.get("/api/v1/tasks/{task_id}")
+    def get_task(task_id: str) -> dict[str, Any]:
+        """Get status of a specific task."""
+        task_manager = get_task_manager()
+        task = task_manager.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task.to_dict()
 
     # ============ Client Management ============
 
@@ -335,62 +397,89 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Remove a client and optionally clean up repository metadata.
 
+        The client is removed from the database immediately.
+        Metadata cleanup from repositories runs in the background.
+
         Args:
             client_id: The client ID to delete
             delete_metadata: If True (default), also delete agent metadata from all repositories
         """
-        from backer.server.repositories import smb_delete_file
-
         # Get client info before deleting (for hostname matching)
         client = storage.get_client(client_id)
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        metadata_deleted = 0
-        metadata_errors = []
+        client_name = client.get("name", client_id)
 
-        # Delete agent metadata from all repositories
-        if delete_metadata:
-            logger.info(f"[DELETE AGENT] Deleting agent '{client_id}' with metadata cleanup")
-            repos = storage.list_repositories()
-            for repo in repos:
-                repo_id = repo.get("id")
-                repo_type = repo.get("repo_type", "smb")
-                server = repo.get("server", "")
-                share = repo.get("share", "")
-                subpath = repo.get("path", "")
-                username = repo.get("username")
-                password = storage.get_repository_password(repo_id) if repo_id else None
-                domain = repo.get("domain")
-
-                # Build path to agent metadata file
-                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
-                agent_path = f"{metadata_base}/agents/{client_id}.json"
-
-                try:
-                    if repo_type == "smb":
-                        success, msg = smb_delete_file(
-                            server, share, agent_path,
-                            username, password, domain
-                        )
-                        if success:
-                            metadata_deleted += 1
-                            logger.info(f"[DELETE AGENT] Deleted agent metadata from {server}/{share}: {agent_path}")
-                        elif "already deleted" not in msg.lower() and "no such file" not in msg.lower():
-                            metadata_errors.append(f"{server}/{share}: {msg}")
-                except Exception as e:
-                    metadata_errors.append(f"{server}/{share}: {str(e)}")
-                    logger.warning(f"[DELETE AGENT] Error deleting from {server}/{share}: {e}")
-
-        # Delete client from database
+        # Delete client from database immediately
         if not storage.delete_client(client_id):
             raise HTTPException(status_code=404, detail="Client not found")
 
         result: dict[str, Any] = {"status": "deleted"}
-        if metadata_deleted > 0:
-            result["metadata_deleted"] = metadata_deleted
-        if metadata_errors:
-            result["metadata_warnings"] = metadata_errors[:5]
+
+        # Schedule metadata cleanup as a background task
+        if delete_metadata:
+            # Capture repository info for the background task
+            repos = storage.list_repositories()
+            repo_info = []
+            for repo in repos:
+                repo_id = repo.get("id")
+                repo_info.append({
+                    "repo_id": repo_id,
+                    "repo_type": repo.get("repo_type", "smb"),
+                    "server": repo.get("server", ""),
+                    "share": repo.get("share", ""),
+                    "path": repo.get("path", ""),
+                    "username": repo.get("username"),
+                    "password": storage.get_repository_password(repo_id) if repo_id else None,
+                    "domain": repo.get("domain"),
+                })
+
+            def cleanup_agent_metadata(task: Task) -> dict[str, Any]:
+                """Background task to clean up agent metadata from repositories."""
+                from backer.server.repositories import smb_delete_file
+
+                metadata_deleted = 0
+                metadata_errors = []
+                total = len(repo_info)
+
+                for i, repo in enumerate(repo_info):
+                    task.progress = int((i / total) * 100) if total > 0 else 0
+                    task.message = f"Cleaning up repository {i + 1} of {total}..."
+
+                    # Build path to agent metadata file
+                    subpath = repo["path"]
+                    metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+                    agent_path = f"{metadata_base}/agents/{client_id}.json"
+
+                    try:
+                        if repo["repo_type"] == "smb":
+                            success, msg = smb_delete_file(
+                                repo["server"], repo["share"], agent_path,
+                                repo["username"], repo["password"], repo["domain"]
+                            )
+                            if success:
+                                metadata_deleted += 1
+                                logger.info(
+                                    f"[DELETE AGENT] Deleted metadata from "
+                                    f"{repo['server']}/{repo['share']}: {agent_path}"
+                                )
+                            elif "already deleted" not in msg.lower() and "no such file" not in msg.lower():
+                                metadata_errors.append(f"{repo['server']}/{repo['share']}: {msg}")
+                    except Exception as e:
+                        metadata_errors.append(f"{repo['server']}/{repo['share']}: {str(e)}")
+                        logger.warning(f"[DELETE AGENT] Error: {e}")
+
+                return {"deleted": metadata_deleted, "errors": metadata_errors}
+
+            task_manager = get_task_manager()
+            task = task_manager.submit_with_func(
+                task_type="delete_agent_metadata",
+                description=f"Cleaning up metadata for agent '{client_name}'",
+                func=cleanup_agent_metadata,
+            )
+            result["cleanup_task_id"] = task.id
+            result["message"] = "Agent deleted. Metadata cleanup running in background."
 
         return result
 
@@ -457,7 +546,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/jobs", response_model=JobResponse)
     def create_job(job: JobCreate, storage: Storage = Depends(get_storage)) -> JobResponse:
         """Create a new backup job."""
-        # Validate job name
+        # Validate job name for security (path traversal, special chars)
+        validate_name(job.name, "Job name")
         if job.name.lower().startswith("restore:"):
             raise HTTPException(status_code=400, detail="Job name cannot start with 'restore:'")
 
@@ -573,20 +663,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Delete a job and its repository metadata.
 
+        The job is removed from the database immediately.
+        Metadata cleanup from repositories runs in the background.
+
         Args:
             job_name: Name of the job to delete
             delete_snapshots: If True, also delete associated snapshot metadata
         """
-        import shutil
-        from pathlib import Path as PathLib
-
-        from backer.server.repositories import (
-            smb_delete_directory,
-            smb_delete_file,
-            smb_list_files,
-            smb_read_file,
-        )
-
         # Get job config before deleting (to find repository)
         job = storage.get_job(job_name)
         if not job:
@@ -594,76 +677,103 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         logger.info(f"[DELETE JOB] Deleting job '{job_name}', delete_snapshots={delete_snapshots}")
 
-        job_deleted = False
-        snapshots_deleted = 0
-        job_error = None
-        snapshot_errors = []
-
-        # Try to delete metadata from repository
+        # Capture info needed for background cleanup
         repo_id = job.get("repository_id")
-        logger.info(f"[DELETE JOB] Job repo_id: {repo_id}")
+        repo_info = None
+        client_hostname = None
+
         if repo_id:
             repo = storage.get_repository(repo_id)
-            logger.info(f"[DELETE JOB] Found repo: {repo is not None}")
             if repo:
-                repo_type = repo.get("repo_type", "smb")
-                server = repo.get("server", "")
-                share = repo.get("share", "")
-                subpath = repo.get("path", "")
-                username = repo.get("username")
-                password = storage.get_repository_password(repo_id)
-                domain = repo.get("domain")
+                repo_info = {
+                    "repo_type": repo.get("repo_type", "smb"),
+                    "server": repo.get("server", ""),
+                    "share": repo.get("share", ""),
+                    "path": repo.get("path", ""),
+                    "username": repo.get("username"),
+                    "password": storage.get_repository_password(repo_id),
+                    "domain": repo.get("domain"),
+                    "mount_point": repo.get("mount_point"),
+                }
+
+        # Get client hostname for snapshot matching
+        client_id = job.get("client_id")
+        if client_id:
+            client = storage.get_client(client_id)
+            if client:
+                client_hostname = client.hostname
+
+        job_source_path = job.get("source_path", "")
+
+        # Delete job from database immediately
+        if not storage.delete_job(job_name):
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        result: dict[str, Any] = {"status": "deleted"}
+
+        # Schedule metadata cleanup as a background task if we have a repository
+        if repo_info:
+            def cleanup_job_metadata(task: Task) -> dict[str, Any]:
+                """Background task to clean up job metadata from repository."""
+                import shutil
+                from pathlib import Path as PathLib
+
+                from backer.server.repositories import (
+                    smb_delete_directory,
+                    smb_delete_file,
+                    smb_list_files,
+                    smb_read_file,
+                )
+
+                job_deleted = False
+                snapshots_deleted = 0
+                errors = []
+
+                repo_type = repo_info["repo_type"]
+                server = repo_info["server"]
+                share = repo_info["share"]
+                subpath = repo_info["path"]
+                username = repo_info["username"]
+                password = repo_info["password"]
+                domain = repo_info["domain"]
 
                 # Build paths
                 metadata_base = f"{subpath}/.backer" if subpath else ".backer"
                 job_path = f"{metadata_base}/jobs/{job_name}"
                 snapshots_path = f"{metadata_base}/snapshots"
 
+                task.message = "Deleting job metadata..."
+                task.progress = 10
+
                 try:
                     if repo_type == "smb":
                         # Delete job metadata using SMB
-                        logger.info(f"[DELETE JOB] SMB delete: server={server}, share={share}, path={job_path}")
                         success, msg = smb_delete_directory(
                             server, share, job_path,
                             username, password, domain
                         )
-                        logger.info(f"[DELETE JOB] SMB delete result: success={success}, msg={msg}")
                         if success:
                             job_deleted = True
-                            logger.info(f"Deleted job metadata from SMB: {job_path} - {msg}")
-                        else:
-                            job_error = msg
-                            logger.warning(f"Failed to delete job metadata from SMB: {msg}")
+                            logger.info(f"Deleted job metadata from SMB: {job_path}")
+                        elif "no such file" not in msg.lower():
+                            errors.append(f"Job metadata: {msg}")
+
+                        task.progress = 30
 
                         # Delete associated snapshots if requested
-                        if delete_snapshots:
-                            # Get the job's client hostname to match snapshots
-                            client_id = job.get("client_id")
-                            client_hostname = None
-                            if client_id:
-                                client = storage.get_client(client_id)
-                                if client:
-                                    client_hostname = client.hostname
-
-                            job_source_path = job.get("source_path", "")
-                            logger.info(
-                                f"[DELETE SNAPSHOTS] Looking for snapshots: "
-                                f"hostname={client_hostname}, source_path={job_source_path}"
-                            )
-
-                            # List and delete matching snapshots
+                        if delete_snapshots and client_hostname:
+                            task.message = "Scanning for snapshots..."
                             ok, snap_files = smb_list_files(
                                 server, share, snapshots_path,
                                 username, password, domain
                             )
-                            snap_count = len(snap_files) if ok else 0
-                            logger.info(f"[DELETE SNAPSHOTS] Found {snap_count} files in {snapshots_path}")
                             if ok and snap_files:
-                                for snap_file in snap_files:
-                                    if not snap_file.endswith(".json"):
-                                        continue
+                                json_files = [f for f in snap_files if f.endswith(".json")]
+                                total = len(json_files)
+                                for i, snap_file in enumerate(json_files):
+                                    task.progress = 30 + int((i / total) * 60) if total > 0 else 90
+                                    task.message = f"Checking snapshot {i + 1} of {total}..."
 
-                                    # Read snapshot to check if it matches this job
                                     ok2, content = smb_read_file(
                                         server, share, f"{snapshots_path}/{snap_file}",
                                         username, password, domain
@@ -672,27 +782,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         import json as json_module
                                         try:
                                             snap_data = json_module.loads(content)
-                                            # Match by hostname and check if paths overlap
                                             snap_hostname = snap_data.get("hostname", "")
                                             snap_paths = snap_data.get("paths", [])
 
-                                            # Check if this snapshot could be from this job
                                             should_delete = False
-                                            if client_hostname and snap_hostname == client_hostname:
-                                                # Same host - check if paths match
-                                                if job_source_path:
-                                                    # Normalize paths for comparison
-                                                    norm_job = job_source_path.replace("\\", "/").rstrip("/")
-                                                    for sp in snap_paths:
-                                                        norm_snap = sp.replace("\\", "/").rstrip("/")
-                                                        if norm_job in norm_snap or norm_snap in norm_job:
-                                                            should_delete = True
-                                                            logger.info(
-                                                                f"[DELETE SNAPSHOTS] Match: {snap_file}"
-                                                            )
-                                                            break
-                                            else:
-                                                pass  # No hostname match - skip silently
+                                            if snap_hostname == client_hostname and job_source_path:
+                                                norm_job = job_source_path.replace("\\", "/").rstrip("/")
+                                                for sp in snap_paths:
+                                                    norm_snap = sp.replace("\\", "/").rstrip("/")
+                                                    if norm_job in norm_snap or norm_snap in norm_job:
+                                                        should_delete = True
+                                                        break
 
                                             if should_delete:
                                                 del_ok, del_msg = smb_delete_file(
@@ -701,19 +801,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                 )
                                                 if del_ok:
                                                     snapshots_deleted += 1
-                                                    logger.info(f"Deleted snapshot: {snap_file}")
                                                 else:
-                                                    snapshot_errors.append(f"{snap_file}: {del_msg}")
+                                                    errors.append(f"{snap_file}: {del_msg}")
 
                                         except (json_module.JSONDecodeError, KeyError):
                                             pass
 
-                    elif repo_type == "local" or repo.get("mount_point"):
+                    elif repo_type == "local" or repo_info.get("mount_point"):
                         # Direct filesystem access
-                        if repo.get("mount_point"):
-                            base_path = PathLib(repo["mount_point"])
+                        if repo_info.get("mount_point"):
+                            base_path = PathLib(repo_info["mount_point"])
                         else:
-                            base_path = PathLib(share or repo.get("path", ""))
+                            base_path = PathLib(share or repo_info.get("path", ""))
 
                         if subpath:
                             base_path = base_path / subpath
@@ -722,47 +821,41 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         if job_metadata_path.exists():
                             shutil.rmtree(job_metadata_path)
                             job_deleted = True
-                            logger.info(f"Deleted job metadata: {job_metadata_path}")
+
+                        task.progress = 30
 
                         # Delete snapshots if requested
-                        if delete_snapshots:
+                        if delete_snapshots and client_hostname:
                             snapshots_dir = base_path / ".backer" / "snapshots"
                             if snapshots_dir.exists():
-                                # Similar logic as SMB but for local files
-                                client_id = job.get("client_id")
-                                client_hostname = None
-                                if client_id:
-                                    client = storage.get_client(client_id)
-                                    if client:
-                                        client_hostname = client.hostname
-
                                 import json as json_module
-                                job_source_path = job.get("source_path", "")
-                                for snap_file in snapshots_dir.glob("*.json"):
+                                snap_files = list(snapshots_dir.glob("*.json"))
+                                total = len(snap_files)
+                                for i, snap_file in enumerate(snap_files):
+                                    task.progress = 30 + int((i / total) * 60) if total > 0 else 90
                                     try:
                                         snap_data = json_module.loads(snap_file.read_text())
                                         snap_hostname = snap_data.get("hostname", "")
                                         snap_paths = snap_data.get("paths", [])
 
                                         should_delete = False
-                                        if client_hostname and snap_hostname == client_hostname:
-                                            if job_source_path:
-                                                norm_job = job_source_path.replace("\\", "/").rstrip("/")
-                                                for sp in snap_paths:
-                                                    norm_snap = sp.replace("\\", "/").rstrip("/")
-                                                    if norm_job in norm_snap or norm_snap in norm_job:
-                                                        should_delete = True
-                                                        break
+                                        if snap_hostname == client_hostname and job_source_path:
+                                            norm_job = job_source_path.replace("\\", "/").rstrip("/")
+                                            for sp in snap_paths:
+                                                norm_snap = sp.replace("\\", "/").rstrip("/")
+                                                if norm_job in norm_snap or norm_snap in norm_job:
+                                                    should_delete = True
+                                                    break
 
                                         if should_delete:
                                             snap_file.unlink()
                                             snapshots_deleted += 1
-                                    except (json_module.JSONDecodeError, OSError):
-                                        pass
+                                    except (json_module.JSONDecodeError, OSError) as e:
+                                        errors.append(f"{snap_file.name}: {e}")
 
                     # NFS - similar to local if mounted
-                    elif repo_type == "nfs" and repo.get("mount_point"):
-                        base_path = PathLib(repo["mount_point"])
+                    elif repo_type == "nfs" and repo_info.get("mount_point"):
+                        base_path = PathLib(repo_info["mount_point"])
                         if subpath:
                             base_path = base_path / subpath
                         job_metadata_path = base_path / ".backer" / "jobs" / job_name
@@ -771,22 +864,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             job_deleted = True
 
                 except Exception as e:
-                    job_error = str(e)
-                    logger.exception(f"Error deleting job metadata: {e}")
+                    errors.append(str(e))
+                    logger.exception(f"Error in job metadata cleanup: {e}")
 
-        # Delete job from database
-        if not storage.delete_job(job_name):
-            raise HTTPException(status_code=404, detail="Job not found")
+                return {
+                    "job_deleted": job_deleted,
+                    "snapshots_deleted": snapshots_deleted,
+                    "errors": errors,
+                }
 
-        result: dict[str, Any] = {"status": "deleted"}
-        if job_deleted:
-            result["metadata_deleted"] = True
-        if snapshots_deleted > 0:
-            result["snapshots_deleted"] = snapshots_deleted
-        if job_error:
-            result["metadata_warning"] = f"Job deleted but metadata cleanup failed: {job_error}"
-        if snapshot_errors:
-            result["snapshot_warnings"] = snapshot_errors[:5]  # Limit to first 5
+            task_manager = get_task_manager()
+            task = task_manager.submit(
+                task_type="delete_job_metadata",
+                description=f"Cleaning up metadata for job '{job_name}'",
+                func=cleanup_job_metadata,
+            )
+            result["cleanup_task_id"] = task.id
+            result["message"] = "Job deleted. Metadata cleanup running in background."
 
         return result
 
@@ -1427,6 +1521,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         name = data.get("name", "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="Name required")
+        # Validate repository name for security
+        validate_name(name, "Repository name")
 
         if storage.get_repository_by_name(name):
             raise HTTPException(status_code=409, detail="Repository name already exists")
