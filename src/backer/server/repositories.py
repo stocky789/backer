@@ -104,8 +104,8 @@ class SMBBrowser:
             Tuple of (success, shares_list or error_message)
         """
         with smb_auth_file(username, password, domain) as auth_path:
-            # Build smbclient command
-            cmd = ["smbclient", "-L", f"//{server}", "-g"]  # -g for parseable output
+            # Build smbclient command with connection timeout
+            cmd = ["smbclient", "-L", f"//{server}", "-g", "-t", "5"]  # -g for parseable output, 5s connection timeout
 
             if auth_path:
                 cmd.extend(["-A", auth_path])
@@ -117,7 +117,7 @@ class SMBBrowser:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=30,  # 30s for browsing (connection timeout is 5s via -t flag)
                 )
 
                 if result.returncode != 0:
@@ -187,7 +187,7 @@ class SMBBrowser:
 
         with smb_auth_file(username, password, domain) as auth_path:
             # Build smbclient command
-            cmd = ["smbclient", f"//{server}/{share}"]
+            cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
 
             if auth_path:
                 cmd.extend(["-A", auth_path])
@@ -201,7 +201,7 @@ class SMBBrowser:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=30,  # 30s for browsing (connection timeout is 5s via -t flag)
                 )
 
                 if result.returncode != 0:
@@ -292,7 +292,7 @@ class NFSBrowser:
                 ["showmount", "-e", server, "--no-headers"],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=30,  # 30s for browsing
             )
 
             if result.returncode != 0:
@@ -490,7 +490,7 @@ def smb_read_file(
     remote_path = remote_path.replace("\\", "/").lstrip("/")
 
     with smb_auth_file(username, password, domain) as auth_path:
-        cmd = ["smbclient", f"//{server}/{share}"]
+        cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
 
         if auth_path:
             cmd.extend(["-A", auth_path])
@@ -504,7 +504,7 @@ def smb_read_file(
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                timeout=30,
+                timeout=30,  # 30s for reading files (connection timeout is 5s via -t flag)
             )
 
             if result.returncode != 0:
@@ -594,7 +594,7 @@ def smb_delete_file(
     remote_path = remote_path.replace("\\", "/").strip("/")
 
     with smb_auth_file(username, password, domain) as auth_path:
-        cmd = ["smbclient", f"//{server}/{share}"]
+        cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
 
         if auth_path:
             cmd.extend(["-A", auth_path])
@@ -604,7 +604,7 @@ def smb_delete_file(
         cmd.extend(["-c", f'del "{remote_path}"'])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)  # 10 second total timeout
 
             if result.returncode == 0:
                 return True, "File deleted"
@@ -648,7 +648,7 @@ def smb_delete_directory(
     def run_smb_command(commands: str) -> tuple[int, str, str]:
         """Run smbclient with given commands."""
         with smb_auth_file(username, password, domain) as auth_path:
-            cmd = ["smbclient", f"//{server}/{share}"]
+            cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
 
             if auth_path:
                 cmd.extend(["-A", auth_path])
@@ -658,7 +658,7 @@ def smb_delete_directory(
             cmd.extend(["-c", commands])
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)  # 10 second total
                 return result.returncode, result.stdout, result.stderr
             except subprocess.TimeoutExpired:
                 return -1, "", "Command timed out"
