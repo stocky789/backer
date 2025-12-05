@@ -1797,9 +1797,12 @@ class AgentService:
         mount_point = tempfile.mkdtemp(prefix="backer_meta_")
 
         try:
-            # Build mount command
+            # Build mount command (use sudo if not running as root)
             smb_url = f"//{smb_server}/{smb_share}"
-            cmd = ["sudo", "mount", "-t", "cifs", smb_url, mount_point]
+            if os.geteuid() == 0:
+                cmd = ["mount", "-t", "cifs", smb_url, mount_point]
+            else:
+                cmd = ["sudo", "mount", "-t", "cifs", smb_url, mount_point]
 
             # Build mount options
             opts = ["rw"]
@@ -1849,10 +1852,13 @@ class AgentService:
             logger.error(f"[METADATA-SMB] Error writing metadata: {e}")
 
         finally:
-            # Unmount
+            # Unmount (use sudo if not running as root)
             logger.info(f"[METADATA-SMB] Unmounting {mount_point}")
             try:
-                subprocess.run(["sudo", "umount", mount_point], capture_output=True, timeout=30)
+                if os.geteuid() == 0:
+                    subprocess.run(["umount", mount_point], capture_output=True, timeout=30)
+                else:
+                    subprocess.run(["sudo", "umount", mount_point], capture_output=True, timeout=30)
             except Exception as e:
                 logger.warning(f"[METADATA-SMB] Unmount failed: {e}")
 
