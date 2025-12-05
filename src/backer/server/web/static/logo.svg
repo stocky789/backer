@@ -7,19 +7,13 @@
   <path d="M32 10L14 18v12c0 10.8 7.8 20.4 18 22.5 10.2-2.1 18-11.7 18-22.5V18L32 10z"
         fill="#0d1117"/>
 
-  <!-- Stylized "B" made of stacked blocks (representing backup layers) -->
-  <g fill="#58a6ff">
-    <!-- Top block -->
-    <rect x="22" y="18" width="16" height="6" rx="1"/>
-    <!-- Middle block -->
-    <rect x="22" y="27" width="20" height="6" rx="1"/>
-    <!-- Bottom block -->
-    <rect x="22" y="36" width="18" height="6" rx="1"/>
-    <!-- Vertical bar -->
-    <rect x="22" y="18" width="5" height="24" rx="1"/>
-  </g>
+  <!-- Stylized "B" - clean letter form -->
+  <path d="M23 16h12c4.5 0 8 3 8 7s-2.5 6-5 6.5c3 .5 6 3.5 6 7.5 0 4.5-3.5 8-8 8H23V16z
+           M28 21v7h6c2 0 4-1.5 4-3.5S36 21 34 21h-6z
+           M28 33v8h7c2.5 0 4.5-1.8 4.5-4s-2-4-4.5-4h-7z"
+        fill="#58a6ff" fill-rule="evenodd"/>
 
-  <!-- Small checkmark in corner -->
-  <circle cx="44" cy="44" r="8" fill="#3fb950"/>
-  <path d="M40 44l3 3 5-6" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Small checkmark badge -->
+  <circle cx="46" cy="46" r="9" fill="#3fb950"/>
+  <path d="M41 46l3.5 3.5 6-7" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
 </svg>
