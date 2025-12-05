@@ -515,7 +515,10 @@ def smb_read_file(
                 stdout_msg = result.stdout.decode("utf-8", errors="replace").strip()
 
                 # Log full details for debugging
-                logger.debug(f"smbclient read failed: returncode={result.returncode}, stderr={error!r}, stdout={stdout_msg!r}")
+                logger.debug(
+                    f"smbclient read failed: returncode={result.returncode}, "
+                    f"stderr={error!r}, stdout={stdout_msg!r}"
+                )
 
                 if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in error or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in stdout_msg:
                     return False, "File not found"
