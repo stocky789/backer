@@ -485,7 +485,7 @@ function renderFileList(entries, path) {
         const parentItem = document.createElement('div');
         parentItem.className = 'file-browser-item';
         parentItem.innerHTML = `
-            <span class="file-browser-icon folder">📁</span>
+            <img src="/static/icons/folder.svg" class="file-browser-icon folder" alt="">
             <span class="file-browser-name">..</span>
         `;
         parentItem.onclick = () => browsePath(goBackPath);
@@ -505,9 +505,10 @@ function renderFileList(entries, path) {
         item.className = 'file-browser-item';
         item.dataset.path = entry.path;
 
-        const icon = document.createElement('span');
+        const icon = document.createElement('img');
+        icon.src = '/static/icons/folder.svg';
         icon.className = 'file-browser-icon folder';
-        icon.textContent = '📁';
+        icon.alt = '';
 
         const name = document.createElement('span');
         name.className = 'file-browser-name';

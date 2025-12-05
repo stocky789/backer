@@ -233,9 +233,10 @@
 }
 
 .browser-item .icon {
-    font-size: 18px;
-    width: 24px;
-    text-align: center;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    color: var(--warning);
 }
 
 .browser-item .name {
@@ -378,7 +379,7 @@ function showSharesList(shares) {
 
     list.innerHTML = shares.map(share => `
         <div class="browser-item" onclick="selectShare('${escapeHtml(share.name)}')">
-            <span class="icon">&#128193;</span>
+            <img src="/static/icons/folder.svg" class="icon" alt="">
             <span class="name">${escapeHtml(share.name)}</span>
             <span class="meta">${escapeHtml(share.comment || share.type)}</span>
         </div>
@@ -442,7 +443,7 @@ function showDirectoryList(entries) {
 
     list.innerHTML = dirs.map(entry => `
         <div class="browser-item" onclick="navigateTo('${escapeHtml(entry.name)}')">
-            <span class="icon">&#128193;</span>
+            <img src="/static/icons/folder.svg" class="icon" alt="">
             <span class="name">${escapeHtml(entry.name)}</span>
         </div>
     `).join('');
