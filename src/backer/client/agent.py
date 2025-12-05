@@ -757,7 +757,7 @@ class BackerAgent:
             # For rclone with NFS, we need to mount first as rclone doesn't have
             # native NFS support (unlike SMB). Could use SFTP if SSH is available,
             # but mounting is more reliable.
-            print(f"[NFS] Mounting NFS export for rclone backend")
+            print("[NFS] Mounting NFS export for rclone backend")
             ctx = self._nfs_mount_context(server=server, export_path=export_path)
             mount_path = ctx.__enter__()
             print(f"[NFS] Using mounted path: {mount_path}")
@@ -817,7 +817,7 @@ class BackerAgent:
                 backend_options,
             )
 
-            print(f"[BACKUP] Checking backend availability...")
+            print("[BACKUP] Checking backend availability...")
             available, message = backend.check_available()
             if not available:
                 print(f"[BACKUP] Backend not available: {message}")
