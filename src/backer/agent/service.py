@@ -1822,6 +1822,7 @@ class AgentService:
 
                 cmd.extend(["-c", "; ".join(smb_commands)])
 
+                logger.debug(f"[METADATA-SMB] Running: smbclient //{smb_server}/{smb_share} -c '{'; '.join(smb_commands)}'")
                 proc_result = subprocess.run(cmd, capture_output=True, timeout=30)
 
                 # Clean up auth file if created
@@ -1831,13 +1832,23 @@ class AgentService:
                     except Exception:
                         pass
 
+                stdout = proc_result.stdout.decode('utf-8', errors='replace')
+                stderr = proc_result.stderr.decode('utf-8', errors='replace')
+
                 if proc_result.returncode != 0:
-                    stderr = proc_result.stderr.decode('utf-8', errors='replace')
                     # mkdir errors are ok (directory might exist)
-                    if "NT_STATUS" in stderr and "NT_STATUS_OBJECT_NAME_COLLISION" not in stderr:
-                        logger.warning(f"[METADATA-SMB] smbclient error: {stderr}")
+                    if "NT_STATUS_OBJECT_NAME_COLLISION" in stderr or "NT_STATUS_OBJECT_NAME_COLLISION" in stdout:
+                        # Directory already exists, that's fine
+                        pass
+                    elif "NT_STATUS" in stderr or "NT_STATUS" in stdout:
+                        logger.warning(f"[METADATA-SMB] smbclient error for {remote_path}: {stderr or stdout}")
+                        return False
+                    else:
+                        # Other error
+                        logger.warning(f"[METADATA-SMB] smbclient failed (rc={proc_result.returncode}) for {remote_path}: {stderr or stdout}")
                         return False
 
+                logger.debug(f"[METADATA-SMB] Successfully wrote {remote_path}")
                 return True
 
             finally:
@@ -1846,6 +1857,14 @@ class AgentService:
                 except Exception:
                     pass
 
+        # Check if smbclient is available
+        try:
+            subprocess.run(["which", "smbclient"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.error("[METADATA-SMB] smbclient is not installed - cannot write metadata to SMB share")
+            logger.error("[METADATA-SMB] Install with: apt install smbclient (Debian/Ubuntu) or yum install samba-client (RHEL)")
+            return
+
         # Write metadata.json
         metadata = {
             "version": "1.0",
@@ -1853,7 +1872,9 @@ class AgentService:
             "updated_at": datetime.now().isoformat(),
             "repo_type": "smb",
         }
-        smb_write_file(f"{metadata_base}/metadata.json", json.dumps(metadata, indent=2))
+        if not smb_write_file(f"{metadata_base}/metadata.json", json.dumps(metadata, indent=2)):
+            logger.error("[METADATA-SMB] Failed to write metadata.json - aborting")
+            return
 
         # Write agent info
         agent_data = {
@@ -1865,10 +1886,11 @@ class AgentService:
             "first_seen": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }
-        smb_write_file(
+        if not smb_write_file(
             f"{metadata_base}/agents/{self.client_id}.json",
             json.dumps(agent_data, indent=2)
-        )
+        ):
+            logger.warning("[METADATA-SMB] Failed to write agent info")
 
         # Write job config
         job_data = {
