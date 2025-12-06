@@ -648,10 +648,12 @@ class ProxmoxAPI:
             # Query storage status on the node
             data = self._make_request("GET", f"/nodes/{node}/storage/{storage_id}/status")
             return data
-        except ProxmoxAPIError as e:
-            if e.status_code in (404, 500):
-                return None
-            raise
+        except ProxmoxAPIError:
+            # Any error checking status - assume not ready yet
+            return None
+        except Exception as e:
+            logger.debug(f"Error checking storage status: {e}")
+            return None
 
     def create_nfs_storage(
         self,
@@ -863,6 +865,25 @@ class ProxmoxAPI:
                 )
             else:
                 logger.info(f"Proxmox storage '{storage_id}' already exists")
+
+            # Still need to wait for it to be active/mounted
+            max_wait = 30  # seconds
+            poll_interval = 2  # seconds
+            waited = 0
+
+            while waited < max_wait:
+                status = self.get_storage_status(storage_id)
+                if status and status.get("active"):
+                    logger.info(f"Storage '{storage_id}' is active and ready")
+                    return storage_id
+                logger.debug(f"Waiting for existing storage '{storage_id}' to become active...")
+                time.sleep(poll_interval)
+                waited += poll_interval
+
+            logger.warning(
+                f"Existing storage '{storage_id}' not active after {max_wait}s. "
+                "Backup may fail if mount is not ready."
+            )
             return storage_id
 
         # Create storage based on repository type
