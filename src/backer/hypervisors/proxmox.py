@@ -843,6 +843,9 @@ class ProxmoxAPI:
             password = repository.get("password")  # Already decrypted by caller
             domain = repository.get("domain")
             subdir = repository.get("path")  # Subdirectory within share
+            # Proxmox requires subdir to be an absolute path (starting with /)
+            if subdir and not subdir.startswith("/"):
+                subdir = f"/{subdir}"
 
             logger.info(
                 f"Creating CIFS storage '{storage_id}' -> //{server}/{share} "
