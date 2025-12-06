@@ -3439,7 +3439,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Read the file
         try:
-            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            with open(log_file, encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to read log file: {e}")
@@ -3512,8 +3512,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ):
         """Stream log file updates using Server-Sent Events."""
-        from fastapi.responses import StreamingResponse
         import asyncio
+
+        from fastapi.responses import StreamingResponse
 
         # Validate filename to prevent path traversal
         if ".." in filename or "/" in filename or "\\" in filename:
@@ -3528,7 +3529,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         async def generate():
             """Generate SSE events for new log lines."""
             try:
-                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                with open(log_file, encoding="utf-8", errors="replace") as f:
                     # Seek to end of file
                     f.seek(0, 2)
 

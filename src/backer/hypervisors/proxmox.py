@@ -1119,38 +1119,14 @@ class ProxmoxAPI:
         Returns:
             Path to the downloaded file
         """
-        # First, get a download URL from Proxmox
-        # The API endpoint is POST /nodes/{node}/storage/{storage}/download-url
-        # But for backups, we need to use the content endpoint with a download query
-        encoded_volid = urllib.parse.quote(volid, safe="")
-        endpoint = f"/nodes/{node}/storage/{storage}/content/{encoded_volid}"
-
-        # Build URL for direct download
-        url = f"{self.base_url}{endpoint}"
-
-        # Build headers
-        headers: dict[str, str] = {}
-        if self.auth_method == ProxmoxAuthMethod.TOKEN and self.token_id and self.token_secret:
-            headers["Authorization"] = (
-                f"PVEAPIToken={self.username}!{self.token_id}={self.token_secret}"
-            )
-        elif self.csrf_token and self.ticket:
-            headers["CSRFPreventionToken"] = self.csrf_token
-            headers["Cookie"] = f"PVEAuthCookie={self.ticket}"
-
-        try:
-            # Try to get the file via the API
-            # Note: Proxmox doesn't have a direct download API for backup files
-            # The backup files need to be accessed via shared storage or SSH/SCP
-            # For now, we'll raise an informative error
-            raise ProxmoxAPIError(
-                f"Direct download of backup {volid} is not supported via Proxmox API. "
-                "Please ensure the Backer server has direct access to the Proxmox storage "
-                "(e.g., via NFS mount or shared storage) or use PBS (Proxmox Backup Server)."
-            )
-
-        except requests.exceptions.RequestException as e:
-            raise ProxmoxAPIError(f"Failed to download backup {volid}: {e}") from e
+        # Note: Proxmox doesn't have a direct download API for backup files
+        # The backup files need to be accessed via shared storage or SSH/SCP
+        # For now, we'll raise an informative error
+        raise ProxmoxAPIError(
+            f"Direct download of backup {volid} is not supported via Proxmox API. "
+            "Please ensure the Backer server has direct access to the Proxmox storage "
+            "(e.g., via NFS mount or shared storage) or use PBS (Proxmox Backup Server)."
+        )
 
     def get_backup_filename(self, volid: str) -> str | None:
         """Extract the filename from a volume ID.
