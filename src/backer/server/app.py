@@ -294,6 +294,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
     auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    proxmox_storage_id = None  # Track for cleanup
 
     try:
         api = ProxmoxAPI(
@@ -428,10 +429,25 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     errors=[str(e)],
                 )
 
+        # Clean up: remove the temporary Proxmox storage
+        # This unmounts the share, keeping Proxmox UI clean
+        try:
+            api.delete_storage(proxmox_storage_id)
+            logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
+        except Exception as cleanup_err:
+            # Log but don't fail the backup - cleanup is best-effort
+            logger.warning(f"Failed to cleanup Proxmox storage '{proxmox_storage_id}': {cleanup_err}")
+
         logger.info(f"Scheduled hypervisor job '{job.get('name')}' completed")
 
     except Exception as e:
         logger.exception(f"Hypervisor job {job_id} failed: {e}")
+        # Try to cleanup storage even on failure
+        if proxmox_storage_id:
+            try:
+                api.delete_storage(proxmox_storage_id)
+            except Exception:
+                pass  # Best effort cleanup
 
 
 def verify_client(
@@ -3117,6 +3133,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             task.progress = 100
             task.message = "Backup job completed"
+
+            # Clean up: remove the temporary Proxmox storage
+            # This unmounts the share, keeping Proxmox UI clean
+            try:
+                task.message = "Cleaning up temporary storage..."
+                api.delete_storage(proxmox_storage_id)
+                logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
+            except Exception as cleanup_err:
+                # Log but don't fail the backup - cleanup is best-effort
+                logger.warning(f"Failed to cleanup Proxmox storage '{proxmox_storage_id}': {cleanup_err}")
 
             success_count = sum(1 for r in results if r.get("success"))
             return {
