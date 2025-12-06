@@ -306,6 +306,9 @@ class ProxmoxAPI:
                 errors = error_data.get("errors", {})
                 error_list = [f"{k}: {v}" for k, v in errors.items()] if errors else []
                 message = error_data.get("message", str(e))
+                # Include field-specific errors in the message for clarity
+                if error_list:
+                    message = f"{message} ({'; '.join(error_list)})"
             except json.JSONDecodeError:
                 message = error_body or str(e)
                 error_list = []
@@ -702,6 +705,11 @@ class ProxmoxAPI:
         if max_protected_backups != 5:
             data["max-protected-backups"] = max_protected_backups
 
+        # Log parameters (without password) for debugging
+        log_data = {k: v for k, v in data.items() if k != "password"}
+        log_data["password"] = "***" if password else None
+        logger.info(f"Creating CIFS storage with params: {log_data}")
+
         return self._make_request("POST", "/storage", data=data)
 
     def update_storage(
@@ -777,10 +785,10 @@ class ProxmoxAPI:
 
         # Generate storage ID from repo name (sanitized)
         if not storage_id:
-            # Proxmox storage IDs must match: [A-Za-z0-9_][A-Za-z0-9._\-]*
-            # First char must be alphanumeric or underscore, rest can include dots and dashes
-            # Replace invalid chars with dash, then collapse consecutive dashes
-            safe_name = "".join(c if c.isalnum() or c in "-_." else "-" for c in repo_name)
+            # Proxmox storage IDs: use only alphanumeric, dash, and underscore
+            # Avoid dots as they can cause issues in some Proxmox versions
+            # Replace dots and other invalid chars with dash
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in repo_name)
             # Collapse multiple consecutive dashes into single dash
             while "--" in safe_name:
                 safe_name = safe_name.replace("--", "-")
@@ -836,7 +844,10 @@ class ProxmoxAPI:
             domain = repository.get("domain")
             subdir = repository.get("path")  # Subdirectory within share
 
-            logger.info(f"Creating CIFS storage '{storage_id}' -> //{server}/{share}")
+            logger.info(
+                f"Creating CIFS storage '{storage_id}' -> //{server}/{share} "
+                f"(user={username or 'guest'}, domain={domain or 'none'}, subdir={subdir or 'none'})"
+            )
             self.create_cifs_storage(
                 storage_id=storage_id,
                 server=server,
