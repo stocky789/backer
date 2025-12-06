@@ -9,10 +9,10 @@ Authentication is done via API tokens (recommended) or username/password tickets
 
 import json
 import logging
-import time
-import urllib.request
-import urllib.parse
 import ssl
+import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -988,7 +988,10 @@ class ProxmoxBackupManager:
         if not final_status.is_success:
             # Get error from log
             log_lines = self.api.get_task_log(node, upid)
-            error_lines = [l for l in log_lines if "error" in l.lower() or "failed" in l.lower()]
+            error_lines = [
+                line for line in log_lines
+                if "error" in line.lower() or "failed" in line.lower()
+            ]
             result["errors"] = error_lines or [final_status.exitstatus]
 
         return result
@@ -1066,7 +1069,10 @@ class ProxmoxBackupManager:
 
         if not final_status.is_success:
             log_lines = self.api.get_task_log(node, upid)
-            error_lines = [l for l in log_lines if "error" in l.lower() or "failed" in l.lower()]
+            error_lines = [
+                line for line in log_lines
+                if "error" in line.lower() or "failed" in line.lower()
+            ]
             result["errors"] = error_lines or [final_status.exitstatus]
 
         return result

@@ -339,7 +339,10 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     guest_name=guest_name,
                     status="success" if result.get("success") else "failed",
                     upid=result.get("upid"),
-                    finished_at=datetime.fromisoformat(result["finished_at"]) if result.get("finished_at") else datetime.now(),
+                    finished_at=(
+                        datetime.fromisoformat(result["finished_at"])
+                        if result.get("finished_at") else datetime.now()
+                    ),
                     duration_seconds=result.get("duration_seconds"),
                     exit_status=result.get("exit_status"),
                     errors=result.get("errors"),
@@ -2987,7 +2990,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         task_manager = get_task_manager()
         guest_count = len(job.get("guest_ids") or [])
-        desc = f"Backing up {guest_count} guests from {hypervisor['name']}" if guest_count else f"Backing up all guests from {hypervisor['name']}"
+        hv_name = hypervisor['name']
+        desc = f"Backing up {guest_count} guests from {hv_name}" if guest_count else f"Backing up all guests from {hv_name}"
 
         task = task_manager.submit(
             task_type="hypervisor_backup",
