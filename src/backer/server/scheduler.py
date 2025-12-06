@@ -30,6 +30,7 @@ class BackupScheduler:
         self,
         storage: "Storage",
         job_trigger_callback: Callable[[str], Any],
+        hypervisor_job_trigger_callback: Callable[[str], Any] | None = None,
         check_interval: int = 60,
     ):
         """Initialize the scheduler.
@@ -38,15 +39,19 @@ class BackupScheduler:
             storage: Storage instance to read job configs
             job_trigger_callback: Function to call when a job should run.
                                   Takes job_name as argument.
+            hypervisor_job_trigger_callback: Function to call when a hypervisor
+                                             backup job should run. Takes job_id.
             check_interval: How often to check for due jobs (seconds)
         """
         self.storage = storage
         self.job_trigger_callback = job_trigger_callback
+        self.hypervisor_job_trigger_callback = hypervisor_job_trigger_callback
         self.check_interval = check_interval
 
         self._running = False
         self._thread: threading.Thread | None = None
         self._last_run_times: dict[str, datetime] = {}
+        self._last_hypervisor_run_times: dict[str, datetime] = {}
 
         # Timezone caching to avoid database hits on every _now() call
         self._cached_timezone: ZoneInfo | None = None
@@ -157,9 +162,10 @@ class BackupScheduler:
 
     def _check_and_run_jobs(self) -> None:
         """Check all jobs and run any that are due."""
-        jobs = self.storage.list_jobs()
         now = self._now()
 
+        # Check regular backup jobs
+        jobs = self.storage.list_jobs()
         for job in jobs:
             job_name = job.get("name")
             schedule = job.get("schedule_cron")
@@ -169,14 +175,24 @@ class BackupScheduler:
                 continue
 
             try:
-                if self._is_job_due(job_name, schedule, now):
+                if self._is_job_due(job_name, schedule, now, self._last_run_times):
                     logger.info(f"Triggering scheduled job: {job_name}")
                     self._trigger_job(job_name)
                     self._last_run_times[job_name] = now
             except Exception as e:
                 logger.error(f"Error checking job {job_name}: {e}")
 
-    def _is_job_due(self, job_name: str, schedule: str, now: datetime) -> bool:
+        # Check hypervisor backup jobs
+        if self.hypervisor_job_trigger_callback:
+            self._check_and_run_hypervisor_jobs(now)
+
+    def _is_job_due(
+        self,
+        job_id: str,
+        schedule: str,
+        now: datetime,
+        last_run_times: dict[str, datetime],
+    ) -> bool:
         """Check if a job is due to run.
 
         A job is due if the current time matches the cron schedule
@@ -191,7 +207,7 @@ class BackupScheduler:
             is_due = -60 <= time_diff <= 60
 
             # Don't run if we already ran this job in the current minute
-            last_run = self._last_run_times.get(job_name)
+            last_run = last_run_times.get(job_id)
             if last_run:
                 since_last = (now - last_run).total_seconds()
                 if since_last < 60:
@@ -200,8 +216,42 @@ class BackupScheduler:
             return is_due
 
         except Exception as e:
-            logger.error(f"Invalid cron expression for {job_name}: {schedule} - {e}")
+            logger.error(f"Invalid cron expression for {job_id}: {schedule} - {e}")
             return False
+
+    def _check_and_run_hypervisor_jobs(self, now: datetime) -> None:
+        """Check hypervisor backup jobs and run any that are due."""
+        try:
+            jobs = self.storage.list_hypervisor_jobs()
+        except Exception as e:
+            logger.error(f"Failed to list hypervisor jobs: {e}")
+            return
+
+        for job in jobs:
+            job_id = job.get("id")
+            schedule = job.get("schedule_cron")
+            enabled = job.get("enabled", True)
+
+            if not schedule or not enabled:
+                continue
+
+            try:
+                if self._is_job_due(job_id, schedule, now, self._last_hypervisor_run_times):
+                    logger.info(f"Triggering scheduled hypervisor job: {job.get('name')} ({job_id})")
+                    self._trigger_hypervisor_job(job_id)
+                    self._last_hypervisor_run_times[job_id] = now
+            except Exception as e:
+                logger.error(f"Error checking hypervisor job {job_id}: {e}")
+
+    def _trigger_hypervisor_job(self, job_id: str) -> None:
+        """Trigger a hypervisor backup job to run."""
+        if not self.hypervisor_job_trigger_callback:
+            return
+
+        try:
+            self.hypervisor_job_trigger_callback(job_id)
+        except Exception as e:
+            logger.error(f"Failed to trigger hypervisor job {job_id}: {e}")
 
     def _trigger_job(self, job_name: str) -> None:
         """Trigger a job to run."""

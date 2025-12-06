@@ -183,6 +183,54 @@ async def agents_page(request: Request):
     })
 
 
+@router.get("/hypervisors", response_class=HTMLResponse)
+async def hypervisors_page(request: Request):
+    """Hypervisors management page."""
+    storage = get_storage(request)
+
+    # Get hypervisors
+    hypervisors_raw = storage.list_hypervisors()
+    hypervisors = []
+
+    for hv in hypervisors_raw:
+        hypervisors.append({
+            **hv,
+            "last_checked_ago": time_ago(hv.get("last_checked")),
+        })
+
+    # Get hypervisor jobs with additional info
+    jobs_raw = storage.list_hypervisor_jobs()
+    jobs = []
+
+    for job in jobs_raw:
+        # Get latest run
+        latest = storage.get_latest_hypervisor_run(job["id"])
+
+        # Count selected guests
+        guest_ids = job.get("guest_ids") or []
+        guest_count = len(guest_ids) if guest_ids else 0
+
+        # Get hypervisor name
+        hv = storage.get_hypervisor(job["hypervisor_id"])
+        hv_name = hv.get("name") if hv else None
+
+        jobs.append({
+            **job,
+            "hypervisor_name": hv_name,
+            "guest_count": guest_count,
+            "last_status": latest["status"] if latest else None,
+            "last_run_ago": time_ago(latest.get("started_at")) if latest else None,
+        })
+
+    return templates.TemplateResponse("hypervisors.html", {
+        "request": request,
+        "active": "hypervisors",
+        "hypervisors": hypervisors,
+        "jobs": jobs,
+        "user": get_current_user(request),
+    })
+
+
 @router.get("/jobs", response_class=HTMLResponse)
 async def jobs_page(request: Request):
     """Jobs management page."""

@@ -149,6 +149,71 @@ class Storage:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+                -- Hypervisors table for Proxmox, VMware, etc.
+                CREATE TABLE IF NOT EXISTS hypervisors (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    hypervisor_type TEXT NOT NULL,  -- proxmox, vmware, hyper-v
+                    host TEXT NOT NULL,
+                    port INTEGER DEFAULT 8006,
+                    auth_method TEXT DEFAULT 'token',  -- token, password
+                    username TEXT,
+                    token_id TEXT,
+                    token_secret_encrypted TEXT,
+                    password_encrypted TEXT,
+                    verify_ssl INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'unknown',
+                    version TEXT,
+                    last_checked TEXT,
+                    created_at TEXT NOT NULL,
+                    config TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hypervisors_name ON hypervisors(name);
+                CREATE INDEX IF NOT EXISTS idx_hypervisors_type ON hypervisors(hypervisor_type);
+
+                -- Hypervisor backup jobs
+                CREATE TABLE IF NOT EXISTS hypervisor_jobs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    hypervisor_id TEXT NOT NULL,
+                    guest_ids TEXT NOT NULL,  -- JSON array of VMIDs
+                    storage_id TEXT NOT NULL,  -- Proxmox storage name
+                    backup_mode TEXT DEFAULT 'snapshot',
+                    compression TEXT DEFAULT 'zstd',
+                    schedule_cron TEXT,
+                    retention TEXT DEFAULT '{}',  -- JSON retention policy
+                    enabled INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hypervisor_jobs_hypervisor ON hypervisor_jobs(hypervisor_id);
+
+                -- Hypervisor backup runs
+                CREATE TABLE IF NOT EXISTS hypervisor_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    job_name TEXT NOT NULL,
+                    hypervisor_id TEXT NOT NULL,
+                    guest_id INTEGER NOT NULL,
+                    guest_name TEXT,
+                    status TEXT NOT NULL,
+                    upid TEXT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    duration_seconds REAL,
+                    exit_status TEXT,
+                    errors TEXT DEFAULT '[]',
+                    FOREIGN KEY (job_id) REFERENCES hypervisor_jobs(id),
+                    FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hypervisor_runs_job ON hypervisor_runs(job_id);
+                CREATE INDEX IF NOT EXISTS idx_hypervisor_runs_started ON hypervisor_runs(started_at DESC);
             """)
 
     @contextmanager
@@ -996,4 +1061,540 @@ class Storage:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login": row["last_login"],
+        }
+
+    # =========================================================================
+    # Hypervisor Operations
+    # =========================================================================
+
+    def add_hypervisor(
+        self,
+        hypervisor_id: str,
+        name: str,
+        hypervisor_type: str,
+        host: str,
+        port: int = 8006,
+        auth_method: str = "token",
+        username: str | None = None,
+        token_id: str | None = None,
+        token_secret: str | None = None,
+        password: str | None = None,
+        verify_ssl: bool = False,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """Add a new hypervisor."""
+        from backer.server.secrets import get_secrets_manager
+
+        secrets = get_secrets_manager(self.db_path.parent)
+        now = datetime.now().isoformat()
+
+        # Encrypt sensitive credentials
+        token_secret_encrypted = None
+        password_encrypted = None
+
+        if token_secret:
+            token_secret_encrypted = secrets.encrypt(token_secret)
+        if password:
+            password_encrypted = secrets.encrypt(password)
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO hypervisors (
+                    id, name, hypervisor_type, host, port, auth_method,
+                    username, token_id, token_secret_encrypted, password_encrypted,
+                    verify_ssl, status, created_at, config
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)
+                """,
+                (
+                    hypervisor_id,
+                    name,
+                    hypervisor_type,
+                    host,
+                    port,
+                    auth_method,
+                    username,
+                    token_id,
+                    token_secret_encrypted,
+                    password_encrypted,
+                    1 if verify_ssl else 0,
+                    now,
+                    json.dumps(config or {}),
+                ),
+            )
+
+    def update_hypervisor(
+        self,
+        hypervisor_id: str,
+        name: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        auth_method: str | None = None,
+        username: str | None = None,
+        token_id: str | None = None,
+        token_secret: str | None = None,
+        password: str | None = None,
+        verify_ssl: bool | None = None,
+        status: str | None = None,
+        version: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> bool:
+        """Update a hypervisor."""
+        from backer.server.secrets import get_secrets_manager
+
+        updates = []
+        params: list[Any] = []
+
+        if name is not None:
+            updates.append("name = ?")
+            params.append(name)
+        if host is not None:
+            updates.append("host = ?")
+            params.append(host)
+        if port is not None:
+            updates.append("port = ?")
+            params.append(port)
+        if auth_method is not None:
+            updates.append("auth_method = ?")
+            params.append(auth_method)
+        if username is not None:
+            updates.append("username = ?")
+            params.append(username)
+        if token_id is not None:
+            updates.append("token_id = ?")
+            params.append(token_id)
+        if token_secret is not None:
+            secrets = get_secrets_manager(self.db_path.parent)
+            updates.append("token_secret_encrypted = ?")
+            params.append(secrets.encrypt(token_secret))
+        if password is not None:
+            secrets = get_secrets_manager(self.db_path.parent)
+            updates.append("password_encrypted = ?")
+            params.append(secrets.encrypt(password))
+        if verify_ssl is not None:
+            updates.append("verify_ssl = ?")
+            params.append(1 if verify_ssl else 0)
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+            updates.append("last_checked = ?")
+            params.append(datetime.now().isoformat())
+        if version is not None:
+            updates.append("version = ?")
+            params.append(version)
+        if config is not None:
+            updates.append("config = ?")
+            params.append(json.dumps(config))
+
+        if not updates:
+            return False
+
+        params.append(hypervisor_id)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE hypervisors SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            return cursor.rowcount > 0
+
+    def get_hypervisor(self, hypervisor_id: str) -> dict[str, Any] | None:
+        """Get a hypervisor by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM hypervisors WHERE id = ?", (hypervisor_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_hypervisor(row)
+        return None
+
+    def get_hypervisor_by_name(self, name: str) -> dict[str, Any] | None:
+        """Get a hypervisor by name."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM hypervisors WHERE name = ?", (name,)
+            ).fetchone()
+            if row:
+                return self._row_to_hypervisor(row)
+        return None
+
+    def list_hypervisors(self, hypervisor_type: str | None = None) -> list[dict[str, Any]]:
+        """List all hypervisors, optionally filtered by type."""
+        with self._connect() as conn:
+            if hypervisor_type:
+                rows = conn.execute(
+                    "SELECT * FROM hypervisors WHERE hypervisor_type = ? ORDER BY name",
+                    (hypervisor_type,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM hypervisors ORDER BY name"
+                ).fetchall()
+            return [self._row_to_hypervisor(row) for row in rows]
+
+    def delete_hypervisor(self, hypervisor_id: str) -> bool:
+        """Delete a hypervisor."""
+        with self._connect() as conn:
+            # First delete associated jobs and runs
+            conn.execute(
+                "DELETE FROM hypervisor_runs WHERE hypervisor_id = ?",
+                (hypervisor_id,)
+            )
+            conn.execute(
+                "DELETE FROM hypervisor_jobs WHERE hypervisor_id = ?",
+                (hypervisor_id,)
+            )
+            cursor = conn.execute(
+                "DELETE FROM hypervisors WHERE id = ?",
+                (hypervisor_id,)
+            )
+            return cursor.rowcount > 0
+
+    def get_hypervisor_token_secret(self, hypervisor_id: str) -> str | None:
+        """Get decrypted token secret for a hypervisor."""
+        from backer.server.secrets import get_secrets_manager
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT token_secret_encrypted FROM hypervisors WHERE id = ?",
+                (hypervisor_id,),
+            ).fetchone()
+            if not row or not row["token_secret_encrypted"]:
+                return None
+
+            secrets = get_secrets_manager(self.db_path.parent)
+            return secrets.decrypt(row["token_secret_encrypted"])
+
+    def get_hypervisor_password(self, hypervisor_id: str) -> str | None:
+        """Get decrypted password for a hypervisor."""
+        from backer.server.secrets import get_secrets_manager
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT password_encrypted FROM hypervisors WHERE id = ?",
+                (hypervisor_id,),
+            ).fetchone()
+            if not row or not row["password_encrypted"]:
+                return None
+
+            secrets = get_secrets_manager(self.db_path.parent)
+            return secrets.decrypt(row["password_encrypted"])
+
+    def _row_to_hypervisor(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to a hypervisor dict."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "hypervisor_type": row["hypervisor_type"],
+            "host": row["host"],
+            "port": row["port"],
+            "auth_method": row["auth_method"],
+            "username": row["username"],
+            "token_id": row["token_id"],
+            "verify_ssl": row["verify_ssl"] == 1,
+            "status": row["status"],
+            "version": row["version"],
+            "last_checked": row["last_checked"],
+            "created_at": row["created_at"],
+            "config": json.loads(row["config"]) if row["config"] else {},
+        }
+
+    # =========================================================================
+    # Hypervisor Job Operations
+    # =========================================================================
+
+    def add_hypervisor_job(
+        self,
+        job_id: str,
+        name: str,
+        hypervisor_id: str,
+        guest_ids: list[int],
+        storage_id: str,
+        backup_mode: str = "snapshot",
+        compression: str = "zstd",
+        schedule_cron: str | None = None,
+        retention: dict[str, int] | None = None,
+        enabled: bool = True,
+    ) -> None:
+        """Add a new hypervisor backup job."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO hypervisor_jobs (
+                    id, name, hypervisor_id, guest_ids, storage_id,
+                    backup_mode, compression, schedule_cron, retention,
+                    enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    name,
+                    hypervisor_id,
+                    json.dumps(guest_ids),
+                    storage_id,
+                    backup_mode,
+                    compression,
+                    schedule_cron,
+                    json.dumps(retention or {}),
+                    1 if enabled else 0,
+                    now,
+                    now,
+                ),
+            )
+
+    def update_hypervisor_job(
+        self,
+        job_id: str,
+        name: str | None = None,
+        guest_ids: list[int] | None = None,
+        storage_id: str | None = None,
+        backup_mode: str | None = None,
+        compression: str | None = None,
+        schedule_cron: str | None = None,
+        retention: dict[str, int] | None = None,
+        enabled: bool | None = None,
+    ) -> bool:
+        """Update a hypervisor job."""
+        updates = ["updated_at = ?"]
+        params: list[Any] = [datetime.now().isoformat()]
+
+        if name is not None:
+            updates.append("name = ?")
+            params.append(name)
+        if guest_ids is not None:
+            updates.append("guest_ids = ?")
+            params.append(json.dumps(guest_ids))
+        if storage_id is not None:
+            updates.append("storage_id = ?")
+            params.append(storage_id)
+        if backup_mode is not None:
+            updates.append("backup_mode = ?")
+            params.append(backup_mode)
+        if compression is not None:
+            updates.append("compression = ?")
+            params.append(compression)
+        if schedule_cron is not None:
+            updates.append("schedule_cron = ?")
+            params.append(schedule_cron if schedule_cron else None)
+        if retention is not None:
+            updates.append("retention = ?")
+            params.append(json.dumps(retention))
+        if enabled is not None:
+            updates.append("enabled = ?")
+            params.append(1 if enabled else 0)
+
+        params.append(job_id)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE hypervisor_jobs SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            return cursor.rowcount > 0
+
+    def get_hypervisor_job(self, job_id: str) -> dict[str, Any] | None:
+        """Get a hypervisor job by ID."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM hypervisor_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_hypervisor_job(row)
+        return None
+
+    def get_hypervisor_job_by_name(self, name: str) -> dict[str, Any] | None:
+        """Get a hypervisor job by name."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM hypervisor_jobs WHERE name = ?", (name,)
+            ).fetchone()
+            if row:
+                return self._row_to_hypervisor_job(row)
+        return None
+
+    def list_hypervisor_jobs(self, hypervisor_id: str | None = None) -> list[dict[str, Any]]:
+        """List hypervisor jobs, optionally filtered by hypervisor."""
+        with self._connect() as conn:
+            if hypervisor_id:
+                rows = conn.execute(
+                    "SELECT * FROM hypervisor_jobs WHERE hypervisor_id = ? ORDER BY name",
+                    (hypervisor_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM hypervisor_jobs ORDER BY name"
+                ).fetchall()
+            return [self._row_to_hypervisor_job(row) for row in rows]
+
+    def delete_hypervisor_job(self, job_id: str) -> bool:
+        """Delete a hypervisor job."""
+        with self._connect() as conn:
+            # First delete associated runs
+            conn.execute(
+                "DELETE FROM hypervisor_runs WHERE job_id = ?",
+                (job_id,)
+            )
+            cursor = conn.execute(
+                "DELETE FROM hypervisor_jobs WHERE id = ?",
+                (job_id,)
+            )
+            return cursor.rowcount > 0
+
+    def _row_to_hypervisor_job(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to a hypervisor job dict."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "hypervisor_id": row["hypervisor_id"],
+            "guest_ids": json.loads(row["guest_ids"]) if row["guest_ids"] else [],
+            "storage_id": row["storage_id"],
+            "backup_mode": row["backup_mode"],
+            "compression": row["compression"],
+            "schedule_cron": row["schedule_cron"],
+            "retention": json.loads(row["retention"]) if row["retention"] else {},
+            "enabled": row["enabled"] == 1,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    # =========================================================================
+    # Hypervisor Run Operations
+    # =========================================================================
+
+    def save_hypervisor_run(
+        self,
+        run_id: str,
+        job_id: str,
+        job_name: str,
+        hypervisor_id: str,
+        guest_id: int,
+        guest_name: str | None = None,
+        status: str = "pending",
+        upid: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        duration_seconds: float | None = None,
+        exit_status: str | None = None,
+        errors: list[str] | None = None,
+    ) -> None:
+        """Save or update a hypervisor backup run."""
+        started = (started_at or datetime.now()).isoformat()
+
+        with self._connect() as conn:
+            # Check if run exists
+            existing = conn.execute(
+                "SELECT id FROM hypervisor_runs WHERE run_id = ? AND guest_id = ?",
+                (run_id, guest_id)
+            ).fetchone()
+
+            if existing:
+                # Update
+                conn.execute(
+                    """
+                    UPDATE hypervisor_runs SET
+                        status = ?, upid = ?, finished_at = ?,
+                        duration_seconds = ?, exit_status = ?, errors = ?
+                    WHERE run_id = ? AND guest_id = ?
+                    """,
+                    (
+                        status,
+                        upid,
+                        finished_at.isoformat() if finished_at else None,
+                        duration_seconds,
+                        exit_status,
+                        json.dumps(errors or []),
+                        run_id,
+                        guest_id,
+                    ),
+                )
+            else:
+                # Insert
+                conn.execute(
+                    """
+                    INSERT INTO hypervisor_runs (
+                        run_id, job_id, job_name, hypervisor_id, guest_id,
+                        guest_name, status, upid, started_at, finished_at,
+                        duration_seconds, exit_status, errors
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        job_id,
+                        job_name,
+                        hypervisor_id,
+                        guest_id,
+                        guest_name,
+                        status,
+                        upid,
+                        started,
+                        finished_at.isoformat() if finished_at else None,
+                        duration_seconds,
+                        exit_status,
+                        json.dumps(errors or []),
+                    ),
+                )
+
+    def get_hypervisor_runs(
+        self,
+        job_id: str | None = None,
+        hypervisor_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get hypervisor backup runs."""
+        with self._connect() as conn:
+            if job_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM hypervisor_runs
+                    WHERE job_id = ?
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                    (job_id, limit)
+                ).fetchall()
+            elif hypervisor_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM hypervisor_runs
+                    WHERE hypervisor_id = ?
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                    (hypervisor_id, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM hypervisor_runs
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                ).fetchall()
+
+            return [self._row_to_hypervisor_run(row) for row in rows]
+
+    def get_latest_hypervisor_run(self, job_id: str) -> dict[str, Any] | None:
+        """Get the latest run for a hypervisor job."""
+        runs = self.get_hypervisor_runs(job_id=job_id, limit=1)
+        return runs[0] if runs else None
+
+    def _row_to_hypervisor_run(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to a hypervisor run dict."""
+        return {
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "job_id": row["job_id"],
+            "job_name": row["job_name"],
+            "hypervisor_id": row["hypervisor_id"],
+            "guest_id": row["guest_id"],
+            "guest_name": row["guest_name"],
+            "status": row["status"],
+            "upid": row["upid"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "duration_seconds": row["duration_seconds"],
+            "exit_status": row["exit_status"],
+            "errors": json.loads(row["errors"]) if row["errors"] else [],
         }

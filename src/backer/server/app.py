@@ -233,6 +233,143 @@ def trigger_job_internal(job_name: str) -> None:
     logger.info(f"Scheduled job {job_name} queued for agent {client_id} (run_id: {run_id})")
 
 
+def trigger_hypervisor_job_internal(job_id: str) -> None:
+    """Internal function to trigger a hypervisor backup job (used by scheduler).
+
+    This runs the backup synchronously in a background thread.
+    """
+    from backer.hypervisors.proxmox import (
+        ProxmoxAPI,
+        ProxmoxAuthMethod,
+        ProxmoxBackupManager,
+        ProxmoxBackupMode,
+        ProxmoxCompression,
+    )
+
+    if _storage is None:
+        logger.error("Storage not initialized")
+        return
+
+    job = _storage.get_hypervisor_job(job_id)
+    if not job:
+        logger.error(f"Hypervisor job not found: {job_id}")
+        return
+
+    hypervisor = _storage.get_hypervisor(job["hypervisor_id"])
+    if not hypervisor:
+        logger.error(f"Hypervisor not found for job: {job_id}")
+        return
+
+    if hypervisor["hypervisor_type"] != "proxmox":
+        logger.error(f"Unsupported hypervisor type: {hypervisor['hypervisor_type']}")
+        return
+
+    # Get credentials
+    token_secret = _storage.get_hypervisor_token_secret(hypervisor["id"])
+    password = _storage.get_hypervisor_password(hypervisor["id"])
+
+    auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+    try:
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor.get("port", 8006),
+            auth_method=auth_method,
+            username=hypervisor.get("username"),
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            password=password,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        backup_manager = ProxmoxBackupManager(api)
+
+        # Get backup options
+        mode_str = job.get("backup_mode", "snapshot")
+        mode = ProxmoxBackupMode(mode_str.upper() if mode_str else "SNAPSHOT")
+        compress_str = job.get("compression", "zstd")
+        compress = ProxmoxCompression(compress_str.lower() if compress_str else "zstd")
+
+        # Get guest IDs from job
+        guest_ids = job.get("guest_ids", [])
+
+        if not guest_ids:
+            # Backup all guests
+            guests = api.list_guests()
+            guest_ids = [g.vmid for g in guests]
+
+        # Build guest name map
+        all_guests = api.list_guests()
+        guest_map = {g.vmid: g for g in all_guests}
+
+        for vmid in guest_ids:
+            guest = guest_map.get(vmid)
+            guest_name = guest.name if guest else f"VM {vmid}"
+
+            # Save run as running
+            _storage.save_hypervisor_run(
+                run_id=run_id,
+                job_id=job_id,
+                job_name=job["name"],
+                hypervisor_id=hypervisor["id"],
+                guest_id=vmid,
+                guest_name=guest_name,
+                status="running",
+            )
+
+            try:
+                result = backup_manager.backup_guest(
+                    vmid=vmid,
+                    storage=job.get("storage_id"),
+                    mode=mode,
+                    compress=compress,
+                    retention=job.get("retention"),
+                    timeout=7200,
+                )
+
+                # Update run record
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    status="success" if result.get("success") else "failed",
+                    upid=result.get("upid"),
+                    finished_at=datetime.fromisoformat(result["finished_at"]) if result.get("finished_at") else datetime.now(),
+                    duration_seconds=result.get("duration_seconds"),
+                    exit_status=result.get("exit_status"),
+                    errors=result.get("errors"),
+                )
+
+                if result.get("success"):
+                    logger.info(f"Backup succeeded for VMID {vmid}")
+                else:
+                    logger.warning(f"Backup failed for VMID {vmid}: {result.get('errors')}")
+
+            except Exception as e:
+                logger.error(f"Backup failed for VMID {vmid}: {e}")
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    status="failed",
+                    finished_at=datetime.now(),
+                    errors=[str(e)],
+                )
+
+        logger.info(f"Scheduled hypervisor job '{job.get('name')}' completed")
+
+    except Exception as e:
+        logger.error(f"Hypervisor job {job_id} failed: {e}")
+
+
 def verify_client(
     credentials: HTTPBasicCredentials | None = Depends(security),
     storage: Storage = Depends(get_storage),
@@ -271,6 +408,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     _scheduler = BackupScheduler(
         storage=_storage,
         job_trigger_callback=trigger_job_internal,
+        hypervisor_job_trigger_callback=trigger_hypervisor_job_internal,
         check_interval=60,
     )
 
@@ -2165,6 +2303,898 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "error": str(e),
                 "repository_id": repo_id,
             }
+
+    # ============ Hypervisor Management ============
+
+    @app.get("/api/v1/hypervisors")
+    def list_hypervisors(
+        hypervisor_type: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List all hypervisors."""
+        return storage.list_hypervisors(hypervisor_type)
+
+    @app.post("/api/v1/hypervisors")
+    def create_hypervisor(
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Add a new hypervisor."""
+        import asyncio
+
+        # Get request body
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
+        name = body.get("name", "").strip()
+        hypervisor_type = body.get("hypervisor_type", "proxmox")
+        host = body.get("host", "").strip()
+        port = body.get("port", 8006)
+        auth_method = body.get("auth_method", "token")
+        username = body.get("username")
+        token_id = body.get("token_id")
+        token_secret = body.get("token_secret")
+        password = body.get("password")
+        verify_ssl = body.get("verify_ssl", False)
+
+        # Validate
+        validate_name(name, "name")
+        if not host:
+            raise HTTPException(status_code=400, detail="Host is required")
+
+        if auth_method == "token" and (not token_id or not token_secret):
+            raise HTTPException(status_code=400, detail="Token ID and secret required for token auth")
+        if auth_method == "password" and (not username or not password):
+            raise HTTPException(status_code=400, detail="Username and password required for password auth")
+
+        # Check for duplicate name
+        if storage.get_hypervisor_by_name(name):
+            raise HTTPException(status_code=400, detail="Hypervisor with this name already exists")
+
+        hypervisor_id = str(uuid4())
+
+        storage.add_hypervisor(
+            hypervisor_id=hypervisor_id,
+            name=name,
+            hypervisor_type=hypervisor_type,
+            host=host,
+            port=port,
+            auth_method=auth_method,
+            username=username,
+            token_id=token_id,
+            token_secret=token_secret,
+            password=password,
+            verify_ssl=verify_ssl,
+        )
+
+        return {"id": hypervisor_id, "name": name, "status": "created"}
+
+    @app.post("/api/v1/hypervisors/test")
+    def test_hypervisor_credentials(
+        request: Request,
+    ) -> dict[str, Any]:
+        """Test hypervisor connection without saving.
+
+        This is used to validate credentials before creating a hypervisor.
+        """
+        import asyncio
+
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
+        hypervisor_type = body.get("hypervisor_type", "proxmox")
+        host = body.get("host", "").strip()
+        port = body.get("port", 8006)
+        auth_method = body.get("auth_method", "token")
+        username = body.get("username")
+        token_id = body.get("token_id")
+        token_secret = body.get("token_secret")
+        password = body.get("password")
+        verify_ssl = body.get("verify_ssl", False)
+
+        if not host:
+            return {"success": False, "message": "Host is required"}
+
+        if hypervisor_type != "proxmox":
+            return {"success": False, "message": f"Unsupported hypervisor type: {hypervisor_type}"}
+
+        try:
+            pve_auth = ProxmoxAuthMethod.TOKEN if auth_method == "token" else ProxmoxAuthMethod.PASSWORD
+
+            api = ProxmoxAPI(
+                host=host,
+                port=port,
+                auth_method=pve_auth,
+                username=username,
+                token_id=token_id,
+                token_secret=token_secret,
+                password=password,
+                verify_ssl=verify_ssl,
+            )
+
+            success, message = api.test_connection()
+
+            return {
+                "success": success,
+                "message": message,
+                "version": api.version if success else None,
+            }
+
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}")
+    def get_hypervisor(
+        hypervisor_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Get hypervisor details."""
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+        return hypervisor
+
+    @app.put("/api/v1/hypervisors/{hypervisor_id}")
+    def update_hypervisor(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Update a hypervisor."""
+        import asyncio
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
+        # Only update fields that are provided
+        update_kwargs: dict[str, Any] = {}
+        if "name" in body:
+            validate_name(body["name"], "name")
+            update_kwargs["name"] = body["name"]
+        if "host" in body:
+            update_kwargs["host"] = body["host"]
+        if "port" in body:
+            update_kwargs["port"] = body["port"]
+        if "auth_method" in body:
+            update_kwargs["auth_method"] = body["auth_method"]
+        if "username" in body:
+            update_kwargs["username"] = body["username"]
+        if "token_id" in body:
+            update_kwargs["token_id"] = body["token_id"]
+        if "token_secret" in body:
+            update_kwargs["token_secret"] = body["token_secret"]
+        if "password" in body:
+            update_kwargs["password"] = body["password"]
+        if "verify_ssl" in body:
+            update_kwargs["verify_ssl"] = body["verify_ssl"]
+
+        storage.update_hypervisor(hypervisor_id, **update_kwargs)
+
+        return {"id": hypervisor_id, "status": "updated"}
+
+    @app.delete("/api/v1/hypervisors/{hypervisor_id}")
+    def delete_hypervisor(
+        hypervisor_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Delete a hypervisor and its jobs."""
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        storage.delete_hypervisor(hypervisor_id)
+        return {"id": hypervisor_id, "status": "deleted"}
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/test")
+    def test_hypervisor_connection(
+        hypervisor_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Test connection to a hypervisor."""
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor["hypervisor_type"] != "proxmox":
+            raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported currently")
+
+        # Get credentials
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        success, message = api.test_connection()
+
+        # Update hypervisor status
+        if success:
+            storage.update_hypervisor(
+                hypervisor_id,
+                status="connected",
+                version=message,
+            )
+        else:
+            storage.update_hypervisor(hypervisor_id, status="error")
+
+        return {
+            "success": success,
+            "message": message,
+            "hypervisor_id": hypervisor_id,
+        }
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/guests")
+    def list_hypervisor_guests(
+        hypervisor_id: str,
+        node: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List VMs and containers on a hypervisor."""
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor["hypervisor_type"] != "proxmox":
+            raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported currently")
+
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        try:
+            guests = api.list_guests(node)
+            return [
+                {
+                    "vmid": g.vmid,
+                    "name": g.name,
+                    "node": g.node,
+                    "type": g.guest_type.value,
+                    "status": g.status,
+                    "cpus": g.cpus,
+                    "maxmem_gb": round(g.maxmem_gb, 2),
+                    "maxdisk_gb": round(g.maxdisk_gb, 2),
+                    "template": g.template,
+                    "tags": g.tags,
+                }
+                for g in guests
+            ]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/nodes")
+    def list_hypervisor_nodes(
+        hypervisor_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List nodes on a hypervisor cluster."""
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        try:
+            nodes = api.list_nodes()
+            return [
+                {
+                    "node": n.node,
+                    "status": n.status,
+                    "cpu_percent": round(n.cpu, 1),
+                    "maxcpu": n.maxcpu,
+                    "mem_used_gb": round(n.mem / (1024**3), 2),
+                    "mem_total_gb": round(n.maxmem / (1024**3), 2),
+                    "uptime_hours": round(n.uptime / 3600, 1),
+                }
+                for n in nodes
+            ]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/storages")
+    def list_hypervisor_storages(
+        hypervisor_id: str,
+        node: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List backup-capable storages on a hypervisor."""
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        try:
+            storages = api.list_storages(node)
+            return [
+                {
+                    "storage": s.storage,
+                    "type": s.type,
+                    "node": s.node,
+                    "content": s.content,
+                    "path": s.path,
+                    "active": s.active,
+                    "enabled": s.enabled,
+                    "shared": s.shared,
+                    "total": s.total,
+                    "used": s.used,
+                    "avail": s.avail,
+                }
+                for s in storages
+            ]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ============ Hypervisor Jobs ============
+
+    @app.get("/api/v1/hypervisor-jobs")
+    def list_hypervisor_jobs(
+        hypervisor_id: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List hypervisor backup jobs."""
+        jobs = storage.list_hypervisor_jobs(hypervisor_id)
+
+        # Enhance with hypervisor info and latest run
+        for job in jobs:
+            hypervisor = storage.get_hypervisor(job["hypervisor_id"])
+            if hypervisor:
+                job["hypervisor_name"] = hypervisor["name"]
+                job["hypervisor_type"] = hypervisor["hypervisor_type"]
+
+            latest = storage.get_latest_hypervisor_run(job["id"])
+            job["last_status"] = latest["status"] if latest else None
+            job["last_run"] = latest["started_at"] if latest else None
+
+        return jobs
+
+    @app.post("/api/v1/hypervisor-jobs")
+    def create_hypervisor_job(
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Create a new hypervisor backup job."""
+        import asyncio
+
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
+        name = body.get("name", "").strip()
+        hypervisor_id = body.get("hypervisor_id")
+        # Accept both vmids and guest_ids
+        guest_ids = body.get("vmids") or body.get("guest_ids") or []
+        # Accept both storage and storage_id
+        storage_id = body.get("storage") or body.get("storage_id")
+        # Accept both mode/backup_mode and compress/compression
+        backup_mode = body.get("mode") or body.get("backup_mode", "snapshot")
+        compression = body.get("compress") or body.get("compression", "zstd")
+        schedule_cron = body.get("schedule_cron")
+        retention = body.get("retention", {})
+        enabled = body.get("enabled", True)
+
+        # Validate
+        validate_name(name, "name")
+        if not hypervisor_id:
+            raise HTTPException(status_code=400, detail="hypervisor_id is required")
+        # guest_ids can be empty to backup all guests
+        if not storage_id:
+            raise HTTPException(status_code=400, detail="storage is required")
+
+        # Check hypervisor exists
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        # Check for duplicate name
+        if storage.get_hypervisor_job_by_name(name):
+            raise HTTPException(status_code=400, detail="Job with this name already exists")
+
+        job_id = str(uuid4())
+
+        storage.add_hypervisor_job(
+            job_id=job_id,
+            name=name,
+            hypervisor_id=hypervisor_id,
+            guest_ids=guest_ids,
+            storage_id=storage_id,
+            backup_mode=backup_mode,
+            compression=compression,
+            schedule_cron=schedule_cron,
+            retention=retention,
+            enabled=enabled,
+        )
+
+        return {"id": job_id, "name": name, "status": "created"}
+
+    @app.get("/api/v1/hypervisor-jobs/{job_id}")
+    def get_hypervisor_job(
+        job_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Get hypervisor job details."""
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+    @app.put("/api/v1/hypervisor-jobs/{job_id}")
+    def update_hypervisor_job(
+        job_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Update a hypervisor job."""
+        import asyncio
+
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
+        update_kwargs: dict[str, Any] = {}
+        if "name" in body:
+            validate_name(body["name"], "name")
+            update_kwargs["name"] = body["name"]
+        # Accept both vmids and guest_ids
+        if "vmids" in body or "guest_ids" in body:
+            update_kwargs["guest_ids"] = body.get("vmids") or body.get("guest_ids")
+        # Accept both storage and storage_id
+        if "storage" in body or "storage_id" in body:
+            update_kwargs["storage_id"] = body.get("storage") or body.get("storage_id")
+        # Accept both mode and backup_mode
+        if "mode" in body or "backup_mode" in body:
+            update_kwargs["backup_mode"] = body.get("mode") or body.get("backup_mode")
+        # Accept both compress and compression
+        if "compress" in body or "compression" in body:
+            update_kwargs["compression"] = body.get("compress") or body.get("compression")
+        if "schedule_cron" in body:
+            update_kwargs["schedule_cron"] = body["schedule_cron"]
+        if "retention" in body:
+            update_kwargs["retention"] = body["retention"]
+        if "enabled" in body:
+            update_kwargs["enabled"] = body["enabled"]
+
+        storage.update_hypervisor_job(job_id, **update_kwargs)
+
+        return {"id": job_id, "status": "updated"}
+
+    @app.delete("/api/v1/hypervisor-jobs/{job_id}")
+    def delete_hypervisor_job(
+        job_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Delete a hypervisor job."""
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        storage.delete_hypervisor_job(job_id)
+        return {"id": job_id, "status": "deleted"}
+
+    @app.post("/api/v1/hypervisor-jobs/{job_id}/run")
+    def run_hypervisor_job(
+        job_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Run a hypervisor backup job."""
+        from backer.hypervisors.proxmox import (
+            ProxmoxAPI,
+            ProxmoxAuthMethod,
+            ProxmoxBackupManager,
+            ProxmoxBackupMode,
+            ProxmoxCompression,
+        )
+
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        hypervisor = storage.get_hypervisor(job["hypervisor_id"])
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor["hypervisor_type"] != "proxmox":
+            raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported")
+
+        # Get credentials
+        token_secret = storage.get_hypervisor_token_secret(hypervisor["id"])
+        password = storage.get_hypervisor_password(hypervisor["id"])
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+        # Submit backup as background task
+        def run_backup_task(task: Task) -> dict[str, Any]:
+            manager = ProxmoxBackupManager(api)
+            results = []
+
+            # Get guest names and resolve guest_ids
+            try:
+                all_guests = api.list_guests()
+                guest_map = {g.vmid: g for g in all_guests}
+            except Exception:
+                all_guests = []
+                guest_map = {}
+
+            # If no specific guests, backup all
+            guest_ids = job.get("guest_ids") or []
+            if not guest_ids:
+                guest_ids = [g.vmid for g in all_guests]
+
+            total = len(guest_ids)
+            if total == 0:
+                return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "results": []}
+
+            for i, vmid in enumerate(guest_ids):
+                task.progress = int((i / total) * 100)
+                guest = guest_map.get(vmid)
+                guest_name = guest.name if guest else f"VM {vmid}"
+                task.message = f"Backing up {guest_name} ({vmid})..."
+
+                # Record pending
+                storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    status="running",
+                )
+
+                try:
+                    # Map backup mode
+                    mode_map = {
+                        "snapshot": ProxmoxBackupMode.SNAPSHOT,
+                        "stop": ProxmoxBackupMode.STOP,
+                        "suspend": ProxmoxBackupMode.SUSPEND,
+                    }
+                    backup_mode = mode_map.get(job["backup_mode"], ProxmoxBackupMode.SNAPSHOT)
+
+                    # Map compression
+                    compress_map = {
+                        "zstd": ProxmoxCompression.ZSTD,
+                        "gzip": ProxmoxCompression.GZIP,
+                        "lzo": ProxmoxCompression.LZO,
+                        "none": ProxmoxCompression.NONE,
+                    }
+                    compression = compress_map.get(job["compression"], ProxmoxCompression.ZSTD)
+
+                    result = manager.backup_guest(
+                        vmid=vmid,
+                        storage=job["storage_id"],
+                        mode=backup_mode,
+                        compress=compression,
+                        retention=job.get("retention"),
+                    )
+
+                    # Update run record
+                    storage.save_hypervisor_run(
+                        run_id=run_id,
+                        job_id=job_id,
+                        job_name=job["name"],
+                        hypervisor_id=hypervisor["id"],
+                        guest_id=vmid,
+                        guest_name=guest_name,
+                        status="success" if result["success"] else "failed",
+                        upid=result.get("upid"),
+                        finished_at=datetime.fromisoformat(result["finished_at"]),
+                        duration_seconds=result.get("duration_seconds"),
+                        exit_status=result.get("exit_status"),
+                        errors=result.get("errors"),
+                    )
+
+                    results.append(result)
+
+                except Exception as e:
+                    logger.error(f"Backup failed for VMID {vmid}: {e}")
+                    storage.save_hypervisor_run(
+                        run_id=run_id,
+                        job_id=job_id,
+                        job_name=job["name"],
+                        hypervisor_id=hypervisor["id"],
+                        guest_id=vmid,
+                        guest_name=guest_name,
+                        status="failed",
+                        finished_at=datetime.now(),
+                        errors=[str(e)],
+                    )
+                    results.append({"success": False, "vmid": vmid, "error": str(e)})
+
+            task.progress = 100
+            task.message = "Backup job completed"
+
+            success_count = sum(1 for r in results if r.get("success"))
+            return {
+                "run_id": run_id,
+                "total": total,
+                "success": success_count,
+                "failed": total - success_count,
+                "results": results,
+            }
+
+        task_manager = get_task_manager()
+        guest_count = len(job.get("guest_ids") or [])
+        desc = f"Backing up {guest_count} guests from {hypervisor['name']}" if guest_count else f"Backing up all guests from {hypervisor['name']}"
+
+        task = task_manager.submit(
+            task_type="hypervisor_backup",
+            description=desc,
+            func=run_backup_task,
+        )
+
+        msg = f"Backup job started for {guest_count} guests" if guest_count else "Backup job started for all guests"
+        return {
+            "run_id": run_id,
+            "task_id": task.id,
+            "message": msg,
+        }
+
+    @app.patch("/api/v1/hypervisor-jobs/{job_id}/toggle")
+    def toggle_hypervisor_job(
+        job_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Toggle a hypervisor job's enabled state."""
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        new_enabled = not job["enabled"]
+        storage.update_hypervisor_job(job_id, enabled=new_enabled)
+
+        return {"id": job_id, "enabled": new_enabled}
+
+    @app.get("/api/v1/hypervisor-jobs/{job_id}/runs")
+    def get_hypervisor_job_runs(
+        job_id: str,
+        limit: int = 50,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """Get backup runs for a hypervisor job."""
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        return storage.get_hypervisor_runs(job_id=job_id, limit=limit)
+
+    # ============ Hypervisor Backups ============
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/backups")
+    def list_hypervisor_backups(
+        hypervisor_id: str,
+        node: str | None = None,
+        storage_id: str | None = None,
+        vmid: int | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List backups on a hypervisor storage.
+
+        If node and storage_id are not provided, scans all backup-capable
+        storages across all nodes.
+        """
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        try:
+            all_backups = []
+
+            if node and storage_id:
+                # Specific node and storage
+                backups = api.list_backups(node, storage_id, vmid)
+                all_backups.extend(backups)
+            else:
+                # Scan all backup-capable storages
+                storages = api.list_storages()
+                nodes = api.list_nodes()
+
+                for pve_node in nodes:
+                    for pve_storage in storages:
+                        # Skip if storage not on this node
+                        if pve_storage.node and pve_storage.node != pve_node.node:
+                            continue
+                        try:
+                            backups = api.list_backups(pve_node.node, pve_storage.storage, vmid)
+                            all_backups.extend(backups)
+                        except Exception:
+                            # Storage might not be accessible on this node
+                            pass
+
+            # Sort by ctime descending (newest first)
+            all_backups.sort(key=lambda b: b.ctime, reverse=True)
+
+            return [
+                {
+                    "volid": b.volid,
+                    "vmid": b.vmid,
+                    "node": b.node,
+                    "ctime": b.ctime.timestamp(),
+                    "size": b.size,
+                    "format": b.format,
+                    "notes": b.notes,
+                    "protected": b.protected,
+                }
+                for b in all_backups[:50]  # Limit to 50 most recent
+            ]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/restore")
+    def restore_hypervisor_backup(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Restore a VM/container from backup."""
+        import asyncio
+
+        from backer.hypervisors.proxmox import (
+            ProxmoxAPI,
+            ProxmoxAuthMethod,
+            ProxmoxBackupManager,
+            ProxmoxGuestType,
+        )
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
+        vmid = body.get("vmid")
+        archive = body.get("archive")
+        node = body.get("node")
+        guest_type = body.get("guest_type", "qemu")
+        target_vmid = body.get("target_vmid")
+        target_storage = body.get("storage")
+        force = body.get("force", False)
+        start_after = body.get("start", False)
+
+        if not vmid or not archive or not node:
+            raise HTTPException(status_code=400, detail="vmid, archive, and node are required")
+
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        # Submit restore as background task
+        def run_restore_task(task: Task) -> dict[str, Any]:
+            manager = ProxmoxBackupManager(api)
+            task.message = f"Restoring VMID {vmid} from backup..."
+
+            try:
+                result = manager.restore_guest(
+                    vmid=vmid,
+                    archive=archive,
+                    node=node,
+                    guest_type=ProxmoxGuestType.QEMU if guest_type == "qemu" else ProxmoxGuestType.LXC,
+                    target_vmid=target_vmid,
+                    storage=target_storage,
+                    force=force,
+                    start_after=start_after,
+                )
+
+                task.progress = 100
+                task.message = "Restore completed" if result["success"] else "Restore failed"
+                return result
+
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+        task_manager = get_task_manager()
+        task = task_manager.submit(
+            task_type="hypervisor_restore",
+            description=f"Restoring VMID {vmid} on {hypervisor['name']}",
+            func=run_restore_task,
+        )
+
+        return {
+            "task_id": task.id,
+            "message": f"Restore started for VMID {vmid}",
+        }
 
     # ============ Web UI ============
 

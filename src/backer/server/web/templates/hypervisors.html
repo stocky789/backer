@@ -1,0 +1,1343 @@
+{% extends "base.html" %}
+{% block title %}Hypervisors - Backer{% endblock %}
+{% block page_title %}Hypervisors{% endblock %}
+
+{% block actions %}
+<button class="btn btn-primary" onclick="showAddHypervisorModal()">+ Add Hypervisor</button>
+{% endblock %}
+
+{% block content %}
+<!-- Hypervisors List -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Configured Hypervisors ({{ hypervisors|length }})</span>
+    </div>
+    {% if hypervisors %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Host</th>
+                <th>Status</th>
+                <th>Version</th>
+                <th>Last Checked</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for hv in hypervisors %}
+            <tr>
+                <td><strong>{{ hv.name }}</strong></td>
+                <td>
+                    <span class="badge badge-info">{{ hv.hypervisor_type|upper }}</span>
+                </td>
+                <td><code>{{ hv.host }}:{{ hv.port }}</code></td>
+                <td>
+                    {% if hv.status == 'connected' %}
+                    <span class="badge badge-success">Connected</span>
+                    {% elif hv.status == 'error' %}
+                    <span class="badge badge-error">Error</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ hv.status or 'Unknown' }}</span>
+                    {% endif %}
+                </td>
+                <td style="color: var(--text-muted);">{{ hv.version or '-' }}</td>
+                <td style="color: var(--text-muted);">{{ hv.last_checked_ago or 'Never' }}</td>
+                <td>
+                    <div class="btn-group">
+                        <button class="btn btn-primary btn-sm" onclick="viewHypervisor('{{ hv.id }}')">
+                            View
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="testHypervisor('{{ hv.id }}')">
+                            Test
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteHypervisor('{{ hv.id }}', '{{ hv.name }}')">
+                            Delete
+                        </button>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No Hypervisors Configured</h3>
+        <p>Add a hypervisor to start backing up VMs and containers</p>
+        <button class="btn btn-primary" onclick="showAddHypervisorModal()">Add Hypervisor</button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Hypervisor Backup Jobs -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Hypervisor Backup Jobs ({{ jobs|length }})</span>
+        {% if hypervisors %}
+        <button class="btn btn-primary btn-sm" onclick="showAddJobModal()" style="margin-left: auto;">+ New Job</button>
+        {% endif %}
+    </div>
+    {% if jobs %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Hypervisor</th>
+                <th>Guests</th>
+                <th>Schedule</th>
+                <th>Status</th>
+                <th>Last Run</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in jobs %}
+            <tr class="{% if not job.enabled %}row-disabled{% endif %}">
+                <td><strong>{{ job.name }}</strong></td>
+                <td>{{ job.hypervisor_name or job.hypervisor_id }}</td>
+                <td>
+                    {% if job.guest_count %}
+                    <span class="badge badge-info">{{ job.guest_count }} guest(s)</span>
+                    {% else %}
+                    <span class="badge badge-muted">All</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if job.schedule_cron %}
+                    <code>{{ job.schedule_cron }}</code>
+                    {% else %}
+                    <span style="color: var(--text-muted);">Manual</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if not job.enabled %}
+                    <span class="badge badge-muted">Disabled</span>
+                    {% elif job.last_status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif job.last_status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% elif job.last_status == 'running' %}
+                    <span class="badge badge-warning">Running</span>
+                    {% else %}
+                    <span class="badge badge-muted">Never run</span>
+                    {% endif %}
+                </td>
+                <td style="color: var(--text-muted);">{{ job.last_run_ago or '-' }}</td>
+                <td>
+                    <div class="btn-group">
+                        <button class="btn btn-primary btn-sm" onclick="runHypervisorJob('{{ job.id }}')"
+                                {% if not job.enabled %}disabled{% endif %}>
+                            Run
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="toggleHypervisorJob('{{ job.id }}')">
+                            {{ 'Enable' if not job.enabled else 'Disable' }}
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="editHypervisorJob('{{ job.id }}')">
+                            Edit
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteHypervisorJob('{{ job.id }}', '{{ job.name }}')">
+                            Delete
+                        </button>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        {% if hypervisors %}
+        <h3>No Backup Jobs</h3>
+        <p>Create a backup job to start protecting your VMs and containers</p>
+        <button class="btn btn-primary" onclick="showAddJobModal()">Create Job</button>
+        {% else %}
+        <h3>Add a Hypervisor First</h3>
+        <p>Configure a hypervisor above to create backup jobs</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Add Hypervisor Modal -->
+<div id="addHypervisorModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-header">
+            <h3>Add Hypervisor</h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideAddHypervisorModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="addHypervisorForm" onsubmit="submitAddHypervisor(event)">
+                <div class="form-group">
+                    <label class="form-label">Hypervisor Type</label>
+                    <select id="hvType" class="form-input" onchange="onHypervisorTypeChange()">
+                        <option value="proxmox">Proxmox VE</option>
+                    </select>
+                    <div class="form-hint">Select the hypervisor platform</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" id="hvName" class="form-input" placeholder="My Proxmox Server" required>
+                    <div class="form-hint">A friendly name for this hypervisor</div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group" style="flex: 2;">
+                        <label class="form-label">Host</label>
+                        <input type="text" id="hvHost" class="form-input" placeholder="192.168.1.100 or pve.local" required>
+                    </div>
+                    <div class="form-group" style="flex: 1;">
+                        <label class="form-label">Port</label>
+                        <input type="number" id="hvPort" class="form-input" value="8006">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Authentication Method</label>
+                    <select id="hvAuthMethod" class="form-input" onchange="onAuthMethodChange()">
+                        <option value="token">API Token (Recommended)</option>
+                        <option value="password">Username & Password</option>
+                    </select>
+                </div>
+
+                <!-- Token Authentication -->
+                <div id="tokenAuth">
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" id="hvTokenUser" class="form-input" placeholder="root@pam">
+                        <div class="form-hint">User who owns the API token (e.g., root@pam or backup@pve)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Token ID</label>
+                        <input type="text" id="hvTokenId" class="form-input" placeholder="backer">
+                        <div class="form-hint">Name of the API token (without the user prefix)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Token Secret</label>
+                        <input type="password" id="hvTokenSecret" class="form-input" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                        <div class="form-hint">The UUID token secret</div>
+                    </div>
+                </div>
+
+                <!-- Password Authentication -->
+                <div id="passwordAuth" style="display: none;">
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" id="hvUsername" class="form-input" placeholder="root@pam">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" id="hvPassword" class="form-input">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="hvVerifySSL"> Verify SSL Certificate
+                    </label>
+                    <div class="form-hint">Uncheck for self-signed certificates (common in Proxmox)</div>
+                </div>
+
+                <div id="addHypervisorError" class="error-msg" style="display: none;"></div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="submit" class="btn btn-primary">Add Hypervisor</button>
+                    <button type="button" class="btn btn-secondary" onclick="testNewHypervisor()">Test Connection</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideAddHypervisorModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- View Hypervisor Modal (Guests & Storage) -->
+<div id="viewHypervisorModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 900px;">
+        <div class="modal-header">
+            <h3>Hypervisor: <span id="viewHvName"></span></h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideViewHypervisorModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <!-- Tabs -->
+            <div class="tabs">
+                <button class="tab active" onclick="switchViewTab('guests')">VMs & Containers</button>
+                <button class="tab" onclick="switchViewTab('storage')">Storage</button>
+                <button class="tab" onclick="switchViewTab('backups')">Backups</button>
+            </div>
+
+            <!-- Guests Tab -->
+            <div id="viewGuestsTab" class="tab-content active">
+                <div id="guestsList" class="loading">Loading guests...</div>
+            </div>
+
+            <!-- Storage Tab -->
+            <div id="viewStorageTab" class="tab-content" style="display: none;">
+                <div id="storageList" class="loading">Loading storage...</div>
+            </div>
+
+            <!-- Backups Tab -->
+            <div id="viewBackupsTab" class="tab-content" style="display: none;">
+                <div id="backupsList" class="loading">Loading backups...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit Job Modal -->
+<div id="jobModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 700px;">
+        <div class="modal-header">
+            <h3 id="jobModalTitle">Create Backup Job</h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideJobModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="jobForm" onsubmit="submitJob(event)">
+                <input type="hidden" id="jobId">
+
+                <div class="form-group">
+                    <label class="form-label">Job Name</label>
+                    <input type="text" id="jobName" class="form-input" placeholder="Daily VM Backups" required>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Hypervisor</label>
+                    <select id="jobHypervisor" class="form-input" onchange="onJobHypervisorChange()" required>
+                        <option value="">Select hypervisor...</option>
+                        {% for hv in hypervisors %}
+                        <option value="{{ hv.id }}">{{ hv.name }} ({{ hv.host }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Guests to Backup</label>
+                    <div class="form-hint" style="margin-bottom: 10px;">Select specific VMs/containers or leave empty to backup all</div>
+                    <div id="jobGuestsList" class="guest-selector">
+                        <div class="loading">Select a hypervisor first</div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Backup Storage</label>
+                    <select id="jobStorage" class="form-input" required>
+                        <option value="">Select storage...</option>
+                    </select>
+                    <div class="form-hint">Proxmox storage where backups will be saved</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Backup Mode</label>
+                    <select id="jobMode" class="form-input">
+                        <option value="snapshot">Snapshot (recommended)</option>
+                        <option value="suspend">Suspend</option>
+                        <option value="stop">Stop</option>
+                    </select>
+                    <div class="form-hint">Snapshot: live backup, Suspend: pause RAM, Stop: shutdown during backup</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Compression</label>
+                    <select id="jobCompression" class="form-input">
+                        <option value="zstd">ZSTD (fast, good compression)</option>
+                        <option value="lzo">LZO (fastest, larger files)</option>
+                        <option value="gzip">GZIP (slowest, best compression)</option>
+                        <option value="none">None</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Schedule (cron)</label>
+                    <input type="text" id="jobSchedule" class="form-input" placeholder="0 2 * * *">
+                    <div class="form-hint">Leave empty for manual backups only. Example: 0 2 * * * = daily at 2am</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="jobEnabled" checked> Enable Job
+                    </label>
+                </div>
+
+                <div id="jobError" class="error-msg" style="display: none;"></div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="submit" class="btn btn-primary" id="jobSubmitBtn">Create Job</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideJobModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Restore Modal -->
+<div id="restoreModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-header">
+            <h3>Restore VM/Container</h3>
+            <button class="btn btn-secondary btn-sm" onclick="hideRestoreModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="restoreForm" onsubmit="submitRestore(event)">
+                <input type="hidden" id="restoreHypervisorId">
+                <input type="hidden" id="restoreArchive">
+                <input type="hidden" id="restoreNode">
+
+                <div class="form-group">
+                    <label class="form-label">Backup</label>
+                    <input type="text" id="restoreBackupName" class="form-input" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Restore as VMID</label>
+                    <input type="number" id="restoreVmid" class="form-input" placeholder="Leave empty for new ID">
+                    <div class="form-hint">Specify VMID or leave empty to auto-assign</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Target Storage (optional)</label>
+                    <select id="restoreStorage" class="form-input">
+                        <option value="">Default (same as backup)</option>
+                    </select>
+                    <div class="form-hint">Storage for the restored VM disks</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="restoreStart"> Start after restore
+                    </label>
+                </div>
+
+                <div id="restoreError" class="error-msg" style="display: none;"></div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="submit" class="btn btn-primary">Start Restore</button>
+                    <button type="button" class="btn btn-secondary" onclick="hideRestoreModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<style>
+.btn-group {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.row-disabled {
+    opacity: 0.6;
+}
+
+.form-row {
+    display: flex;
+    gap: 15px;
+}
+
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+    margin: 0;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.error-msg {
+    color: var(--error);
+    padding: 10px;
+    background: rgba(255, 107, 107, 0.1);
+    border-radius: 4px;
+    margin-top: 10px;
+}
+
+.success-msg {
+    color: var(--success);
+    padding: 10px;
+    background: rgba(76, 175, 80, 0.1);
+    border-radius: 4px;
+    margin-top: 10px;
+}
+
+.loading {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+}
+
+/* Tabs */
+.tabs {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+}
+
+.tab {
+    background: transparent;
+    border: none;
+    padding: 10px 20px;
+    cursor: pointer;
+    color: var(--text-muted);
+    border-radius: 4px 4px 0 0;
+    transition: all 0.2s;
+}
+
+.tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-primary);
+}
+
+.tab.active {
+    color: var(--accent);
+    background: var(--bg-primary);
+    border-bottom: 2px solid var(--accent);
+}
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+/* Guest Selector */
+.guest-selector {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    max-height: 250px;
+    overflow-y: auto;
+    background: var(--bg-primary);
+}
+
+.guest-item {
+    padding: 10px 15px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.guest-item:last-child {
+    border-bottom: none;
+}
+
+.guest-item:hover {
+    background: var(--bg-secondary);
+}
+
+.guest-item input[type="checkbox"] {
+    margin: 0;
+}
+
+.guest-item .guest-name {
+    flex: 1;
+    font-weight: 500;
+}
+
+.guest-item .guest-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.guest-item .guest-status {
+    font-size: 11px;
+}
+
+/* Guest/Storage Tables */
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.data-table th,
+.data-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.data-table th {
+    background: var(--bg-primary);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.data-table tr:hover {
+    background: var(--bg-primary);
+}
+
+.guest-type-vm {
+    color: var(--accent);
+}
+
+.guest-type-lxc {
+    color: var(--success);
+}
+
+/* Status indicators */
+.status-running {
+    color: var(--success);
+}
+
+.status-stopped {
+    color: var(--text-muted);
+}
+
+/* Backup list items */
+.backup-item {
+    padding: 15px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+.backup-item:last-child {
+    border-bottom: none;
+}
+
+.backup-item:hover {
+    background: var(--bg-primary);
+}
+
+.backup-info {
+    flex: 1;
+}
+
+.backup-name {
+    font-weight: 500;
+    margin-bottom: 5px;
+}
+
+.backup-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.backup-actions {
+    display: flex;
+    gap: 5px;
+}
+</style>
+
+<script>
+let currentHypervisorId = null;
+let editingJobId = null;
+
+// Escape HTML to prevent XSS
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// ========== Add Hypervisor ==========
+
+function showAddHypervisorModal() {
+    document.getElementById('addHypervisorModal').style.display = 'flex';
+    document.getElementById('addHypervisorForm').reset();
+    document.getElementById('addHypervisorError').style.display = 'none';
+    onAuthMethodChange();
+}
+
+function hideAddHypervisorModal() {
+    document.getElementById('addHypervisorModal').style.display = 'none';
+}
+
+function onHypervisorTypeChange() {
+    // Future: handle different hypervisor types
+}
+
+function onAuthMethodChange() {
+    const method = document.getElementById('hvAuthMethod').value;
+    document.getElementById('tokenAuth').style.display = method === 'token' ? 'block' : 'none';
+    document.getElementById('passwordAuth').style.display = method === 'password' ? 'block' : 'none';
+}
+
+function getHypervisorFormData() {
+    const authMethod = document.getElementById('hvAuthMethod').value;
+    const data = {
+        name: document.getElementById('hvName').value,
+        hypervisor_type: document.getElementById('hvType').value,
+        host: document.getElementById('hvHost').value,
+        port: parseInt(document.getElementById('hvPort').value) || 8006,
+        auth_method: authMethod,
+        verify_ssl: document.getElementById('hvVerifySSL').checked,
+    };
+
+    if (authMethod === 'token') {
+        data.username = document.getElementById('hvTokenUser').value;
+        data.token_id = document.getElementById('hvTokenId').value;
+        data.token_secret = document.getElementById('hvTokenSecret').value;
+    } else {
+        data.username = document.getElementById('hvUsername').value;
+        data.password = document.getElementById('hvPassword').value;
+    }
+
+    return data;
+}
+
+async function testNewHypervisor() {
+    const data = getHypervisorFormData();
+    const errorDiv = document.getElementById('addHypervisorError');
+    errorDiv.style.display = 'none';
+
+    try {
+        const response = await fetch('/api/v1/hypervisors/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            alert(`Connection successful!\n\nVersion: ${result.version || 'Unknown'}`);
+        } else {
+            errorDiv.textContent = result.message || 'Connection failed';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = 'Test failed: ' + e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+async function submitAddHypervisor(event) {
+    event.preventDefault();
+
+    const data = getHypervisorFormData();
+    const errorDiv = document.getElementById('addHypervisorError');
+    errorDiv.style.display = 'none';
+
+    try {
+        const response = await fetch('/api/v1/hypervisors', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const result = await response.json();
+            errorDiv.textContent = result.detail || 'Failed to add hypervisor';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = 'Error: ' + e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+// Close modal on background click
+document.getElementById('addHypervisorModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideAddHypervisorModal();
+});
+
+// ========== View Hypervisor ==========
+
+async function viewHypervisor(hvId) {
+    currentHypervisorId = hvId;
+    document.getElementById('viewHypervisorModal').style.display = 'flex';
+
+    // Reset tabs
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelector('.tab').classList.add('active');
+    document.getElementById('viewGuestsTab').classList.add('active');
+
+    // Load data
+    loadHypervisorName(hvId);
+    loadGuests(hvId);
+}
+
+function hideViewHypervisorModal() {
+    document.getElementById('viewHypervisorModal').style.display = 'none';
+    currentHypervisorId = null;
+}
+
+async function loadHypervisorName(hvId) {
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}`);
+        const hv = await response.json();
+        document.getElementById('viewHvName').textContent = hv.name;
+    } catch (e) {
+        document.getElementById('viewHvName').textContent = 'Unknown';
+    }
+}
+
+function switchViewTab(tabName) {
+    // Update tab buttons
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+
+    // Update content
+    document.querySelectorAll('.tab-content').forEach(t => {
+        t.style.display = 'none';
+        t.classList.remove('active');
+    });
+
+    const tabContent = document.getElementById(`view${tabName.charAt(0).toUpperCase() + tabName.slice(1)}Tab`);
+    tabContent.style.display = 'block';
+    tabContent.classList.add('active');
+
+    // Load data if needed
+    if (tabName === 'guests') {
+        loadGuests(currentHypervisorId);
+    } else if (tabName === 'storage') {
+        loadStorages(currentHypervisorId);
+    } else if (tabName === 'backups') {
+        loadBackups(currentHypervisorId);
+    }
+}
+
+async function loadGuests(hvId) {
+    const container = document.getElementById('guestsList');
+    container.innerHTML = '<div class="loading">Loading VMs and containers...</div>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/guests`);
+        const guests = await response.json();
+
+        if (guests.length === 0) {
+            container.innerHTML = '<div class="loading">No VMs or containers found</div>';
+            return;
+        }
+
+        let html = `
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>VMID</th>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Node</th>
+                        <th>CPU</th>
+                        <th>Memory</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        for (const guest of guests) {
+            const typeClass = guest.type === 'qemu' ? 'guest-type-vm' : 'guest-type-lxc';
+            const typeLabel = guest.type === 'qemu' ? 'VM' : 'LXC';
+            const statusClass = guest.status === 'running' ? 'status-running' : 'status-stopped';
+            const memGB = guest.maxmem_gb || 0;
+
+            html += `
+                <tr>
+                    <td><strong>${guest.vmid}</strong></td>
+                    <td>${escapeHtml(guest.name)}</td>
+                    <td><span class="${typeClass}">${typeLabel}</span></td>
+                    <td><span class="${statusClass}">${guest.status}</span></td>
+                    <td>${escapeHtml(guest.node)}</td>
+                    <td>${guest.cpus || '-'}</td>
+                    <td>${memGB ? memGB.toFixed(1) + ' GB' : '-'}</td>
+                </tr>
+            `;
+        }
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div class="error-msg">Failed to load guests: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function loadStorages(hvId) {
+    const container = document.getElementById('storageList');
+    container.innerHTML = '<div class="loading">Loading storage...</div>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/storages`);
+        const storages = await response.json();
+
+        if (storages.length === 0) {
+            container.innerHTML = '<div class="loading">No backup-capable storage found</div>';
+            return;
+        }
+
+        let html = `
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Node</th>
+                        <th>Total</th>
+                        <th>Used</th>
+                        <th>Available</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        for (const storage of storages) {
+            const totalGB = Math.round((storage.total || 0) / 1024 / 1024 / 1024);
+            const usedGB = Math.round((storage.used || 0) / 1024 / 1024 / 1024);
+            const availGB = Math.round((storage.avail || 0) / 1024 / 1024 / 1024);
+            const statusClass = storage.active ? 'status-running' : 'status-stopped';
+
+            html += `
+                <tr>
+                    <td><strong>${escapeHtml(storage.storage)}</strong></td>
+                    <td>${escapeHtml(storage.type)}</td>
+                    <td>${escapeHtml(storage.node || 'All')}</td>
+                    <td>${totalGB} GB</td>
+                    <td>${usedGB} GB</td>
+                    <td>${availGB} GB</td>
+                    <td><span class="${statusClass}">${storage.active ? 'Active' : 'Inactive'}</span></td>
+                </tr>
+            `;
+        }
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div class="error-msg">Failed to load storage: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function loadBackups(hvId) {
+    const container = document.getElementById('backupsList');
+    container.innerHTML = '<div class="loading">Loading backups...</div>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/backups`);
+        const backups = await response.json();
+
+        if (backups.length === 0) {
+            container.innerHTML = '<div class="loading">No backups found</div>';
+            return;
+        }
+
+        let html = '';
+        for (const backup of backups) {
+            const sizeGB = (backup.size / 1024 / 1024 / 1024).toFixed(2);
+            const date = backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : '-';
+
+            html += `
+                <div class="backup-item">
+                    <div class="backup-info">
+                        <div class="backup-name">${escapeHtml(backup.volid)}</div>
+                        <div class="backup-meta">
+                            VMID: ${backup.vmid} | Size: ${sizeGB} GB | Date: ${date} | Node: ${escapeHtml(backup.node)}
+                        </div>
+                    </div>
+                    <div class="backup-actions">
+                        <button class="btn btn-primary btn-sm" onclick="showRestoreDialog('${hvId}', '${escapeHtml(backup.volid)}', '${escapeHtml(backup.node)}')">
+                            Restore
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div class="error-msg">Failed to load backups: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+// Close view modal on background click
+document.getElementById('viewHypervisorModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideViewHypervisorModal();
+});
+
+// ========== Hypervisor Actions ==========
+
+async function testHypervisor(hvId) {
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/test`, {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            alert(`Connection successful!\n\nVersion: ${result.version || 'Unknown'}`);
+            location.reload();
+        } else {
+            alert('Connection failed: ' + (result.message || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Test failed: ' + e.message);
+    }
+}
+
+async function deleteHypervisor(hvId, hvName) {
+    if (!confirm(`Delete hypervisor '${hvName}'?\n\nThis will also delete all associated backup jobs.`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            let errorMsg = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Failed to delete: ' + errorMsg);
+        }
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
+}
+
+// ========== Job Management ==========
+
+function showAddJobModal() {
+    editingJobId = null;
+    document.getElementById('jobModalTitle').textContent = 'Create Backup Job';
+    document.getElementById('jobSubmitBtn').textContent = 'Create Job';
+    document.getElementById('jobForm').reset();
+    document.getElementById('jobEnabled').checked = true;
+    document.getElementById('jobGuestsList').innerHTML = '<div class="loading">Select a hypervisor first</div>';
+    document.getElementById('jobStorage').innerHTML = '<option value="">Select storage...</option>';
+    document.getElementById('jobError').style.display = 'none';
+    document.getElementById('jobModal').style.display = 'flex';
+}
+
+function hideJobModal() {
+    document.getElementById('jobModal').style.display = 'none';
+    editingJobId = null;
+}
+
+async function onJobHypervisorChange() {
+    const hvId = document.getElementById('jobHypervisor').value;
+    if (!hvId) {
+        document.getElementById('jobGuestsList').innerHTML = '<div class="loading">Select a hypervisor first</div>';
+        document.getElementById('jobStorage').innerHTML = '<option value="">Select storage...</option>';
+        return;
+    }
+
+    // Load guests
+    const guestsContainer = document.getElementById('jobGuestsList');
+    guestsContainer.innerHTML = '<div class="loading">Loading guests...</div>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/guests`);
+        const guests = await response.json();
+
+        if (guests.length === 0) {
+            guestsContainer.innerHTML = '<div class="loading">No VMs or containers found</div>';
+        } else {
+            let html = '';
+            for (const guest of guests) {
+                const typeLabel = guest.type === 'qemu' ? 'VM' : 'LXC';
+                html += `
+                    <label class="guest-item">
+                        <input type="checkbox" name="guests" value="${guest.vmid}">
+                        <span class="guest-name">${escapeHtml(guest.name)}</span>
+                        <span class="guest-meta">${typeLabel} (${guest.vmid})</span>
+                        <span class="guest-status ${guest.status === 'running' ? 'status-running' : 'status-stopped'}">${guest.status}</span>
+                    </label>
+                `;
+            }
+            guestsContainer.innerHTML = html;
+        }
+    } catch (e) {
+        guestsContainer.innerHTML = `<div class="error-msg">Failed to load guests: ${escapeHtml(e.message)}</div>`;
+    }
+
+    // Load storages
+    const storageSelect = document.getElementById('jobStorage');
+    storageSelect.innerHTML = '<option value="">Loading...</option>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/storages`);
+        const storages = await response.json();
+
+        storageSelect.innerHTML = '<option value="">Select storage...</option>';
+        for (const storage of storages) {
+            storageSelect.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)} (${escapeHtml(storage.type)})</option>`;
+        }
+    } catch (e) {
+        storageSelect.innerHTML = '<option value="">Failed to load storage</option>';
+    }
+}
+
+async function submitJob(event) {
+    event.preventDefault();
+
+    const errorDiv = document.getElementById('jobError');
+    errorDiv.style.display = 'none';
+
+    // Get selected guests
+    const selectedGuests = [];
+    document.querySelectorAll('#jobGuestsList input[name="guests"]:checked').forEach(cb => {
+        selectedGuests.push(parseInt(cb.value));
+    });
+
+    const data = {
+        name: document.getElementById('jobName').value,
+        hypervisor_id: document.getElementById('jobHypervisor').value,
+        vmids: selectedGuests.length > 0 ? selectedGuests : null,
+        storage: document.getElementById('jobStorage').value,
+        mode: document.getElementById('jobMode').value,
+        compress: document.getElementById('jobCompression').value,
+        schedule_cron: document.getElementById('jobSchedule').value || null,
+        enabled: document.getElementById('jobEnabled').checked,
+    };
+
+    const url = editingJobId ? `/api/v1/hypervisor-jobs/${editingJobId}` : '/api/v1/hypervisor-jobs';
+    const method = editingJobId ? 'PUT' : 'POST';
+
+    try {
+        const response = await fetch(url, {
+            method: method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const result = await response.json();
+            errorDiv.textContent = result.detail || 'Failed to save job';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = 'Error: ' + e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+async function editHypervisorJob(jobId) {
+    editingJobId = jobId;
+    document.getElementById('jobModalTitle').textContent = 'Edit Backup Job';
+    document.getElementById('jobSubmitBtn').textContent = 'Save Changes';
+    document.getElementById('jobError').style.display = 'none';
+    document.getElementById('jobModal').style.display = 'flex';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`);
+        const job = await response.json();
+
+        document.getElementById('jobName').value = job.name;
+        document.getElementById('jobHypervisor').value = job.hypervisor_id;
+        document.getElementById('jobMode').value = job.backup_mode || job.mode || 'snapshot';
+        document.getElementById('jobCompression').value = job.compression || job.compress || 'zstd';
+        document.getElementById('jobSchedule').value = job.schedule_cron || '';
+        document.getElementById('jobEnabled').checked = job.enabled;
+
+        // Load guests and storage for this hypervisor
+        await onJobHypervisorChange();
+
+        // Wait a bit for DOM to update, then select the right values
+        setTimeout(() => {
+            document.getElementById('jobStorage').value = job.storage_id || job.storage || '';
+
+            // Check selected guests
+            const vmids = job.guest_ids || job.vmids || [];
+            if (vmids.length > 0) {
+                vmids.forEach(vmid => {
+                    const checkbox = document.querySelector(`#jobGuestsList input[value="${vmid}"]`);
+                    if (checkbox) checkbox.checked = true;
+                });
+            }
+        }, 500);
+    } catch (e) {
+        document.getElementById('jobError').textContent = 'Failed to load job: ' + e.message;
+        document.getElementById('jobError').style.display = 'block';
+    }
+}
+
+async function runHypervisorJob(jobId) {
+    try {
+        const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}/run`, {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            alert(`Backup started!\n\nRun ID: ${result.run_id}\n${result.message || ''}`);
+            location.reload();
+        } else {
+            alert('Failed to start backup: ' + (result.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function toggleHypervisorJob(jobId) {
+    try {
+        const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}/toggle`, {
+            method: 'PATCH'
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const result = await response.json();
+            alert('Failed to toggle: ' + (result.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function deleteHypervisorJob(jobId, jobName) {
+    if (!confirm(`Delete backup job '${jobName}'?`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            let errorMsg = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                errorMsg = data.detail || data.message || errorMsg;
+            } catch {
+                const text = await response.text();
+                if (text) errorMsg = text;
+            }
+            alert('Failed to delete: ' + errorMsg);
+        }
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
+}
+
+// Close job modal on background click
+document.getElementById('jobModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideJobModal();
+});
+
+// ========== Restore ==========
+
+function showRestoreDialog(hvId, volid, node) {
+    document.getElementById('restoreHypervisorId').value = hvId;
+    document.getElementById('restoreArchive').value = volid;
+    document.getElementById('restoreNode').value = node;
+    document.getElementById('restoreBackupName').value = volid;
+    document.getElementById('restoreVmid').value = '';
+    document.getElementById('restoreStart').checked = false;
+    document.getElementById('restoreError').style.display = 'none';
+
+    // Load storage options
+    loadRestoreStorages(hvId);
+
+    document.getElementById('restoreModal').style.display = 'flex';
+}
+
+function hideRestoreModal() {
+    document.getElementById('restoreModal').style.display = 'none';
+}
+
+async function loadRestoreStorages(hvId) {
+    const select = document.getElementById('restoreStorage');
+    select.innerHTML = '<option value="">Default (same as backup)</option>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/storages?type=images`);
+        const storages = await response.json();
+
+        for (const storage of storages) {
+            select.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)}</option>`;
+        }
+    } catch (e) {
+        // Ignore errors
+    }
+}
+
+async function submitRestore(event) {
+    event.preventDefault();
+
+    const errorDiv = document.getElementById('restoreError');
+    errorDiv.style.display = 'none';
+
+    const data = {
+        node: document.getElementById('restoreNode').value,
+        archive: document.getElementById('restoreArchive').value,
+        vmid: document.getElementById('restoreVmid').value ? parseInt(document.getElementById('restoreVmid').value) : null,
+        storage: document.getElementById('restoreStorage').value || null,
+        start: document.getElementById('restoreStart').checked,
+    };
+
+    const hvId = document.getElementById('restoreHypervisorId').value;
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/restore`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            alert(`Restore started!\n\nTask ID: ${result.upid || result.task_id}`);
+            hideRestoreModal();
+        } else {
+            errorDiv.textContent = result.detail || 'Failed to start restore';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = 'Error: ' + e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+// Close restore modal on background click
+document.getElementById('restoreModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideRestoreModal();
+});
+</script>
+{% endblock %}
