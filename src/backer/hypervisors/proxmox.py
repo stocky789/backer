@@ -726,6 +726,100 @@ class ProxmoxAPI:
 
         logger.info(f"Ensured SMB directory exists: //{server}/{share}/{path}")
 
+    def _cleanup_stale_mount_point(
+        self,
+        storage_id: str,
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        ssh_key: str | None = None,
+        ssh_password: str | None = None,
+    ) -> bool:
+        """Remove a stale mount point directory on the Proxmox host via SSH.
+
+        When Proxmox storage is deleted but the mount point directory remains,
+        subsequent storage creation fails. This cleans up the stale directory.
+
+        Args:
+            storage_id: The storage ID (mount point is at /mnt/pve/{storage_id})
+            ssh_user: SSH username (default: root)
+            ssh_port: SSH port (default: 22)
+            ssh_key: Path to SSH private key file
+            ssh_password: SSH password (used if no key)
+
+        Returns:
+            True if cleanup succeeded, False otherwise
+        """
+        import subprocess
+
+        mount_point = f"/mnt/pve/{storage_id}"
+        logger.info(f"Attempting to clean up stale mount point: {mount_point}")
+
+        # Build SSH command
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
+
+        if ssh_key:
+            ssh_cmd.extend(["-i", ssh_key])
+        if ssh_port != 22:
+            ssh_cmd.extend(["-p", str(ssh_port)])
+
+        ssh_cmd.append(f"{ssh_user}@{self.host}")
+
+        # First check if directory exists and is empty
+        check_cmd = ssh_cmd + [f"test -d {mount_point} && rmdir {mount_point}"]
+
+        try:
+            # If using password auth without key, we need sshpass
+            if ssh_password and not ssh_key:
+                full_cmd = ["sshpass", "-p", ssh_password] + check_cmd
+            else:
+                full_cmd = check_cmd
+
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                timeout=30,
+            )
+
+            if result.returncode == 0:
+                logger.info(f"Successfully removed stale mount point: {mount_point}")
+                return True
+            else:
+                stderr = result.stderr.decode() if result.stderr else ""
+                if "Directory not empty" in stderr:
+                    logger.warning(
+                        f"Mount point {mount_point} is not empty - may still be mounted. "
+                        "Trying to unmount first..."
+                    )
+                    # Try to unmount and then remove
+                    unmount_cmd = ssh_cmd + [f"umount {mount_point} 2>/dev/null; rmdir {mount_point}"]
+                    if ssh_password and not ssh_key:
+                        unmount_cmd = ["sshpass", "-p", ssh_password] + unmount_cmd
+
+                    result2 = subprocess.run(unmount_cmd, capture_output=True, timeout=30)
+                    if result2.returncode == 0:
+                        logger.info(f"Unmounted and removed stale mount point: {mount_point}")
+                        return True
+                    else:
+                        logger.warning(f"Could not clean up mount point: {result2.stderr.decode() if result2.stderr else 'unknown error'}")
+                        return False
+                elif "No such file" in stderr:
+                    # Directory doesn't exist, that's fine
+                    logger.debug(f"Mount point {mount_point} does not exist")
+                    return True
+                else:
+                    logger.warning(f"Failed to remove mount point: {stderr}")
+                    return False
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout cleaning up mount point {mount_point}")
+            return False
+        except FileNotFoundError:
+            logger.warning("sshpass not installed - cannot use password auth for SSH cleanup")
+            return False
+        except Exception as e:
+            logger.warning(f"Error cleaning up mount point {mount_point}: {e}")
+            return False
+
     def create_nfs_storage(
         self,
         storage_id: str,
@@ -874,6 +968,10 @@ class ProxmoxAPI:
         repository: dict[str, Any],
         hypervisor_name: str | None = None,
         storage_id: str | None = None,
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        ssh_key: str | None = None,
+        ssh_password: str | None = None,
     ) -> str:
         """Ensure a Backer repository is configured as Proxmox storage.
 
@@ -893,6 +991,10 @@ class ProxmoxAPI:
                 - password: SMB password (optional)
                 - domain: SMB domain (optional)
             hypervisor_name: Name of the hypervisor (for folder organization)
+            ssh_user: SSH username for cleanup operations (default: root)
+            ssh_port: SSH port (default: 22)
+            ssh_key: Path to SSH private key
+            ssh_password: SSH password (used if no key provided)
             storage_id: Override storage ID (default: "backer-{repo_name}")
 
         Returns:
@@ -1021,15 +1123,57 @@ class ProxmoxAPI:
                 f"Creating CIFS storage '{storage_id}' -> //{server}/{share} "
                 f"(user={username or 'guest'}, domain={domain or 'none'}, subdir={subdir or 'none'})"
             )
-            self.create_cifs_storage(
-                storage_id=storage_id,
-                server=server,
-                share=share,
-                username=username,
-                password=password,
-                domain=domain,
-                subdir=subdir,
-            )
+            try:
+                self.create_cifs_storage(
+                    storage_id=storage_id,
+                    server=server,
+                    share=share,
+                    username=username,
+                    password=password,
+                    domain=domain,
+                    subdir=subdir,
+                )
+            except ProxmoxAPIError as e:
+                # Handle "mkdir: File exists" error - stale mount point from previous run
+                if "File exists" in str(e) or "already exists" in str(e).lower():
+                    logger.warning(
+                        f"Storage creation failed due to stale mount point. "
+                        f"Attempting to clean up /mnt/pve/{storage_id}..."
+                    )
+                    # Check if storage exists now (race condition or partial creation)
+                    check_storage = self.get_storage(storage_id)
+                    if check_storage:
+                        logger.info(f"Storage '{storage_id}' exists despite error, continuing...")
+                    else:
+                        # Mount point exists but storage doesn't - try to clean up via SSH
+                        cleanup_success = self._cleanup_stale_mount_point(
+                            storage_id=storage_id,
+                            ssh_user=ssh_user,
+                            ssh_port=ssh_port,
+                            ssh_key=ssh_key,
+                            ssh_password=ssh_password,
+                        )
+                        if cleanup_success:
+                            # Retry storage creation
+                            logger.info(f"Retrying storage creation after cleanup...")
+                            self.create_cifs_storage(
+                                storage_id=storage_id,
+                                server=server,
+                                share=share,
+                                username=username,
+                                password=password,
+                                domain=domain,
+                                subdir=subdir,
+                            )
+                        else:
+                            raise ProxmoxAPIError(
+                                f"Failed to create storage '{storage_id}': stale mount point exists at "
+                                f"/mnt/pve/{storage_id} and automatic cleanup failed. "
+                                f"Please remove it manually on the Proxmox host: "
+                                f"sudo rmdir /mnt/pve/{storage_id}"
+                            ) from e
+                else:
+                    raise
 
         else:
             raise ProxmoxAPIError(

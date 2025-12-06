@@ -3230,23 +3230,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
+        # Get SSH credentials - used for both incremental backups and cleanup operations
+        # Use job-level SSH settings, fall back to hypervisor settings
+        ssh_user = job.get("ssh_user") or hypervisor.get("ssh_user", "root")
+        ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
+        ssh_key_path = hypervisor.get("ssh_key_path")
+
+        # For SSH password: use API password if ssh_use_api_password is enabled
+        ssh_password = None
+        if hypervisor.get("ssh_use_api_password", True) and hv_password:
+            ssh_password = hv_password
+
         # Set up incremental backup manager if enabled
         incremental_manager = None
         enable_incremental = job.get("enable_incremental", False)
         logger.info(f"Job '{job.get('name')}' enable_incremental={enable_incremental}")
 
         if enable_incremental:
-            # Get SSH credentials for QMP access
-            # Use job-level SSH settings, fall back to hypervisor settings
-            ssh_user = job.get("ssh_user") or hypervisor.get("ssh_user", "root")
-            ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
-            ssh_key_path = hypervisor.get("ssh_key_path")
-
-            # For SSH password: use API password if ssh_use_api_password is enabled
-            ssh_password = None
-            if hypervisor.get("ssh_use_api_password", True) and hv_password:
-                ssh_password = hv_password
-
             incremental_manager = IncrementalBackupManager(
                 host=hypervisor["host"],
                 hypervisor_id=hypervisor["id"],
@@ -3267,17 +3267,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 proxmox_storage_id = api.ensure_backer_storage(
                     repo_with_password,
                     hypervisor_name=hypervisor["name"],
+                    ssh_user=ssh_user,
+                    ssh_port=ssh_port,
+                    ssh_key=ssh_key_path,
+                    ssh_password=ssh_password,
                 )
             except ProxmoxAPIError as e:
-                return {
-                    "run_id": run_id,
-                    "total": 0,
-                    "success": 0,
-                    "failed": 1,
-                    "skipped": 0,
-                    "error": f"Failed to configure Proxmox storage: {e}",
-                    "results": [],
-                }
+                # Raise the error so the task shows as FAILED, not completed
+                raise RuntimeError(f"Failed to configure Proxmox storage: {e}") from e
 
             manager = ProxmoxBackupManager(api)
             results = []
