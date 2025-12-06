@@ -284,6 +284,10 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
             verify_ssl=hypervisor.get("verify_ssl", False),
         )
 
+        # Authenticate if using password-based auth
+        if auth_method == ProxmoxAuthMethod.PASSWORD:
+            api.authenticate()
+
         backup_manager = ProxmoxBackupManager(api)
 
         # Get backup options
@@ -2569,6 +2573,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         try:
+            # Authenticate if using password-based auth
+            if auth_method == ProxmoxAuthMethod.PASSWORD:
+                api.authenticate()
+
             guests = api.list_guests(node)
             return [
                 {
@@ -2618,6 +2626,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         try:
+            # Authenticate if using password-based auth
+            if auth_method == ProxmoxAuthMethod.PASSWORD:
+                api.authenticate()
+
             nodes = api.list_nodes()
             return [
                 {
@@ -2665,6 +2677,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         try:
+            # Authenticate if using password-based auth
+            if auth_method == ProxmoxAuthMethod.PASSWORD:
+                api.authenticate()
+
             storages = api.list_storages(node)
             return [
                 {
@@ -2870,6 +2886,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             verify_ssl=hypervisor.get("verify_ssl", False),
         )
 
+        # Authenticate if using password-based auth
+        if auth_method == ProxmoxAuthMethod.PASSWORD:
+            api.authenticate()
+
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
         # Submit backup as background task
@@ -3069,6 +3089,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         try:
+            # Authenticate if using password-based auth
+            if auth_method == ProxmoxAuthMethod.PASSWORD:
+                api.authenticate()
+
             all_backups = []
 
             if node and storage_id:
@@ -3158,6 +3182,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             auth_method=auth_method,
             verify_ssl=hypervisor.get("verify_ssl", False),
         )
+
+        # Authenticate if using password-based auth
+        if auth_method == ProxmoxAuthMethod.PASSWORD:
+            api.authenticate()
 
         # Submit restore as background task
         def run_restore_task(task: Task) -> dict[str, Any]:

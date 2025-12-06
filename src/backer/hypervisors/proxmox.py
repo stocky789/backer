@@ -391,11 +391,12 @@ class ProxmoxAPI:
             Version info dict with keys: version, release, repoid
         """
         data = self._make_request("GET", "/version")
+        if not data:
+            return {"version": "unknown", "release": ""}
         # Cache the version
-        if data:
-            ver = data.get("version", "")
-            release = data.get("release", "")
-            self._version = f"{ver}-{release}" if release else ver
+        ver = data.get("version", "")
+        release = data.get("release", "")
+        self._version = f"{ver}-{release}" if release else ver
         return data
 
     def test_connection(self) -> tuple[bool, str]:
@@ -408,6 +409,8 @@ class ProxmoxAPI:
             if self.auth_method == ProxmoxAuthMethod.PASSWORD:
                 self.authenticate()
             version = self.get_version()
+            if not version:
+                return False, "No version information returned"
             ver = version.get("version", "unknown")
             release = version.get("release", "")
             return True, f"Proxmox VE {ver}-{release}"
@@ -460,7 +463,13 @@ class ProxmoxAPI:
         if node:
             nodes = [node]
         else:
-            nodes = [n.node for n in self.list_nodes() if n.status == "online"]
+            # Get all nodes - include those with status "online" or "unknown"
+            # (unknown often means the node is reachable but status not fully reported)
+            all_nodes = self.list_nodes()
+            nodes = [n.node for n in all_nodes if n.status != "offline"]
+            if not nodes:
+                logger.warning("No online nodes found in cluster")
+                return []
 
         for node_name in nodes:
             # Get QEMU VMs
@@ -519,6 +528,8 @@ class ProxmoxAPI:
         endpoint = f"/nodes/{node}/{guest_type.value}/{vmid}/status/current"
         try:
             data = self._make_request("GET", endpoint)
+            if not data:
+                return None
             return ProxmoxGuest(
                 vmid=vmid,
                 name=data.get("name", f"{guest_type.value.upper()} {vmid}"),
@@ -595,9 +606,9 @@ class ProxmoxAPI:
         Returns:
             List of ProxmoxBackup objects
         """
-        params = {"content": "backup"}
-        if vmid:
-            params["vmid"] = vmid
+        params: dict[str, Any] = {"content": "backup"}
+        if vmid is not None:
+            params["vmid"] = str(vmid)
 
         endpoint = f"/nodes/{node}/storage/{storage}/content"
         data = self._make_request("GET", endpoint, params=params) or []
@@ -682,9 +693,14 @@ class ProxmoxAPI:
         result = self._make_request("POST", endpoint, data=data)
 
         # Result is the UPID string
+        if not result:
+            raise ProxmoxAPIError(f"No UPID returned for backup task on VMID {vmid}")
         if isinstance(result, str):
             return result
-        return result.get("upid", result)
+        upid = result.get("upid")
+        if not upid:
+            raise ProxmoxAPIError(f"No UPID in response for backup task on VMID {vmid}")
+        return upid
 
     def restore_guest(
         self,
@@ -718,13 +734,15 @@ class ProxmoxAPI:
 
         data: dict[str, Any] = {
             "vmid": vmid,
-            "archive": archive,
         }
 
         if guest_type == ProxmoxGuestType.LXC:
-            # LXC restore requires these parameters
+            # LXC restore uses ostemplate parameter pointing to the backup archive
+            data["ostemplate"] = archive
             data["restore"] = 1
-            data["ostemplate"] = archive  # For LXC, archive goes here too
+        else:
+            # QEMU uses archive parameter
+            data["archive"] = archive
 
         if storage:
             data["storage"] = storage
@@ -739,9 +757,14 @@ class ProxmoxAPI:
 
         result = self._make_request("POST", endpoint, data=data)
 
+        if not result:
+            raise ProxmoxAPIError(f"No UPID returned for restore task on VMID {vmid}")
         if isinstance(result, str):
             return result
-        return result.get("upid", result)
+        upid = result.get("upid")
+        if not upid:
+            raise ProxmoxAPIError(f"No UPID in response for restore task on VMID {vmid}")
+        return upid
 
     def delete_backup(self, node: str, storage: str, volid: str) -> str:
         """Delete a backup.
@@ -782,6 +805,8 @@ class ProxmoxAPI:
         endpoint = f"/nodes/{node}/tasks/{encoded_upid}/status"
 
         data = self._make_request("GET", endpoint)
+        if not data:
+            raise ProxmoxAPIError(f"No status data returned for task {upid}")
 
         starttime = data.get("starttime")
         endtime = data.get("endtime")
