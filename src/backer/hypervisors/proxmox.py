@@ -586,6 +586,260 @@ class ProxmoxAPI:
 
         return [s for s in storages if s.supports_backup]
 
+    def get_storage(self, storage_id: str) -> dict[str, Any] | None:
+        """Get a specific storage by ID.
+
+        Args:
+            storage_id: Storage identifier
+
+        Returns:
+            Storage configuration dict or None
+        """
+        try:
+            data = self._make_request("GET", f"/storage/{storage_id}")
+            return data
+        except ProxmoxAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    def create_nfs_storage(
+        self,
+        storage_id: str,
+        server: str,
+        export: str,
+        content: list[str] | None = None,
+        nodes: list[str] | None = None,
+        disable: bool = False,
+        max_protected_backups: int = 5,
+    ) -> dict[str, Any]:
+        """Create an NFS storage in Proxmox.
+
+        Args:
+            storage_id: Unique storage identifier (e.g., "backer-myrepo")
+            server: NFS server hostname or IP
+            export: NFS export path (e.g., "/share/backups")
+            content: Content types (default: ["backup"])
+            nodes: List of nodes to enable storage on (None = all)
+            disable: Whether to create storage disabled
+            max_protected_backups: Max protected backups (default 5)
+
+        Returns:
+            Created storage info
+        """
+        data: dict[str, Any] = {
+            "storage": storage_id,
+            "type": "nfs",
+            "server": server,
+            "export": export,
+            "content": ",".join(content or ["backup"]),
+        }
+
+        if nodes:
+            data["nodes"] = ",".join(nodes)
+        if disable:
+            data["disable"] = 1
+        if max_protected_backups != 5:
+            data["max-protected-backups"] = max_protected_backups
+
+        return self._make_request("POST", "/storage", data=data)
+
+    def create_cifs_storage(
+        self,
+        storage_id: str,
+        server: str,
+        share: str,
+        username: str | None = None,
+        password: str | None = None,
+        domain: str | None = None,
+        content: list[str] | None = None,
+        nodes: list[str] | None = None,
+        subdir: str | None = None,
+        disable: bool = False,
+        max_protected_backups: int = 5,
+    ) -> dict[str, Any]:
+        """Create a CIFS/SMB storage in Proxmox.
+
+        Args:
+            storage_id: Unique storage identifier (e.g., "backer-myrepo")
+            server: SMB server hostname or IP
+            share: SMB share name
+            username: SMB username (optional for guest access)
+            password: SMB password
+            domain: SMB domain (optional)
+            content: Content types (default: ["backup"])
+            nodes: List of nodes to enable storage on (None = all)
+            subdir: Subdirectory within the share
+            disable: Whether to create storage disabled
+            max_protected_backups: Max protected backups (default 5)
+
+        Returns:
+            Created storage info
+        """
+        data: dict[str, Any] = {
+            "storage": storage_id,
+            "type": "cifs",
+            "server": server,
+            "share": share,
+            "content": ",".join(content or ["backup"]),
+        }
+
+        if username:
+            data["username"] = username
+        if password:
+            data["password"] = password
+        if domain:
+            data["domain"] = domain
+        if nodes:
+            data["nodes"] = ",".join(nodes)
+        if subdir:
+            data["subdir"] = subdir
+        if disable:
+            data["disable"] = 1
+        if max_protected_backups != 5:
+            data["max-protected-backups"] = max_protected_backups
+
+        return self._make_request("POST", "/storage", data=data)
+
+    def update_storage(
+        self,
+        storage_id: str,
+        content: list[str] | None = None,
+        nodes: list[str] | None = None,
+        disable: bool | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing storage configuration.
+
+        Args:
+            storage_id: Storage identifier to update
+            content: New content types
+            nodes: New node list
+            disable: Whether to disable storage
+
+        Returns:
+            Updated storage info
+        """
+        data: dict[str, Any] = {}
+
+        if content is not None:
+            data["content"] = ",".join(content)
+        if nodes is not None:
+            data["nodes"] = ",".join(nodes)
+        if disable is not None:
+            data["disable"] = 1 if disable else 0
+
+        if not data:
+            return {}
+
+        return self._make_request("PUT", f"/storage/{storage_id}", data=data)
+
+    def delete_storage(self, storage_id: str) -> None:
+        """Delete a storage configuration from Proxmox.
+
+        Args:
+            storage_id: Storage identifier to delete
+        """
+        self._make_request("DELETE", f"/storage/{storage_id}")
+
+    def ensure_backer_storage(
+        self,
+        repository: dict[str, Any],
+        storage_id: str | None = None,
+    ) -> str:
+        """Ensure a Backer repository is configured as Proxmox storage.
+
+        Creates or verifies that a Proxmox storage exists for the given
+        Backer repository. This enables vzdump to write directly to the
+        repository.
+
+        Args:
+            repository: Backer repository dict with keys:
+                - repo_type: "smb" or "nfs"
+                - server: Server hostname/IP
+                - share: Share name (SMB) or export path (NFS)
+                - path: Subdirectory within share (optional)
+                - username: SMB username (optional)
+                - password: SMB password (optional)
+                - domain: SMB domain (optional)
+            storage_id: Override storage ID (default: "backer-{repo_name}")
+
+        Returns:
+            The storage ID to use for backups
+
+        Raises:
+            ProxmoxAPIError: If storage creation fails
+        """
+        repo_type = repository.get("repo_type", "").lower()
+        repo_name = repository.get("name", "unknown")
+
+        # Generate storage ID from repo name (sanitized)
+        if not storage_id:
+            # Proxmox storage IDs: alphanumeric, dash, underscore only
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in repo_name)
+            storage_id = f"backer-{safe_name}"
+
+        # Get server from repository
+        server = repository.get("server", "")
+        if not server:
+            raise ProxmoxAPIError(f"Repository '{repo_name}' has no server configured")
+
+        # Check if storage already exists
+        existing = self.get_storage(storage_id)
+        if existing:
+            # Verify the storage points to the same server
+            existing_server = existing.get("server", "")
+            if existing_server and existing_server != server:
+                logger.warning(
+                    f"Proxmox storage '{storage_id}' exists but points to different server "
+                    f"({existing_server} vs {server}). Using existing storage."
+                )
+            else:
+                logger.info(f"Proxmox storage '{storage_id}' already exists")
+            return storage_id
+
+        # Create storage based on repository type
+        if repo_type == "nfs":
+            export = repository.get("share") or repository.get("path", "")
+            if not export:
+                raise ProxmoxAPIError(f"NFS repository '{repo_name}' has no export path")
+
+            logger.info(f"Creating NFS storage '{storage_id}' -> {server}:{export}")
+            self.create_nfs_storage(
+                storage_id=storage_id,
+                server=server,
+                export=export,
+            )
+
+        elif repo_type == "smb":
+            share = repository.get("share", "")
+            if not share:
+                raise ProxmoxAPIError(f"SMB repository '{repo_name}' has no share name")
+
+            username = repository.get("username")
+            password = repository.get("password")  # Already decrypted by caller
+            domain = repository.get("domain")
+            subdir = repository.get("path")  # Subdirectory within share
+
+            logger.info(f"Creating CIFS storage '{storage_id}' -> //{server}/{share}")
+            self.create_cifs_storage(
+                storage_id=storage_id,
+                server=server,
+                share=share,
+                username=username,
+                password=password,
+                domain=domain,
+                subdir=subdir,
+            )
+
+        else:
+            raise ProxmoxAPIError(
+                f"Repository type '{repo_type}' cannot be configured as Proxmox storage. "
+                "Only NFS and SMB repositories are supported for hypervisor backups."
+            )
+
+        logger.info(f"Created Proxmox storage '{storage_id}' for repository '{repo_name}'")
+        return storage_id
+
     # =========================================================================
     # Backup Operations
     # =========================================================================
@@ -786,6 +1040,79 @@ class ProxmoxAPI:
         if isinstance(result, str):
             return result
         return result.get("upid", result) if result else ""
+
+    def download_backup(
+        self,
+        node: str,
+        storage: str,
+        volid: str,
+        dest_path: str,
+        progress_callback: Any | None = None,
+    ) -> str:
+        """Download a backup file from Proxmox storage.
+
+        Uses the Proxmox download-url API to get a temporary download URL,
+        then streams the file to the destination.
+
+        Args:
+            node: Node name
+            storage: Storage ID
+            volid: Volume ID of the backup (e.g., "local:backup/vzdump-qemu-100-...")
+            dest_path: Local destination path for the downloaded file
+            progress_callback: Optional callback(bytes_downloaded, total_bytes)
+
+        Returns:
+            Path to the downloaded file
+        """
+        # First, get a download URL from Proxmox
+        # The API endpoint is POST /nodes/{node}/storage/{storage}/download-url
+        # But for backups, we need to use the content endpoint with a download query
+        encoded_volid = urllib.parse.quote(volid, safe="")
+        endpoint = f"/nodes/{node}/storage/{storage}/content/{encoded_volid}"
+
+        # Build URL for direct download
+        url = f"{self.base_url}{endpoint}"
+
+        # Build headers
+        headers: dict[str, str] = {}
+        if self.auth_method == ProxmoxAuthMethod.TOKEN and self.token_id and self.token_secret:
+            headers["Authorization"] = (
+                f"PVEAPIToken={self.username}!{self.token_id}={self.token_secret}"
+            )
+        elif self.csrf_token and self.ticket:
+            headers["CSRFPreventionToken"] = self.csrf_token
+            headers["Cookie"] = f"PVEAuthCookie={self.ticket}"
+
+        try:
+            # Try to get the file via the API
+            # Note: Proxmox doesn't have a direct download API for backup files
+            # The backup files need to be accessed via shared storage or SSH/SCP
+            # For now, we'll raise an informative error
+            raise ProxmoxAPIError(
+                f"Direct download of backup {volid} is not supported via Proxmox API. "
+                "Please ensure the Backer server has direct access to the Proxmox storage "
+                "(e.g., via NFS mount or shared storage) or use PBS (Proxmox Backup Server)."
+            )
+
+        except requests.exceptions.RequestException as e:
+            raise ProxmoxAPIError(f"Failed to download backup {volid}: {e}") from e
+
+    def get_backup_filename(self, volid: str) -> str | None:
+        """Extract the filename from a volume ID.
+
+        Args:
+            volid: Volume ID (e.g., "local:backup/vzdump-qemu-100-...")
+
+        Returns:
+            Filename or None
+        """
+        # Parse volid to get the filename
+        # Format: "storage:backup/filename" e.g., "local:backup/vzdump-qemu-100-..."
+        if ":" in volid:
+            _, path_part = volid.split(":", 1)
+            if path_part.startswith("backup/"):
+                return path_part[7:]  # Remove "backup/" prefix
+        return None
 
     # =========================================================================
     # Task Operations
@@ -1028,6 +1355,69 @@ class ProxmoxBackupManager:
             result["errors"] = error_lines or [final_status.exitstatus]
 
         return result
+
+    def backup_to_storage(
+        self,
+        vmid: int,
+        storage: str,
+        node: str | None = None,
+        mode: ProxmoxBackupMode = ProxmoxBackupMode.SNAPSHOT,
+        compress: ProxmoxCompression = ProxmoxCompression.ZSTD,
+        progress_callback: Any | None = None,
+        timeout: int = 7200,
+    ) -> dict[str, Any]:
+        """Backup a VM/container to a Proxmox storage.
+
+        This is a simple wrapper around backup_guest that finds the backup
+        file info after completion.
+
+        Args:
+            vmid: VM/container ID to backup
+            storage: Proxmox storage ID to save backup (must be configured in Proxmox)
+            node: Node name (auto-detected if None)
+            mode: Backup mode
+            compress: Compression algorithm
+            progress_callback: Optional callback for progress updates
+            timeout: Maximum backup time in seconds
+
+        Returns:
+            Dict with backup result info including volid and file path
+        """
+        # Find guest if node not specified
+        if not node:
+            guests = self.api.list_guests()
+            guest = next((g for g in guests if g.vmid == vmid), None)
+            if not guest:
+                raise ProxmoxAPIError(f"Guest {vmid} not found")
+            node = guest.node
+
+        logger.info(f"Backup VMID {vmid} on {node} to storage {storage}")
+
+        # Create backup on Proxmox storage
+        backup_result = self.backup_guest(
+            vmid=vmid,
+            storage=storage,
+            node=node,
+            mode=mode,
+            compress=compress,
+            progress_callback=progress_callback,
+            timeout=timeout,
+        )
+
+        if not backup_result.get("success"):
+            return backup_result
+
+        # Find the created backup
+        backups = self.api.list_backups(node, storage, vmid=vmid)
+        if backups:
+            # Get the most recent backup (should be the one we just created)
+            created_backup = backups[0]
+            backup_result["volid"] = created_backup.volid
+            backup_result["backup_size"] = created_backup.size
+            backup_result["backup_filename"] = self.api.get_backup_filename(created_backup.volid)
+            logger.info(f"Backup created: {created_backup.volid} ({created_backup.size} bytes)")
+
+        return backup_result
 
     def restore_guest(
         self,

@@ -319,11 +319,11 @@
                 </div>
 
                 <div class="form-group">
-                    <label class="form-label">Backup Storage</label>
-                    <select id="jobStorage" class="form-input" required>
-                        <option value="">Select storage...</option>
+                    <label class="form-label">Backup Repository</label>
+                    <select id="jobRepository" class="form-input" required>
+                        <option value="">Select repository...</option>
                     </select>
-                    <div class="form-hint">Proxmox storage where backups will be saved</div>
+                    <div class="form-hint">Backer repository for backups (SMB or NFS). Backer will auto-configure it as Proxmox storage.</div>
                 </div>
 
                 <div class="form-group">
@@ -1053,9 +1053,42 @@ function showAddJobModal() {
     document.getElementById('jobForm').reset();
     document.getElementById('jobEnabled').checked = true;
     document.getElementById('jobGuestsList').innerHTML = '<div class="loading">Select a hypervisor first</div>';
-    document.getElementById('jobStorage').innerHTML = '<option value="">Select storage...</option>';
     document.getElementById('jobError').style.display = 'none';
     document.getElementById('jobModal').style.display = 'flex';
+
+    // Load repositories
+    loadRepositories();
+}
+
+async function loadRepositories() {
+    const select = document.getElementById('jobRepository');
+    select.innerHTML = '<option value="">Loading...</option>';
+
+    try {
+        const response = await fetch('/api/v1/repositories');
+        const repos = await response.json();
+
+        select.innerHTML = '<option value="">Select repository...</option>';
+
+        if (response.ok && Array.isArray(repos)) {
+            // Filter to only SMB and NFS repos (supported for Proxmox)
+            const supportedRepos = repos.filter(r =>
+                r.repo_type === 'smb' || r.repo_type === 'nfs'
+            );
+
+            if (supportedRepos.length === 0) {
+                select.innerHTML = '<option value="">No SMB/NFS repositories configured</option>';
+                return;
+            }
+
+            for (const repo of supportedRepos) {
+                const label = `${escapeHtml(repo.name)} (${repo.repo_type.toUpperCase()})`;
+                select.innerHTML += `<option value="${escapeHtml(repo.id)}">${label}</option>`;
+            }
+        }
+    } catch (e) {
+        select.innerHTML = '<option value="">Failed to load repositories</option>';
+    }
 }
 
 function hideJobModal() {
@@ -1067,7 +1100,6 @@ async function onJobHypervisorChange() {
     const hvId = document.getElementById('jobHypervisor').value;
     if (!hvId) {
         document.getElementById('jobGuestsList').innerHTML = '<div class="loading">Select a hypervisor first</div>';
-        document.getElementById('jobStorage').innerHTML = '<option value="">Select storage...</option>';
         return;
     }
 
@@ -1103,28 +1135,6 @@ async function onJobHypervisorChange() {
     } catch (e) {
         guestsContainer.innerHTML = `<div class="error-msg">Failed to load guests: ${escapeHtml(e.message)}</div>`;
     }
-
-    // Load storages
-    const storageSelect = document.getElementById('jobStorage');
-    storageSelect.innerHTML = '<option value="">Loading...</option>';
-
-    try {
-        const response = await fetch(`/api/v1/hypervisors/${hvId}/storages`);
-        const storages = await response.json();
-
-        if (!response.ok) {
-            throw new Error(storages.detail || 'Failed to load storages');
-        }
-
-        storageSelect.innerHTML = '<option value="">Select storage...</option>';
-        if (Array.isArray(storages)) {
-            for (const storage of storages) {
-                storageSelect.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)} (${escapeHtml(storage.type)})</option>`;
-            }
-        }
-    } catch (e) {
-        storageSelect.innerHTML = '<option value="">Failed to load storage</option>';
-    }
 }
 
 async function submitJob(event) {
@@ -1143,7 +1153,7 @@ async function submitJob(event) {
         name: document.getElementById('jobName').value,
         hypervisor_id: document.getElementById('jobHypervisor').value,
         vmids: selectedGuests.length > 0 ? selectedGuests : null,
-        storage: document.getElementById('jobStorage').value,
+        repository_id: document.getElementById('jobRepository').value,
         mode: document.getElementById('jobMode').value,
         compress: document.getElementById('jobCompression').value,
         schedule_cron: document.getElementById('jobSchedule').value || null,
@@ -1180,6 +1190,9 @@ async function editHypervisorJob(jobId) {
     document.getElementById('jobError').style.display = 'none';
     document.getElementById('jobModal').style.display = 'flex';
 
+    // Load repositories first
+    await loadRepositories();
+
     try {
         const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`);
         const job = await response.json();
@@ -1190,14 +1203,13 @@ async function editHypervisorJob(jobId) {
         document.getElementById('jobCompression').value = job.compression || job.compress || 'zstd';
         document.getElementById('jobSchedule').value = job.schedule_cron || '';
         document.getElementById('jobEnabled').checked = job.enabled;
+        document.getElementById('jobRepository').value = job.repository_id || '';
 
-        // Load guests and storage for this hypervisor
+        // Load guests for this hypervisor
         await onJobHypervisorChange();
 
-        // Wait a bit for DOM to update, then select the right values
+        // Wait a bit for DOM to update, then select guests
         setTimeout(() => {
-            document.getElementById('jobStorage').value = job.storage_id || job.storage || '';
-
             // Check selected guests
             const vmids = job.guest_ids || job.vmids || [];
             if (vmids.length > 0) {

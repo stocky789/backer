@@ -179,7 +179,7 @@ class Storage:
                     name TEXT NOT NULL UNIQUE,
                     hypervisor_id TEXT NOT NULL,
                     guest_ids TEXT NOT NULL,  -- JSON array of VMIDs
-                    storage_id TEXT NOT NULL,  -- Proxmox storage name
+                    repository_id TEXT NOT NULL,  -- Backer repository for backups
                     backup_mode TEXT DEFAULT 'snapshot',
                     compression TEXT DEFAULT 'zstd',
                     schedule_cron TEXT,
@@ -187,7 +187,8 @@ class Storage:
                     enabled INTEGER DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id)
+                    FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id),
+                    FOREIGN KEY (repository_id) REFERENCES repositories(id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_hypervisor_jobs_hypervisor ON hypervisor_jobs(hypervisor_id);
@@ -1309,7 +1310,7 @@ class Storage:
         name: str,
         hypervisor_id: str,
         guest_ids: list[int],
-        storage_id: str,
+        repository_id: str,
         backup_mode: str = "snapshot",
         compression: str = "zstd",
         schedule_cron: str | None = None,
@@ -1322,7 +1323,7 @@ class Storage:
             conn.execute(
                 """
                 INSERT INTO hypervisor_jobs (
-                    id, name, hypervisor_id, guest_ids, storage_id,
+                    id, name, hypervisor_id, guest_ids, repository_id,
                     backup_mode, compression, schedule_cron, retention,
                     enabled, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1332,7 +1333,7 @@ class Storage:
                     name,
                     hypervisor_id,
                     json.dumps(guest_ids),
-                    storage_id,
+                    repository_id,
                     backup_mode,
                     compression,
                     schedule_cron,
@@ -1348,7 +1349,7 @@ class Storage:
         job_id: str,
         name: str | None = None,
         guest_ids: list[int] | None = None,
-        storage_id: str | None = None,
+        repository_id: str | None = None,
         backup_mode: str | None = None,
         compression: str | None = None,
         schedule_cron: str | None = None,
@@ -1365,9 +1366,9 @@ class Storage:
         if guest_ids is not None:
             updates.append("guest_ids = ?")
             params.append(json.dumps(guest_ids))
-        if storage_id is not None:
-            updates.append("storage_id = ?")
-            params.append(storage_id)
+        if repository_id is not None:
+            updates.append("repository_id = ?")
+            params.append(repository_id)
         if backup_mode is not None:
             updates.append("backup_mode = ?")
             params.append(backup_mode)
@@ -1448,7 +1449,7 @@ class Storage:
             "name": row["name"],
             "hypervisor_id": row["hypervisor_id"],
             "guest_ids": json.loads(row["guest_ids"]) if row["guest_ids"] else [],
-            "storage_id": row["storage_id"],
+            "repository_id": row["repository_id"],
             "backup_mode": row["backup_mode"],
             "compression": row["compression"],
             "schedule_cron": row["schedule_cron"],

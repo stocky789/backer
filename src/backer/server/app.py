@@ -237,9 +237,12 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
     """Internal function to trigger a hypervisor backup job (used by scheduler).
 
     This runs the backup synchronously in a background thread.
+    Backups are stored to the configured Backer repository by auto-configuring
+    it as Proxmox storage (like Veeam does).
     """
     from backer.hypervisors.proxmox import (
         ProxmoxAPI,
+        ProxmoxAPIError,
         ProxmoxAuthMethod,
         ProxmoxBackupManager,
         ProxmoxBackupMode,
@@ -264,9 +267,29 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         logger.error(f"Unsupported hypervisor type: {hypervisor['hypervisor_type']}")
         return
 
+    # Get repository for backup destination
+    repository_id = job.get("repository_id")
+    if not repository_id:
+        logger.error(f"No repository configured for job: {job_id}")
+        return
+
+    repository = _storage.get_repository(repository_id)
+    if not repository:
+        logger.error(f"Repository not found: {repository_id}")
+        return
+
+    # Validate repository type (must be SMB or NFS for Proxmox storage)
+    repo_type = repository.get("repo_type", "").lower()
+    if repo_type not in ("smb", "nfs"):
+        logger.error(
+            f"Repository type '{repo_type}' is not supported for hypervisor backups. "
+            "Use an SMB or NFS repository so Proxmox can write directly to it."
+        )
+        return
+
     # Get credentials
     token_secret = _storage.get_hypervisor_token_secret(hypervisor["id"])
-    password = _storage.get_hypervisor_password(hypervisor["id"])
+    hv_password = _storage.get_hypervisor_password(hypervisor["id"])
 
     auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
 
@@ -280,7 +303,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
             username=hypervisor.get("username"),
             token_id=hypervisor.get("token_id"),
             token_secret=token_secret,
-            password=password,
+            password=hv_password,
             verify_ssl=hypervisor.get("verify_ssl", False),
         )
 
@@ -288,13 +311,38 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         if auth_method == ProxmoxAuthMethod.PASSWORD:
             api.authenticate()
 
+        # Get repository password for SMB storage
+        repo_password = None
+        if repo_type == "smb" and repository.get("has_password"):
+            repo_password = _storage.get_repository_password(repository_id)
+
+        # Create repository dict with password for ensure_backer_storage
+        repo_with_password = {**repository, "password": repo_password}
+
+        # Ensure Proxmox storage exists for this repository
+        try:
+            proxmox_storage_id = api.ensure_backer_storage(repo_with_password)
+        except ProxmoxAPIError as e:
+            logger.error(f"Failed to configure Proxmox storage for repository: {e}")
+            return
+
         backup_manager = ProxmoxBackupManager(api)
 
         # Get backup options
-        mode_str = job.get("backup_mode", "snapshot")
-        mode = ProxmoxBackupMode(mode_str.upper() if mode_str else "SNAPSHOT")
-        compress_str = job.get("compression", "zstd")
-        compress = ProxmoxCompression(compress_str.lower() if compress_str else "zstd")
+        mode_map = {
+            "snapshot": ProxmoxBackupMode.SNAPSHOT,
+            "stop": ProxmoxBackupMode.STOP,
+            "suspend": ProxmoxBackupMode.SUSPEND,
+        }
+        mode = mode_map.get(job.get("backup_mode", "snapshot"), ProxmoxBackupMode.SNAPSHOT)
+
+        compress_map = {
+            "zstd": ProxmoxCompression.ZSTD,
+            "gzip": ProxmoxCompression.GZIP,
+            "lzo": ProxmoxCompression.LZO,
+            "none": ProxmoxCompression.NONE,
+        }
+        compress = compress_map.get(job.get("compression", "zstd"), ProxmoxCompression.ZSTD)
 
         # Get guest IDs from job
         guest_ids = job.get("guest_ids", [])
@@ -307,6 +355,11 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         # Build guest name map
         all_guests = api.list_guests()
         guest_map = {g.vmid: g for g in all_guests}
+
+        logger.info(
+            f"Starting hypervisor backup job '{job['name']}' to repository "
+            f"'{repository['name']}' (Proxmox storage: {proxmox_storage_id})"
+        )
 
         for vmid in guest_ids:
             guest = guest_map.get(vmid)
@@ -324,12 +377,12 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
             )
 
             try:
-                result = backup_manager.backup_guest(
+                # Backup directly to Proxmox storage (which points to Backer repo)
+                result = backup_manager.backup_to_storage(
                     vmid=vmid,
-                    storage=job.get("storage_id"),
+                    storage=proxmox_storage_id,
                     mode=mode,
                     compress=compress,
-                    retention=job.get("retention"),
                     timeout=7200,
                 )
 
@@ -353,12 +406,16 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                 )
 
                 if result.get("success"):
-                    logger.info(f"Backup succeeded for VMID {vmid}")
+                    backup_size = result.get("backup_size", 0)
+                    logger.info(
+                        f"Backup succeeded for VMID {vmid} -> {proxmox_storage_id} "
+                        f"({backup_size / 1024 / 1024:.1f} MB)"
+                    )
                 else:
                     logger.warning(f"Backup failed for VMID {vmid}: {result.get('errors')}")
 
             except Exception as e:
-                logger.error(f"Backup failed for VMID {vmid}: {e}")
+                logger.exception(f"Backup failed for VMID {vmid}: {e}")
                 _storage.save_hypervisor_run(
                     run_id=run_id,
                     job_id=job_id,
@@ -374,7 +431,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         logger.info(f"Scheduled hypervisor job '{job.get('name')}' completed")
 
     except Exception as e:
-        logger.error(f"Hypervisor job {job_id} failed: {e}")
+        logger.exception(f"Hypervisor job {job_id} failed: {e}")
 
 
 def verify_client(
@@ -2723,6 +2780,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             job["last_status"] = latest["status"] if latest else None
             job["last_run"] = latest["started_at"] if latest else None
 
+            # Add guest count for UI
+            job["guest_count"] = len(job.get("guest_ids") or [])
+
         return jobs
 
     @app.post("/api/v1/hypervisor-jobs")
@@ -2737,8 +2797,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hypervisor_id = body.get("hypervisor_id")
         # Accept both vmids and guest_ids
         guest_ids = body.get("vmids") or body.get("guest_ids") or []
-        # Accept both storage and storage_id
-        storage_id = body.get("storage") or body.get("storage_id")
+        # Repository ID for Backer storage
+        repository_id = body.get("repository_id")
         # Accept both mode/backup_mode and compress/compression
         backup_mode = body.get("mode") or body.get("backup_mode", "snapshot")
         compression = body.get("compress") or body.get("compression", "zstd")
@@ -2751,13 +2811,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not hypervisor_id:
             raise HTTPException(status_code=400, detail="hypervisor_id is required")
         # guest_ids can be empty to backup all guests
-        if not storage_id:
-            raise HTTPException(status_code=400, detail="storage is required")
+        if not repository_id:
+            raise HTTPException(status_code=400, detail="repository_id is required")
 
         # Check hypervisor exists
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        # Check repository exists and is SMB/NFS
+        repository = storage.get_repository(repository_id)
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        repo_type = repository.get("repo_type", "").lower()
+        if repo_type not in ("smb", "nfs"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository type '{repo_type}' is not supported for hypervisor backups. "
+                       "Only SMB or NFS repositories can be used."
+            )
 
         # Check for duplicate name
         if storage.get_hypervisor_job_by_name(name):
@@ -2770,7 +2843,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             name=name,
             hypervisor_id=hypervisor_id,
             guest_ids=guest_ids,
-            storage_id=storage_id,
+            repository_id=repository_id,
             backup_mode=backup_mode,
             compression=compression,
             schedule_cron=schedule_cron,
@@ -2811,9 +2884,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Accept both vmids and guest_ids
         if "vmids" in body or "guest_ids" in body:
             update_kwargs["guest_ids"] = body.get("vmids") or body.get("guest_ids")
-        # Accept both storage and storage_id
-        if "storage" in body or "storage_id" in body:
-            update_kwargs["storage_id"] = body.get("storage") or body.get("storage_id")
+        # Repository ID for Backer storage
+        if "repository_id" in body:
+            new_repo_id = body["repository_id"]
+            repository = storage.get_repository(new_repo_id)
+            if not repository:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            repo_type = repository.get("repo_type", "").lower()
+            if repo_type not in ("smb", "nfs"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository type '{repo_type}' is not supported for hypervisor backups. "
+                           "Only SMB or NFS repositories can be used."
+                )
+            update_kwargs["repository_id"] = new_repo_id
         # Accept both mode and backup_mode
         if "mode" in body or "backup_mode" in body:
             update_kwargs["backup_mode"] = body.get("mode") or body.get("backup_mode")
@@ -2849,9 +2933,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         job_id: str,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Run a hypervisor backup job."""
+        """Run a hypervisor backup job.
+
+        Backups are stored directly on the Backer repository by auto-configuring
+        the repository as Proxmox storage (like Veeam does).
+        """
         from backer.hypervisors.proxmox import (
             ProxmoxAPI,
+            ProxmoxAPIError,
             ProxmoxAuthMethod,
             ProxmoxBackupManager,
             ProxmoxBackupMode,
@@ -2869,9 +2958,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if hypervisor["hypervisor_type"] != "proxmox":
             raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported")
 
+        # Get repository for backup destination
+        repository_id = job.get("repository_id")
+        if not repository_id:
+            raise HTTPException(status_code=400, detail="No repository configured for this job")
+
+        repository = storage.get_repository(repository_id)
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        # Validate repository type (must be SMB or NFS for Proxmox storage)
+        repo_type = repository.get("repo_type", "").lower()
+        if repo_type not in ("smb", "nfs"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository type '{repo_type}' is not supported for hypervisor backups. "
+                       "Use an SMB or NFS repository so Proxmox can write directly to it."
+            )
+
         # Get credentials
         token_secret = storage.get_hypervisor_token_secret(hypervisor["id"])
-        password = storage.get_hypervisor_password(hypervisor["id"])
+        hv_password = storage.get_hypervisor_password(hypervisor["id"])
 
         auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
 
@@ -2881,7 +2988,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             token_id=hypervisor.get("token_id"),
             token_secret=token_secret,
             username=hypervisor.get("username"),
-            password=password,
+            password=hv_password,
             auth_method=auth_method,
             verify_ssl=hypervisor.get("verify_ssl", False),
         )
@@ -2889,6 +2996,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Authenticate if using password-based auth
         if auth_method == ProxmoxAuthMethod.PASSWORD:
             api.authenticate()
+
+        # Get repository password for SMB storage
+        repo_password = None
+        if repo_type == "smb" and repository.get("has_password"):
+            repo_password = storage.get_repository_password(repository_id)
+
+        # Create repository dict with password for ensure_backer_storage
+        repo_with_password = {**repository, "password": repo_password}
+
+        # Ensure Proxmox storage exists for this repository
+        try:
+            proxmox_storage_id = api.ensure_backer_storage(repo_with_password)
+        except ProxmoxAPIError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to configure Proxmox storage for repository: {e}"
+            )
 
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
@@ -2918,7 +3042,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 task.progress = int((i / total) * 100)
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
-                task.message = f"Backing up {guest_name} ({vmid})..."
+                task.message = f"Backing up {guest_name} ({vmid}) to {repository['name']}..."
 
                 # Record pending
                 storage.save_hypervisor_run(
@@ -2949,12 +3073,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     }
                     compression = compress_map.get(job["compression"], ProxmoxCompression.ZSTD)
 
-                    result = manager.backup_guest(
+                    # Backup directly to Proxmox storage (which points to Backer repo)
+                    result = manager.backup_to_storage(
                         vmid=vmid,
-                        storage=job["storage_id"],
+                        storage=proxmox_storage_id,
                         mode=backup_mode,
                         compress=compression,
-                        retention=job.get("retention"),
+                        timeout=7200,
                     )
 
                     # Update run record
@@ -2976,7 +3101,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     results.append(result)
 
                 except Exception as e:
-                    logger.error(f"Backup failed for VMID {vmid}: {e}")
+                    logger.exception(f"Backup failed for VMID {vmid}: {e}")
                     storage.save_hypervisor_run(
                         run_id=run_id,
                         job_id=job_id,
@@ -3005,10 +3130,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         task_manager = get_task_manager()
         guest_count = len(job.get("guest_ids") or [])
         hv_name = hypervisor['name']
+        repo_name = repository['name']
         if guest_count:
-            desc = f"Backing up {guest_count} guests from {hv_name}"
+            desc = f"Backing up {guest_count} guests from {hv_name} to {repo_name}"
         else:
-            desc = f"Backing up all guests from {hv_name}"
+            desc = f"Backing up all guests from {hv_name} to {repo_name}"
 
         task = task_manager.submit(
             task_type="hypervisor_backup",
