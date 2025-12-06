@@ -7,10 +7,19 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <!-- Mobile menu toggle -->
+    <button class="mobile-menu-toggle" onclick="toggleMobileMenu()" aria-label="Toggle menu">
+        <span class="hamburger-line"></span>
+        <span class="hamburger-line"></span>
+        <span class="hamburger-line"></span>
+    </button>
+    <div class="mobile-overlay" onclick="toggleMobileMenu()"></div>
+
     <div class="sidebar">
         <div class="logo">
             <img src="/static/logo.svg" alt="Backer" class="logo-icon">
             Backer
+            <button class="mobile-close" onclick="toggleMobileMenu()" aria-label="Close menu">&times;</button>
         </div>
         <nav>
             <a href="/" class="nav-item {% if active == 'dashboard' %}active{% endif %}">
@@ -218,6 +227,23 @@
             profileMenuOpen = false;
             document.getElementById('profileMenu').classList.remove('active');
         }
+    });
+
+    // Mobile Menu
+    let mobileMenuOpen = false;
+
+    function toggleMobileMenu() {
+        mobileMenuOpen = !mobileMenuOpen;
+        document.body.classList.toggle('mobile-menu-open', mobileMenuOpen);
+    }
+
+    // Close mobile menu on nav item click
+    document.querySelectorAll('.sidebar .nav-item').forEach(item => {
+        item.addEventListener('click', () => {
+            if (mobileMenuOpen) {
+                toggleMobileMenu();
+            }
+        });
     });
     </script>
 
