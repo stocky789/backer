@@ -3109,14 +3109,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if not local_file.is_file():
                     continue
 
-                rel_path = local_file.relative_to(tmp_path)
-                remote_dir = f"{remote_base}/.backer/{rel_path.parent}".replace("\\", "/").strip("/")
+                # rel_path is relative to backer_dir (e.g., "hypervisors/123.json" or "metadata.json")
+                rel_path = local_file.relative_to(backer_dir)
+                rel_path_str = str(rel_path).replace("\\", "/")
+
+                # Build remote directory path
+                # For "metadata.json" -> parent is "." -> remote_dir is just "{remote_base}/.backer"
+                # For "hypervisors/123.json" -> remote_dir is "{remote_base}/.backer/hypervisors"
+                parent_str = str(rel_path.parent).replace("\\", "/")
+                if parent_str == ".":
+                    remote_dir = f"{remote_base}/.backer"
+                else:
+                    remote_dir = f"{remote_base}/.backer/{parent_str}"
 
                 # Create remote directory (and all parents)
                 ensure_remote_dir(remote_dir)
 
                 # Upload file
-                remote_file = f"{remote_base}/.backer/{rel_path}".replace("\\", "/").strip("/")
+                remote_file = f"{remote_base}/.backer/{rel_path_str}"
                 put_cmd = [
                     "smbclient", f"//{server}/{share}", *auth_parts,
                     "-c", f"put {local_file} {remote_file}"
@@ -3124,6 +3134,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 result = subprocess.run(put_cmd, capture_output=True, timeout=30)
                 if result.returncode != 0:
                     logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
+                else:
+                    logger.debug(f"Uploaded metadata: {remote_file}")
 
             logger.info(f"Wrote hypervisor backup metadata to //{server}/{share}/{remote_base}")
 
@@ -3755,6 +3767,168 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             ]
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/v1/hypervisor-jobs/{job_id}/backups")
+    def list_hypervisor_job_backups(
+        job_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List backups for a hypervisor job from repository metadata.
+
+        This reads the backup metadata stored in the repository, which persists
+        even if the Backer server is reinstalled. This is the source of truth
+        for what backups exist in the repository.
+        """
+        import subprocess
+
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        repository_id = job.get("repository_id")
+        if not repository_id:
+            return []
+
+        repository = storage.get_repository(repository_id)
+        if not repository:
+            return []
+
+        hypervisor = storage.get_hypervisor(job["hypervisor_id"])
+        if not hypervisor:
+            return []
+
+        repo_type = repository.get("repo_type", "").lower()
+        server = repository.get("server", "")
+        share = repository.get("share", "")
+        subdir = repository.get("path", "")
+        username = repository.get("username")
+        domain = repository.get("domain")
+
+        # Get repository password
+        repo_password = storage.get_repository_password(repository_id)
+
+        if repo_type != "smb" or not server or not share:
+            # For non-SMB repos, fall back to local storage runs
+            # TODO: Support NFS and local repos
+            return _get_job_backups_from_local_storage(storage, job_id)
+
+        # Build the path to metadata: {repo_path}/Hypervisors/{hypervisor_name}/.backer/
+        base_path = subdir.strip("/") if subdir else ""
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
+        if base_path:
+            remote_base = f"{base_path}/Hypervisors/{safe_hv_name}"
+        else:
+            remote_base = f"Hypervisors/{safe_hv_name}"
+
+        # Build smbclient auth
+        auth_parts = []
+        if username:
+            auth_parts.extend(["-U", f"{domain}\\{username}%{repo_password or ''}" if domain else f"{username}%{repo_password or ''}"])
+        else:
+            auth_parts.extend(["-N"])
+
+        # List vzdump files in dump/ directory
+        dump_path = f"{remote_base}/dump"
+        logger.debug(f"Listing backups from //{server}/{share}/{dump_path}")
+
+        list_cmd = [
+            "smbclient", f"//{server}/{share}", *auth_parts,
+            "-c", f"ls {dump_path}/vzdump-*"
+        ]
+
+        try:
+            result = subprocess.run(list_cmd, capture_output=True, timeout=30, text=True)
+            if result.returncode != 0:
+                logger.debug(f"smbclient ls dump/ failed (trying without dump/): {result.stderr}")
+                # Try without dump/ prefix (older structure)
+                list_cmd[-1] = f"ls {remote_base}/vzdump-*"
+                result = subprocess.run(list_cmd, capture_output=True, timeout=30, text=True)
+
+            backups = []
+            if result.returncode == 0 and result.stdout:
+                # Parse smbclient ls output
+                # Format: "  vzdump-qemu-100-2025_12_06-10_30_00.vma.zst      A   123456789  Fri Dec  6 10:35:00 2025"
+                # Or:     "  vzdump-qemu-100-2025_12_06-10_30_00.vma.zst  N  123456789  Fri Dec  6 10:35:00 2025"
+                import re
+                for line in result.stdout.split("\n"):
+                    # Skip empty lines and summary lines
+                    if not line.strip() or "blocks of size" in line or "blocks available" in line:
+                        continue
+
+                    # Extract vzdump filename from line
+                    # smbclient format: "  filename  ATTR  SIZE  DATE"
+                    vzdump_match = re.search(
+                        r"(vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.vma(?:\.(zst|gz|lzo))?)",
+                        line
+                    )
+                    if vzdump_match:
+                        filename = vzdump_match.group(1)
+                        guest_type = vzdump_match.group(2)
+                        vmid = vzdump_match.group(3)
+                        date_str = vzdump_match.group(4)
+                        time_str = vzdump_match.group(5)
+                        compression = vzdump_match.group(6)
+
+                        # Try to extract size from the line (digits followed by date)
+                        size_match = re.search(r"\s(\d+)\s+\w{3}\s+\w{3}", line)
+                        size = int(size_match.group(1)) if size_match else 0
+
+                        try:
+                            backup_time = datetime.strptime(f"{date_str}_{time_str}", "%Y_%m_%d_%H_%M_%S")
+                            backups.append({
+                                "filename": filename,
+                                "volid": f"backer:{dump_path}/{filename}",
+                                "vmid": int(vmid),
+                                "guest_type": guest_type,
+                                "ctime": backup_time.timestamp(),
+                                "size": size,
+                                "format": "vma",
+                                "node": hypervisor.get("name", "unknown"),
+                                "compression": compression or "none",
+                            })
+                        except ValueError as e:
+                            logger.debug(f"Failed to parse backup date from {filename}: {e}")
+
+            # Sort by time descending
+            backups.sort(key=lambda x: x.get("ctime", 0), reverse=True)
+            return backups[:50]
+
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout listing backups from SMB share")
+            return _get_job_backups_from_local_storage(storage, job_id)
+        except Exception as e:
+            logger.warning(f"Error listing backups from SMB: {e}")
+            return _get_job_backups_from_local_storage(storage, job_id)
+
+    def _get_job_backups_from_local_storage(storage: Storage, job_id: str) -> list[dict[str, Any]]:
+        """Get backup history from local database for a hypervisor job."""
+        runs = storage.get_hypervisor_runs(job_id=job_id, limit=100)
+        backups = []
+        for run in runs:
+            if run.get("status") == "success":
+                # Convert started_at to timestamp
+                started_at = run.get("started_at")
+                if isinstance(started_at, str):
+                    try:
+                        started_at = datetime.fromisoformat(started_at).timestamp()
+                    except ValueError:
+                        started_at = 0
+                elif isinstance(started_at, datetime):
+                    started_at = started_at.timestamp()
+                else:
+                    started_at = 0
+
+                backups.append({
+                    "filename": f"vzdump-qemu-{run.get('guest_id', 0)}-backup",
+                    "volid": run.get("upid", ""),
+                    "vmid": run.get("guest_id", 0),
+                    "guest_type": "qemu",  # Default
+                    "ctime": started_at,
+                    "size": 0,  # Not tracked in run table
+                    "format": "vma",
+                    "node": run.get("guest_name", "unknown"),
+                })
+        return backups
 
     @app.post("/api/v1/hypervisors/{hypervisor_id}/restore")
     async def restore_hypervisor_backup(

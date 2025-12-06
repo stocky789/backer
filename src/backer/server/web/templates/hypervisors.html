@@ -135,7 +135,7 @@
                                 {% if not job.enabled %}disabled{% endif %}>
                             Run
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="viewJobBackups('{{ job.hypervisor_id }}')">
+                        <button class="btn btn-secondary btn-sm" onclick="viewJobBackups('{{ job.id }}', '{{ job.hypervisor_id }}')">
                             Backups
                         </button>
                         <button class="btn btn-secondary btn-sm" onclick="toggleHypervisorJob('{{ job.id }}')">
@@ -1368,7 +1368,7 @@ async function runHypervisorJob(jobId) {
     }
 }
 
-function viewJobBackups(hvId) {
+function viewJobBackups(jobId, hvId) {
     // Open the view hypervisor modal directly to the backups tab
     currentHypervisorId = hvId;
     document.getElementById('viewHypervisorModal').style.display = 'flex';
@@ -1390,7 +1390,60 @@ function viewJobBackups(hvId) {
 
     // Load data
     loadHypervisorName(hvId);
-    loadBackups(hvId);
+    // Load backups from job-specific endpoint (reads from repository)
+    loadJobBackups(jobId, hvId);
+}
+
+async function loadJobBackups(jobId, hvId) {
+    const container = document.getElementById('backupsList');
+    container.innerHTML = '<div class="loading">Loading backups from repository...</div>';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}/backups`);
+        const backups = await response.json();
+
+        if (!response.ok) {
+            throw new Error(backups.detail || 'Failed to load backups');
+        }
+
+        if (!Array.isArray(backups) || backups.length === 0) {
+            container.innerHTML = '<div class="loading">No backups found in repository</div>';
+            return;
+        }
+
+        let html = '';
+        for (const backup of backups) {
+            const sizeGB = (backup.size / 1024 / 1024 / 1024).toFixed(2);
+            const date = backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : '-';
+            const guestType = backup.guest_type || 'qemu';
+            const typeLabel = guestType === 'lxc' ? 'CT' : 'VM';
+
+            html += `
+                <div class="backup-item">
+                    <div class="backup-info">
+                        <div class="backup-name">${escapeHtml(backup.filename || backup.volid)}</div>
+                        <div class="backup-meta">
+                            ${typeLabel} ${backup.vmid} | Size: ${sizeGB} GB | Date: ${date}
+                        </div>
+                    </div>
+                    <div class="backup-actions">
+                        <button class="btn btn-primary btn-sm" onclick="showRestoreFromRepoDialog('${hvId}', '${escapeHtml(backup.filename)}', '${guestType}', ${backup.vmid})">
+                            Restore
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div class="loading" style="color: var(--danger-color);">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function showRestoreFromRepoDialog(hvId, filename, guestType, vmid) {
+    // For now, show a message that restore from repository requires re-mounting
+    alert(`To restore "${filename}":\n\n1. The backup will need to be mounted on Proxmox first\n2. Use the Hypervisor's Backups tab to restore once mounted\n\nThis feature is coming soon.`);
 }
 
 async function toggleHypervisorJob(jobId) {
