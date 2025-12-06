@@ -417,21 +417,28 @@ class RepositoryMetadata:
             }
 
         # Scan job subfolders for metadata
-        # Each job has its own subfolder: repo_root/job_name/.backer/
+        # New structure: repo_root/Agents/{job_name}/.backer/
+        # Legacy structure: repo_root/{job_name}/.backer/
         all_agents = []
         all_jobs = []
         all_snapshots = []
         agent_ids_seen = set()
         found_any = False
 
-        if self.repo_path.exists():
-            for item in self.repo_path.iterdir():
+        def scan_folder(folder: Path, prefix: str = "") -> None:
+            """Scan a folder for job metadata."""
+            nonlocal found_any
+            if not folder.exists():
+                return
+
+            for item in folder.iterdir():
                 if item.is_dir() and not item.name.startswith('.'):
                     # Check if this subfolder has .backer metadata
                     subfolder_meta = RepositoryMetadata(item, self.repo_type)
                     if subfolder_meta.is_initialized():
                         found_any = True
-                        logger.debug(f"Found metadata in job folder: {item.name}")
+                        folder_path = f"{prefix}{item.name}" if prefix else item.name
+                        logger.debug(f"Found metadata in job folder: {folder_path}")
 
                         # Aggregate agents (dedup by agent_id)
                         for agent in subfolder_meta.list_agents():
@@ -442,10 +449,39 @@ class RepositoryMetadata:
 
                         # Aggregate jobs
                         for job in subfolder_meta.list_jobs():
-                            job["job_folder"] = item.name
+                            job["job_folder"] = folder_path
                             all_jobs.append(job)
 
                         # Aggregate snapshots
+                        for snap in subfolder_meta.list_snapshots():
+                            snap["job_folder"] = folder_path
+                            all_snapshots.append(snap)
+
+        if self.repo_path.exists():
+            # First scan the new structure: Agents/ folder
+            agents_folder = self.repo_path / "Agents"
+            if agents_folder.exists():
+                scan_folder(agents_folder, "Agents/")
+
+            # Also scan legacy structure (direct subfolders)
+            # Skip Agents/ and Hypervisors/ folders as they use the new structure
+            for item in self.repo_path.iterdir():
+                if item.is_dir() and item.name not in ('.', '..', 'Agents', 'Hypervisors') and not item.name.startswith('.'):
+                    subfolder_meta = RepositoryMetadata(item, self.repo_type)
+                    if subfolder_meta.is_initialized():
+                        found_any = True
+                        logger.debug(f"Found metadata in legacy job folder: {item.name}")
+
+                        for agent in subfolder_meta.list_agents():
+                            agent_id = agent.get("agent_id")
+                            if agent_id and agent_id not in agent_ids_seen:
+                                agent_ids_seen.add(agent_id)
+                                all_agents.append(agent)
+
+                        for job in subfolder_meta.list_jobs():
+                            job["job_folder"] = item.name
+                            all_jobs.append(job)
+
                         for snap in subfolder_meta.list_snapshots():
                             snap["job_folder"] = item.name
                             all_snapshots.append(snap)

@@ -41,8 +41,7 @@ logger = logging.getLogger(__name__)
 class BackupType(str, Enum):
     """Type of backup to perform."""
 
-    FULL = "full"  # Full backup - always performed
-    INCREMENTAL = "incremental"  # Incremental - only if changes detected
+    FULL = "full"  # Full backup - always performed when changes detected
     SKIP = "skip"  # Skip - no changes since last backup
 
 
@@ -263,12 +262,12 @@ class IncrementalBackupManager:
                         backup_type=BackupType.FULL,
                         reason="VM not running - RAW disk bitmaps lost",
                     )
-                # qcow2 bitmaps persist, we can still do incremental
-                # but we can't check dirty bytes without VM running
+                # qcow2 bitmaps persist, but we can't check dirty bytes without VM running
+                # Do full backup to be safe
                 return BackupDecision(
                     vmid=vmid,
-                    backup_type=BackupType.INCREMENTAL,
-                    reason="VM not running - using persisted qcow2 bitmap state",
+                    backup_type=BackupType.FULL,
+                    reason="VM not running - cannot check bitmap state",
                 )
 
             # VM is running - get live disk info
@@ -326,10 +325,10 @@ class IncrementalBackupManager:
                     disks=disk_info,
                 )
 
-            # There are changes - do incremental
+            # There are changes - do full backup
             return BackupDecision(
                 vmid=vmid,
-                backup_type=BackupType.INCREMENTAL,
+                backup_type=BackupType.FULL,
                 reason=f"Changes detected: ~{total_dirty / (1024*1024):.1f} MB",
                 dirty_bytes=total_dirty,
                 disk_count=len(disk_info),

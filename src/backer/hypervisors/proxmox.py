@@ -801,6 +801,7 @@ class ProxmoxAPI:
     def ensure_backer_storage(
         self,
         repository: dict[str, Any],
+        hypervisor_name: str | None = None,
         storage_id: str | None = None,
     ) -> str:
         """Ensure a Backer repository is configured as Proxmox storage.
@@ -808,6 +809,8 @@ class ProxmoxAPI:
         Creates or verifies that a Proxmox storage exists for the given
         Backer repository. This enables vzdump to write directly to the
         repository.
+
+        Backups are organized under: {repo_path}/Hypervisors/{hypervisor_name}/
 
         Args:
             repository: Backer repository dict with keys:
@@ -818,6 +821,7 @@ class ProxmoxAPI:
                 - username: SMB username (optional)
                 - password: SMB password (optional)
                 - domain: SMB domain (optional)
+            hypervisor_name: Name of the hypervisor (for folder organization)
             storage_id: Override storage ID (default: "backer-{repo_name}")
 
         Returns:
@@ -888,11 +892,21 @@ class ProxmoxAPI:
 
         # Create storage based on repository type
         if repo_type == "nfs":
-            export = repository.get("share") or repository.get("path", "")
-            if not export:
+            base_export = repository.get("share") or repository.get("path", "")
+            if not base_export:
                 raise ProxmoxAPIError(f"NFS repository '{repo_name}' has no export path")
 
+            # NFS doesn't support subdir like CIFS - the export path must exist on the server
+            # Use the base export path directly. Vzdump will create dump/ subfolder automatically.
+            # Note: For proper Hypervisors/ organization with NFS, the NFS export should be
+            # configured to point to the Hypervisors/{name} folder on the NFS server.
+            export = base_export
+
             logger.info(f"Creating NFS storage '{storage_id}' -> {server}:{export}")
+            logger.warning(
+                f"NFS storage does not support subdirectories. Backups will go to {export}/dump/. "
+                "For Hypervisors/ folder organization, configure NFS export path on the server."
+            )
             self.create_nfs_storage(
                 storage_id=storage_id,
                 server=server,
@@ -907,10 +921,18 @@ class ProxmoxAPI:
             username = repository.get("username")
             password = repository.get("password")  # Already decrypted by caller
             domain = repository.get("domain")
-            subdir = repository.get("path")  # Subdirectory within share
-            # Proxmox requires subdir to be an absolute path (starting with /)
-            if subdir and not subdir.startswith("/"):
-                subdir = f"/{subdir}"
+
+            # Build subdir: {repo_path}/Hypervisors/{hypervisor_name}
+            base_path = repository.get("path", "").strip("/")
+            if hypervisor_name:
+                # Sanitize hypervisor name for folder
+                safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
+                subdir_parts = [p for p in [base_path, "Hypervisors", safe_hv_name] if p]
+                subdir = "/" + "/".join(subdir_parts)
+            elif base_path:
+                subdir = f"/{base_path}"
+            else:
+                subdir = None
 
             logger.info(
                 f"Creating CIFS storage '{storage_id}' -> //{server}/{share} "

@@ -5,6 +5,7 @@ from backer.hypervisors.incremental import (
     BackupType,
     IncrementalBackupManager,
 )
+from backer.hypervisors.metadata import HypervisorMetadata
 from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxBackupManager
 from backer.hypervisors.qmp import DirtyBitmap, QMPClient, QMPError
 
@@ -17,4 +18,5 @@ __all__ = [
     "IncrementalBackupManager",
     "BackupType",
     "BackupDecision",
+    "HypervisorMetadata",
 ]

@@ -109,12 +109,13 @@ def _build_backup_command_payload(
     backend_options = job.get("backend_options", {}).copy()
     backend = job.get("backend", "rclone")
 
-    # Get base destination and append job-specific subfolder
+    # Get base destination and append job-specific subfolder under Agents/
+    # Final structure: {repo_path}/Agents/{job_name}
     base_destination = job.get("destination_path", "")
     job_subfolder = _get_job_subfolder(job_name)
     if base_destination:
-        # Normalize path separators and append subfolder
-        destination_path = f"{base_destination.rstrip('/')}/{job_subfolder}"
+        # Normalize path separators and append Agents/ prefix with subfolder
+        destination_path = f"{base_destination.rstrip('/')}/Agents/{job_subfolder}"
     else:
         destination_path = ""
 
@@ -321,8 +322,12 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         repo_with_password = {**repository, "password": repo_password}
 
         # Ensure Proxmox storage exists for this repository
+        # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
         try:
-            proxmox_storage_id = api.ensure_backer_storage(repo_with_password)
+            proxmox_storage_id = api.ensure_backer_storage(
+                repo_with_password,
+                hypervisor_name=hypervisor["name"],
+            )
         except ProxmoxAPIError as e:
             logger.error(f"Failed to configure Proxmox storage for repository: {e}")
             return
@@ -2973,6 +2978,155 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage.delete_hypervisor_job(job_id)
         return {"id": job_id, "status": "deleted"}
 
+    def _write_hypervisor_backup_metadata(
+        repository: dict[str, Any],
+        hypervisor: dict[str, Any],
+        job: dict[str, Any],
+        job_id: str,
+        run_id: str,
+        results: list[dict[str, Any]],
+        guest_map: dict[int, Any],
+    ) -> None:
+        """Write backup metadata to the repository using smbclient.
+
+        This allows the metadata to be discovered if the Backer server is reinstalled.
+        Uses smbclient to write directly to SMB shares without requiring mount.
+        """
+        import subprocess
+        import tempfile
+        from backer.hypervisors.metadata import HypervisorMetadata
+
+        repo_type = repository.get("repo_type", "").lower()
+        if repo_type not in ("smb", "nfs"):
+            logger.debug(f"Skipping metadata write for repo type: {repo_type}")
+            return
+
+        server = repository.get("server", "")
+        share = repository.get("share", "")
+        subdir = repository.get("path", "")
+        username = repository.get("username")
+        password = repository.get("password")
+        domain = repository.get("domain")
+
+        if not server or not share:
+            logger.warning("Cannot write metadata: missing server or share")
+            return
+
+        # Create metadata in a temp directory first
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            metadata = HypervisorMetadata(tmp_path)
+
+            # Initialize if needed
+            if not metadata.is_initialized():
+                metadata.initialize()
+
+            # Save hypervisor info
+            metadata.save_hypervisor(
+                hypervisor_id=hypervisor["id"],
+                name=hypervisor["name"],
+                hypervisor_type=hypervisor.get("hypervisor_type", "proxmox"),
+                host=hypervisor["host"],
+            )
+
+            # Save guest and run info for each result
+            for result in results:
+                vmid = result.get("vmid")
+                if not vmid:
+                    continue
+
+                guest = guest_map.get(vmid)
+                guest_name = guest.name if guest else f"VM {vmid}"
+                guest_type = guest.type if guest else "qemu"
+                node = guest.node if guest else "unknown"
+
+                # Save guest info
+                metadata.save_guest(
+                    vmid=vmid,
+                    name=guest_name,
+                    guest_type=guest_type,
+                    node=node,
+                    hypervisor_id=hypervisor["id"],
+                )
+
+                # Save run record
+                metadata.save_backup_run(
+                    vmid=vmid,
+                    run_id=run_id,
+                    status="success" if result.get("success") else "failed",
+                    backup_file=result.get("archive_name", ""),
+                    started_at=result.get("started_at", datetime.now().isoformat()),
+                    finished_at=result.get("finished_at"),
+                    size_bytes=result.get("archive_size"),
+                    duration_seconds=result.get("duration_seconds"),
+                    backup_type=result.get("backup_type", "full"),
+                    skipped=result.get("skipped", False),
+                    job_name=job["name"],
+                    job_id=job_id,
+                    hypervisor_id=hypervisor["id"],
+                )
+
+            # Now upload the .backer directory to the SMB share
+            backer_dir = tmp_path / ".backer"
+            if not backer_dir.exists():
+                return
+
+            # Build remote path: {repo_path}/Hypervisors/{hypervisor_name}/
+            base_path = subdir.strip("/") if subdir else ""
+            # Sanitize hypervisor name for folder
+            safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
+            if base_path:
+                remote_base = f"{base_path}/Hypervisors/{safe_hv_name}"
+            else:
+                remote_base = f"Hypervisors/{safe_hv_name}"
+
+            # Build smbclient auth
+            auth_parts = []
+            if username:
+                auth_parts.extend(["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"])
+            else:
+                auth_parts.extend(["-N"])  # No password
+
+            # Track directories we've already created to avoid redundant mkdir calls
+            created_dirs: set[str] = set()
+
+            def ensure_remote_dir(dir_path: str) -> None:
+                """Create remote directory and all parents using smbclient."""
+                if not dir_path or dir_path in created_dirs:
+                    return
+
+                # Build list of directories to create (from root to leaf)
+                parts = dir_path.split("/")
+                for i in range(1, len(parts) + 1):
+                    partial_path = "/".join(parts[:i])
+                    if partial_path and partial_path not in created_dirs:
+                        mkdir_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"mkdir {partial_path}"]
+                        subprocess.run(mkdir_cmd, capture_output=True, timeout=30)
+                        created_dirs.add(partial_path)
+
+            # Upload each file in .backer directory
+            for local_file in backer_dir.rglob("*"):
+                if not local_file.is_file():
+                    continue
+
+                rel_path = local_file.relative_to(tmp_path)
+                remote_dir = f"{remote_base}/.backer/{rel_path.parent}".replace("\\", "/").strip("/")
+
+                # Create remote directory (and all parents)
+                ensure_remote_dir(remote_dir)
+
+                # Upload file
+                remote_file = f"{remote_base}/.backer/{rel_path}".replace("\\", "/").strip("/")
+                put_cmd = [
+                    "smbclient", f"//{server}/{share}", *auth_parts,
+                    "-c", f"put {local_file} {remote_file}"
+                ]
+                result = subprocess.run(put_cmd, capture_output=True, timeout=30)
+                if result.returncode != 0:
+                    logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
+
+            logger.info(f"Wrote hypervisor backup metadata to //{server}/{share}/{remote_base}")
+
     @app.post("/api/v1/hypervisor-jobs/{job_id}/run")
     def run_hypervisor_job(
         job_id: str,
@@ -3095,9 +3249,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Submit backup as background task
         def run_backup_task(task: Task) -> dict[str, Any]:
             # Ensure Proxmox storage exists for this repository (done in background to avoid blocking API)
+            # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
             task.message = "Configuring backup storage..."
             try:
-                proxmox_storage_id = api.ensure_backer_storage(repo_with_password)
+                proxmox_storage_id = api.ensure_backer_storage(
+                    repo_with_password,
+                    hypervisor_name=hypervisor["name"],
+                )
             except ProxmoxAPIError as e:
                 return {
                     "run_id": run_id,
@@ -3285,6 +3443,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             task.progress = 100
             task.message = "Backup job completed"
+
+            # Write metadata to repository
+            try:
+                task.message = "Writing backup metadata..."
+                _write_hypervisor_backup_metadata(
+                    repository=repo_with_password,
+                    hypervisor=hypervisor,
+                    job=job,
+                    job_id=job_id,
+                    run_id=run_id,
+                    results=results,
+                    guest_map=guest_map,
+                )
+            except Exception as meta_err:
+                # Don't fail backup if metadata write fails
+                logger.warning(f"Failed to write backup metadata: {meta_err}")
 
             # Clean up: remove the temporary Proxmox storage
             # This unmounts the share, keeping Proxmox UI clean
