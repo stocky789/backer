@@ -240,7 +240,7 @@ class ProxmoxAPI:
         endpoint: str,
         data: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Make an authenticated request to the Proxmox API.
 
         Args:
@@ -250,7 +250,7 @@ class ProxmoxAPI:
             params: Query parameters
 
         Returns:
-            JSON response data
+            JSON response data (can be dict, list, or None)
 
         Raises:
             ProxmoxAPIError: If request fails
@@ -294,7 +294,10 @@ class ProxmoxAPI:
             ) as response:
                 response_data = response.read().decode("utf-8")
                 result = json.loads(response_data)
-                return result.get("data", result)
+                data = result.get("data", result)
+                if data is None:
+                    logger.debug(f"Proxmox API returned null data for {endpoint}: {result}")
+                return data
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
@@ -418,7 +421,7 @@ class ProxmoxAPI:
         Returns:
             List of ProxmoxNode objects
         """
-        data = self._make_request("GET", "/nodes")
+        data = self._make_request("GET", "/nodes") or []
         nodes = []
 
         for item in data:
@@ -457,7 +460,7 @@ class ProxmoxAPI:
         for node_name in nodes:
             # Get QEMU VMs
             try:
-                vms = self._make_request("GET", f"/nodes/{node_name}/qemu")
+                vms = self._make_request("GET", f"/nodes/{node_name}/qemu") or []
                 for vm in vms:
                     guests.append(ProxmoxGuest(
                         vmid=vm.get("vmid", 0),
@@ -477,7 +480,7 @@ class ProxmoxAPI:
 
             # Get LXC containers
             try:
-                cts = self._make_request("GET", f"/nodes/{node_name}/lxc")
+                cts = self._make_request("GET", f"/nodes/{node_name}/lxc") or []
                 for ct in cts:
                     guests.append(ProxmoxGuest(
                         vmid=ct.get("vmid", 0),
@@ -543,7 +546,7 @@ class ProxmoxAPI:
         else:
             endpoint = "/storage"
 
-        data = self._make_request("GET", endpoint)
+        data = self._make_request("GET", endpoint) or []
         storages = []
 
         for item in data:
@@ -592,7 +595,7 @@ class ProxmoxAPI:
             params["vmid"] = vmid
 
         endpoint = f"/nodes/{node}/storage/{storage}/content"
-        data = self._make_request("GET", endpoint, params=params)
+        data = self._make_request("GET", endpoint, params=params) or []
         backups = []
 
         for item in data:
