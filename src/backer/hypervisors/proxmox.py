@@ -655,6 +655,77 @@ class ProxmoxAPI:
             logger.debug(f"Error checking storage status: {e}")
             return None
 
+    def _ensure_smb_directory(
+        self,
+        server: str,
+        share: str,
+        path: str,
+        username: str | None = None,
+        password: str | None = None,
+        domain: str | None = None,
+    ) -> None:
+        """Ensure a directory exists on an SMB share using smbclient.
+
+        Creates the directory and all parent directories if they don't exist.
+        This is needed because Proxmox CIFS mount requires the subdir to exist.
+
+        Args:
+            server: SMB server hostname/IP
+            share: SMB share name
+            path: Directory path to create (without leading slash)
+            username: SMB username
+            password: SMB password
+            domain: SMB domain
+        """
+        import subprocess
+
+        # Build smbclient auth arguments
+        auth_parts = []
+        if username:
+            if domain:
+                auth_parts.extend(["-U", f"{domain}\\{username}%{password or ''}"])
+            else:
+                auth_parts.extend(["-U", f"{username}%{password or ''}"])
+        else:
+            auth_parts.extend(["-N"])  # No password (guest)
+
+        # Create each directory level
+        parts = path.strip("/").split("/")
+        for i in range(1, len(parts) + 1):
+            partial_path = "/".join(parts[:i])
+            if not partial_path:
+                continue
+
+            mkdir_cmd = [
+                "smbclient",
+                f"//{server}/{share}",
+                *auth_parts,
+                "-c", f"mkdir {partial_path}",
+            ]
+
+            try:
+                result = subprocess.run(
+                    mkdir_cmd,
+                    capture_output=True,
+                    timeout=30,
+                )
+                # mkdir may fail if directory exists - that's OK
+                if result.returncode == 0:
+                    logger.debug(f"Created SMB directory: //{server}/{share}/{partial_path}")
+                else:
+                    # Check if it's just "already exists" error
+                    stderr = result.stderr.decode() if result.stderr else ""
+                    if "NT_STATUS_OBJECT_NAME_COLLISION" in stderr:
+                        logger.debug(f"SMB directory already exists: //{server}/{share}/{partial_path}")
+                    else:
+                        logger.debug(f"smbclient mkdir {partial_path}: {stderr}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout creating SMB directory: {partial_path}")
+            except Exception as e:
+                logger.warning(f"Error creating SMB directory {partial_path}: {e}")
+
+        logger.info(f"Ensured SMB directory exists: //{server}/{share}/{path}")
+
     def create_nfs_storage(
         self,
         storage_id: str,
@@ -933,6 +1004,18 @@ class ProxmoxAPI:
                 subdir = f"/{base_path}"
             else:
                 subdir = None
+
+            # Pre-create the subdir on the SMB share using smbclient
+            # Proxmox CIFS mount requires the subdir to exist
+            if subdir:
+                self._ensure_smb_directory(
+                    server=server,
+                    share=share,
+                    path=subdir.lstrip("/"),
+                    username=username,
+                    password=password,
+                    domain=domain,
+                )
 
             logger.info(
                 f"Creating CIFS storage '{storage_id}' -> //{server}/{share} "
