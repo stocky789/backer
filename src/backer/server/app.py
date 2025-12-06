@@ -3141,14 +3141,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 backup_decision = None
                 backup_type_label = "full"
 
+                logger.info(f"Incremental check for VM {vmid}: manager={'set' if incremental_manager else 'None'}")
                 if incremental_manager:
                     task.message = f"Checking changes for {guest_name} ({vmid})..."
+                    logger.info(f"Checking dirty bitmaps for VM {vmid}...")
                     try:
                         backup_decision = incremental_manager.get_backup_decision(
                             vmid=vmid,
                             force_full=force_full,
                         )
                         backup_type_label = backup_decision.backup_type.value
+                        logger.info(f"VM {vmid} backup decision: {backup_decision.backup_type.value} - {backup_decision.reason}")
 
                         if backup_decision.backup_type == BackupType.SKIP:
                             # No changes since last backup - skip this VM
