@@ -593,13 +593,16 @@ class ProxmoxAPI:
             storage_id: Storage identifier
 
         Returns:
-            Storage configuration dict or None
+            Storage configuration dict or None if storage doesn't exist
         """
         try:
             data = self._make_request("GET", f"/storage/{storage_id}")
             return data
         except ProxmoxAPIError as e:
+            # Proxmox may return 404 or 500 with "does not exist" message
             if e.status_code == 404:
+                return None
+            if e.status_code == 500 and "does not exist" in str(e):
                 return None
             raise
 
@@ -774,9 +777,22 @@ class ProxmoxAPI:
 
         # Generate storage ID from repo name (sanitized)
         if not storage_id:
-            # Proxmox storage IDs: alphanumeric, dash, underscore only
-            safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in repo_name)
+            # Proxmox storage IDs must match: [A-Za-z0-9_][A-Za-z0-9._\-]*
+            # First char must be alphanumeric or underscore, rest can include dots and dashes
+            # Replace invalid chars with dash, then collapse consecutive dashes
+            safe_name = "".join(c if c.isalnum() or c in "-_." else "-" for c in repo_name)
+            # Collapse multiple consecutive dashes into single dash
+            while "--" in safe_name:
+                safe_name = safe_name.replace("--", "-")
+            # Remove leading/trailing dashes
+            safe_name = safe_name.strip("-")
+            # Ensure we have a valid name
+            if not safe_name:
+                safe_name = "repo"
             storage_id = f"backer-{safe_name}"
+            # Truncate to avoid potential GUI display issues (keep under 40 chars total)
+            if len(storage_id) > 40:
+                storage_id = storage_id[:40].rstrip("-")
 
         # Get server from repository
         server = repository.get("server", "")
@@ -835,6 +851,13 @@ class ProxmoxAPI:
             raise ProxmoxAPIError(
                 f"Repository type '{repo_type}' cannot be configured as Proxmox storage. "
                 "Only NFS and SMB repositories are supported for hypervisor backups."
+            )
+
+        # Verify storage was created successfully
+        created_storage = self.get_storage(storage_id)
+        if not created_storage:
+            raise ProxmoxAPIError(
+                f"Storage '{storage_id}' was not created. Check Proxmox server logs for details."
             )
 
         logger.info(f"Created Proxmox storage '{storage_id}' for repository '{repo_name}'")
