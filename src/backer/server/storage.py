@@ -167,7 +167,12 @@ class Storage:
                     version TEXT,
                     last_checked TEXT,
                     created_at TEXT NOT NULL,
-                    config TEXT DEFAULT '{}'
+                    config TEXT DEFAULT '{}',
+                    -- SSH settings for incremental backups (QMP access)
+                    ssh_user TEXT DEFAULT 'root',
+                    ssh_port INTEGER DEFAULT 22,
+                    ssh_key_path TEXT,  -- Path to SSH private key (optional)
+                    ssh_use_api_password INTEGER DEFAULT 1  -- If 1, use API password for SSH (password auth only)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_hypervisors_name ON hypervisors(name);
@@ -185,6 +190,10 @@ class Storage:
                     schedule_cron TEXT,
                     retention TEXT DEFAULT '{}',  -- JSON retention policy
                     enabled INTEGER DEFAULT 1,
+                    enable_incremental INTEGER DEFAULT 0,  -- Enable incremental backups using dirty bitmaps
+                    ssh_user TEXT DEFAULT 'root',  -- SSH user for QMP access (incremental backups)
+                    ssh_port INTEGER DEFAULT 22,  -- SSH port for QMP access
+                    max_incrementals INTEGER DEFAULT 7,  -- Force full backup after this many incrementals
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id),
@@ -215,6 +224,28 @@ class Storage:
 
                 CREATE INDEX IF NOT EXISTS idx_hypervisor_runs_job ON hypervisor_runs(job_id);
                 CREATE INDEX IF NOT EXISTS idx_hypervisor_runs_started ON hypervisor_runs(started_at DESC);
+
+                -- VM bitmap state tracking for incremental backups
+                -- Tracks dirty bitmap state per VM disk to enable incremental backups
+                CREATE TABLE IF NOT EXISTS vm_bitmap_state (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hypervisor_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    disk_node TEXT NOT NULL,  -- Block device node (e.g., "drive-scsi0")
+                    disk_driver TEXT NOT NULL,  -- Disk format (qcow2, raw, etc.)
+                    bitmap_name TEXT NOT NULL,  -- Name of the dirty bitmap
+                    bitmap_valid INTEGER DEFAULT 1,  -- Whether bitmap is usable
+                    last_full_backup TEXT,  -- Timestamp of last full backup
+                    last_incremental_backup TEXT,  -- Timestamp of last incremental
+                    backup_count INTEGER DEFAULT 0,  -- Number of incrementals since full
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id),
+                    UNIQUE(hypervisor_id, vmid, disk_node)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_hv ON vm_bitmap_state(hypervisor_id);
+                CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_vm ON vm_bitmap_state(hypervisor_id, vmid);
             """)
 
     @contextmanager
@@ -1082,6 +1113,10 @@ class Storage:
         password: str | None = None,
         verify_ssl: bool = False,
         config: dict[str, Any] | None = None,
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        ssh_key_path: str | None = None,
+        ssh_use_api_password: bool = True,
     ) -> None:
         """Add a new hypervisor."""
         from backer.server.secrets import get_secrets_manager
@@ -1104,8 +1139,9 @@ class Storage:
                 INSERT INTO hypervisors (
                     id, name, hypervisor_type, host, port, auth_method,
                     username, token_id, token_secret_encrypted, password_encrypted,
-                    verify_ssl, status, created_at, config
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)
+                    verify_ssl, status, created_at, config,
+                    ssh_user, ssh_port, ssh_key_path, ssh_use_api_password
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hypervisor_id,
@@ -1121,6 +1157,10 @@ class Storage:
                     1 if verify_ssl else 0,
                     now,
                     json.dumps(config or {}),
+                    ssh_user,
+                    ssh_port,
+                    ssh_key_path,
+                    1 if ssh_use_api_password else 0,
                 ),
             )
 
@@ -1139,6 +1179,10 @@ class Storage:
         status: str | None = None,
         version: str | None = None,
         config: dict[str, Any] | None = None,
+        ssh_user: str | None = None,
+        ssh_port: int | None = None,
+        ssh_key_path: str | None = None,
+        ssh_use_api_password: bool | None = None,
     ) -> bool:
         """Update a hypervisor."""
         from backer.server.secrets import get_secrets_manager
@@ -1186,6 +1230,19 @@ class Storage:
         if config is not None:
             updates.append("config = ?")
             params.append(json.dumps(config))
+        # SSH settings for incremental backups
+        if ssh_user is not None:
+            updates.append("ssh_user = ?")
+            params.append(ssh_user)
+        if ssh_port is not None:
+            updates.append("ssh_port = ?")
+            params.append(ssh_port)
+        if ssh_key_path is not None:
+            updates.append("ssh_key_path = ?")
+            params.append(ssh_key_path if ssh_key_path else None)
+        if ssh_use_api_password is not None:
+            updates.append("ssh_use_api_password = ?")
+            params.append(1 if ssh_use_api_password else 0)
 
         if not updates:
             return False
@@ -1283,6 +1340,8 @@ class Storage:
 
     def _row_to_hypervisor(self, row: sqlite3.Row) -> dict[str, Any]:
         """Convert a database row to a hypervisor dict."""
+        # Handle optional SSH columns that may not exist in older databases
+        keys = row.keys()
         return {
             "id": row["id"],
             "name": row["name"],
@@ -1298,6 +1357,11 @@ class Storage:
             "last_checked": row["last_checked"],
             "created_at": row["created_at"],
             "config": json.loads(row["config"]) if row["config"] else {},
+            # SSH settings for incremental backups
+            "ssh_user": row["ssh_user"] if "ssh_user" in keys else "root",
+            "ssh_port": row["ssh_port"] if "ssh_port" in keys else 22,
+            "ssh_key_path": row["ssh_key_path"] if "ssh_key_path" in keys else None,
+            "ssh_use_api_password": row["ssh_use_api_password"] == 1 if "ssh_use_api_password" in keys else True,
         }
 
     # =========================================================================
@@ -1316,6 +1380,10 @@ class Storage:
         schedule_cron: str | None = None,
         retention: dict[str, int] | None = None,
         enabled: bool = True,
+        enable_incremental: bool = False,
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        max_incrementals: int = 7,
     ) -> None:
         """Add a new hypervisor backup job."""
         now = datetime.now().isoformat()
@@ -1325,8 +1393,9 @@ class Storage:
                 INSERT INTO hypervisor_jobs (
                     id, name, hypervisor_id, guest_ids, repository_id,
                     backup_mode, compression, schedule_cron, retention,
-                    enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, enable_incremental, ssh_user, ssh_port,
+                    max_incrementals, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -1339,6 +1408,10 @@ class Storage:
                     schedule_cron,
                     json.dumps(retention or {}),
                     1 if enabled else 0,
+                    1 if enable_incremental else 0,
+                    ssh_user,
+                    ssh_port,
+                    max_incrementals,
                     now,
                     now,
                 ),
@@ -1355,6 +1428,10 @@ class Storage:
         schedule_cron: str | None = None,
         retention: dict[str, int] | None = None,
         enabled: bool | None = None,
+        enable_incremental: bool | None = None,
+        ssh_user: str | None = None,
+        ssh_port: int | None = None,
+        max_incrementals: int | None = None,
     ) -> bool:
         """Update a hypervisor job."""
         updates = ["updated_at = ?"]
@@ -1384,6 +1461,18 @@ class Storage:
         if enabled is not None:
             updates.append("enabled = ?")
             params.append(1 if enabled else 0)
+        if enable_incremental is not None:
+            updates.append("enable_incremental = ?")
+            params.append(1 if enable_incremental else 0)
+        if ssh_user is not None:
+            updates.append("ssh_user = ?")
+            params.append(ssh_user)
+        if ssh_port is not None:
+            updates.append("ssh_port = ?")
+            params.append(ssh_port)
+        if max_incrementals is not None:
+            updates.append("max_incrementals = ?")
+            params.append(max_incrementals)
 
         params.append(job_id)
 
@@ -1444,6 +1533,8 @@ class Storage:
 
     def _row_to_hypervisor_job(self, row: sqlite3.Row) -> dict[str, Any]:
         """Convert a database row to a hypervisor job dict."""
+        # Handle optional new columns that may not exist in older databases
+        keys = row.keys()
         return {
             "id": row["id"],
             "name": row["name"],
@@ -1455,6 +1546,10 @@ class Storage:
             "schedule_cron": row["schedule_cron"],
             "retention": json.loads(row["retention"]) if row["retention"] else {},
             "enabled": row["enabled"] == 1,
+            "enable_incremental": row["enable_incremental"] == 1 if "enable_incremental" in keys else False,
+            "ssh_user": row["ssh_user"] if "ssh_user" in keys else "root",
+            "ssh_port": row["ssh_port"] if "ssh_port" in keys else 22,
+            "max_incrementals": row["max_incrementals"] if "max_incrementals" in keys else 7,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1598,4 +1693,268 @@ class Storage:
             "duration_seconds": row["duration_seconds"],
             "exit_status": row["exit_status"],
             "errors": json.loads(row["errors"]) if row["errors"] else [],
+        }
+
+    # =========================================================================
+    # VM Bitmap State (for incremental backups)
+    # =========================================================================
+
+    def get_vm_bitmap_state(
+        self,
+        hypervisor_id: str,
+        vmid: int,
+        disk_node: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get bitmap state for a VM's disks.
+
+        Args:
+            hypervisor_id: Hypervisor ID
+            vmid: VM ID
+            disk_node: Optional specific disk node to query
+
+        Returns:
+            List of bitmap state dicts
+        """
+        with self._connect() as conn:
+            if disk_node:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM vm_bitmap_state
+                    WHERE hypervisor_id = ? AND vmid = ? AND disk_node = ?
+                    """,
+                    (hypervisor_id, vmid, disk_node),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM vm_bitmap_state
+                    WHERE hypervisor_id = ? AND vmid = ?
+                    """,
+                    (hypervisor_id, vmid),
+                ).fetchall()
+
+            return [self._row_to_bitmap_state(row) for row in rows]
+
+    def save_vm_bitmap_state(
+        self,
+        hypervisor_id: str,
+        vmid: int,
+        disk_node: str,
+        disk_driver: str,
+        bitmap_name: str,
+        bitmap_valid: bool = True,
+        last_full_backup: str | None = None,
+        last_incremental_backup: str | None = None,
+        backup_count: int = 0,
+    ) -> None:
+        """Save or update bitmap state for a VM disk.
+
+        Args:
+            hypervisor_id: Hypervisor ID
+            vmid: VM ID
+            disk_node: Block device node (e.g., "drive-scsi0")
+            disk_driver: Disk format (qcow2, raw, etc.)
+            bitmap_name: Name of the dirty bitmap
+            bitmap_valid: Whether bitmap is currently valid
+            last_full_backup: Timestamp of last full backup
+            last_incremental_backup: Timestamp of last incremental
+            backup_count: Number of incrementals since last full
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO vm_bitmap_state (
+                    hypervisor_id, vmid, disk_node, disk_driver, bitmap_name,
+                    bitmap_valid, last_full_backup, last_incremental_backup,
+                    backup_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hypervisor_id, vmid, disk_node) DO UPDATE SET
+                    disk_driver = excluded.disk_driver,
+                    bitmap_name = excluded.bitmap_name,
+                    bitmap_valid = excluded.bitmap_valid,
+                    last_full_backup = COALESCE(excluded.last_full_backup, last_full_backup),
+                    last_incremental_backup = COALESCE(excluded.last_incremental_backup, last_incremental_backup),
+                    backup_count = excluded.backup_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    hypervisor_id,
+                    vmid,
+                    disk_node,
+                    disk_driver,
+                    bitmap_name,
+                    1 if bitmap_valid else 0,
+                    last_full_backup,
+                    last_incremental_backup,
+                    backup_count,
+                    now,
+                    now,
+                ),
+            )
+
+    def update_bitmap_after_backup(
+        self,
+        hypervisor_id: str,
+        vmid: int,
+        disk_node: str,
+        backup_type: str,  # "full" or "incremental"
+        timestamp: str | None = None,
+    ) -> None:
+        """Update bitmap state after a successful backup.
+
+        Args:
+            hypervisor_id: Hypervisor ID
+            vmid: VM ID
+            disk_node: Block device node
+            backup_type: "full" or "incremental"
+            timestamp: Backup timestamp (default: now)
+        """
+        now = timestamp or datetime.now().isoformat()
+        with self._connect() as conn:
+            if backup_type == "full":
+                conn.execute(
+                    """
+                    UPDATE vm_bitmap_state
+                    SET last_full_backup = ?,
+                        backup_count = 0,
+                        bitmap_valid = 1,
+                        updated_at = ?
+                    WHERE hypervisor_id = ? AND vmid = ? AND disk_node = ?
+                    """,
+                    (now, now, hypervisor_id, vmid, disk_node),
+                )
+            else:  # incremental
+                conn.execute(
+                    """
+                    UPDATE vm_bitmap_state
+                    SET last_incremental_backup = ?,
+                        backup_count = backup_count + 1,
+                        updated_at = ?
+                    WHERE hypervisor_id = ? AND vmid = ? AND disk_node = ?
+                    """,
+                    (now, now, hypervisor_id, vmid, disk_node),
+                )
+
+    def invalidate_vm_bitmaps(
+        self,
+        hypervisor_id: str,
+        vmid: int,
+        disk_node: str | None = None,
+    ) -> int:
+        """Mark VM bitmaps as invalid (e.g., after VM reboot for RAW disks).
+
+        Args:
+            hypervisor_id: Hypervisor ID
+            vmid: VM ID
+            disk_node: Optional specific disk (None = all disks)
+
+        Returns:
+            Number of bitmaps invalidated
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            if disk_node:
+                result = conn.execute(
+                    """
+                    UPDATE vm_bitmap_state
+                    SET bitmap_valid = 0, updated_at = ?
+                    WHERE hypervisor_id = ? AND vmid = ? AND disk_node = ?
+                    """,
+                    (now, hypervisor_id, vmid, disk_node),
+                )
+            else:
+                result = conn.execute(
+                    """
+                    UPDATE vm_bitmap_state
+                    SET bitmap_valid = 0, updated_at = ?
+                    WHERE hypervisor_id = ? AND vmid = ?
+                    """,
+                    (now, hypervisor_id, vmid),
+                )
+            return result.rowcount
+
+    def delete_vm_bitmap_state(
+        self,
+        hypervisor_id: str,
+        vmid: int,
+        disk_node: str | None = None,
+    ) -> int:
+        """Delete bitmap state records for a VM.
+
+        Args:
+            hypervisor_id: Hypervisor ID
+            vmid: VM ID
+            disk_node: Optional specific disk (None = all disks)
+
+        Returns:
+            Number of records deleted
+        """
+        with self._connect() as conn:
+            if disk_node:
+                result = conn.execute(
+                    """
+                    DELETE FROM vm_bitmap_state
+                    WHERE hypervisor_id = ? AND vmid = ? AND disk_node = ?
+                    """,
+                    (hypervisor_id, vmid, disk_node),
+                )
+            else:
+                result = conn.execute(
+                    """
+                    DELETE FROM vm_bitmap_state
+                    WHERE hypervisor_id = ? AND vmid = ?
+                    """,
+                    (hypervisor_id, vmid),
+                )
+            return result.rowcount
+
+    def can_do_incremental_backup(
+        self,
+        hypervisor_id: str,
+        vmid: int,
+    ) -> tuple[bool, str]:
+        """Check if a VM can do incremental backup.
+
+        A VM can do incremental if:
+        - At least one disk has valid bitmap state
+        - Has had at least one full backup
+
+        Args:
+            hypervisor_id: Hypervisor ID
+            vmid: VM ID
+
+        Returns:
+            Tuple of (can_incremental, reason)
+        """
+        states = self.get_vm_bitmap_state(hypervisor_id, vmid)
+
+        if not states:
+            return False, "No bitmap tracking configured for this VM"
+
+        valid_states = [s for s in states if s["bitmap_valid"]]
+        if not valid_states:
+            return False, "All bitmaps are invalid (may need full backup after VM restart)"
+
+        has_full = any(s["last_full_backup"] for s in valid_states)
+        if not has_full:
+            return False, "No full backup exists yet"
+
+        return True, "Incremental backup available"
+
+    def _row_to_bitmap_state(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to a bitmap state dict."""
+        return {
+            "id": row["id"],
+            "hypervisor_id": row["hypervisor_id"],
+            "vmid": row["vmid"],
+            "disk_node": row["disk_node"],
+            "disk_driver": row["disk_driver"],
+            "bitmap_name": row["bitmap_name"],
+            "bitmap_valid": bool(row["bitmap_valid"]),
+            "last_full_backup": row["last_full_backup"],
+            "last_incremental_backup": row["last_incremental_backup"],
+            "backup_count": row["backup_count"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }

@@ -94,7 +94,12 @@
         <tbody>
             {% for job in jobs %}
             <tr class="{% if not job.enabled %}row-disabled{% endif %}">
-                <td><strong>{{ job.name }}</strong></td>
+                <td>
+                    <strong>{{ job.name }}</strong>
+                    {% if job.enable_incremental %}
+                    <span class="badge badge-warning" title="Incremental backups enabled - VMs with no changes will be skipped">INC</span>
+                    {% endif %}
+                </td>
                 <td>{{ job.hypervisor_name or job.hypervisor_id }}</td>
                 <td>
                     {% if job.guest_count %}
@@ -242,6 +247,41 @@
                     <div class="form-hint">Uncheck for self-signed certificates (common in Proxmox)</div>
                 </div>
 
+                <!-- SSH Settings for Incremental Backups (collapsed by default) -->
+                <details class="form-details">
+                    <summary class="form-label" style="cursor: pointer;">SSH Settings (for Incremental Backups)</summary>
+                    <div style="margin-top: 10px; padding: 10px; background: var(--bg-primary); border-radius: 4px;">
+                        <div class="form-hint" style="margin-bottom: 15px;">
+                            SSH access is required for incremental backups using QEMU dirty bitmaps.
+                            Only needed if you plan to enable incremental backups.
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="flex: 2;">
+                                <label class="form-label">SSH User</label>
+                                <input type="text" id="hvSshUser" class="form-input" value="root" placeholder="root">
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label">SSH Port</label>
+                                <input type="number" id="hvSshPort" class="form-input" value="22">
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">SSH Key Path (optional)</label>
+                            <input type="text" id="hvSshKeyPath" class="form-input" placeholder="/root/.ssh/id_rsa">
+                            <div class="form-hint">Path to SSH private key on the Backer server</div>
+                        </div>
+
+                        <div class="form-group" id="sshPasswordOption">
+                            <label class="form-label">
+                                <input type="checkbox" id="hvSshUseApiPassword" checked> Use API password for SSH
+                            </label>
+                            <div class="form-hint">When using password auth, reuse the Proxmox API password for SSH (requires root@pam)</div>
+                        </div>
+                    </div>
+                </details>
+
                 <div id="addHypervisorError" class="error-msg" style="display: none;"></div>
 
                 <div style="display: flex; gap: 10px; margin-top: 20px;">
@@ -355,7 +395,44 @@
                     <div class="form-hint">Leave empty for manual backups only. Example: 0 2 * * * = daily at 2am</div>
                 </div>
 
-                <div class="form-group">
+                <!-- Incremental Backup Settings -->
+                <details class="form-details" id="incrementalDetails">
+                    <summary class="form-label" style="cursor: pointer;">Incremental Backup Settings</summary>
+                    <div style="margin-top: 10px; padding: 10px; background: var(--bg-primary); border-radius: 4px;">
+                        <div class="form-hint" style="margin-bottom: 15px;">
+                            Incremental backups use QEMU dirty bitmaps to skip VMs with no changes,
+                            reducing backup time and storage for frequently scheduled jobs.
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="jobEnableIncremental" onchange="onIncrementalChange()"> Enable Incremental Backups
+                            </label>
+                            <div class="form-hint">Skip unchanged VMs using dirty bitmap tracking (requires SSH access to hypervisor)</div>
+                        </div>
+
+                        <div id="incrementalOptions" style="display: none; margin-top: 10px;">
+                            <div class="form-group">
+                                <label class="form-label">Max Incrementals Before Full</label>
+                                <input type="number" id="jobMaxIncrementals" class="form-input" value="7" min="1" max="30">
+                                <div class="form-hint">Force a full backup after this many incremental backups</div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group" style="flex: 2;">
+                                    <label class="form-label">SSH User</label>
+                                    <input type="text" id="jobSshUser" class="form-input" placeholder="root (uses hypervisor default)">
+                                </div>
+                                <div class="form-group" style="flex: 1;">
+                                    <label class="form-label">SSH Port</label>
+                                    <input type="number" id="jobSshPort" class="form-input" placeholder="22">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                <div class="form-group" style="margin-top: 15px;">
                     <label class="form-label">
                         <input type="checkbox" id="jobEnabled" checked> Enable Job
                     </label>
@@ -710,6 +787,11 @@ function getHypervisorFormData() {
         port: parseInt(document.getElementById('hvPort').value) || 8006,
         auth_method: authMethod,
         verify_ssl: document.getElementById('hvVerifySSL').checked,
+        // SSH settings for incremental backups
+        ssh_user: document.getElementById('hvSshUser').value || 'root',
+        ssh_port: parseInt(document.getElementById('hvSshPort').value) || 22,
+        ssh_key_path: document.getElementById('hvSshKeyPath').value || null,
+        ssh_use_api_password: document.getElementById('hvSshUseApiPassword').checked,
     };
 
     if (authMethod === 'token') {
@@ -1070,6 +1152,12 @@ function showAddJobModal() {
     document.getElementById('jobError').style.display = 'none';
     document.getElementById('jobModal').style.display = 'flex';
 
+    // Reset incremental options
+    document.getElementById('jobEnableIncremental').checked = false;
+    document.getElementById('jobMaxIncrementals').value = 7;
+    document.getElementById('incrementalOptions').style.display = 'none';
+    document.getElementById('incrementalDetails').open = false;
+
     // Load repositories
     loadRepositories();
 }
@@ -1151,6 +1239,11 @@ async function onJobHypervisorChange() {
     }
 }
 
+function onIncrementalChange() {
+    const enabled = document.getElementById('jobEnableIncremental').checked;
+    document.getElementById('incrementalOptions').style.display = enabled ? 'block' : 'none';
+}
+
 async function submitJob(event) {
     event.preventDefault();
 
@@ -1172,6 +1265,11 @@ async function submitJob(event) {
         compress: document.getElementById('jobCompression').value,
         schedule_cron: document.getElementById('jobSchedule').value || null,
         enabled: document.getElementById('jobEnabled').checked,
+        // Incremental backup settings
+        enable_incremental: document.getElementById('jobEnableIncremental').checked,
+        max_incrementals: parseInt(document.getElementById('jobMaxIncrementals').value) || 7,
+        ssh_user: document.getElementById('jobSshUser').value || null,
+        ssh_port: parseInt(document.getElementById('jobSshPort').value) || null,
     };
 
     const url = editingJobId ? `/api/v1/hypervisor-jobs/${editingJobId}` : '/api/v1/hypervisor-jobs';
@@ -1218,6 +1316,18 @@ async function editHypervisorJob(jobId) {
         document.getElementById('jobSchedule').value = job.schedule_cron || '';
         document.getElementById('jobEnabled').checked = job.enabled;
         document.getElementById('jobRepository').value = job.repository_id || '';
+
+        // Incremental backup settings
+        document.getElementById('jobEnableIncremental').checked = job.enable_incremental || false;
+        document.getElementById('jobMaxIncrementals').value = job.max_incrementals || 7;
+        document.getElementById('jobSshUser').value = job.ssh_user || '';
+        document.getElementById('jobSshPort').value = job.ssh_port || '';
+        onIncrementalChange();  // Show/hide options based on checkbox
+
+        // If incremental is enabled, expand the details
+        if (job.enable_incremental) {
+            document.getElementById('incrementalDetails').open = true;
+        }
 
         // Load guests for this hypervisor
         await onJobHypervisorChange();

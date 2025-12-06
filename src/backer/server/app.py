@@ -2414,6 +2414,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         password = body.get("password")
         verify_ssl = body.get("verify_ssl", False)
 
+        # SSH settings for incremental backups
+        ssh_user = body.get("ssh_user", "root")
+        ssh_port = body.get("ssh_port", 22)
+        ssh_key_path = body.get("ssh_key_path")
+        ssh_use_api_password = body.get("ssh_use_api_password", True)
+
         # Validate
         validate_name(name, "name")
         if not host:
@@ -2442,6 +2448,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             token_secret=token_secret,
             password=password,
             verify_ssl=verify_ssl,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            ssh_key_path=ssh_key_path,
+            ssh_use_api_password=ssh_use_api_password,
         )
 
         return {"id": hypervisor_id, "name": name, "status": "created"}
@@ -2822,6 +2832,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         retention = body.get("retention", {})
         enabled = body.get("enabled", True)
 
+        # Incremental backup settings
+        enable_incremental = body.get("enable_incremental", False)
+        ssh_user = body.get("ssh_user", "root")
+        ssh_port = body.get("ssh_port", 22)
+        max_incrementals = body.get("max_incrementals", 7)
+
         # Validate
         validate_name(name, "name")
         if not hypervisor_id:
@@ -2865,6 +2881,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             schedule_cron=schedule_cron,
             retention=retention,
             enabled=enabled,
+            enable_incremental=enable_incremental,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            max_incrementals=max_incrementals,
         )
 
         return {"id": job_id, "name": name, "status": "created"}
@@ -2926,6 +2946,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             update_kwargs["retention"] = body["retention"]
         if "enabled" in body:
             update_kwargs["enabled"] = body["enabled"]
+        # Incremental backup settings
+        if "enable_incremental" in body:
+            update_kwargs["enable_incremental"] = body["enable_incremental"]
+        if "ssh_user" in body:
+            update_kwargs["ssh_user"] = body["ssh_user"]
+        if "ssh_port" in body:
+            update_kwargs["ssh_port"] = body["ssh_port"]
+        if "max_incrementals" in body:
+            update_kwargs["max_incrementals"] = body["max_incrementals"]
 
         storage.update_hypervisor_job(job_id, **update_kwargs)
 
@@ -2947,13 +2976,25 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/hypervisor-jobs/{job_id}/run")
     def run_hypervisor_job(
         job_id: str,
+        force_full: bool = False,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Run a hypervisor backup job.
 
         Backups are stored directly on the Backer repository by auto-configuring
         the repository as Proxmox storage (like Veeam does).
+
+        When incremental backups are enabled for the job, uses QEMU dirty bitmaps
+        to determine which VMs have changed. VMs with no changes can be skipped.
+
+        Args:
+            job_id: Hypervisor job ID
+            force_full: Force full backups for all VMs (ignore dirty bitmap state)
         """
+        from backer.hypervisors.incremental import (
+            BackupType,
+            IncrementalBackupManager,
+        )
         from backer.hypervisors.proxmox import (
             ProxmoxAPI,
             ProxmoxAPIError,
@@ -3032,6 +3073,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
+        # Set up incremental backup manager if enabled
+        incremental_manager = None
+        enable_incremental = job.get("enable_incremental", False)
+
+        if enable_incremental:
+            # Get SSH credentials for QMP access
+            # Use job-level SSH settings, fall back to hypervisor settings
+            ssh_user = job.get("ssh_user") or hypervisor.get("ssh_user", "root")
+            ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
+            ssh_key_path = hypervisor.get("ssh_key_path")
+
+            # For SSH password: use API password if ssh_use_api_password is enabled
+            ssh_password = None
+            if hypervisor.get("ssh_use_api_password", True) and hv_password:
+                ssh_password = hv_password
+
+            incremental_manager = IncrementalBackupManager(
+                host=hypervisor["host"],
+                hypervisor_id=hypervisor["id"],
+                storage=storage,
+                ssh_user=ssh_user,
+                ssh_port=ssh_port,
+                ssh_key=ssh_key_path,
+                ssh_password=ssh_password,
+                max_incrementals=job.get("max_incrementals", 7),
+            )
+
         # Submit backup as background task
         def run_backup_task(task: Task) -> dict[str, Any]:
             manager = ProxmoxBackupManager(api)
@@ -3052,13 +3120,62 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             total = len(guest_ids)
             if total == 0:
-                return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "results": []}
+                return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "skipped": 0, "results": []}
+
+            # Counters for incremental stats
+            skipped_count = 0
 
             for i, vmid in enumerate(guest_ids):
                 task.progress = int((i / total) * 100)
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
-                task.message = f"Backing up {guest_name} ({vmid}) to {repository['name']}..."
+
+                # Check if we can skip this VM (incremental mode with no changes)
+                backup_decision = None
+                backup_type_label = "full"
+
+                if incremental_manager:
+                    task.message = f"Checking changes for {guest_name} ({vmid})..."
+                    try:
+                        backup_decision = incremental_manager.get_backup_decision(
+                            vmid=vmid,
+                            force_full=force_full,
+                        )
+                        backup_type_label = backup_decision.backup_type.value
+
+                        if backup_decision.backup_type == BackupType.SKIP:
+                            # No changes since last backup - skip this VM
+                            logger.info(
+                                f"Skipping VM {vmid} ({guest_name}): {backup_decision.reason}"
+                            )
+                            storage.save_hypervisor_run(
+                                run_id=run_id,
+                                job_id=job_id,
+                                job_name=job["name"],
+                                hypervisor_id=hypervisor["id"],
+                                guest_id=vmid,
+                                guest_name=guest_name,
+                                status="skipped",
+                                finished_at=datetime.now(),
+                                exit_status="no changes",
+                            )
+                            results.append({
+                                "success": True,
+                                "vmid": vmid,
+                                "skipped": True,
+                                "reason": backup_decision.reason,
+                            })
+                            skipped_count += 1
+                            continue
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Error checking incremental state for VM {vmid}: {e}. "
+                            "Falling back to full backup."
+                        )
+                        backup_decision = None
+
+                task.message = f"Backing up {guest_name} ({vmid}) [{backup_type_label}] to {repository['name']}..."
 
                 # Record pending
                 storage.save_hypervisor_run(
@@ -3098,6 +3215,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         timeout=7200,
                     )
 
+                    # Add backup type to result
+                    result["backup_type"] = backup_type_label
+
                     # Update run record
                     storage.save_hypervisor_run(
                         run_id=run_id,
@@ -3114,10 +3234,32 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         errors=result.get("errors"),
                     )
 
+                    # On success, update incremental tracking
+                    if result["success"] and incremental_manager and backup_decision:
+                        try:
+                            # Set up tracking if this was a full backup
+                            if backup_decision.backup_type == BackupType.FULL:
+                                incremental_manager.setup_tracking(vmid)
+
+                            # Update bitmap state
+                            incremental_manager.after_backup_success(vmid, backup_decision)
+                        except Exception as inc_err:
+                            logger.warning(
+                                f"Failed to update incremental state for VM {vmid}: {inc_err}"
+                            )
+
                     results.append(result)
 
                 except Exception as e:
                     logger.exception(f"Backup failed for VMID {vmid}: {e}")
+
+                    # Notify incremental manager of failure
+                    if incremental_manager and backup_decision:
+                        try:
+                            incremental_manager.after_backup_failure(vmid, backup_decision)
+                        except Exception:
+                            pass
+
                     storage.save_hypervisor_run(
                         run_id=run_id,
                         job_id=job_id,
@@ -3144,12 +3286,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Log but don't fail the backup - cleanup is best-effort
                 logger.warning(f"Failed to cleanup Proxmox storage '{proxmox_storage_id}': {cleanup_err}")
 
-            success_count = sum(1 for r in results if r.get("success"))
+            success_count = sum(1 for r in results if r.get("success") and not r.get("skipped"))
             return {
                 "run_id": run_id,
                 "total": total,
                 "success": success_count,
-                "failed": total - success_count,
+                "failed": total - success_count - skipped_count,
+                "skipped": skipped_count,
+                "incremental_enabled": enable_incremental,
                 "results": results,
             }
 
@@ -3202,6 +3346,146 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
 
         return storage.get_hypervisor_runs(job_id=job_id, limit=limit)
+
+    # ============ Incremental Backup Status ============
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/incremental-status/{vmid}")
+    def get_vm_incremental_status(
+        hypervisor_id: str,
+        vmid: int,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Get incremental backup status for a specific VM.
+
+        Returns bitmap tracking state, dirty bytes, and backup history.
+        """
+        from backer.hypervisors.incremental import IncrementalBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        # Get SSH credentials
+        ssh_password = None
+        if hypervisor.get("ssh_use_api_password", True):
+            ssh_password = storage.get_hypervisor_password(hypervisor_id)
+
+        inc_manager = IncrementalBackupManager(
+            host=hypervisor["host"],
+            hypervisor_id=hypervisor_id,
+            storage=storage,
+            ssh_user=hypervisor.get("ssh_user", "root"),
+            ssh_port=hypervisor.get("ssh_port", 22),
+            ssh_key=hypervisor.get("ssh_key_path"),
+            ssh_password=ssh_password,
+        )
+
+        try:
+            stats = inc_manager.get_vm_backup_stats(vmid)
+            validity = inc_manager.check_bitmap_validity(vmid)
+            return {
+                "vmid": vmid,
+                "stats": stats,
+                "validity": validity,
+            }
+        except Exception as e:
+            logger.warning(f"Error getting incremental status for VM {vmid}: {e}")
+            return {
+                "vmid": vmid,
+                "error": str(e),
+                "stats": {"tracked": False},
+                "validity": {"valid": False, "reason": str(e)},
+            }
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/incremental-setup/{vmid}")
+    def setup_vm_incremental_tracking(
+        hypervisor_id: str,
+        vmid: int,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Set up incremental backup tracking for a VM.
+
+        Creates dirty bitmaps on all VM disks to enable change tracking.
+        Should be called after a full backup or when re-initializing tracking.
+        """
+        from backer.hypervisors.incremental import IncrementalBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        # Get SSH credentials
+        ssh_password = None
+        if hypervisor.get("ssh_use_api_password", True):
+            ssh_password = storage.get_hypervisor_password(hypervisor_id)
+
+        inc_manager = IncrementalBackupManager(
+            host=hypervisor["host"],
+            hypervisor_id=hypervisor_id,
+            storage=storage,
+            ssh_user=hypervisor.get("ssh_user", "root"),
+            ssh_port=hypervisor.get("ssh_port", 22),
+            ssh_key=hypervisor.get("ssh_key_path"),
+            ssh_password=ssh_password,
+        )
+
+        try:
+            result = inc_manager.setup_tracking(vmid)
+            return result
+        except Exception as e:
+            logger.error(f"Error setting up incremental tracking for VM {vmid}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to set up incremental tracking: {e}"
+            )
+
+    @app.delete("/api/v1/hypervisors/{hypervisor_id}/incremental-cleanup/{vmid}")
+    def cleanup_vm_incremental_tracking(
+        hypervisor_id: str,
+        vmid: int,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Remove incremental backup tracking for a VM.
+
+        Removes dirty bitmaps and clears tracking state from the database.
+        """
+        from backer.hypervisors.qmp import QMPClient, QMPError
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        # Get SSH credentials
+        ssh_password = None
+        if hypervisor.get("ssh_use_api_password", True):
+            ssh_password = storage.get_hypervisor_password(hypervisor_id)
+
+        # Try to clean up bitmaps on the VM
+        bitmaps_removed = 0
+        try:
+            client = QMPClient(
+                host=hypervisor["host"],
+                vmid=vmid,
+                ssh_user=hypervisor.get("ssh_user", "root"),
+                ssh_port=hypervisor.get("ssh_port", 22),
+                ssh_key=hypervisor.get("ssh_key_path"),
+                ssh_password=ssh_password,
+            )
+
+            if client.is_vm_running():
+                bitmaps_removed = client.cleanup_bitmaps()
+
+        except QMPError as e:
+            logger.warning(f"Could not clean up bitmaps on VM {vmid}: {e}")
+
+        # Clean up database state
+        db_removed = storage.delete_vm_bitmap_state(hypervisor_id, vmid)
+
+        return {
+            "vmid": vmid,
+            "bitmaps_removed": bitmaps_removed,
+            "db_records_removed": db_removed,
+        }
 
     # ============ Hypervisor Backups ============
 
