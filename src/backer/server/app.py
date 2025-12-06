@@ -3067,6 +3067,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Set up incremental backup manager if enabled
         incremental_manager = None
         enable_incremental = job.get("enable_incremental", False)
+        logger.info(f"Job '{job.get('name')}' enable_incremental={enable_incremental}")
 
         if enable_incremental:
             # Get SSH credentials for QMP access
