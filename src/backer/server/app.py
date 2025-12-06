@@ -2318,15 +2318,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return storage.list_hypervisors(hypervisor_type)
 
     @app.post("/api/v1/hypervisors")
-    def create_hypervisor(
+    async def create_hypervisor(
         request: Request,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Add a new hypervisor."""
-        import asyncio
-
         # Get request body
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
         name = body.get("name", "").strip()
         hypervisor_type = body.get("hypervisor_type", "proxmox")
@@ -2372,18 +2370,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {"id": hypervisor_id, "name": name, "status": "created"}
 
     @app.post("/api/v1/hypervisors/test")
-    def test_hypervisor_credentials(
+    async def test_hypervisor_credentials(
         request: Request,
     ) -> dict[str, Any]:
         """Test hypervisor connection without saving.
 
         This is used to validate credentials before creating a hypervisor.
         """
-        import asyncio
-
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
 
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
         hypervisor_type = body.get("hypervisor_type", "proxmox")
         host = body.get("host", "").strip()
@@ -2438,19 +2434,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return hypervisor
 
     @app.put("/api/v1/hypervisors/{hypervisor_id}")
-    def update_hypervisor(
+    async def update_hypervisor(
         hypervisor_id: str,
         request: Request,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Update a hypervisor."""
-        import asyncio
-
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
         # Only update fields that are provided
         update_kwargs: dict[str, Any] = {}
@@ -2712,14 +2706,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return jobs
 
     @app.post("/api/v1/hypervisor-jobs")
-    def create_hypervisor_job(
+    async def create_hypervisor_job(
         request: Request,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Create a new hypervisor backup job."""
-        import asyncio
-
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
         name = body.get("name", "").strip()
         hypervisor_id = body.get("hypervisor_id")
@@ -2780,19 +2772,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return job
 
     @app.put("/api/v1/hypervisor-jobs/{job_id}")
-    def update_hypervisor_job(
+    async def update_hypervisor_job(
         job_id: str,
         request: Request,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Update a hypervisor job."""
-        import asyncio
-
         job = storage.get_hypervisor_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
         update_kwargs: dict[str, Any] = {}
         if "name" in body:
@@ -3118,14 +3108,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/v1/hypervisors/{hypervisor_id}/restore")
-    def restore_hypervisor_backup(
+    async def restore_hypervisor_backup(
         hypervisor_id: str,
         request: Request,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Restore a VM/container from backup."""
-        import asyncio
-
         from backer.hypervisors.proxmox import (
             ProxmoxAPI,
             ProxmoxAuthMethod,
@@ -3137,7 +3125,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
         vmid = body.get("vmid")
         archive = body.get("archive")
