@@ -3037,7 +3037,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
-                guest_type = guest.type if guest else "qemu"
+                guest_type = guest.guest_type.value if guest else "qemu"
                 node = guest.node if guest else "unknown"
 
                 # Save guest info

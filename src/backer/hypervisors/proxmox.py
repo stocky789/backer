@@ -648,8 +648,9 @@ class ProxmoxAPI:
             # Query storage status on the node
             data = self._make_request("GET", f"/nodes/{node}/storage/{storage_id}/status")
             return data
-        except ProxmoxAPIError:
-            # Any error checking status - assume not ready yet
+        except ProxmoxAPIError as e:
+            # Log the actual error for debugging
+            logger.debug(f"Storage status check failed: {e}")
             return None
         except Exception as e:
             logger.debug(f"Error checking storage status: {e}")
@@ -676,6 +677,9 @@ class ProxmoxAPI:
             username: SMB username
             password: SMB password
             domain: SMB domain
+
+        Raises:
+            ProxmoxAPIError: If unable to create or verify directory
         """
         import subprocess
 
@@ -691,6 +695,7 @@ class ProxmoxAPI:
 
         # Create each directory level
         parts = path.strip("/").split("/")
+        last_error = None
         for i in range(1, len(parts) + 1):
             partial_path = "/".join(parts[:i])
             if not partial_path:
@@ -711,18 +716,59 @@ class ProxmoxAPI:
                 )
                 # mkdir may fail if directory exists - that's OK
                 if result.returncode == 0:
-                    logger.debug(f"Created SMB directory: //{server}/{share}/{partial_path}")
+                    logger.info(f"Created SMB directory: //{server}/{share}/{partial_path}")
                 else:
                     # Check if it's just "already exists" error
                     stderr = result.stderr.decode() if result.stderr else ""
                     if "NT_STATUS_OBJECT_NAME_COLLISION" in stderr:
                         logger.debug(f"SMB directory already exists: //{server}/{share}/{partial_path}")
+                    elif "NT_STATUS_LOGON_FAILURE" in stderr:
+                        raise ProxmoxAPIError(
+                            f"SMB authentication failed for //{server}/{share}. "
+                            "Check username, password, and domain settings."
+                        )
+                    elif "NT_STATUS_BAD_NETWORK_NAME" in stderr:
+                        raise ProxmoxAPIError(
+                            f"SMB share not found: //{server}/{share}. "
+                            "Check the share name is correct."
+                        )
+                    elif "NT_STATUS_HOST_UNREACHABLE" in stderr or "NT_STATUS_CONNECTION_REFUSED" in stderr:
+                        raise ProxmoxAPIError(
+                            f"Cannot connect to SMB server {server}. "
+                            "Check network connectivity and firewall settings."
+                        )
                     else:
-                        logger.debug(f"smbclient mkdir {partial_path}: {stderr}")
+                        logger.warning(f"smbclient mkdir {partial_path}: {stderr}")
+                        last_error = stderr
             except subprocess.TimeoutExpired:
                 logger.warning(f"Timeout creating SMB directory: {partial_path}")
+                last_error = "timeout"
+            except ProxmoxAPIError:
+                raise
             except Exception as e:
                 logger.warning(f"Error creating SMB directory {partial_path}: {e}")
+                last_error = str(e)
+
+        # Verify the final directory exists by listing it
+        verify_cmd = [
+            "smbclient",
+            f"//{server}/{share}",
+            *auth_parts,
+            "-c", f"cd {path}",
+        ]
+        try:
+            result = subprocess.run(verify_cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                stderr = result.stderr.decode() if result.stderr else ""
+                if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in stderr or "NT_STATUS_OBJECT_PATH_NOT_FOUND" in stderr:
+                    raise ProxmoxAPIError(
+                        f"Failed to create SMB directory //{server}/{share}/{path}. "
+                        f"Last error: {last_error or stderr}"
+                    )
+        except ProxmoxAPIError:
+            raise
+        except Exception as e:
+            logger.warning(f"Could not verify SMB directory: {e}")
 
         logger.info(f"Ensured SMB directory exists: //{server}/{share}/{path}")
 
