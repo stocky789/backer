@@ -3392,6 +3392,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     }
                     compression = compress_map.get(job["compression"], ProxmoxCompression.ZSTD)
 
+                    # Progress callback to update task with vzdump progress
+                    def progress_callback(status: Any, log_lines: list[str]) -> None:
+                        import re
+                        for line in log_lines:
+                            # Parse vzdump progress: "INFO: 5% (1.2G of 24G)"
+                            match = re.search(r"(\d+)%", line)
+                            if match:
+                                pct = int(match.group(1))
+                                # Scale to this VM's portion of overall progress
+                                base_progress = int((i / total) * 100)
+                                vm_progress = int((pct / 100) * (100 / total))
+                                task.progress = min(base_progress + vm_progress, 99)
+                            # Also update message with latest log line
+                            if "INFO:" in line:
+                                short_line = line.replace("INFO:", "").strip()[:60]
+                                task.message = f"Backing up {guest_name}: {short_line}"
+
                     # Backup directly to Proxmox storage (which points to Backer repo)
                     result = manager.backup_to_storage(
                         vmid=vmid,
@@ -3399,6 +3416,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         mode=backup_mode,
                         compress=compression,
                         timeout=7200,
+                        progress_callback=progress_callback,
                     )
 
                     # Add backup type to result
@@ -3548,6 +3566,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
 
         return storage.get_hypervisor_runs(job_id=job_id, limit=limit)
+
+    @app.get("/api/v1/hypervisor-runs/{run_id}")
+    def get_hypervisor_run(
+        run_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Get details of a specific hypervisor backup run."""
+        run = storage.get_hypervisor_run_by_run_id(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return run
 
     # ============ Incremental Backup Status ============
 

@@ -429,11 +429,50 @@ async def history_page(request: Request):
 
         all_runs.append({
             **run,
+            "run_type": "agent",
             "started_at_formatted": started[:19].replace("T", " ") if started else "-",
             "started_at_ago": time_ago(started),
             "duration": duration,
             "bytes_formatted": format_bytes(run.get("bytes_transferred", 0)),
         })
+
+    # Also get hypervisor runs
+    hv_runs = storage.get_hypervisor_runs(limit=100)
+    for run in hv_runs:
+        started = run.get("started_at")
+        finished = run.get("finished_at")
+
+        duration = None
+        if run.get("duration_seconds"):
+            diff = run["duration_seconds"]
+            if diff < 60:
+                duration = f"{diff:.0f}s"
+            else:
+                duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
+        elif started and finished:
+            try:
+                start_dt = datetime.fromisoformat(started)
+                end_dt = datetime.fromisoformat(finished)
+                diff = (end_dt - start_dt).total_seconds()
+                if diff < 60:
+                    duration = f"{diff:.0f}s"
+                else:
+                    duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
+            except ValueError:
+                pass
+
+        all_runs.append({
+            **run,
+            "run_type": "hypervisor",
+            "started_at_formatted": started[:19].replace("T", " ") if started else "-",
+            "started_at_ago": time_ago(started),
+            "duration": duration,
+            "bytes_formatted": "-",  # Hypervisor runs don't track bytes the same way
+        })
+
+    # Sort all runs by started_at descending
+    all_runs.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+    all_runs = all_runs[:100]  # Limit to 100 total
 
     return templates.TemplateResponse("history.html", {
         "request": request,

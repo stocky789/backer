@@ -1676,6 +1676,17 @@ class Storage:
         runs = self.get_hypervisor_runs(job_id=job_id, limit=1)
         return runs[0] if runs else None
 
+    def get_hypervisor_run_by_run_id(self, run_id: str) -> dict[str, Any] | None:
+        """Get a specific hypervisor run by its run_id."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM hypervisor_runs WHERE run_id = ? LIMIT 1",
+                (run_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_hypervisor_run(row)
+            return None
+
     def _row_to_hypervisor_run(self, row: sqlite3.Row) -> dict[str, Any]:
         """Convert a database row to a hypervisor run dict."""
         return {

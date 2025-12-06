@@ -16,20 +16,33 @@
     <table>
         <thead>
             <tr>
+                <th>Type</th>
                 <th>Job</th>
-                <th>Agent</th>
+                <th>Target</th>
                 <th>Status</th>
                 <th>Started</th>
                 <th>Duration</th>
-                <th>Files</th>
-                <th>Size</th>
+                <th>Details</th>
             </tr>
         </thead>
         <tbody>
             {% for run in runs %}
-            <tr class="run-row" data-run-id="{{ run.run_id or '' }}" style="cursor: pointer;">
+            <tr class="run-row" data-run-id="{{ run.run_id or '' }}" data-run-type="{{ run.run_type or 'agent' }}" data-hypervisor-id="{{ run.hypervisor_id or '' }}" style="cursor: pointer;">
+                <td>
+                    {% if run.run_type == 'hypervisor' %}
+                    <span class="badge badge-info" style="font-size: 10px;">VM</span>
+                    {% else %}
+                    <span class="badge badge-muted" style="font-size: 10px;">Agent</span>
+                    {% endif %}
+                </td>
                 <td><strong>{{ run.job_name }}</strong></td>
-                <td>{{ run.client_id or '-' }}</td>
+                <td>
+                    {% if run.run_type == 'hypervisor' %}
+                    {{ run.guest_name or 'VM ' + (run.guest_id|string) }}
+                    {% else %}
+                    {{ run.client_id or '-' }}
+                    {% endif %}
+                </td>
                 <td>
                     {% if run.status == 'success' %}
                     <span class="badge badge-success">Success</span>
@@ -37,14 +50,21 @@
                     <span class="badge badge-error">Failed</span>
                     {% elif run.status == 'running' %}
                     <span class="badge badge-info">Running</span>
+                    {% elif run.status == 'skipped' %}
+                    <span class="badge badge-muted">Skipped</span>
                     {% else %}
                     <span class="badge badge-muted">{{ run.status }}</span>
                     {% endif %}
                 </td>
                 <td>{{ run.started_at_formatted }}</td>
                 <td>{{ run.duration or '-' }}</td>
-                <td>{{ run.files_transferred or '-' }}</td>
-                <td>{{ run.bytes_formatted or '-' }}</td>
+                <td>
+                    {% if run.run_type == 'hypervisor' %}
+                    {{ run.exit_status or '-' }}
+                    {% else %}
+                    {{ run.files_transferred or '-' }} files / {{ run.bytes_formatted or '-' }}
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -217,7 +237,8 @@ function getStatusBadge(status) {
     const classes = {
         'success': 'badge-success',
         'failed': 'badge-error',
-        'running': 'badge-info'
+        'running': 'badge-info',
+        'skipped': 'badge-muted'
     };
     return `<span class="badge ${classes[status] || 'badge-muted'}">${status}</span>`;
 }
@@ -311,12 +332,88 @@ document.getElementById('logsModal').addEventListener('click', (e) => {
     }
 });
 
+async function showHypervisorLogs(runId, hypervisorId) {
+    const modal = document.getElementById('logsModal');
+    const loading = document.getElementById('logsLoading');
+    const content = document.getElementById('logsContent');
+
+    modal.classList.add('active');
+    loading.style.display = 'block';
+    content.style.display = 'none';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisor-runs/${encodeURIComponent(runId)}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch run details');
+        }
+
+        const data = await response.json();
+
+        // Update modal content for hypervisor run
+        document.getElementById('logsModalTitle').textContent = `VM Backup: ${data.guest_name || 'VM ' + data.guest_id}`;
+        document.getElementById('logsRunId').textContent = data.run_id;
+        document.getElementById('logsStatus').innerHTML = getStatusBadge(data.status);
+        document.getElementById('logsAgent').textContent = data.guest_name || 'VM ' + data.guest_id;
+        document.getElementById('logsStarted').textContent = formatDate(data.started_at);
+        document.getElementById('logsFinished').textContent = formatDate(data.finished_at);
+        document.getElementById('logsFiles').textContent = '-';
+        document.getElementById('logsSize').textContent = '-';
+
+        // UPID as snapshot
+        if (data.upid) {
+            document.getElementById('logsSnapshotRow').style.display = 'flex';
+            document.getElementById('logsSnapshot').textContent = data.upid;
+        } else {
+            document.getElementById('logsSnapshotRow').style.display = 'none';
+        }
+
+        // Errors
+        const errorsSection = document.getElementById('logsErrorsSection');
+        const errorsEl = document.getElementById('logsErrors');
+        if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
+            errorsSection.style.display = 'block';
+            const errorText = data.errors.map(e => stripAnsi(typeof e === 'string' ? e : JSON.stringify(e))).join('\n');
+            errorsEl.textContent = errorText;
+        } else {
+            errorsSection.style.display = 'none';
+        }
+
+        // Output - show exit status and duration
+        const outputEl = document.getElementById('logsOutput');
+        let output = `Job: ${data.job_name}\n`;
+        output += `Guest: ${data.guest_name || 'VM ' + data.guest_id} (VMID ${data.guest_id})\n`;
+        output += `Status: ${data.status}\n`;
+        output += `Exit Status: ${data.exit_status || '-'}\n`;
+        if (data.duration_seconds) {
+            output += `Duration: ${Math.floor(data.duration_seconds / 60)}m ${Math.floor(data.duration_seconds % 60)}s\n`;
+        }
+        if (data.upid) {
+            output += `\nProxmox Task ID: ${data.upid}\n`;
+        }
+        outputEl.textContent = output;
+        outputEl.classList.remove('logs-empty');
+
+        loading.style.display = 'none';
+        content.style.display = 'block';
+
+    } catch (error) {
+        loading.innerHTML = `<span style="color: var(--error);">Error loading details: ${error.message}</span>`;
+    }
+}
+
 // Add click handlers to all run rows
 document.querySelectorAll('.run-row').forEach(row => {
     const runId = row.dataset.runId;
+    const runType = row.dataset.runType;
+    const hypervisorId = row.dataset.hypervisorId;
+
     if (runId && runId !== 'None' && runId !== 'undefined') {
         row.addEventListener('click', () => {
-            showJobLogs(runId);
+            if (runType === 'hypervisor') {
+                showHypervisorLogs(runId, hypervisorId);
+            } else {
+                showJobLogs(runId);
+            }
         });
     } else {
         // No run_id, make row not clickable
