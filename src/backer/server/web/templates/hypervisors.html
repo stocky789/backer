@@ -130,6 +130,9 @@
                                 {% if not job.enabled %}disabled{% endif %}>
                             Run
                         </button>
+                        <button class="btn btn-secondary btn-sm" onclick="viewJobBackups('{{ job.hypervisor_id }}')">
+                            Backups
+                        </button>
                         <button class="btn btn-secondary btn-sm" onclick="toggleHypervisorJob('{{ job.id }}')">
                             {{ 'Enable' if not job.enabled else 'Disable' }}
                         </button>
@@ -1253,6 +1256,31 @@ async function runHypervisorJob(jobId) {
     } catch (e) {
         alert('Error: ' + e.message);
     }
+}
+
+function viewJobBackups(hvId) {
+    // Open the view hypervisor modal directly to the backups tab
+    currentHypervisorId = hvId;
+    document.getElementById('viewHypervisorModal').style.display = 'flex';
+
+    // Reset and activate backups tab
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => {
+        t.style.display = 'none';
+        t.classList.remove('active');
+    });
+
+    // Activate the backups tab (3rd tab)
+    const tabs = document.querySelectorAll('.tab');
+    if (tabs[2]) tabs[2].classList.add('active');
+
+    const backupsTab = document.getElementById('viewBackupsTab');
+    backupsTab.style.display = 'block';
+    backupsTab.classList.add('active');
+
+    // Load data
+    loadHypervisorName(hvId);
+    loadBackups(hvId);
 }
 
 async function toggleHypervisorJob(jobId) {
