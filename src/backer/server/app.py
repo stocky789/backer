@@ -2420,6 +2420,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             }
 
         except Exception as e:
+            logger.exception("Failed to test hypervisor connection")
             return {"success": False, "message": str(e)}
 
     @app.get("/api/v1/hypervisors/{hypervisor_id}")
@@ -2585,6 +2586,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 for g in guests
             ]
         except Exception as e:
+            logger.exception(f"Failed to list guests for hypervisor {hypervisor_id}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/v1/hypervisors/{hypervisor_id}/nodes")
@@ -2630,6 +2632,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 for n in nodes
             ]
         except Exception as e:
+            logger.exception(f"Failed to list nodes for hypervisor {hypervisor_id}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/v1/hypervisors/{hypervisor_id}/storages")
@@ -2680,6 +2683,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 for s in storages
             ]
         except Exception as e:
+            logger.exception(f"Failed to list storages for hypervisor {hypervisor_id}")
             raise HTTPException(status_code=500, detail=str(e))
 
     # ============ Hypervisor Jobs ============

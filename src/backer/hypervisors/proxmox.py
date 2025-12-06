@@ -310,12 +310,17 @@ class ProxmoxAPI:
                 message = error_body or str(e)
                 error_list = []
 
+            logger.error(
+                f"Proxmox API error: {method} {endpoint} returned {e.code}: {message}"
+            )
             raise ProxmoxAPIError(message, status_code=e.code, errors=error_list)
 
         except urllib.error.URLError as e:
+            logger.error(f"Proxmox connection failed for {endpoint}: {e.reason}")
             raise ProxmoxAPIError(f"Connection failed: {e.reason}")
 
         except Exception as e:
+            logger.exception(f"Unexpected error in Proxmox API request: {method} {endpoint}")
             raise ProxmoxAPIError(f"Request failed: {e}")
 
     def authenticate(self) -> bool:
