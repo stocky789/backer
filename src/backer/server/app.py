@@ -3191,6 +3191,173 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "message": f"Restore started for VMID {vmid}",
         }
 
+    # ============ Logs API ============
+
+    @app.get("/api/v1/logs")
+    def list_log_files(
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List available log files."""
+        log_dir = data_dir / "logs"
+        if not log_dir.exists():
+            return []
+
+        log_files = []
+        for log_file in sorted(log_dir.glob("*.log"), reverse=True):
+            stat = log_file.stat()
+            log_files.append({
+                "name": log_file.name,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            })
+
+        return log_files
+
+    @app.get("/api/v1/logs/{filename}")
+    def get_log_content(
+        filename: str,
+        lines: int = 500,
+        offset: int = 0,
+        level: str | None = None,
+        search: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Get content of a log file.
+
+        Args:
+            filename: Log file name
+            lines: Number of lines to return (default 500)
+            offset: Number of lines to skip from end (for pagination)
+            level: Filter by log level (DEBUG, INFO, WARNING, ERROR)
+            search: Search string to filter logs
+        """
+        import re
+
+        # Validate filename to prevent path traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        log_dir = data_dir / "logs"
+        log_file = log_dir / filename
+
+        if not log_file.exists() or not log_file.is_file():
+            raise HTTPException(status_code=404, detail="Log file not found")
+
+        # Read the file
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read log file: {e}")
+
+        total_lines = len(all_lines)
+
+        # Filter by log level if specified
+        if level:
+            level_upper = level.upper()
+            all_lines = [line for line in all_lines if f" - {level_upper} - " in line]
+
+        # Filter by search term if specified
+        if search:
+            search_lower = search.lower()
+            all_lines = [line for line in all_lines if search_lower in line.lower()]
+
+        filtered_total = len(all_lines)
+
+        # Get the requested range (from end, newest first)
+        if offset > 0:
+            end_idx = len(all_lines) - offset
+            start_idx = max(0, end_idx - lines)
+            selected_lines = all_lines[start_idx:end_idx]
+        else:
+            # Get last N lines
+            selected_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+
+        # Reverse to show newest first
+        selected_lines = list(reversed(selected_lines))
+
+        # Parse log lines for structured output
+        log_entries = []
+        log_pattern = re.compile(
+            r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+) - (\w+) - (.*)$'
+        )
+
+        for line in selected_lines:
+            line = line.rstrip('\n\r')
+            match = log_pattern.match(line)
+            if match:
+                log_entries.append({
+                    "timestamp": match.group(1),
+                    "logger": match.group(2).strip(),
+                    "level": match.group(3),
+                    "message": match.group(4),
+                    "raw": line,
+                })
+            else:
+                # Non-matching line (continuation or different format)
+                log_entries.append({
+                    "timestamp": "",
+                    "logger": "",
+                    "level": "",
+                    "message": line,
+                    "raw": line,
+                })
+
+        return {
+            "filename": filename,
+            "total_lines": total_lines,
+            "filtered_lines": filtered_total,
+            "returned_lines": len(log_entries),
+            "offset": offset,
+            "entries": log_entries,
+        }
+
+    @app.get("/api/v1/logs/stream/{filename}")
+    async def stream_log(
+        filename: str,
+        storage: Storage = Depends(get_storage),
+    ):
+        """Stream log file updates using Server-Sent Events."""
+        from fastapi.responses import StreamingResponse
+        import asyncio
+
+        # Validate filename to prevent path traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        log_dir = data_dir / "logs"
+        log_file = log_dir / filename
+
+        if not log_file.exists() or not log_file.is_file():
+            raise HTTPException(status_code=404, detail="Log file not found")
+
+        async def generate():
+            """Generate SSE events for new log lines."""
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                    # Seek to end of file
+                    f.seek(0, 2)
+
+                    while True:
+                        line = f.readline()
+                        if line:
+                            # Send as SSE event
+                            yield f"data: {json.dumps({'line': line.rstrip()})}\n\n"
+                        else:
+                            # No new data, wait a bit
+                            await asyncio.sleep(0.5)
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
+        )
+
     # ============ Web UI ============
 
     # Store storage in app state for web routes

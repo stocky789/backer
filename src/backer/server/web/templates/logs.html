@@ -1,0 +1,371 @@
+{% extends "base.html" %}
+{% block title %}Server Logs - Backer{% endblock %}
+{% block page_title %}Server Logs{% endblock %}
+
+{% block actions %}
+<button class="btn btn-secondary" onclick="copyLogs()" title="Copy visible logs to clipboard">
+    Copy Logs
+</button>
+<button class="btn btn-primary" onclick="refreshLogs()" id="refreshBtn">
+    Refresh
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="logs-container">
+    <!-- Controls -->
+    <div class="card logs-controls">
+        <div class="logs-toolbar">
+            <div class="logs-toolbar-left">
+                <div class="form-group" style="margin: 0; min-width: 200px;">
+                    <select id="logFile" class="form-input" onchange="loadLogs()">
+                        <option value="">Loading log files...</option>
+                    </select>
+                </div>
+
+                <div class="form-group" style="margin: 0; min-width: 120px;">
+                    <select id="logLevel" class="form-input" onchange="loadLogs()">
+                        <option value="">All Levels</option>
+                        <option value="DEBUG">DEBUG</option>
+                        <option value="INFO">INFO</option>
+                        <option value="WARNING">WARNING</option>
+                        <option value="ERROR">ERROR</option>
+                    </select>
+                </div>
+
+                <div class="form-group" style="margin: 0; flex: 1; min-width: 200px;">
+                    <input type="text" id="logSearch" class="form-input" placeholder="Search logs..."
+                           onkeyup="debounceSearch()">
+                </div>
+            </div>
+
+            <div class="logs-toolbar-right">
+                <label class="logs-checkbox">
+                    <input type="checkbox" id="autoScroll" checked>
+                    Auto-scroll
+                </label>
+                <label class="logs-checkbox">
+                    <input type="checkbox" id="liveMode" onchange="toggleLiveMode()">
+                    Live tail
+                </label>
+                <div class="logs-line-count">
+                    <span id="lineCount">0</span> lines
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Output -->
+    <div class="card logs-output-card">
+        <div id="logsOutput" class="logs-output">
+            <div class="logs-loading">Loading logs...</div>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="logs-pagination" id="logsPagination" style="display: none;">
+        <button class="btn btn-secondary" id="loadMoreBtn" onclick="loadMoreLogs()">
+            Load More (older logs)
+        </button>
+        <span id="paginationInfo" class="pagination-info"></span>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentOffset = 0;
+let currentFile = '';
+let searchTimeout = null;
+let eventSource = null;
+let allEntries = [];
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadLogFiles();
+});
+
+async function loadLogFiles() {
+    try {
+        const response = await fetch('/api/v1/logs');
+        const files = await response.json();
+
+        const select = document.getElementById('logFile');
+        select.innerHTML = '';
+
+        if (files.length === 0) {
+            select.innerHTML = '<option value="">No log files found</option>';
+            document.getElementById('logsOutput').innerHTML = '<div class="logs-empty">No log files available. Start the server to generate logs.</div>';
+            return;
+        }
+
+        for (const file of files) {
+            const sizeKB = (file.size / 1024).toFixed(1);
+            const option = document.createElement('option');
+            option.value = file.name;
+            option.textContent = `${file.name} (${sizeKB} KB)`;
+            select.appendChild(option);
+        }
+
+        // Load first (most recent) log file
+        currentFile = files[0].name;
+        await loadLogs();
+    } catch (e) {
+        document.getElementById('logsOutput').innerHTML = `<div class="logs-error">Failed to load log files: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function loadLogs(append = false) {
+    const filename = document.getElementById('logFile').value;
+    if (!filename) return;
+
+    currentFile = filename;
+
+    if (!append) {
+        currentOffset = 0;
+        allEntries = [];
+        document.getElementById('logsOutput').innerHTML = '<div class="logs-loading">Loading logs...</div>';
+    }
+
+    const level = document.getElementById('logLevel').value;
+    const search = document.getElementById('logSearch').value;
+
+    let url = `/api/v1/logs/${encodeURIComponent(filename)}?lines=500&offset=${currentOffset}`;
+    if (level) url += `&level=${encodeURIComponent(level)}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || 'Failed to load logs');
+        }
+
+        if (append) {
+            // Append older entries at the end
+            allEntries = [...allEntries, ...data.entries];
+        } else {
+            allEntries = data.entries;
+        }
+
+        renderLogs(allEntries);
+        updatePagination(data);
+
+    } catch (e) {
+        if (!append) {
+            document.getElementById('logsOutput').innerHTML = `<div class="logs-error">Failed to load logs: ${escapeHtml(e.message)}</div>`;
+        }
+    }
+}
+
+function renderLogs(entries) {
+    const output = document.getElementById('logsOutput');
+
+    if (entries.length === 0) {
+        output.innerHTML = '<div class="logs-empty">No log entries found matching your filters.</div>';
+        document.getElementById('lineCount').textContent = '0';
+        return;
+    }
+
+    let html = '<div class="logs-entries">';
+    for (const entry of entries) {
+        const levelClass = getLevelClass(entry.level);
+        const timestamp = entry.timestamp ? `<span class="log-timestamp">${escapeHtml(entry.timestamp)}</span>` : '';
+        const level = entry.level ? `<span class="log-level ${levelClass}">${escapeHtml(entry.level)}</span>` : '';
+        const logger = entry.logger ? `<span class="log-logger">${escapeHtml(entry.logger)}</span>` : '';
+
+        html += `
+            <div class="log-entry ${levelClass}">
+                ${timestamp}
+                ${level}
+                ${logger}
+                <span class="log-message">${escapeHtml(entry.message)}</span>
+            </div>
+        `;
+    }
+    html += '</div>';
+
+    output.innerHTML = html;
+    document.getElementById('lineCount').textContent = entries.length.toString();
+
+    // Auto-scroll to top (newest) if enabled
+    if (document.getElementById('autoScroll').checked) {
+        output.scrollTop = 0;
+    }
+}
+
+function getLevelClass(level) {
+    switch (level) {
+        case 'DEBUG': return 'level-debug';
+        case 'INFO': return 'level-info';
+        case 'WARNING': return 'level-warning';
+        case 'ERROR': return 'level-error';
+        case 'CRITICAL': return 'level-error';
+        default: return '';
+    }
+}
+
+function updatePagination(data) {
+    const pagination = document.getElementById('logsPagination');
+    const info = document.getElementById('paginationInfo');
+
+    if (data.filtered_lines > allEntries.length) {
+        pagination.style.display = 'flex';
+        info.textContent = `Showing ${allEntries.length} of ${data.filtered_lines} lines`;
+    } else {
+        pagination.style.display = 'none';
+    }
+}
+
+async function loadMoreLogs() {
+    currentOffset += allEntries.length;
+    await loadLogs(true);
+}
+
+function refreshLogs() {
+    loadLogs(false);
+}
+
+function debounceSearch() {
+    if (searchTimeout) clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => loadLogs(false), 300);
+}
+
+function toggleLiveMode() {
+    const liveMode = document.getElementById('liveMode').checked;
+
+    if (liveMode) {
+        startLiveMode();
+    } else {
+        stopLiveMode();
+    }
+}
+
+function startLiveMode() {
+    if (eventSource) {
+        eventSource.close();
+    }
+
+    const filename = document.getElementById('logFile').value;
+    if (!filename) return;
+
+    // First load existing logs
+    loadLogs(false).then(() => {
+        // Then start streaming
+        eventSource = new EventSource(`/api/v1/logs/stream/${encodeURIComponent(filename)}`);
+
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.line) {
+                    appendLogLine(data.line);
+                } else if (data.error) {
+                    console.error('Stream error:', data.error);
+                }
+            } catch (e) {
+                console.error('Failed to parse SSE data:', e);
+            }
+        };
+
+        eventSource.onerror = (e) => {
+            console.error('EventSource error:', e);
+            // Reconnect after a delay
+            setTimeout(() => {
+                if (document.getElementById('liveMode').checked) {
+                    startLiveMode();
+                }
+            }, 3000);
+        };
+    });
+
+    document.getElementById('refreshBtn').disabled = true;
+    document.getElementById('logFile').disabled = true;
+    document.getElementById('logLevel').disabled = true;
+    document.getElementById('logSearch').disabled = true;
+}
+
+function stopLiveMode() {
+    if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+    }
+
+    document.getElementById('refreshBtn').disabled = false;
+    document.getElementById('logFile').disabled = false;
+    document.getElementById('logLevel').disabled = false;
+    document.getElementById('logSearch').disabled = false;
+}
+
+function appendLogLine(line) {
+    // Parse the line
+    const logPattern = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+) - (\w+) - (.*)$/;
+    const match = line.match(logPattern);
+
+    let entry;
+    if (match) {
+        entry = {
+            timestamp: match[1],
+            logger: match[2].trim(),
+            level: match[3],
+            message: match[4],
+        };
+    } else {
+        entry = {
+            timestamp: '',
+            logger: '',
+            level: '',
+            message: line,
+        };
+    }
+
+    // Check if it matches current filters
+    const levelFilter = document.getElementById('logLevel').value;
+    const searchFilter = document.getElementById('logSearch').value.toLowerCase();
+
+    if (levelFilter && entry.level !== levelFilter) return;
+    if (searchFilter && !line.toLowerCase().includes(searchFilter)) return;
+
+    // Add to beginning of entries (newest first)
+    allEntries.unshift(entry);
+
+    // Re-render
+    renderLogs(allEntries);
+
+    // Flash effect for new entry
+    const firstEntry = document.querySelector('.log-entry');
+    if (firstEntry) {
+        firstEntry.classList.add('log-entry-new');
+        setTimeout(() => firstEntry.classList.remove('log-entry-new'), 1000);
+    }
+}
+
+function copyLogs() {
+    const text = allEntries.map(e => e.raw || e.message).join('\n');
+
+    navigator.clipboard.writeText(text).then(() => {
+        // Show brief confirmation
+        const btn = document.querySelector('[onclick="copyLogs()"]');
+        const originalText = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = originalText, 2000);
+    }).catch(e => {
+        alert('Failed to copy: ' + e.message);
+    });
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    if (eventSource) {
+        eventSource.close();
+    }
+});
+</script>
+{% endblock %}

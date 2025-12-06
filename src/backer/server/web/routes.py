@@ -457,6 +457,16 @@ async def storage_page(request: Request):
     })
 
 
+@router.get("/logs", response_class=HTMLResponse)
+async def logs_page(request: Request):
+    """Server logs page."""
+    return templates.TemplateResponse("logs.html", {
+        "request": request,
+        "active": "logs",
+        "user": get_current_user(request),
+    })
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """Settings page."""

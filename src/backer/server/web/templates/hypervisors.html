@@ -835,7 +835,11 @@ async function loadGuests(hvId) {
         const response = await fetch(`/api/v1/hypervisors/${hvId}/guests`);
         const guests = await response.json();
 
-        if (guests.length === 0) {
+        if (!response.ok) {
+            throw new Error(guests.detail || 'Failed to load guests');
+        }
+
+        if (!Array.isArray(guests) || guests.length === 0) {
             container.innerHTML = '<div class="loading">No VMs or containers found</div>';
             return;
         }
@@ -890,7 +894,11 @@ async function loadStorages(hvId) {
         const response = await fetch(`/api/v1/hypervisors/${hvId}/storages`);
         const storages = await response.json();
 
-        if (storages.length === 0) {
+        if (!response.ok) {
+            throw new Error(storages.detail || 'Failed to load storage');
+        }
+
+        if (!Array.isArray(storages) || storages.length === 0) {
             container.innerHTML = '<div class="loading">No backup-capable storage found</div>';
             return;
         }
@@ -945,7 +953,11 @@ async function loadBackups(hvId) {
         const response = await fetch(`/api/v1/hypervisors/${hvId}/backups`);
         const backups = await response.json();
 
-        if (backups.length === 0) {
+        if (!response.ok) {
+            throw new Error(backups.detail || 'Failed to load backups');
+        }
+
+        if (!Array.isArray(backups) || backups.length === 0) {
             container.innerHTML = '<div class="loading">No backups found</div>';
             return;
         }
@@ -1067,7 +1079,11 @@ async function onJobHypervisorChange() {
         const response = await fetch(`/api/v1/hypervisors/${hvId}/guests`);
         const guests = await response.json();
 
-        if (guests.length === 0) {
+        if (!response.ok) {
+            throw new Error(guests.detail || 'Failed to load guests');
+        }
+
+        if (!Array.isArray(guests) || guests.length === 0) {
             guestsContainer.innerHTML = '<div class="loading">No VMs or containers found</div>';
         } else {
             let html = '';
@@ -1096,9 +1112,15 @@ async function onJobHypervisorChange() {
         const response = await fetch(`/api/v1/hypervisors/${hvId}/storages`);
         const storages = await response.json();
 
+        if (!response.ok) {
+            throw new Error(storages.detail || 'Failed to load storages');
+        }
+
         storageSelect.innerHTML = '<option value="">Select storage...</option>';
-        for (const storage of storages) {
-            storageSelect.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)} (${escapeHtml(storage.type)})</option>`;
+        if (Array.isArray(storages)) {
+            for (const storage of storages) {
+                storageSelect.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)} (${escapeHtml(storage.type)})</option>`;
+            }
         }
     } catch (e) {
         storageSelect.innerHTML = '<option value="">Failed to load storage</option>';
@@ -1289,8 +1311,10 @@ async function loadRestoreStorages(hvId) {
         const response = await fetch(`/api/v1/hypervisors/${hvId}/storages?type=images`);
         const storages = await response.json();
 
-        for (const storage of storages) {
-            select.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)}</option>`;
+        if (response.ok && Array.isArray(storages)) {
+            for (const storage of storages) {
+                select.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)}</option>`;
+            }
         }
     } catch (e) {
         // Ignore errors

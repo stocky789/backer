@@ -1261,3 +1261,222 @@ pre {
         display: none;
     }
 }
+
+/* ========== Log Viewer Styles ========== */
+
+.logs-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    height: calc(100vh - 180px);
+}
+
+.logs-controls {
+    flex-shrink: 0;
+}
+
+.logs-toolbar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+}
+
+.logs-toolbar-left {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.logs-toolbar-right {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+}
+
+.logs-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.logs-checkbox input {
+    cursor: pointer;
+}
+
+.logs-line-count {
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 4px 10px;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.logs-output-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.logs-output {
+    flex: 1;
+    overflow-y: auto;
+    background: #0d1117;
+    border-radius: 8px;
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 12px;
+}
+
+.logs-entries {
+    display: flex;
+    flex-direction: column;
+}
+
+.log-entry {
+    padding: 4px 8px;
+    border-radius: 4px;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    word-break: break-word;
+}
+
+.log-entry:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.log-entry-new {
+    animation: log-highlight 1s ease-out;
+}
+
+@keyframes log-highlight {
+    0% { background: rgba(88, 166, 255, 0.3); }
+    100% { background: transparent; }
+}
+
+.log-timestamp {
+    color: #7d8590;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.log-level {
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    min-width: 55px;
+    text-align: center;
+}
+
+.log-logger {
+    color: #7ee787;
+    flex-shrink: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.log-message {
+    color: #e6edf3;
+    flex: 1;
+    white-space: pre-wrap;
+}
+
+/* Log level colors */
+.level-debug .log-level {
+    background: rgba(139, 148, 158, 0.2);
+    color: #8b949e;
+}
+
+.level-info .log-level {
+    background: rgba(88, 166, 255, 0.2);
+    color: #58a6ff;
+}
+
+.level-warning .log-level {
+    background: rgba(210, 153, 34, 0.2);
+    color: #d29922;
+}
+
+.level-error .log-level,
+.level-critical .log-level {
+    background: rgba(248, 81, 73, 0.2);
+    color: #f85149;
+}
+
+.level-error .log-message,
+.level-critical .log-message {
+    color: #f85149;
+}
+
+.logs-loading,
+.logs-empty,
+.logs-error {
+    padding: 40px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.logs-error {
+    color: var(--danger);
+}
+
+.logs-pagination {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.pagination-info {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* Responsive adjustments for logs */
+@media (max-width: 768px) {
+    .logs-container {
+        height: calc(100vh - 200px);
+    }
+
+    .logs-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .logs-toolbar-left,
+    .logs-toolbar-right {
+        width: 100%;
+    }
+
+    .logs-toolbar-right {
+        justify-content: space-between;
+    }
+
+    .log-entry {
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .log-timestamp,
+    .log-logger {
+        font-size: 11px;
+    }
+}
