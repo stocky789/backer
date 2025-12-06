@@ -3281,6 +3281,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "format": b.format,
                     "notes": b.notes,
                     "protected": b.protected,
+                    "guest_type": b.guest_type,  # qemu or lxc
                 }
                 for b in all_backups[:50]  # Limit to 50 most recent
             ]
@@ -3307,17 +3308,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         body = await request.json()
 
-        vmid = body.get("vmid")
         archive = body.get("archive")
         node = body.get("node")
         guest_type = body.get("guest_type", "qemu")
-        target_vmid = body.get("target_vmid")
+        target_vmid = body.get("vmid")  # Optional: restore to different VMID
         target_storage = body.get("storage")
         force = body.get("force", False)
         start_after = body.get("start", False)
 
-        if not vmid or not archive or not node:
-            raise HTTPException(status_code=400, detail="vmid, archive, and node are required")
+        if not archive or not node:
+            raise HTTPException(status_code=400, detail="archive and node are required")
+
+        # Parse original VMID from backup filename (e.g., vzdump-qemu-100-2024...)
+        import re
+        vmid_match = re.search(r"vzdump-(?:qemu|lxc)-(\d+)-", archive)
+        if not vmid_match:
+            raise HTTPException(status_code=400, detail="Could not parse VMID from backup filename")
+        original_vmid = int(vmid_match.group(1))
+
+        # Use target_vmid if provided, otherwise restore to original VMID
+        vmid = target_vmid or original_vmid
 
         token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
         password = storage.get_hypervisor_password(hypervisor_id)
@@ -3342,15 +3352,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Submit restore as background task
         def run_restore_task(task: Task) -> dict[str, Any]:
             manager = ProxmoxBackupManager(api)
-            task.message = f"Restoring VMID {vmid} from backup..."
+            task.message = f"Restoring to VMID {vmid} from backup..."
 
             try:
                 result = manager.restore_guest(
-                    vmid=vmid,
+                    vmid=original_vmid,  # Original VMID from backup
                     archive=archive,
                     node=node,
                     guest_type=ProxmoxGuestType.QEMU if guest_type == "qemu" else ProxmoxGuestType.LXC,
-                    target_vmid=target_vmid,
+                    target_vmid=vmid,  # Target VMID (may be same or different)
                     storage=target_storage,
                     force=force,
                     start_after=start_after,

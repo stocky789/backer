@@ -381,16 +381,18 @@
                 <input type="hidden" id="restoreHypervisorId">
                 <input type="hidden" id="restoreArchive">
                 <input type="hidden" id="restoreNode">
+                <input type="hidden" id="restoreGuestType">
 
                 <div class="form-group">
                     <label class="form-label">Backup</label>
                     <input type="text" id="restoreBackupName" class="form-input" readonly>
+                    <div id="restoreGuestTypeLabel" class="form-hint"></div>
                 </div>
 
                 <div class="form-group">
                     <label class="form-label">Restore as VMID</label>
-                    <input type="number" id="restoreVmid" class="form-input" placeholder="Leave empty for new ID">
-                    <div class="form-hint">Specify VMID or leave empty to auto-assign</div>
+                    <input type="number" id="restoreVmid" class="form-input" placeholder="Leave empty for original VMID">
+                    <div class="form-hint">Specify VMID or leave empty to use the original VMID from backup</div>
                 </div>
 
                 <div class="form-group">
@@ -399,6 +401,13 @@
                         <option value="">Default (same as backup)</option>
                     </select>
                     <div class="form-hint">Storage for the restored VM disks</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="restoreForce"> Overwrite if VMID exists
+                    </label>
+                    <div class="form-hint">Warning: This will delete the existing VM/container with the same ID</div>
                 </div>
 
                 <div class="form-group">
@@ -966,17 +975,19 @@ async function loadBackups(hvId) {
         for (const backup of backups) {
             const sizeGB = (backup.size / 1024 / 1024 / 1024).toFixed(2);
             const date = backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : '-';
+            const guestType = backup.guest_type || 'qemu';
+            const typeLabel = guestType === 'lxc' ? 'CT' : 'VM';
 
             html += `
                 <div class="backup-item">
                     <div class="backup-info">
                         <div class="backup-name">${escapeHtml(backup.volid)}</div>
                         <div class="backup-meta">
-                            VMID: ${backup.vmid} | Size: ${sizeGB} GB | Date: ${date} | Node: ${escapeHtml(backup.node)}
+                            ${typeLabel} ${backup.vmid} | Size: ${sizeGB} GB | Date: ${date} | Node: ${escapeHtml(backup.node)}
                         </div>
                     </div>
                     <div class="backup-actions">
-                        <button class="btn btn-primary btn-sm" onclick="showRestoreDialog('${hvId}', '${escapeHtml(backup.volid)}', '${escapeHtml(backup.node)}')">
+                        <button class="btn btn-primary btn-sm" onclick="showRestoreDialog('${hvId}', '${escapeHtml(backup.volid)}', '${escapeHtml(backup.node)}', '${guestType}')">
                             Restore
                         </button>
                     </div>
@@ -1296,12 +1307,15 @@ document.getElementById('jobModal')?.addEventListener('click', function(e) {
 
 // ========== Restore ==========
 
-function showRestoreDialog(hvId, volid, node) {
+function showRestoreDialog(hvId, volid, node, guestType = 'qemu') {
     document.getElementById('restoreHypervisorId').value = hvId;
     document.getElementById('restoreArchive').value = volid;
     document.getElementById('restoreNode').value = node;
+    document.getElementById('restoreGuestType').value = guestType;
     document.getElementById('restoreBackupName').value = volid;
+    document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
     document.getElementById('restoreVmid').value = '';
+    document.getElementById('restoreForce').checked = false;
     document.getElementById('restoreStart').checked = false;
     document.getElementById('restoreError').style.display = 'none';
 
@@ -1320,16 +1334,20 @@ async function loadRestoreStorages(hvId) {
     select.innerHTML = '<option value="">Default (same as backup)</option>';
 
     try {
-        const response = await fetch(`/api/v1/hypervisors/${hvId}/storages?type=images`);
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/storages`);
         const storages = await response.json();
 
         if (response.ok && Array.isArray(storages)) {
-            for (const storage of storages) {
-                select.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)}</option>`;
+            // Filter to storages that can hold VM disk images
+            const diskStorages = storages.filter(s =>
+                s.content && (s.content.includes('images') || s.content.includes('rootdir'))
+            );
+            for (const storage of diskStorages) {
+                select.innerHTML += `<option value="${escapeHtml(storage.storage)}">${escapeHtml(storage.storage)} (${storage.type})</option>`;
             }
         }
     } catch (e) {
-        // Ignore errors
+        // Ignore errors - storage selection is optional
     }
 }
 
@@ -1342,8 +1360,10 @@ async function submitRestore(event) {
     const data = {
         node: document.getElementById('restoreNode').value,
         archive: document.getElementById('restoreArchive').value,
+        guest_type: document.getElementById('restoreGuestType').value || 'qemu',
         vmid: document.getElementById('restoreVmid').value ? parseInt(document.getElementById('restoreVmid').value) : null,
         storage: document.getElementById('restoreStorage').value || null,
+        force: document.getElementById('restoreForce').checked,
         start: document.getElementById('restoreStart').checked,
     };
 

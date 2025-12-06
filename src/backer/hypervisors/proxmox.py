@@ -91,6 +91,18 @@ class ProxmoxBackup:
         """Size in GB."""
         return self.size / (1024**3)
 
+    @property
+    def guest_type(self) -> str:
+        """Detect guest type (qemu/lxc) from backup volid.
+
+        Backup naming convention: vzdump-{qemu|lxc}-{vmid}-{timestamp}
+        Example: local:backup/vzdump-qemu-100-2024_01_15-12_00_00.vma.zst
+        """
+        # Extract filename from volid (format: "storage:path/filename")
+        if "vzdump-lxc-" in self.volid:
+            return "lxc"
+        return "qemu"  # Default to qemu
+
 
 @dataclass
 class ProxmoxStorage:
@@ -313,9 +325,15 @@ class ProxmoxAPI:
                 message = error_body or str(e)
                 error_list = []
 
-            logger.error(
-                f"Proxmox API error: {method} {endpoint} returned {e.code}: {message}"
-            )
+            # Log at appropriate level - "does not exist" is often expected (e.g., checking if storage exists)
+            if e.code in (404, 500) and "does not exist" in message:
+                logger.debug(
+                    f"Proxmox API: {method} {endpoint} returned {e.code}: {message}"
+                )
+            else:
+                logger.error(
+                    f"Proxmox API error: {method} {endpoint} returned {e.code}: {message}"
+                )
             raise ProxmoxAPIError(message, status_code=e.code, errors=error_list)
 
         except urllib.error.URLError as e:
