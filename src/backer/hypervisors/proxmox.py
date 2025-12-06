@@ -627,6 +627,32 @@ class ProxmoxAPI:
                 return None
             raise
 
+    def get_storage_status(self, storage_id: str, node: str | None = None) -> dict[str, Any] | None:
+        """Get storage status including mount state.
+
+        Args:
+            storage_id: Storage identifier
+            node: Node to check status on (default: first available node)
+
+        Returns:
+            Storage status dict with 'active' field, or None if not found
+        """
+        try:
+            # Get the node to query
+            if not node:
+                nodes = self.list_nodes()
+                if not nodes:
+                    return None
+                node = nodes[0]["node"]
+
+            # Query storage status on the node
+            data = self._make_request("GET", f"/nodes/{node}/storage/{storage_id}/status")
+            return data
+        except ProxmoxAPIError as e:
+            if e.status_code in (404, 500):
+                return None
+            raise
+
     def create_nfs_storage(
         self,
         storage_id: str,
@@ -893,6 +919,26 @@ class ProxmoxAPI:
             )
 
         logger.info(f"Created Proxmox storage '{storage_id}' for repository '{repo_name}'")
+
+        # Wait for storage to be mounted and active
+        # Proxmox mounts storage asynchronously, so we need to poll until ready
+        max_wait = 30  # seconds
+        poll_interval = 2  # seconds
+        waited = 0
+
+        while waited < max_wait:
+            status = self.get_storage_status(storage_id)
+            if status and status.get("active"):
+                logger.info(f"Storage '{storage_id}' is active and ready")
+                break
+            logger.debug(f"Waiting for storage '{storage_id}' to become active...")
+            time.sleep(poll_interval)
+            waited += poll_interval
+        else:
+            logger.warning(
+                f"Storage '{storage_id}' not active after {max_wait}s. "
+                "Backup may fail if mount is not ready."
+            )
         return storage_id
 
     # =========================================================================

@@ -77,6 +77,11 @@ $PKG_MANAGER install -y -qq \
     smbclient \
     > /dev/null 2>&1
 
+# SSH utilities for incremental backups (QMP over SSH)
+$PKG_MANAGER install -y -qq \
+    sshpass \
+    > /dev/null 2>&1
+
 # NFS support
 $PKG_MANAGER install -y -qq \
     nfs-common \
