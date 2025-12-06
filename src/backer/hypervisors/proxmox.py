@@ -470,6 +470,53 @@ class ProxmoxAPI:
     # Guest (VM/Container) Operations
     # =========================================================================
 
+    def list_guests_cluster(self) -> list[ProxmoxGuest]:
+        """List all VMs and containers using the cluster resources endpoint.
+
+        This is more efficient for clusters as it uses a single API call
+        instead of querying each node separately. Use this method when
+        you need to list guests across an entire cluster.
+
+        Returns:
+            List of ProxmoxGuest objects
+        """
+        try:
+            # Use cluster/resources endpoint for efficiency
+            data = self._make_request("GET", "/cluster/resources", params={"type": "vm"}) or []
+
+            guests = []
+            for item in data:
+                # Determine guest type from resource type
+                resource_type = item.get("type", "")
+                if resource_type == "qemu":
+                    guest_type = ProxmoxGuestType.QEMU
+                elif resource_type == "lxc":
+                    guest_type = ProxmoxGuestType.LXC
+                else:
+                    continue  # Skip non-VM/CT resources
+
+                guests.append(ProxmoxGuest(
+                    vmid=item.get("vmid", 0),
+                    name=item.get("name", f"{resource_type.upper()} {item.get('vmid')}"),
+                    node=item.get("node", ""),
+                    guest_type=guest_type,
+                    status=item.get("status", "unknown"),
+                    cpus=item.get("maxcpu", 0),
+                    maxmem=item.get("maxmem", 0),
+                    maxdisk=item.get("maxdisk", 0),
+                    uptime=item.get("uptime", 0),
+                    template=item.get("template", 0) == 1,
+                    tags=item.get("tags", "").split(";") if item.get("tags") else [],
+                ))
+
+            return sorted(guests, key=lambda g: g.vmid)
+
+        except ProxmoxAPIError as e:
+            # Fall back to per-node query if cluster resources fails
+            # (e.g., insufficient permissions)
+            logger.warning(f"Cluster resources query failed, falling back to per-node: {e}")
+            return self.list_guests()
+
     def list_guests(self, node: str | None = None) -> list[ProxmoxGuest]:
         """List all VMs and containers.
 
@@ -565,6 +612,55 @@ class ProxmoxAPI:
         except ProxmoxAPIError:
             return None
 
+    def find_guest(self, vmid: int) -> ProxmoxGuest | None:
+        """Find a guest by VMID across the cluster.
+
+        Uses the cluster/resources endpoint for efficiency. This is the
+        recommended way to find a guest when you don't know which node it's on,
+        especially in cluster environments where VMs may migrate.
+
+        Args:
+            vmid: VM/container ID to find
+
+        Returns:
+            ProxmoxGuest or None if not found
+        """
+        try:
+            # Query cluster resources for this specific VMID
+            data = self._make_request("GET", "/cluster/resources", params={"type": "vm"}) or []
+
+            for item in data:
+                if item.get("vmid") == vmid:
+                    resource_type = item.get("type", "")
+                    if resource_type == "qemu":
+                        guest_type = ProxmoxGuestType.QEMU
+                    elif resource_type == "lxc":
+                        guest_type = ProxmoxGuestType.LXC
+                    else:
+                        continue
+
+                    return ProxmoxGuest(
+                        vmid=vmid,
+                        name=item.get("name", f"{resource_type.upper()} {vmid}"),
+                        node=item.get("node", ""),
+                        guest_type=guest_type,
+                        status=item.get("status", "unknown"),
+                        cpus=item.get("maxcpu", 0),
+                        maxmem=item.get("maxmem", 0),
+                        maxdisk=item.get("maxdisk", 0),
+                        uptime=item.get("uptime", 0),
+                        template=item.get("template", 0) == 1,
+                        tags=item.get("tags", "").split(";") if item.get("tags") else [],
+                    )
+
+            return None
+
+        except ProxmoxAPIError as e:
+            # Fall back to per-node search
+            logger.debug(f"Cluster resource query failed, searching nodes: {e}")
+            guests = self.list_guests()
+            return next((g for g in guests if g.vmid == vmid), None)
+
     # =========================================================================
     # Storage Operations
     # =========================================================================
@@ -643,7 +739,7 @@ class ProxmoxAPI:
                 nodes = self.list_nodes()
                 if not nodes:
                     return None
-                node = nodes[0]["node"]
+                node = nodes[0].node  # ProxmoxNode is a dataclass, access .node attribute
 
             # Query storage status on the node
             data = self._make_request("GET", f"/nodes/{node}/storage/{storage_id}/status")
@@ -655,6 +751,62 @@ class ProxmoxAPI:
         except Exception as e:
             logger.debug(f"Error checking storage status: {e}")
             return None
+
+    def get_storage_status_all_nodes(self, storage_id: str) -> dict[str, dict[str, Any] | None]:
+        """Get storage status on all cluster nodes.
+
+        Useful for cluster environments to verify storage is mounted everywhere.
+
+        Args:
+            storage_id: Storage identifier
+
+        Returns:
+            Dict mapping node name to storage status (or None if not available on that node)
+        """
+        result = {}
+        try:
+            nodes = self.list_nodes()
+            for pve_node in nodes:
+                if pve_node.status == "offline":
+                    result[pve_node.node] = None
+                    continue
+                try:
+                    data = self._make_request(
+                        "GET", f"/nodes/{pve_node.node}/storage/{storage_id}/status"
+                    )
+                    result[pve_node.node] = data
+                except ProxmoxAPIError:
+                    result[pve_node.node] = None
+        except Exception as e:
+            logger.debug(f"Error checking storage status on all nodes: {e}")
+        return result
+
+    def is_storage_active_on_any_node(self, storage_id: str) -> tuple[bool, str | None]:
+        """Check if storage is active on at least one node.
+
+        Args:
+            storage_id: Storage identifier
+
+        Returns:
+            Tuple of (is_active, node_name) - node_name is the first node where storage is active
+        """
+        try:
+            nodes = self.list_nodes()
+            for pve_node in nodes:
+                if pve_node.status == "offline":
+                    continue
+                try:
+                    data = self._make_request(
+                        "GET", f"/nodes/{pve_node.node}/storage/{storage_id}/status"
+                    )
+                    if data and data.get("active"):
+                        return True, pve_node.node
+                except ProxmoxAPIError:
+                    continue
+            return False, None
+        except Exception as e:
+            logger.debug(f"Error checking storage status: {e}")
+            return False, None
 
     def _ensure_smb_directory(
         self,
@@ -1089,22 +1241,22 @@ class ProxmoxAPI:
             else:
                 logger.info(f"Proxmox storage '{storage_id}' already exists")
 
-            # Still need to wait for it to be active/mounted
+            # Still need to wait for it to be active/mounted on at least one node
             max_wait = 30  # seconds
             poll_interval = 2  # seconds
             waited = 0
 
             while waited < max_wait:
-                status = self.get_storage_status(storage_id)
-                if status and status.get("active"):
-                    logger.info(f"Storage '{storage_id}' is active and ready")
+                is_active, active_node = self.is_storage_active_on_any_node(storage_id)
+                if is_active:
+                    logger.info(f"Storage '{storage_id}' is active on node '{active_node}'")
                     return storage_id
                 logger.debug(f"Waiting for existing storage '{storage_id}' to become active...")
                 time.sleep(poll_interval)
                 waited += poll_interval
 
             logger.warning(
-                f"Existing storage '{storage_id}' not active after {max_wait}s. "
+                f"Existing storage '{storage_id}' not active on any node after {max_wait}s. "
                 "Backup may fail if mount is not ready."
             )
             return storage_id
@@ -1236,24 +1388,24 @@ class ProxmoxAPI:
 
         logger.info(f"Created Proxmox storage '{storage_id}' for repository '{repo_name}'")
 
-        # Wait for storage to be mounted and active
-        # Proxmox mounts storage asynchronously, so we need to poll until ready
+        # Wait for storage to be mounted and active on at least one node
+        # In a cluster, storage mounts asynchronously on each node
         max_wait = 30  # seconds
         poll_interval = 2  # seconds
         waited = 0
 
         while waited < max_wait:
-            status = self.get_storage_status(storage_id)
-            logger.info(f"Storage status check: active={status.get('active') if status else 'N/A'}, status={status}")
-            if status and status.get("active"):
-                logger.info(f"Storage '{storage_id}' is active and ready")
+            # Check if storage is active on any cluster node
+            is_active, active_node = self.is_storage_active_on_any_node(storage_id)
+            if is_active:
+                logger.info(f"Storage '{storage_id}' is active on node '{active_node}'")
                 break
             logger.info(f"Waiting for storage '{storage_id}' to become active (waited {waited}s)...")
             time.sleep(poll_interval)
             waited += poll_interval
         else:
             logger.warning(
-                f"Storage '{storage_id}' not active after {max_wait}s. "
+                f"Storage '{storage_id}' not active on any node after {max_wait}s. "
                 "Backup may fail if mount is not ready."
             )
         return storage_id
@@ -1307,6 +1459,48 @@ class ProxmoxAPI:
             ))
 
         return sorted(backups, key=lambda b: b.ctime, reverse=True)
+
+    def list_backups_all_nodes(
+        self,
+        storage: str,
+        vmid: int | None = None,
+    ) -> list[ProxmoxBackup]:
+        """List backups from a storage across all cluster nodes.
+
+        In a cluster, shared storage content is accessible from any node,
+        but we query from the first available node. For non-shared storage,
+        this aggregates backups from all nodes.
+
+        Args:
+            storage: Storage ID
+            vmid: Optional VM ID to filter by
+
+        Returns:
+            List of ProxmoxBackup objects sorted by creation time (newest first)
+        """
+        all_backups: list[ProxmoxBackup] = []
+        seen_volids: set[str] = set()  # Deduplicate for shared storage
+
+        try:
+            nodes = self.list_nodes()
+            for pve_node in nodes:
+                if pve_node.status == "offline":
+                    continue
+                try:
+                    backups = self.list_backups(pve_node.node, storage, vmid)
+                    for backup in backups:
+                        # Deduplicate - shared storage shows same backups on all nodes
+                        if backup.volid not in seen_volids:
+                            seen_volids.add(backup.volid)
+                            all_backups.append(backup)
+                except ProxmoxAPIError as e:
+                    # Storage might not be available on this node
+                    logger.debug(f"Could not list backups on {pve_node.node}: {e}")
+                    continue
+        except Exception as e:
+            logger.warning(f"Error listing backups across cluster: {e}")
+
+        return sorted(all_backups, key=lambda b: b.ctime, reverse=True)
 
     def create_backup(
         self,
@@ -1673,12 +1867,11 @@ class ProxmoxBackupManager:
         Returns:
             Dict with backup result info
         """
-        # Find guest if node not specified
+        # Find guest if node not specified - use find_guest for cluster efficiency
         if not node:
-            guests = self.api.list_guests()
-            guest = next((g for g in guests if g.vmid == vmid), None)
+            guest = self.api.find_guest(vmid)
             if not guest:
-                raise ProxmoxAPIError(f"Guest {vmid} not found")
+                raise ProxmoxAPIError(f"Guest {vmid} not found in cluster")
             node = guest.node
 
         # Build retention string
@@ -1777,12 +1970,11 @@ class ProxmoxBackupManager:
         Returns:
             Dict with backup result info including volid and file path
         """
-        # Find guest if node not specified
+        # Find guest if node not specified - use find_guest for cluster efficiency
         if not node:
-            guests = self.api.list_guests()
-            guest = next((g for g in guests if g.vmid == vmid), None)
+            guest = self.api.find_guest(vmid)
             if not guest:
-                raise ProxmoxAPIError(f"Guest {vmid} not found")
+                raise ProxmoxAPIError(f"Guest {vmid} not found in cluster")
             node = guest.node
 
         logger.info(f"Backup VMID {vmid} on {node} to storage {storage}")

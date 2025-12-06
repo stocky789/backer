@@ -1902,6 +1902,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "initialized": discovery.get("initialized", False),
                     "summary": discovery.get("summary", {}),
                     "agents": discovery.get("agents", []),
+                    "hypervisors": discovery.get("hypervisors", []),
+                    "guests": discovery.get("guests", []),
                     "jobs": [
                         {
                             "job_name": j.get("job_name"),
@@ -2062,6 +2064,75 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                             except json_module.JSONDecodeError:
                                                 pass
 
+                    # Also scan Hypervisors folder specifically for VM backups
+                    all_hypervisors = []
+                    all_guests = []
+                    hypervisors_path = f"{base_path}/Hypervisors" if base_path else "Hypervisors"
+                    ok_hv, hv_folders = smb_list_files(
+                        server, share, hypervisors_path,
+                        username, password, domain
+                    )
+                    if ok_hv:
+                        for hv_folder in hv_folders:
+                            if hv_folder.startswith('.'):
+                                continue
+                            task.message = f"Scanning hypervisor: {hv_folder}..."
+                            hv_metadata_base = f"{hypervisors_path}/{hv_folder}/.backer"
+
+                            # Read hypervisor metadata
+                            ok_meta, meta_content = smb_read_file(
+                                server, share, f"{hv_metadata_base}/metadata.json",
+                                username, password, domain
+                            )
+                            if ok_meta:
+                                found_any_metadata = True
+                                logger.info(f"[SCAN] Found hypervisor metadata: {hv_folder}")
+
+                                # Read hypervisors
+                                ok_hvs, hv_files = smb_list_files(
+                                    server, share, f"{hv_metadata_base}/hypervisors",
+                                    username, password, domain
+                                )
+                                if ok_hvs:
+                                    for f in hv_files:
+                                        if f.endswith(".json"):
+                                            ok_h, c = smb_read_file(
+                                                server, share, f"{hv_metadata_base}/hypervisors/{f}",
+                                                username, password, domain
+                                            )
+                                            if ok_h:
+                                                try:
+                                                    hv_data = json_module.loads(c)
+                                                    hv_data["folder"] = hv_folder
+                                                    all_hypervisors.append(hv_data)
+                                                except json_module.JSONDecodeError:
+                                                    pass
+
+                                # Read guests from hypervisor_backups
+                                ok_guests, guest_dirs = smb_list_files(
+                                    server, share, f"{hv_metadata_base}/hypervisor_backups",
+                                    username, password, domain
+                                )
+                                if ok_guests:
+                                    for vmid_dir in guest_dirs:
+                                        ok_g, g_content = smb_read_file(
+                                            server, share, f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/guest.json",
+                                            username, password, domain
+                                        )
+                                        if ok_g:
+                                            try:
+                                                guest_data = json_module.loads(g_content)
+                                                guest_data["hypervisor_folder"] = hv_folder
+                                                # Count backup runs
+                                                ok_runs, run_files = smb_list_files(
+                                                    server, share, f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/runs",
+                                                    username, password, domain
+                                                )
+                                                guest_data["run_count"] = len([r for r in run_files if r.endswith(".json")]) if ok_runs else 0
+                                                all_guests.append(guest_data)
+                                            except json_module.JSONDecodeError:
+                                                pass
+
                     if not found_any_metadata:
                         # Also check for legacy metadata at root level (backwards compatibility)
                         metadata_base = f"{base_path}/.backer" if base_path else ".backer"
@@ -2087,11 +2158,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         "agents": all_agents,
                         "jobs": all_jobs,
                         "snapshots": all_snapshots,
+                        "hypervisors": all_hypervisors,
+                        "guests": all_guests,
                         "summary": {
                             "agent_count": len(all_agents),
                             "job_count": len(all_jobs),
                             "snapshot_count": len(all_snapshots),
+                            "hypervisor_count": len(all_hypervisors),
+                            "guest_count": len(all_guests),
                             "total_runs": sum(j.get("run_count", 0) for j in all_jobs),
+                            "total_vm_runs": sum(g.get("run_count", 0) for g in all_guests),
                         },
                     })
 
@@ -3761,13 +3837,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 api.authenticate()
 
             all_backups = []
+            seen_volids: set[str] = set()  # Deduplicate for shared storage in clusters
 
             if node and storage_id:
                 # Specific node and storage
                 backups = api.list_backups(node, storage_id, vmid)
-                all_backups.extend(backups)
+                for backup in backups:
+                    if backup.volid not in seen_volids:
+                        seen_volids.add(backup.volid)
+                        all_backups.append(backup)
             else:
-                # Scan all backup-capable storages
+                # Scan all backup-capable storages across all nodes
                 storages = api.list_storages()
                 nodes = api.list_nodes()
 
@@ -3778,7 +3858,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             continue
                         try:
                             backups = api.list_backups(pve_node.node, pve_storage.storage, vmid)
-                            all_backups.extend(backups)
+                            for backup in backups:
+                                # Deduplicate - shared storage shows same backups on all nodes
+                                if backup.volid not in seen_volids:
+                                    seen_volids.add(backup.volid)
+                                    all_backups.append(backup)
                         except Exception:
                             # Storage might not be accessible on this node
                             pass
