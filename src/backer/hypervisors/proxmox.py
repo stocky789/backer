@@ -1054,10 +1054,11 @@ class ProxmoxAPI:
 
         while waited < max_wait:
             status = self.get_storage_status(storage_id)
+            logger.info(f"Storage status check: active={status.get('active') if status else 'N/A'}, status={status}")
             if status and status.get("active"):
                 logger.info(f"Storage '{storage_id}' is active and ready")
                 break
-            logger.debug(f"Waiting for storage '{storage_id}' to become active...")
+            logger.info(f"Waiting for storage '{storage_id}' to become active (waited {waited}s)...")
             time.sleep(poll_interval)
             waited += poll_interval
         else:

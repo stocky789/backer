@@ -3284,28 +3284,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             # Get guest names and resolve guest_ids
             try:
+                logger.info("Fetching guest list from Proxmox...")
                 all_guests = api.list_guests()
                 guest_map = {g.vmid: g for g in all_guests}
-            except Exception:
+                logger.info(f"Found {len(all_guests)} guests: {[g.vmid for g in all_guests]}")
+            except Exception as e:
+                logger.warning(f"Failed to list guests: {e}")
                 all_guests = []
                 guest_map = {}
 
             # If no specific guests, backup all
             guest_ids = job.get("guest_ids") or []
+            logger.info(f"Job guest_ids from storage: {guest_ids} (types: {[type(x).__name__ for x in guest_ids]})")
             if not guest_ids:
                 guest_ids = [g.vmid for g in all_guests]
+                logger.info(f"No specific guests, backing up all: {guest_ids}")
 
             total = len(guest_ids)
+            logger.info(f"Total guests to backup: {total}")
             if total == 0:
+                logger.warning("No guests to backup - returning early")
                 return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "skipped": 0, "results": []}
 
             # Counters for incremental stats
             skipped_count = 0
 
             for i, vmid in enumerate(guest_ids):
+                logger.info(f"=== Processing guest {i+1}/{total}: VMID {vmid} ===")
                 task.progress = int((i / total) * 100)
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
+                logger.info(f"Guest lookup: vmid={vmid} (type={type(vmid).__name__}), found={guest is not None}, name={guest_name}")
 
                 # Check if we can skip this VM (incremental mode with no changes)
                 backup_decision = None
