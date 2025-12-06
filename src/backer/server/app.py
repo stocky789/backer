@@ -3062,15 +3062,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Create repository dict with password for ensure_backer_storage
         repo_with_password = {**repository, "password": repo_password}
 
-        # Ensure Proxmox storage exists for this repository
-        try:
-            proxmox_storage_id = api.ensure_backer_storage(repo_with_password)
-        except ProxmoxAPIError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to configure Proxmox storage for repository: {e}"
-            )
-
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
         # Set up incremental backup manager if enabled
@@ -3102,6 +3093,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Submit backup as background task
         def run_backup_task(task: Task) -> dict[str, Any]:
+            # Ensure Proxmox storage exists for this repository (done in background to avoid blocking API)
+            task.message = "Configuring backup storage..."
+            try:
+                proxmox_storage_id = api.ensure_backer_storage(repo_with_password)
+            except ProxmoxAPIError as e:
+                return {
+                    "run_id": run_id,
+                    "total": 0,
+                    "success": 0,
+                    "failed": 1,
+                    "skipped": 0,
+                    "error": f"Failed to configure Proxmox storage: {e}",
+                    "results": [],
+                }
+
             manager = ProxmoxBackupManager(api)
             results = []
 
