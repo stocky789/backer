@@ -2991,7 +2991,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         task_manager = get_task_manager()
         guest_count = len(job.get("guest_ids") or [])
         hv_name = hypervisor['name']
-        desc = f"Backing up {guest_count} guests from {hv_name}" if guest_count else f"Backing up all guests from {hv_name}"
+        if guest_count:
+            desc = f"Backing up {guest_count} guests from {hv_name}"
+        else:
+            desc = f"Backing up all guests from {hv_name}"
 
         task = task_manager.submit(
             task_type="hypervisor_backup",
