@@ -1270,7 +1270,7 @@ class ProxmoxAPI:
         """Create an NFS storage in Proxmox.
 
         Args:
-            storage_id: Unique storage identifier (e.g., "backer-myrepo")
+            storage_id: Unique storage identifier (e.g., "backer-nfs-myrepo")
             server: NFS server hostname or IP
             export: NFS export path (e.g., "/share/backups")
             content: Content types (default: ["backup"])
@@ -1316,7 +1316,7 @@ class ProxmoxAPI:
         """Create a CIFS/SMB storage in Proxmox.
 
         Args:
-            storage_id: Unique storage identifier (e.g., "backer-myrepo")
+            storage_id: Unique storage identifier (e.g., "backer-nfs-myrepo")
             server: SMB server hostname or IP
             share: SMB share name
             username: SMB username (optional for guest access)
@@ -1437,7 +1437,7 @@ class ProxmoxAPI:
             ssh_port: SSH port (default: 22)
             ssh_key: Path to SSH private key
             ssh_password: SSH password (used if no key provided)
-            storage_id: Override storage ID (default: "backer-{repo_name}")
+            storage_id: Override storage ID (default: "backer-{type}-{repo_name}")
             smbversion: SMB protocol version (2.0, 2.1, 3, 3.0, 3.11, or default)
                        If not specified, defaults to "3.0" for better NAS compatibility.
 
@@ -1464,7 +1464,10 @@ class ProxmoxAPI:
             # Ensure we have a valid name
             if not safe_name:
                 safe_name = "repo"
-            storage_id = f"backer-{safe_name}"
+            # Include storage type prefix to avoid collision between NFS and SMB repos
+            # with the same name pointing to the same physical storage
+            type_prefix = "cifs" if repo_type == "smb" else repo_type
+            storage_id = f"backer-{type_prefix}-{safe_name}"
             # Truncate to avoid potential GUI display issues (keep under 40 chars total)
             if len(storage_id) > 40:
                 storage_id = storage_id[:40].rstrip("-")
@@ -1477,6 +1480,16 @@ class ProxmoxAPI:
         # Check if storage already exists
         existing = self.get_storage(storage_id)
         if existing:
+            # Verify the storage type matches (nfs vs cifs)
+            existing_type = existing.get("type", "").lower()
+            expected_type = "cifs" if repo_type == "smb" else repo_type
+            if existing_type and existing_type != expected_type:
+                raise ProxmoxAPIError(
+                    f"Storage '{storage_id}' already exists with type '{existing_type}' "
+                    f"but repository requires type '{expected_type}'. "
+                    "Delete the existing storage or use a different repository name."
+                )
+
             # Verify the storage points to the same server
             existing_server = existing.get("server", "")
             if existing_server and existing_server != server:

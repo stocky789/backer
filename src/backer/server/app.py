@@ -3306,7 +3306,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     if notes_file.exists():
                                         notes_file.unlink()
                                         logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
-                                    log_file = entry.with_suffix(".log")
+                                    # Log file has same base name but .log instead of .vma.zst
+                                    # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
+                                    base_name = entry.name.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                    log_file = entry.parent / f"{base_name}.log"
                                     if log_file.exists():
                                         log_file.unlink()
                                         logger.info(f"[NFS CLEANUP] DELETED log: {log_file.name}")
@@ -3429,6 +3432,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             if del_ok:
                                 deleted_count += 1
                                 logger.info(f"Deleted backup file: {filename}")
+
+                                # Also delete .notes file if exists
+                                notes_filename = f"{filename}.notes"
+                                run_smb_cmd(f'del "{dump_path}/{notes_filename}"')
+
+                                # Also delete .log file if exists
+                                # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
+                                base_name = filename.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                log_filename = f"{base_name}.log"
+                                run_smb_cmd(f'del "{dump_path}/{log_filename}"')
                             else:
                                 logger.warning(f"Failed to delete {filename}: {del_out}")
                     except ValueError:

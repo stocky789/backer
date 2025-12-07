@@ -539,9 +539,14 @@ class RetentionManager:
                                     notes_file = Path(str(entry) + ".notes")
                                     if notes_file.exists():
                                         notes_file.unlink()
-                                    log_file = entry.with_suffix(".log")
+                                        logger.info(f"Deleted notes file: {notes_file.name}")
+                                    # Log file has same base name but .log instead of .vma.zst
+                                    # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
+                                    base_name = entry.name.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                    log_file = entry.parent / f"{base_name}.log"
                                     if log_file.exists():
                                         log_file.unlink()
+                                        logger.info(f"Deleted log file: {log_file.name}")
                                 except OSError as e:
                                     logger.warning(f"Failed to delete {entry.name}: {e}")
                         except ValueError:
@@ -630,6 +635,24 @@ class RetentionManager:
                                 if del_result.returncode == 0:
                                     deleted_count += 1
                                     logger.info(f"Deleted backup file: {filename}")
+
+                                    # Also delete .notes file if exists
+                                    notes_filename = f"{filename}.notes"
+                                    notes_cmd = [
+                                        "smbclient", f"//{server}/{share}", *auth_opts,
+                                        "-c", f"cd {dump_path}; rm \"{notes_filename}\""
+                                    ]
+                                    subprocess.run(notes_cmd, capture_output=True, timeout=30)
+
+                                    # Also delete .log file if exists
+                                    # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
+                                    base_name = filename.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                    log_filename = f"{base_name}.log"
+                                    log_cmd = [
+                                        "smbclient", f"//{server}/{share}", *auth_opts,
+                                        "-c", f"cd {dump_path}; rm \"{log_filename}\""
+                                    ]
+                                    subprocess.run(log_cmd, capture_output=True, timeout=30)
                                 else:
                                     logger.warning(
                                         f"Failed to delete {filename}: {del_result.stderr}"
