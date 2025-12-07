@@ -1,11 +1,22 @@
 #!/bin/bash
 # Backer Server Installation Script
-# One-command installation for Debian/Ubuntu systems
+# One-command installation for Linux systems
+#
+# Supported distributions:
+#   - Debian, Ubuntu, Linux Mint, Pop!_OS
+#   - Fedora
+#   - RHEL, CentOS, Rocky Linux, AlmaLinux
+#   - Arch Linux, Manjaro
+#   - openSUSE
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
 #   or
-#   ./install.sh
+#   sudo ./install.sh
+#
+# Options:
+#   --uninstall     Remove backer server
+#   --help          Show this help
 #
 set -e
 
@@ -14,17 +25,37 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Installation directory
 INSTALL_DIR="${BACKER_INSTALL_DIR:-/opt/backer}"
 DATA_DIR="${BACKER_DATA_DIR:-/var/lib/backer}"
 SERVICE_USER="${BACKER_USER:-backer}"
+UNINSTALL=false
 
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+step() { echo -e "${CYAN}==>${NC} $1"; }
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --uninstall)
+            UNINSTALL=true
+            shift
+            ;;
+        --help|-h)
+            head -20 "$0" | tail -16
+            exit 0
+            ;;
+        *)
+            error "Unknown option: $1. Use --help for usage."
+            ;;
+    esac
+done
 
 echo ""
 echo "========================================"
@@ -37,57 +68,182 @@ if [ "$EUID" -ne 0 ]; then
     error "Please run as root: sudo ./install.sh"
 fi
 
-# Detect OS
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-    VERSION=$VERSION_ID
-else
-    error "Cannot detect OS. This script supports Debian/Ubuntu."
+# Uninstall function
+uninstall() {
+    info "Uninstalling Backer Server..."
+
+    systemctl stop backer 2>/dev/null || true
+    systemctl disable backer 2>/dev/null || true
+    rm -f /etc/systemd/system/backer.service
+    systemctl daemon-reload
+
+    rm -f /usr/local/bin/backer
+    rm -rf "$INSTALL_DIR"
+
+    echo ""
+    warn "Data directory preserved at: $DATA_DIR"
+    warn "To remove data: sudo rm -rf $DATA_DIR"
+    warn "To remove user: sudo userdel $SERVICE_USER"
+    echo ""
+    success "Backer Server uninstalled"
+    exit 0
+}
+
+if [[ "$UNINSTALL" == true ]]; then
+    uninstall
 fi
 
-info "Detected OS: $OS $VERSION"
+# Detect OS and install dependencies
+install_dependencies() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        DISTRO_ID="${ID}"
+        DISTRO_VERSION="${VERSION_ID}"
+    else
+        error "Cannot detect Linux distribution"
+    fi
 
-# Check for supported OS
-case $OS in
-    ubuntu|debian)
-        PKG_MANAGER="apt-get"
-        ;;
-    *)
-        error "Unsupported OS: $OS. This script supports Debian/Ubuntu."
-        ;;
-esac
+    info "Detected OS: $DISTRO_ID $DISTRO_VERSION"
 
-# Install system dependencies
-info "Installing system dependencies..."
-$PKG_MANAGER update -qq
+    case "$DISTRO_ID" in
+        debian|ubuntu|linuxmint|pop)
+            step "Installing dependencies via apt..."
+            apt-get update -qq
+            apt-get install -y -qq \
+                python3 \
+                python3-venv \
+                python3-pip \
+                git \
+                curl \
+                ca-certificates \
+                cifs-utils \
+                smbclient \
+                sshpass \
+                nfs-common \
+                > /dev/null 2>&1
+            ;;
+        fedora)
+            step "Installing dependencies via dnf..."
+            dnf install -y -q \
+                python3 \
+                python3-pip \
+                python3-virtualenv \
+                git \
+                curl \
+                ca-certificates \
+                cifs-utils \
+                samba-client \
+                sshpass \
+                nfs-utils \
+                > /dev/null 2>&1
+            ;;
+        rhel|centos|rocky|almalinux)
+            step "Installing dependencies via dnf/yum..."
+            # Try dnf first (RHEL 8+), fall back to yum
+            if command -v dnf &>/dev/null; then
+                # Enable EPEL for sshpass on RHEL-based distros
+                dnf install -y -q epel-release 2>/dev/null || true
+                dnf install -y -q \
+                    python3 \
+                    python3-pip \
+                    git \
+                    curl \
+                    ca-certificates \
+                    cifs-utils \
+                    samba-client \
+                    sshpass \
+                    nfs-utils \
+                    > /dev/null 2>&1
+            else
+                yum install -y -q epel-release 2>/dev/null || true
+                yum install -y -q \
+                    python3 \
+                    python3-pip \
+                    git \
+                    curl \
+                    ca-certificates \
+                    cifs-utils \
+                    samba-client \
+                    sshpass \
+                    nfs-utils \
+                    > /dev/null 2>&1
+            fi
+            ;;
+        arch|manjaro|endeavouros|garuda|cachyos)
+            step "Installing dependencies via pacman..."
+            # Arch uses 'python' not 'python3', and 'python-pip' not 'python3-pip'
+            pacman -Sy --noconfirm --needed \
+                python \
+                python-pip \
+                git \
+                curl \
+                ca-certificates \
+                cifs-utils \
+                smbclient \
+                sshpass \
+                nfs-utils \
+                > /dev/null 2>&1
+            ;;
+        opensuse*|sles)
+            step "Installing dependencies via zypper..."
+            # Note: python3-virtualenv may not be in default repos, but we use python3 -m venv
+            zypper install -y \
+                python3 \
+                python3-pip \
+                git \
+                curl \
+                ca-certificates \
+                cifs-utils \
+                samba-client \
+                sshpass \
+                nfs-client \
+                > /dev/null 2>&1 || true
+            ;;
+        *)
+            warn "Unknown distro: $DISTRO_ID"
+            warn "Attempting to continue - you may need to manually install:"
+            warn "  python3, python3-pip, python3-venv, git, curl"
+            warn "  cifs-utils, smbclient, sshpass, nfs-common/nfs-utils"
+            echo ""
+            # Try to detect package manager
+            if command -v apt-get &>/dev/null; then
+                apt-get update -qq
+                apt-get install -y -qq python3 python3-venv python3-pip git curl cifs-utils smbclient sshpass nfs-common 2>/dev/null || true
+            elif command -v dnf &>/dev/null; then
+                dnf install -y -q python3 python3-pip git curl cifs-utils samba-client sshpass nfs-utils 2>/dev/null || true
+            elif command -v yum &>/dev/null; then
+                yum install -y -q python3 python3-pip git curl cifs-utils samba-client sshpass nfs-utils 2>/dev/null || true
+            elif command -v pacman &>/dev/null; then
+                pacman -Sy --noconfirm --needed python python-pip git curl cifs-utils smbclient sshpass nfs-utils 2>/dev/null || true
+            elif command -v zypper &>/dev/null; then
+                zypper install -y -q python3 python3-pip git curl cifs-utils samba-client sshpass nfs-client 2>/dev/null || true
+            fi
+            ;;
+    esac
 
-# Core Python
-$PKG_MANAGER install -y -qq \
-    python3 \
-    python3-venv \
-    python3-pip \
-    git \
-    curl \
-    > /dev/null 2>&1
+    # Verify critical dependencies
+    if ! command -v python3 &>/dev/null; then
+        error "python3 is required but not installed"
+    fi
+    if ! command -v git &>/dev/null; then
+        error "git is required but not installed"
+    fi
 
-# SMB/CIFS support for Windows shares
-$PKG_MANAGER install -y -qq \
-    cifs-utils \
-    smbclient \
-    > /dev/null 2>&1
+    # Warn about optional dependencies
+    if ! command -v sshpass &>/dev/null; then
+        warn "sshpass not installed - SSH password authentication for Proxmox cleanup will not work"
+        warn "You can still use SSH key authentication or install sshpass manually"
+    fi
 
-# SSH utilities for incremental backups (QMP over SSH)
-$PKG_MANAGER install -y -qq \
-    sshpass \
-    > /dev/null 2>&1
+    if ! command -v smbclient &>/dev/null; then
+        warn "smbclient not installed - SMB share directory creation may not work"
+    fi
 
-# NFS support
-$PKG_MANAGER install -y -qq \
-    nfs-common \
-    > /dev/null 2>&1
+    success "System dependencies installed"
+}
 
-success "System dependencies installed"
+# Run dependency installation
+install_dependencies
 
 # Create service user
 if ! id "$SERVICE_USER" &>/dev/null; then

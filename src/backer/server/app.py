@@ -322,12 +322,20 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         # Create repository dict with password for ensure_backer_storage
         repo_with_password = {**repository, "password": repo_password}
 
+        # Get SSH credentials for mount point cleanup
+        ssh_user = job.get("ssh_user") or hypervisor.get("ssh_user", "root")
+        ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
+        ssh_key_path = hypervisor.get("ssh_key_path")
+
         # Ensure Proxmox storage exists for this repository
         # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
         try:
             proxmox_storage_id = api.ensure_backer_storage(
                 repo_with_password,
                 hypervisor_name=hypervisor["name"],
+                ssh_user=ssh_user,
+                ssh_port=ssh_port,
+                ssh_key=ssh_key_path,
             )
         except ProxmoxAPIError as e:
             logger.error(f"Failed to configure Proxmox storage for repository: {e}")

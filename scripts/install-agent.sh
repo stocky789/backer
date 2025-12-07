@@ -77,24 +77,32 @@ setup_packages() {
     case "$DISTRO_ID" in
         debian|ubuntu|linuxmint|pop)
             apt-get update -qq
-            apt-get install -y -qq python3 python3-pip python3-venv curl ca-certificates cifs-utils nfs-common
+            apt-get install -y -qq python3 python3-pip python3-venv curl ca-certificates cifs-utils nfs-common sshpass smbclient
             ;;
         fedora)
-            dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils
+            dnf install -y -q python3 python3-pip python3-virtualenv curl ca-certificates cifs-utils nfs-utils sshpass samba-client
             ;;
         rhel|centos|rocky|almalinux)
-            dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils || \
-            yum install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils
+            # Enable EPEL for sshpass
+            if command -v dnf &>/dev/null; then
+                dnf install -y -q epel-release 2>/dev/null || true
+                dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils sshpass samba-client
+            else
+                yum install -y -q epel-release 2>/dev/null || true
+                yum install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils sshpass samba-client
+            fi
             ;;
-        arch|manjaro)
-            pacman -Sy --noconfirm --needed python python-pip curl ca-certificates cifs-utils nfs-utils
+        arch|manjaro|endeavouros|garuda|cachyos)
+            # Arch uses 'python' not 'python3', and 'python-pip' not 'python3-pip'
+            pacman -Sy --noconfirm --needed python python-pip curl ca-certificates cifs-utils nfs-utils sshpass smbclient
             ;;
-        opensuse*)
-            zypper install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-client
+        opensuse*|sles)
+            # Note: python3-virtualenv may not be in default repos, but we use python3 -m venv
+            zypper install -y python3 python3-pip curl ca-certificates cifs-utils nfs-client sshpass samba-client > /dev/null 2>&1 || true
             ;;
         *)
             warn "Unknown distro: $DISTRO_ID - assuming python3 is available"
-            warn "You may need to manually install: cifs-utils nfs-common"
+            warn "You may need to manually install: cifs-utils nfs-common sshpass smbclient"
             ;;
     esac
 }
