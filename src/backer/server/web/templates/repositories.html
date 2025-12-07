@@ -392,7 +392,15 @@ function selectShare(shareName) {
     document.getElementById('step2').style.display = 'none';
     document.getElementById('step3').style.display = 'block';
     document.getElementById('shareDisplay').textContent = shareName;
-    document.getElementById('repoName').value = currentServer + ' - ' + shareName;
+    // For NFS, shareName is a path like /mnt/tank/Backups - use just the last component
+    // Also sanitize any remaining special chars that would fail validation
+    let friendlyName = shareName;
+    if (currentType === 'nfs' && shareName.includes('/')) {
+        // Get the last non-empty path component
+        const parts = shareName.split('/').filter(p => p);
+        friendlyName = parts.length > 0 ? parts[parts.length - 1] : shareName;
+    }
+    document.getElementById('repoName').value = currentServer + ' - ' + friendlyName;
     browseDirectory('');
 }
 
