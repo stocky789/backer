@@ -466,7 +466,8 @@ class RepositoryMetadata:
             # Also scan legacy structure (direct subfolders)
             # Skip Agents/ and Hypervisors/ folders as they use the new structure
             for item in self.repo_path.iterdir():
-                if item.is_dir() and item.name not in ('.', '..', 'Agents', 'Hypervisors') and not item.name.startswith('.'):
+                skip_dirs = ('.', '..', 'Agents', 'Hypervisors')
+                if item.is_dir() and item.name not in skip_dirs and not item.name.startswith('.'):
                     subfolder_meta = RepositoryMetadata(item, self.repo_type)
                     if subfolder_meta.is_initialized():
                         found_any = True

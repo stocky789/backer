@@ -2124,20 +2124,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 )
                                 if ok_guests:
                                     for vmid_dir in guest_dirs:
+                                        guest_path = f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/guest.json"
                                         ok_g, g_content = smb_read_file(
-                                            server, share, f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/guest.json",
-                                            username, password, domain
+                                            server, share, guest_path, username, password, domain
                                         )
                                         if ok_g:
                                             try:
                                                 guest_data = json_module.loads(g_content)
                                                 guest_data["hypervisor_folder"] = hv_folder
                                                 # Count backup runs
+                                                runs_path = f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/runs"
                                                 ok_runs, run_files = smb_list_files(
-                                                    server, share, f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/runs",
-                                                    username, password, domain
+                                                    server, share, runs_path, username, password, domain
                                                 )
-                                                guest_data["run_count"] = len([r for r in run_files if r.endswith(".json")]) if ok_runs else 0
+                                                run_count = len([r for r in run_files if r.endswith(".json")])
+                                                guest_data["run_count"] = run_count if ok_runs else 0
                                                 all_guests.append(guest_data)
                                             except json_module.JSONDecodeError:
                                                 pass
@@ -3233,6 +3234,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """
         import subprocess
         import tempfile
+
         from backer.hypervisors.metadata import HypervisorMetadata
 
         repo_type = repository.get("repo_type", "").lower()
@@ -3550,7 +3552,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 task.progress = int((i / total) * 100)
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
-                logger.info(f"Guest lookup: vmid={vmid} (type={type(vmid).__name__}), found={guest is not None}, name={guest_name}")
+                vmid_type = type(vmid).__name__
+                logger.info(f"Guest lookup: vmid={vmid} ({vmid_type}), found={guest is not None}")
 
                 # Check if we can skip this VM (incremental mode with no changes)
                 backup_decision = None
@@ -3566,7 +3569,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             force_full=force_full,
                         )
                         backup_type_label = backup_decision.backup_type.value
-                        logger.info(f"VM {vmid} backup decision: {backup_decision.backup_type.value} - {backup_decision.reason}")
+                        decision_type = backup_decision.backup_type.value
+                        logger.info(f"VM {vmid} backup decision: {decision_type} - {backup_decision.reason}")
 
                         if backup_decision.backup_type == BackupType.SKIP:
                             # No changes since last backup - skip this VM
@@ -4105,7 +4109,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Build smbclient auth
         auth_parts = []
         if username:
-            auth_parts.extend(["-U", f"{domain}\\{username}%{repo_password or ''}" if domain else f"{username}%{repo_password or ''}"])
+            pw = repo_password or ''
+            if domain:
+                auth_parts.extend(["-U", f"{domain}\\{username}%{pw}"])
+            else:
+                auth_parts.extend(["-U", f"{username}%{pw}"])
         else:
             auth_parts.extend(["-N"])
 

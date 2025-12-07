@@ -1035,28 +1035,28 @@ class ProxmoxAPI:
 
             # Step 4: If rmdir failed due to "not empty", check what's there
             if "not empty" in stderr.lower() or "Directory not empty" in stderr:
-                logger.warning(f"Mount point not empty, checking contents...")
+                logger.warning("Mount point not empty, checking contents...")
                 rc, stdout, _ = run_ssh(f"ls -A {mount_point} 2>/dev/null | head -5")
 
                 # If empty or only contains expected backup dirs, force remove
                 contents = stdout.strip()
                 if not contents or contents in ("dump", ".backer"):
-                    logger.info(f"Mount point contains only backup data, force removing...")
+                    logger.info("Mount point contains only backup data, force removing...")
                     rc, _, _ = run_ssh(f"rm -rf {mount_point}")
                     if rc == 0:
-                        logger.info(f"Force removed mount point with contents")
+                        logger.info("Force removed mount point with contents")
                         return True
                 else:
                     logger.warning(f"Mount point has unexpected contents: {contents[:100]}")
 
             # Step 5: Handle "Transport endpoint is not connected"
             if "Transport endpoint" in stderr or "Stale file handle" in stderr:
-                logger.warning(f"Stale mount detected, forcing lazy unmount...")
+                logger.warning("Stale mount detected, forcing lazy unmount...")
                 run_ssh(f"umount -l -f {mount_point} 2>/dev/null || true")
                 time_module.sleep(1)
                 rc, _, stderr = run_ssh(f"rmdir {mount_point} 2>&1")
                 if rc == 0:
-                    logger.info(f"Successfully removed stale mount point after force unmount")
+                    logger.info("Successfully removed stale mount point after force unmount")
                     return True
 
             # Step 6: Last resort - verify directory state
@@ -1401,7 +1401,6 @@ class ProxmoxAPI:
 
             # Retry logic for storage creation - handles race condition where
             # newly created SMB directories aren't immediately visible to Proxmox mount
-            import time
             max_retries = 3
             retry_delay = 2  # seconds
 
@@ -1440,9 +1439,10 @@ class ProxmoxAPI:
                             continue
                         else:
                             raise ProxmoxAPIError(
-                                f"Failed to activate storage '{storage_id}' after {max_retries} attempts. "
-                                f"The SMB directory may not be accessible from Proxmox. "
-                                f"Try running on the Proxmox host: sudo umount -l /mnt/pve/{storage_id}; sudo rmdir /mnt/pve/{storage_id}"
+                                f"Failed to activate storage '{storage_id}' after {max_retries} "
+                                f"attempts. The SMB directory may not be accessible from Proxmox. "
+                                f"Try: sudo umount -l /mnt/pve/{storage_id}; "
+                                f"sudo rmdir /mnt/pve/{storage_id}"
                             ) from e
 
                     # Handle "mkdir: File exists" error - stale mount point from previous run
@@ -1467,7 +1467,7 @@ class ProxmoxAPI:
                             )
                             if cleanup_success:
                                 # Retry storage creation
-                                logger.info(f"Retrying storage creation after cleanup...")
+                                logger.info("Retrying storage creation after cleanup...")
                                 self.create_cifs_storage(
                                     storage_id=storage_id,
                                     server=server,
