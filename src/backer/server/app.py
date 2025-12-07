@@ -4587,6 +4587,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not hypervisor:
             return []
 
+        # Get job's guest_ids to filter results (empty list means all guests)
+        job_guest_ids = job.get("guest_ids") or []
+
         repo_type = repository.get("repo_type", "").lower()
         server = repository.get("server", "")
         share = repository.get("share", "")
@@ -4601,13 +4604,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if repo_type == "nfs" and server:
             nfs_export = repository.get("share") or repository.get("path", "")
             if nfs_export:
-                return _get_job_backups_from_nfs(
+                backups = _get_job_backups_from_nfs(
                     server=server,
                     export=nfs_export,
                     hypervisor_name=hypervisor["name"],
                     storage=storage,
                     job_id=job_id,
                 )
+                # Filter by job's guest_ids if specified
+                if job_guest_ids:
+                    backups = [b for b in backups if b.get("vmid") in job_guest_ids]
+                return backups
 
         if repo_type != "smb" or not server or not share:
             # For unsupported repo types, fall back to local storage runs
@@ -4694,16 +4701,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         except ValueError as e:
                             logger.debug(f"Failed to parse backup date from {filename}: {e}")
 
+            # Filter by job's guest_ids if specified
+            if job_guest_ids:
+                backups = [b for b in backups if b.get("vmid") in job_guest_ids]
+
             # Sort by time descending
             backups.sort(key=lambda x: x.get("ctime", 0), reverse=True)
             return backups[:50]
 
         except subprocess.TimeoutExpired:
             logger.warning("Timeout listing backups from SMB share")
-            return _get_job_backups_from_local_storage(storage, job_id)
+            fallback = _get_job_backups_from_local_storage(storage, job_id)
+            if job_guest_ids:
+                fallback = [b for b in fallback if b.get("vmid") in job_guest_ids]
+            return fallback
         except Exception as e:
             logger.warning(f"Error listing backups from SMB: {e}")
-            return _get_job_backups_from_local_storage(storage, job_id)
+            fallback = _get_job_backups_from_local_storage(storage, job_id)
+            if job_guest_ids:
+                fallback = [b for b in fallback if b.get("vmid") in job_guest_ids]
+            return fallback
 
     def _get_job_backups_from_nfs(
         server: str,

@@ -20,11 +20,16 @@ NC='\033[0m' # No Color
 # Parse arguments
 KEEP_DATA=false
 SKIP_CONFIRM=false
+CLEAN_USER_FILES=false
 
 for arg in "$@"; do
     case $arg in
         --keep-data)
             KEEP_DATA=true
+            shift
+            ;;
+        --clean-user)
+            CLEAN_USER_FILES=true
             shift
             ;;
         -y|--yes)
@@ -36,6 +41,7 @@ for arg in "$@"; do
             echo ""
             echo "Options:"
             echo "  --keep-data    Preserve backup data in /var/lib/backer"
+            echo "  --clean-user   Also remove ~/backer and ~/venv for SUDO_USER"
             echo "  -y, --yes      Skip confirmation prompt"
             echo "  -h, --help     Show this help message"
             exit 0
@@ -62,6 +68,9 @@ else
     echo -e "  • ${DIM}Backup data will be preserved${NC}"
 fi
 echo "  • System user (backer)"
+if [[ "$CLEAN_USER_FILES" == "true" ]] && [[ -n "$SUDO_USER" ]]; then
+    echo -e "  • ${YELLOW}User files (~$SUDO_USER/backer, ~$SUDO_USER/venv)${NC}"
+fi
 echo ""
 
 # Confirm
@@ -144,6 +153,32 @@ else
 fi
 
 echo ""
+echo -e "${BOLD}5. Cleaning up user files...${NC}"
+
+# Remove user files if --clean-user specified
+if [[ "$CLEAN_USER_FILES" == "true" ]] && [[ -n "$SUDO_USER" ]]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [[ -n "$USER_HOME" ]]; then
+        if [[ -d "$USER_HOME/backer" ]]; then
+            rm -rf "$USER_HOME/backer"
+            echo -e "   ${GREEN}✓${NC} Removed $USER_HOME/backer"
+        else
+            echo -e "   ${DIM}$USER_HOME/backer not found${NC}"
+        fi
+        if [[ -d "$USER_HOME/venv" ]]; then
+            rm -rf "$USER_HOME/venv"
+            echo -e "   ${GREEN}✓${NC} Removed $USER_HOME/venv"
+        else
+            echo -e "   ${DIM}$USER_HOME/venv not found${NC}"
+        fi
+    else
+        echo -e "   ${YELLOW}Could not determine home directory for $SUDO_USER${NC}"
+    fi
+else
+    echo -e "   ${DIM}Skipped (use --clean-user to remove ~/backer and ~/venv)${NC}"
+fi
+
+echo ""
 echo -e "${BOLD}${GREEN}✓ Backer server uninstalled successfully${NC}"
 
 if [[ "$KEEP_DATA" == "true" ]]; then
@@ -152,6 +187,9 @@ if [[ "$KEEP_DATA" == "true" ]]; then
     echo "To remove it later: sudo rm -rf /var/lib/backer"
 fi
 
-echo ""
-echo -e "${DIM}To clean up user files, run as your regular user:${NC}"
-echo -e "${DIM}  rm -rf ~/backer ~/venv${NC}"
+if [[ "$CLEAN_USER_FILES" == "false" ]]; then
+    echo ""
+    echo -e "${DIM}To clean up user files, run:${NC}"
+    echo -e "${DIM}  rm -rf ~/backer ~/venv${NC}"
+    echo -e "${DIM}Or re-run with: sudo $0 --clean-user${NC}"
+fi
