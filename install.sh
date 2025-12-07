@@ -326,8 +326,7 @@ ExecStart=$INSTALL_DIR/venv/bin/backer server start --host 0.0.0.0 --port 8420
 Restart=always
 RestartSec=5
 
-# Security hardening
-NoNewPrivileges=true
+# Security hardening (NoNewPrivileges disabled to allow sudo for NFS mounts)
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$DATA_DIR
