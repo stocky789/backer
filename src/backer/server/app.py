@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -3046,13 +3047,167 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         job_id: str,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Delete a hypervisor job."""
+        """Delete a hypervisor job and clean up all repository data.
+
+        This permanently deletes the job configuration, all backup files,
+        and all metadata from the repository. This prevents conflicts when
+        creating new jobs with the same names or VMIDs.
+        """
         job = storage.get_hypervisor_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
+        cleanup_errors = []
+
+        # Always clean up repository data to prevent conflicts
+        repository_id = job.get("repository_id")
+        hypervisor_id = job.get("hypervisor_id")
+
+        if repository_id and hypervisor_id:
+            repository = storage.get_repository(repository_id)
+            hypervisor = storage.get_hypervisor(hypervisor_id)
+
+            if repository and hypervisor:
+                try:
+                    _cleanup_hypervisor_job_data(
+                        repository=repository,
+                        hypervisor=hypervisor,
+                        storage=storage,
+                        repository_id=repository_id,
+                    )
+                    logger.info(f"Cleaned up repository data for job {job_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up repository data: {e}")
+                    cleanup_errors.append(str(e))
+
+        # Delete local database records
         storage.delete_hypervisor_job(job_id)
-        return {"id": job_id, "status": "deleted"}
+
+        result: dict[str, Any] = {"id": job_id, "status": "deleted"}
+        if cleanup_errors:
+            result["cleanup_warnings"] = cleanup_errors
+        return result
+
+    def _cleanup_hypervisor_job_data(
+        repository: dict[str, Any],
+        hypervisor: dict[str, Any],
+        storage: Storage,
+        repository_id: str,
+    ) -> None:
+        """Clean up all job data from the repository.
+
+        Deletes:
+        - Backup files in dump/
+        - Metadata in .backer/
+        - The hypervisor folder if empty after cleanup
+        """
+        import subprocess
+
+        repo_type = repository.get("repo_type", "").lower()
+        if repo_type != "smb":
+            logger.debug(f"Repository cleanup not supported for type: {repo_type}")
+            return
+
+        server = repository.get("server", "")
+        share = repository.get("share", "")
+        subdir = repository.get("path", "").strip("/")
+        username = repository.get("username")
+        domain = repository.get("domain")
+
+        # Get repository password
+        repo_password = storage.get_repository_password(repository_id)
+
+        if not server or not share:
+            logger.warning("Cannot clean up: missing server or share")
+            return
+
+        # Build hypervisor folder path
+        safe_hv_name = "".join(
+            c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+        )
+        if subdir:
+            hv_path = f"{subdir}/Hypervisors/{safe_hv_name}"
+        else:
+            hv_path = f"Hypervisors/{safe_hv_name}"
+
+        # Build smbclient auth
+        if username:
+            if domain:
+                auth_str = f"{domain}\\{username}%{repo_password or ''}"
+            else:
+                auth_str = f"{username}%{repo_password or ''}"
+            auth_parts = ["-U", auth_str]
+        else:
+            auth_parts = ["-N"]
+
+        def run_smb_cmd(cmd: str) -> tuple[bool, str]:
+            """Run an smbclient command and return success status and output."""
+            full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
+            try:
+                result = subprocess.run(
+                    full_cmd, capture_output=True, timeout=60, text=True
+                )
+                return result.returncode == 0, result.stderr or result.stdout
+            except subprocess.TimeoutExpired:
+                return False, "Command timed out"
+            except Exception as e:
+                return False, str(e)
+
+        # Step 1: Delete all files in dump/ folder
+        dump_path = f"{hv_path}/dump"
+        logger.info(f"Cleaning up backup files in {dump_path}")
+
+        # List files first
+        ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
+        if ok:
+            # Delete each vzdump file
+            for line in output.split("\n"):
+                if "vzdump-" in line:
+                    # Extract filename from smbclient ls output
+                    parts = line.strip().split()
+                    if parts:
+                        filename = parts[0]
+                        if filename.startswith("vzdump-"):
+                            del_ok, del_out = run_smb_cmd(
+                                f'del "{dump_path}/{filename}"'
+                            )
+                            if del_ok:
+                                logger.debug(f"Deleted backup: {filename}")
+                            else:
+                                logger.warning(f"Failed to delete {filename}: {del_out}")
+
+        # Step 2: Delete metadata folder contents
+        backer_path = f"{hv_path}/.backer"
+        logger.info(f"Cleaning up metadata in {backer_path}")
+
+        # Delete files in subdirectories
+        for subpath in ["hypervisors", "guests", "runs", "jobs"]:
+            full_path = f"{backer_path}/{subpath}"
+            ok, output = run_smb_cmd(f'ls "{full_path}/*"')
+            if ok:
+                for line in output.split("\n"):
+                    if ".json" in line:
+                        parts = line.strip().split()
+                        if parts and parts[0].endswith(".json"):
+                            filename = parts[0]
+                            run_smb_cmd(f'del "{full_path}/{filename}"')
+
+            # Try to remove the empty directory
+            run_smb_cmd(f'rmdir "{full_path}"')
+
+        # Delete metadata.json
+        run_smb_cmd(f'del "{backer_path}/metadata.json"')
+
+        # Try to remove .backer directory
+        run_smb_cmd(f'rmdir "{backer_path}"')
+
+        # Step 3: Try to remove dump directory if empty
+        run_smb_cmd(f'rmdir "{dump_path}"')
+
+        # Step 4: Try to remove hypervisor folder if empty
+        run_smb_cmd(f'rmdir "{hv_path}"')
+
+        logger.info(f"Repository cleanup completed for hypervisor: {hypervisor['name']}")
 
     def _write_hypervisor_backup_metadata(
         repository: dict[str, Any],
@@ -4144,6 +4299,207 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {
             "task_id": task.id,
             "message": f"Restore started for VMID {vmid}",
+        }
+
+    @app.post("/api/v1/hypervisor-jobs/{job_id}/restore")
+    async def restore_from_repository(
+        job_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Restore a VM/container from a backup stored in the Backer repository.
+
+        This endpoint:
+        1. Temporarily mounts the repository as Proxmox storage
+        2. Performs the restore via Proxmox API
+        3. Cleans up the temporary storage mount
+        """
+        from backer.hypervisors.proxmox import (
+            ProxmoxAPI,
+            ProxmoxAPIError,
+            ProxmoxAuthMethod,
+            ProxmoxBackupManager,
+            ProxmoxGuestType,
+        )
+
+        job = storage.get_hypervisor_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        hypervisor_id = job["hypervisor_id"]
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        repository_id = job["repository_id"]
+        repository = storage.get_repository(repository_id)
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        body = await request.json()
+
+        filename = body.get("filename")  # e.g., "vzdump-qemu-100-2025_12_07-10_04_54.vma.zst"
+        target_vmid = body.get("vmid")  # Optional: restore to different VMID
+        target_storage = body.get("storage")  # Optional: storage for VM disks
+        force = body.get("force", False)
+        start_after = body.get("start", False)
+        guest_type = body.get("guest_type", "qemu")
+
+        if not filename:
+            raise HTTPException(status_code=400, detail="filename is required")
+
+        # Parse original VMID from backup filename
+        import re
+        vmid_match = re.search(r"vzdump-(?:qemu|lxc)-(\d+)-", filename)
+        if not vmid_match:
+            raise HTTPException(status_code=400, detail="Could not parse VMID from backup filename")
+        original_vmid = int(vmid_match.group(1))
+
+        # Detect guest type from filename if not specified
+        if "vzdump-lxc-" in filename:
+            guest_type = "lxc"
+
+        # Use target_vmid if provided, otherwise restore to original VMID
+        vmid = target_vmid or original_vmid
+
+        # Get credentials
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        hv_password = storage.get_hypervisor_password(hypervisor_id)
+        repo_password = None
+        if repository.get("repo_type") == "smb" and repository.get("has_password"):
+            repo_password = storage.get_repository_password(repository_id)
+
+        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+        api = ProxmoxAPI(
+            host=hypervisor["host"],
+            port=hypervisor["port"],
+            token_id=hypervisor.get("token_id"),
+            token_secret=token_secret,
+            username=hypervisor.get("username"),
+            password=hv_password,
+            auth_method=auth_method,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        if auth_method == ProxmoxAuthMethod.PASSWORD:
+            api.authenticate()
+
+        # Get SSH credentials for storage cleanup
+        ssh_user = job.get("ssh_user") or hypervisor.get("ssh_user", "root")
+        ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
+        ssh_key_path = hypervisor.get("ssh_key_path")
+        ssh_password = None
+        if hypervisor.get("ssh_use_api_password", True) and hv_password:
+            ssh_password = hv_password
+
+        # Build repository dict with password
+        repo_with_password = {**repository, "password": repo_password}
+
+        def run_restore_task(task: Task) -> dict[str, Any]:
+            proxmox_storage_id = None
+            try:
+                # Step 1: Mount repository as Proxmox storage
+                task.message = "Mounting backup repository..."
+                task.progress = 10
+                try:
+                    proxmox_storage_id = api.ensure_backer_storage(
+                        repo_with_password,
+                        hypervisor_name=hypervisor["name"],
+                        ssh_user=ssh_user,
+                        ssh_port=ssh_port,
+                        ssh_key=ssh_key_path,
+                        ssh_password=ssh_password,
+                    )
+                except ProxmoxAPIError as e:
+                    raise RuntimeError(f"Failed to mount repository: {e}") from e
+
+                # Step 2: Find which node has the storage active
+                task.message = "Finding target node..."
+                task.progress = 20
+
+                # Wait for storage to be active and get the node where it's mounted
+                max_wait = 30
+                poll_interval = 2
+                waited = 0
+                target_node = None
+
+                while waited < max_wait:
+                    is_active, active_node = api.is_storage_active_on_any_node(proxmox_storage_id)
+                    if is_active and active_node:
+                        target_node = active_node
+                        logger.info(f"Storage '{proxmox_storage_id}' is active on node '{target_node}'")
+                        break
+                    logger.info(f"Waiting for storage to become active... ({waited}s)")
+                    time.sleep(poll_interval)
+                    waited += poll_interval
+
+                if not target_node:
+                    raise RuntimeError(
+                        f"Storage '{proxmox_storage_id}' not active on any node after {max_wait}s. "
+                        "Cannot perform restore."
+                    )
+
+                # Step 3: Build the archive volid
+                # Format: "storage_id:backup/filename"
+                archive = f"{proxmox_storage_id}:backup/{filename}"
+
+                task.message = f"Restoring VMID {vmid} from {filename}..."
+                task.progress = 30
+
+                # Step 4: Perform restore
+                manager = ProxmoxBackupManager(api)
+
+                def progress_callback(status: Any, log_lines: list[str]) -> None:
+                    # Update progress based on log lines
+                    for line in log_lines:
+                        if "extracting" in line.lower():
+                            task.progress = min(task.progress + 5, 90)
+                        if "INFO:" in line:
+                            short_line = line.replace("INFO:", "").strip()[:60]
+                            task.message = f"Restoring: {short_line}"
+
+                result = manager.restore_guest(
+                    vmid=original_vmid,
+                    archive=archive,
+                    node=target_node,
+                    guest_type=ProxmoxGuestType.QEMU if guest_type == "qemu" else ProxmoxGuestType.LXC,
+                    target_vmid=vmid,
+                    storage=target_storage,
+                    force=force,
+                    start_after=start_after,
+                    progress_callback=progress_callback,
+                )
+
+                task.progress = 95
+                task.message = "Cleaning up..."
+
+                return result
+
+            except Exception as e:
+                logger.exception(f"Restore failed: {e}")
+                return {"success": False, "error": str(e)}
+
+            finally:
+                # Step 5: Clean up temporary storage mount
+                if proxmox_storage_id:
+                    try:
+                        api.delete_storage(proxmox_storage_id)
+                        logger.info(f"Cleaned up temporary Proxmox storage '{proxmox_storage_id}'")
+                    except Exception as cleanup_err:
+                        logger.warning(f"Failed to cleanup storage '{proxmox_storage_id}': {cleanup_err}")
+
+        task_manager = get_task_manager()
+        task = task_manager.submit(
+            task_type="hypervisor_restore",
+            description=f"Restoring VMID {vmid} from {filename}",
+            func=run_restore_task,
+        )
+
+        return {
+            "task_id": task.id,
+            "message": f"Restore started for VMID {vmid}",
+            "filename": filename,
         }
 
     # ============ Logs API ============

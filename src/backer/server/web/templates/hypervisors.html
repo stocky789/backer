@@ -746,6 +746,7 @@
 <script>
 let currentHypervisorId = null;
 let editingJobId = null;
+let currentJobId = null;  // Track current job for repository restore
 
 // Escape HTML to prevent XSS
 function escapeHtml(text) {
@@ -1371,6 +1372,7 @@ async function runHypervisorJob(jobId) {
 function viewJobBackups(jobId, hvId) {
     // Open the view hypervisor modal directly to the backups tab
     currentHypervisorId = hvId;
+    currentJobId = jobId;  // Track job ID for repository restore
     document.getElementById('viewHypervisorModal').style.display = 'flex';
 
     // Reset and activate backups tab
@@ -1442,8 +1444,26 @@ async function loadJobBackups(jobId, hvId) {
 }
 
 function showRestoreFromRepoDialog(hvId, filename, guestType, vmid) {
-    // For now, show a message that restore from repository requires re-mounting
-    alert(`To restore "${filename}":\n\n1. The backup will need to be mounted on Proxmox first\n2. Use the Hypervisor's Backups tab to restore once mounted\n\nThis feature is coming soon.`);
+    // Use the restore modal but set up for repository restore
+    document.getElementById('restoreHypervisorId').value = hvId;
+    document.getElementById('restoreArchive').value = filename;  // Just filename for repo restore
+    document.getElementById('restoreNode').value = '';  // Will be auto-selected
+    document.getElementById('restoreGuestType').value = guestType;
+    document.getElementById('restoreBackupName').value = filename;
+    document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
+    document.getElementById('restoreVmid').value = '';
+    document.getElementById('restoreForce').checked = false;
+    document.getElementById('restoreStart').checked = false;
+    document.getElementById('restoreError').style.display = 'none';
+
+    // Mark this as a repository restore
+    document.getElementById('restoreForm').dataset.restoreType = 'repository';
+    document.getElementById('restoreForm').dataset.jobId = currentJobId;
+
+    // Load storage options
+    loadRestoreStorages(hvId);
+
+    document.getElementById('restoreModal').style.display = 'flex';
 }
 
 async function toggleHypervisorJob(jobId) {
@@ -1464,7 +1484,24 @@ async function toggleHypervisorJob(jobId) {
 }
 
 async function deleteHypervisorJob(jobId, jobName) {
-    if (!confirm(`Delete backup job '${jobName}'?`)) {
+    // Show type-to-confirm dialog
+    const userInput = prompt(
+        `⚠️ DELETE JOB: ${jobName}\n\n` +
+        `This will permanently delete:\n` +
+        `• The backup job configuration\n` +
+        `• ALL backup files (.vma.zst) in the repository\n` +
+        `• All metadata for this hypervisor\n\n` +
+        `This action CANNOT be undone.\n\n` +
+        `Type the job name "${jobName}" to confirm deletion:`
+    );
+
+    // Check if user cancelled or typed wrong name
+    if (userInput === null) {
+        return; // User cancelled
+    }
+
+    if (userInput !== jobName) {
+        alert(`Job name doesn't match. Expected "${jobName}" but got "${userInput}".\n\nDeletion cancelled.`);
         return;
     }
 
@@ -1473,17 +1510,17 @@ async function deleteHypervisorJob(jobId, jobName) {
             method: 'DELETE'
         });
 
+        const result = await response.json();
+
         if (response.ok) {
+            let msg = `Job '${jobName}' deleted.\n\nBackups and metadata have been removed from the repository.`;
+            if (result.cleanup_warnings && result.cleanup_warnings.length > 0) {
+                msg += '\n\nWarnings:\n' + result.cleanup_warnings.join('\n');
+            }
+            alert(msg);
             location.reload();
         } else {
-            let errorMsg = `HTTP ${response.status}`;
-            try {
-                const data = await response.json();
-                errorMsg = data.detail || data.message || errorMsg;
-            } catch {
-                const text = await response.text();
-                if (text) errorMsg = text;
-            }
+            let errorMsg = result.detail || result.message || `HTTP ${response.status}`;
             alert('Failed to delete: ' + errorMsg);
         }
     } catch (e) {
@@ -1509,6 +1546,11 @@ function showRestoreDialog(hvId, volid, node, guestType = 'qemu') {
     document.getElementById('restoreForce').checked = false;
     document.getElementById('restoreStart').checked = false;
     document.getElementById('restoreError').style.display = 'none';
+
+    // Mark this as a direct Proxmox storage restore (not repository)
+    const form = document.getElementById('restoreForm');
+    delete form.dataset.restoreType;
+    delete form.dataset.jobId;
 
     // Load storage options
     loadRestoreStorages(hvId);
@@ -1548,38 +1590,80 @@ async function submitRestore(event) {
     const errorDiv = document.getElementById('restoreError');
     errorDiv.style.display = 'none';
 
-    const data = {
-        node: document.getElementById('restoreNode').value,
-        archive: document.getElementById('restoreArchive').value,
-        guest_type: document.getElementById('restoreGuestType').value || 'qemu',
-        vmid: document.getElementById('restoreVmid').value ? parseInt(document.getElementById('restoreVmid').value) : null,
-        storage: document.getElementById('restoreStorage').value || null,
-        force: document.getElementById('restoreForce').checked,
-        start: document.getElementById('restoreStart').checked,
-    };
-
+    const form = document.getElementById('restoreForm');
+    const restoreType = form.dataset.restoreType;
+    const jobId = form.dataset.jobId;
     const hvId = document.getElementById('restoreHypervisorId').value;
 
-    try {
-        const response = await fetch(`/api/v1/hypervisors/${hvId}/restore`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(data)
-        });
+    // Check if this is a repository restore or direct Proxmox storage restore
+    if (restoreType === 'repository' && jobId) {
+        // Repository restore - uses the job endpoint which mounts storage automatically
+        const data = {
+            filename: document.getElementById('restoreArchive').value,
+            guest_type: document.getElementById('restoreGuestType').value || 'qemu',
+            vmid: document.getElementById('restoreVmid').value ? parseInt(document.getElementById('restoreVmid').value) : null,
+            storage: document.getElementById('restoreStorage').value || null,
+            force: document.getElementById('restoreForce').checked,
+            start: document.getElementById('restoreStart').checked,
+        };
 
-        const result = await response.json();
+        try {
+            const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}/restore`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
 
-        if (response.ok) {
-            alert(`Restore started!\n\nTask ID: ${result.upid || result.task_id}`);
-            hideRestoreModal();
-        } else {
-            errorDiv.textContent = result.detail || 'Failed to start restore';
+            const result = await response.json();
+
+            if (response.ok) {
+                alert(`Restore started!\n\nTask ID: ${result.task_id}\n\nThe backup repository will be temporarily mounted on Proxmox to perform the restore.`);
+                hideRestoreModal();
+            } else {
+                errorDiv.textContent = result.detail || 'Failed to start restore';
+                errorDiv.style.display = 'block';
+            }
+        } catch (e) {
+            errorDiv.textContent = 'Error: ' + e.message;
             errorDiv.style.display = 'block';
         }
-    } catch (e) {
-        errorDiv.textContent = 'Error: ' + e.message;
-        errorDiv.style.display = 'block';
+    } else {
+        // Direct Proxmox storage restore
+        const data = {
+            node: document.getElementById('restoreNode').value,
+            archive: document.getElementById('restoreArchive').value,
+            guest_type: document.getElementById('restoreGuestType').value || 'qemu',
+            vmid: document.getElementById('restoreVmid').value ? parseInt(document.getElementById('restoreVmid').value) : null,
+            storage: document.getElementById('restoreStorage').value || null,
+            force: document.getElementById('restoreForce').checked,
+            start: document.getElementById('restoreStart').checked,
+        };
+
+        try {
+            const response = await fetch(`/api/v1/hypervisors/${hvId}/restore`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+
+            if (response.ok) {
+                alert(`Restore started!\n\nTask ID: ${result.upid || result.task_id}`);
+                hideRestoreModal();
+            } else {
+                errorDiv.textContent = result.detail || 'Failed to start restore';
+                errorDiv.style.display = 'block';
+            }
+        } catch (e) {
+            errorDiv.textContent = 'Error: ' + e.message;
+            errorDiv.style.display = 'block';
+        }
     }
+
+    // Clear the restore type marker
+    delete form.dataset.restoreType;
+    delete form.dataset.jobId;
 }
 
 // Close restore modal on background click
