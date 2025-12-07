@@ -250,6 +250,144 @@
     });
     </script>
 
+    <!-- Confirm Modal (reusable) -->
+    <div id="confirmModal" class="modal" style="display: none;">
+        <div class="modal-content confirm-modal">
+            <div class="modal-header">
+                <div class="confirm-icon">
+                    <span id="confirmIconText">⚠</span>
+                </div>
+                <h3 class="confirm-title" id="confirmTitle">Confirm Action</h3>
+                <button class="btn btn-secondary btn-sm" onclick="hideConfirmModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-message" id="confirmMessage">Are you sure you want to proceed?</p>
+                <div class="confirm-details" id="confirmDetails" style="display: none;">
+                    <ul id="confirmDetailsList"></ul>
+                </div>
+                <div class="confirm-input-group" id="confirmInputGroup" style="display: none;">
+                    <label class="confirm-input-label" id="confirmInputLabel">Type to confirm:</label>
+                    <input type="text" class="confirm-input" id="confirmInput" autocomplete="off">
+                    <div class="confirm-error" id="confirmError">Input does not match</div>
+                </div>
+            </div>
+            <div class="modal-footer" style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button class="btn btn-secondary" onclick="hideConfirmModal()">Cancel</button>
+                <button class="btn btn-danger" id="confirmButton" onclick="executeConfirmAction()">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Modal JavaScript -->
+    <script>
+    let confirmModalCallback = null;
+    let confirmModalExpectedValue = null;
+
+    function showConfirmModal(options) {
+        const modal = document.getElementById('confirmModal');
+        const modalContent = modal.querySelector('.confirm-modal');
+        const title = document.getElementById('confirmTitle');
+        const message = document.getElementById('confirmMessage');
+        const details = document.getElementById('confirmDetails');
+        const detailsList = document.getElementById('confirmDetailsList');
+        const inputGroup = document.getElementById('confirmInputGroup');
+        const inputLabel = document.getElementById('confirmInputLabel');
+        const input = document.getElementById('confirmInput');
+        const confirmBtn = document.getElementById('confirmButton');
+        const icon = document.getElementById('confirmIconText');
+        const error = document.getElementById('confirmError');
+
+        // Reset state
+        modalContent.classList.remove('confirm-danger', 'confirm-warning');
+        input.classList.remove('error');
+        error.classList.remove('visible');
+        input.value = '';
+
+        // Set type (danger, warning)
+        if (options.type === 'danger') {
+            modalContent.classList.add('confirm-danger');
+            icon.textContent = '⚠';
+        } else if (options.type === 'warning') {
+            modalContent.classList.add('confirm-warning');
+            icon.textContent = '⚠';
+        }
+
+        // Set content
+        title.textContent = options.title || 'Confirm Action';
+        message.textContent = options.message || 'Are you sure?';
+        confirmBtn.textContent = options.confirmText || 'Confirm';
+
+        // Set details list
+        if (options.details && options.details.length > 0) {
+            detailsList.innerHTML = options.details.map(d => `<li>${escapeHtml(d)}</li>`).join('');
+            details.style.display = 'block';
+        } else {
+            details.style.display = 'none';
+        }
+
+        // Set input requirement
+        if (options.requireInput) {
+            inputLabel.textContent = options.inputLabel || 'Type to confirm:';
+            inputGroup.style.display = 'block';
+            confirmModalExpectedValue = options.requireInput;
+            confirmBtn.disabled = true;
+
+            // Enable button only when input matches
+            input.oninput = function() {
+                const matches = input.value === confirmModalExpectedValue;
+                confirmBtn.disabled = !matches;
+                if (input.value && !matches) {
+                    input.classList.add('error');
+                    error.classList.add('visible');
+                } else {
+                    input.classList.remove('error');
+                    error.classList.remove('visible');
+                }
+            };
+        } else {
+            inputGroup.style.display = 'none';
+            confirmModalExpectedValue = null;
+            confirmBtn.disabled = false;
+        }
+
+        // Store callback
+        confirmModalCallback = options.onConfirm;
+
+        // Show modal
+        modal.style.display = 'flex';
+
+        // Focus input if present
+        if (options.requireInput) {
+            setTimeout(() => input.focus(), 100);
+        }
+    }
+
+    function hideConfirmModal() {
+        document.getElementById('confirmModal').style.display = 'none';
+        confirmModalCallback = null;
+        confirmModalExpectedValue = null;
+    }
+
+    function executeConfirmAction() {
+        if (confirmModalCallback) {
+            confirmModalCallback();
+        }
+        hideConfirmModal();
+    }
+
+    // Close modal on background click
+    document.getElementById('confirmModal')?.addEventListener('click', function(e) {
+        if (e.target === this) hideConfirmModal();
+    });
+
+    // Close modal on Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && document.getElementById('confirmModal').style.display === 'flex') {
+            hideConfirmModal();
+        }
+    });
+    </script>
+
     {% block scripts %}{% endblock %}
 </body>
 </html>

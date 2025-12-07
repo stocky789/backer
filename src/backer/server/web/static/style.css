@@ -483,6 +483,117 @@ pre {
     gap: 10px;
 }
 
+/* Confirm Dialog Modal */
+.confirm-modal {
+    max-width: 420px;
+}
+
+.confirm-modal .modal-header {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.confirm-modal .modal-body {
+    padding-top: 10px;
+}
+
+.confirm-modal.confirm-danger .modal-header {
+    color: var(--error);
+}
+
+.confirm-modal .confirm-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    margin-bottom: 16px;
+}
+
+.confirm-modal.confirm-danger .confirm-icon {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--error);
+}
+
+.confirm-modal.confirm-warning .confirm-icon {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--warning);
+}
+
+.confirm-modal .confirm-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.confirm-modal .confirm-message {
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.5;
+    margin-bottom: 16px;
+}
+
+.confirm-modal .confirm-details {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 16px;
+}
+
+.confirm-modal .confirm-details ul {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.confirm-modal .confirm-details li {
+    margin-bottom: 4px;
+}
+
+.confirm-modal .confirm-input-group {
+    margin-top: 16px;
+}
+
+.confirm-modal .confirm-input-label {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.confirm-modal .confirm-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text);
+    font-size: 14px;
+}
+
+.confirm-modal .confirm-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.confirm-modal .confirm-input.error {
+    border-color: var(--error);
+}
+
+.confirm-modal .confirm-error {
+    color: var(--error);
+    font-size: 12px;
+    margin-top: 6px;
+    display: none;
+}
+
+.confirm-modal .confirm-error.visible {
+    display: block;
+}
+
 /* Animations */
 @keyframes pulse {
     0%, 100% { opacity: 1; }

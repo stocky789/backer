@@ -1483,49 +1483,39 @@ async function toggleHypervisorJob(jobId) {
     }
 }
 
-async function deleteHypervisorJob(jobId, jobName) {
-    // Show type-to-confirm dialog
-    const userInput = prompt(
-        `⚠️ DELETE JOB: ${jobName}\n\n` +
-        `This will permanently delete:\n` +
-        `• The backup job configuration\n` +
-        `• ALL backup files (.vma.zst) in the repository\n` +
-        `• All metadata for this hypervisor\n\n` +
-        `This action CANNOT be undone.\n\n` +
-        `Type the job name "${jobName}" to confirm deletion:`
-    );
+function deleteHypervisorJob(jobId, jobName) {
+    // Show styled confirm modal with type-to-confirm
+    showConfirmModal({
+        type: 'danger',
+        title: `Delete Job: ${jobName}`,
+        message: 'This action CANNOT be undone.',
+        details: [
+            'The backup job configuration',
+            'ALL backup files (.vma.zst) in the repository',
+            'All metadata for this hypervisor'
+        ],
+        requireInput: jobName,
+        inputLabel: `Type "${jobName}" to confirm deletion:`,
+        confirmText: 'Delete Job',
+        onConfirm: async () => {
+            try {
+                const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`, {
+                    method: 'DELETE'
+                });
 
-    // Check if user cancelled or typed wrong name
-    if (userInput === null) {
-        return; // User cancelled
-    }
+                const result = await response.json();
 
-    if (userInput !== jobName) {
-        alert(`Job name doesn't match. Expected "${jobName}" but got "${userInput}".\n\nDeletion cancelled.`);
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`, {
-            method: 'DELETE'
-        });
-
-        const result = await response.json();
-
-        if (response.ok) {
-            let msg = `Job '${jobName}' deleted.\n\nBackups and metadata have been removed from the repository.`;
-            if (result.cleanup_warnings && result.cleanup_warnings.length > 0) {
-                msg += '\n\nWarnings:\n' + result.cleanup_warnings.join('\n');
+                if (response.ok) {
+                    location.reload();
+                } else {
+                    let errorMsg = result.detail || result.message || `HTTP ${response.status}`;
+                    alert('Failed to delete: ' + errorMsg);
+                }
+            } catch (e) {
+                alert('Delete failed: ' + e.message);
             }
-            alert(msg);
-            location.reload();
-        } else {
-            let errorMsg = result.detail || result.message || `HTTP ${response.status}`;
-            alert('Failed to delete: ' + errorMsg);
         }
-    } catch (e) {
-        alert('Delete failed: ' + e.message);
-    }
+    });
 }
 
 // Close job modal on background click
