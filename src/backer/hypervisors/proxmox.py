@@ -1141,12 +1141,19 @@ class ProxmoxAPI:
         logger.info(f"Attempting to clean up stale mount point: {mount_point}")
 
         # Build SSH command with connection timeout
+        # Note: BatchMode=yes disables password prompts, so we only use it with key auth
+        # For password auth via sshpass, we need to allow password prompts
+        use_password = ssh_password and not ssh_key
         ssh_cmd = [
             "ssh",
             "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
         ]
+
+        # Only use BatchMode when not using password auth
+        # BatchMode=yes disables password prompts which breaks sshpass
+        if not use_password:
+            ssh_cmd.extend(["-o", "BatchMode=yes"])
 
         if ssh_key:
             ssh_cmd.extend(["-i", ssh_key])
@@ -1158,7 +1165,7 @@ class ProxmoxAPI:
         def run_ssh(cmd_str: str, timeout: int = 15) -> tuple[int, str, str]:
             """Run SSH command and return (returncode, stdout, stderr)."""
             full_ssh = ssh_cmd + [cmd_str]
-            if ssh_password and not ssh_key:
+            if use_password:
                 full_ssh = ["sshpass", "-p", ssh_password] + full_ssh
             result = subprocess.run(full_ssh, capture_output=True, timeout=timeout, text=True)
             return (

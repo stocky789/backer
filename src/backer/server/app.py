@@ -4213,9 +4213,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get repository password
         repo_password = storage.get_repository_password(repository_id)
 
+        # Handle NFS repositories
+        if repo_type == "nfs" and server:
+            nfs_export = repository.get("share") or repository.get("path", "")
+            if nfs_export:
+                return _get_job_backups_from_nfs(
+                    server=server,
+                    export=nfs_export,
+                    hypervisor_name=hypervisor["name"],
+                    storage=storage,
+                    job_id=job_id,
+                )
+
         if repo_type != "smb" or not server or not share:
-            # For non-SMB repos, fall back to local storage runs
-            # TODO: Support NFS and local repos
+            # For unsupported repo types, fall back to local storage runs
             return _get_job_backups_from_local_storage(storage, job_id)
 
         # Build the path to metadata: {repo_path}/Hypervisors/{hypervisor_name}/.backer/
@@ -4309,6 +4320,115 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except Exception as e:
             logger.warning(f"Error listing backups from SMB: {e}")
             return _get_job_backups_from_local_storage(storage, job_id)
+
+    def _get_job_backups_from_nfs(
+        server: str,
+        export: str,
+        hypervisor_name: str,
+        storage: Storage,
+        job_id: str,
+    ) -> list[dict[str, Any]]:
+        """List vzdump backups from an NFS share by temporarily mounting it."""
+        import re
+        import subprocess
+        import tempfile
+
+        mount_point = tempfile.mkdtemp(prefix="backer_nfs_list_")
+        backups: list[dict[str, Any]] = []
+        mounted = False
+
+        try:
+            # Mount the NFS export
+            mount_cmd = [
+                "sudo", "-n", "mount", "-t", "nfs",
+                "-o", "soft,timeo=50,retrans=2,ro",  # read-only, soft mount
+                f"{server}:{export}",
+                mount_point,
+            ]
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                logger.warning(f"Failed to mount NFS for backup listing: {result.stderr.strip()}")
+                return _get_job_backups_from_local_storage(storage, job_id)
+
+            mounted = True
+
+            # List vzdump files in dump/ directory (where Proxmox stores backups)
+            dump_path = Path(mount_point) / "dump"
+
+            if dump_path.exists() and dump_path.is_dir():
+                # Collect entries first to avoid issues if NFS becomes unresponsive during iteration
+                try:
+                    entries = list(dump_path.iterdir())
+                except OSError as e:
+                    logger.warning(f"Failed to list NFS directory: {e}")
+                    entries = []  # Continue to finally block for cleanup
+
+                for entry in entries:
+                    if not entry.name.startswith("vzdump-"):
+                        continue
+
+                    # Parse vzdump filename: vzdump-qemu-100-2025_12_07-15_09_27.vma.zst
+                    vzdump_match = re.match(
+                        r"vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.vma(?:\.(zst|gz|lzo))?$",
+                        entry.name
+                    )
+                    if vzdump_match:
+                        guest_type = vzdump_match.group(1)
+                        vmid = vzdump_match.group(2)
+                        date_str = vzdump_match.group(3)
+                        time_str = vzdump_match.group(4)
+                        compression = vzdump_match.group(5)
+
+                        try:
+                            # Get file size (may fail on stale NFS)
+                            try:
+                                size = entry.stat().st_size
+                            except OSError:
+                                size = 0
+
+                            # Parse backup time from filename
+                            backup_time = datetime.strptime(f"{date_str}_{time_str}", "%Y_%m_%d_%H_%M_%S")
+
+                            backups.append({
+                                "filename": entry.name,
+                                "volid": f"backup/{entry.name}",
+                                "vmid": int(vmid),
+                                "guest_type": guest_type,
+                                "ctime": backup_time.timestamp(),
+                                "size": size,
+                                "format": "vma",
+                                "node": hypervisor_name,
+                                "compression": compression or "none",
+                            })
+                        except ValueError as e:
+                            logger.debug(f"Failed to parse backup {entry.name}: {e}")
+
+            # Sort by time descending
+            backups.sort(key=lambda x: x.get("ctime", 0), reverse=True)
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout mounting NFS {server}:{export} for backup listing")
+            return _get_job_backups_from_local_storage(storage, job_id)
+        except Exception as e:
+            logger.warning(f"Error listing backups from NFS: {e}")
+            return _get_job_backups_from_local_storage(storage, job_id)
+        finally:
+            # Unmount and cleanup - always try even if mount failed
+            if mounted:
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "umount", "-l", mount_point],  # lazy unmount for reliability
+                        capture_output=True,
+                        timeout=30
+                    )
+                except Exception:
+                    pass
+            try:
+                Path(mount_point).rmdir()
+            except Exception:
+                pass
+
+        return backups[:50]
 
     def _get_job_backups_from_local_storage(storage: Storage, job_id: str) -> list[dict[str, Any]]:
         """Get backup history from local database for a hypervisor job."""
