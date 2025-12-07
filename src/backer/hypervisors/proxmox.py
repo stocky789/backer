@@ -130,6 +130,16 @@ class ProxmoxStorage:
         """Check if storage supports backups."""
         return "backup" in self.content
 
+    @property
+    def supports_lxc(self) -> bool:
+        """Check if storage supports LXC container rootfs."""
+        return "rootdir" in self.content
+
+    @property
+    def supports_vm_images(self) -> bool:
+        """Check if storage supports VM disk images."""
+        return "images" in self.content
+
 
 @dataclass
 class ProxmoxNode:
@@ -788,6 +798,70 @@ class ProxmoxAPI:
             ))
 
         return [s for s in storages if s.supports_backup]
+
+    def list_all_storages(self, node: str) -> list[ProxmoxStorage]:
+        """List all storage locations on a node (not just backup-capable).
+
+        Args:
+            node: Node name to query storage from
+
+        Returns:
+            List of all ProxmoxStorage objects
+        """
+        endpoint = f"/nodes/{node}/storage"
+        data = self._make_request("GET", endpoint) or []
+        storages = []
+
+        for item in data:
+            content = item.get("content", "")
+            if isinstance(content, str):
+                content = content.split(",") if content else []
+
+            storages.append(ProxmoxStorage(
+                storage=item.get("storage", ""),
+                type=item.get("type", ""),
+                content=content,
+                node=node,
+                path=item.get("path", ""),
+                active=item.get("active", 1) == 1,
+                enabled=item.get("enabled", 1) == 1,
+                shared=item.get("shared", 0) == 1,
+                total=item.get("total", 0),
+                used=item.get("used", 0),
+                avail=item.get("avail", 0),
+            ))
+
+        return storages
+
+    def find_default_storage(self, node: str, guest_type: "ProxmoxGuestType") -> str | None:
+        """Find a suitable default storage for a guest type.
+
+        Args:
+            node: Node to search storage on
+            guest_type: QEMU or LXC
+
+        Returns:
+            Storage ID or None if no suitable storage found
+        """
+        storages = self.list_all_storages(node)
+
+        # Filter by guest type requirements
+        if guest_type == ProxmoxGuestType.LXC:
+            suitable = [s for s in storages if s.supports_lxc and s.active and s.enabled]
+        else:
+            suitable = [s for s in storages if s.supports_vm_images and s.active and s.enabled]
+
+        if not suitable:
+            return None
+
+        # Prefer "local-lvm" or "local-zfs" as common defaults, then any suitable storage
+        for preferred in ["local-lvm", "local-zfs", "local"]:
+            for s in suitable:
+                if s.storage == preferred:
+                    return s.storage
+
+        # Return first suitable storage
+        return suitable[0].storage
 
     def get_storage(self, storage_id: str) -> dict[str, Any] | None:
         """Get a specific storage by ID.
@@ -2559,6 +2633,19 @@ class ProxmoxBackupManager:
                 # If guest doesn't exist, that's fine - we're restoring fresh
                 if "does not exist" not in str(e).lower() and "not found" not in str(e).lower():
                     raise
+
+        # For LXC containers, we MUST have a storage that supports rootdir
+        # If no storage specified, find a suitable default
+        if not storage:
+            default_storage = self.api.find_default_storage(node, guest_type)
+            if default_storage:
+                logger.info(f"Using default storage '{default_storage}' for {guest_type.value} restore")
+                storage = default_storage
+            elif guest_type == ProxmoxGuestType.LXC:
+                raise ProxmoxAPIError(
+                    "No suitable storage found for LXC container restore. "
+                    "Please specify a storage that supports 'rootdir' content type."
+                )
 
         upid = self.api.restore_guest(
             node=node,
