@@ -1002,11 +1002,13 @@ class ProxmoxAPI:
 
         logger.info(f"Ensured SMB directory exists: //{server}/{share}/{path}")
 
-        # Add a small delay to allow the NAS to fully commit the directory
+        # Add a delay to allow the NAS to fully commit the directory
         # This helps with race conditions where Proxmox CIFS mount doesn't
-        # see the newly created directory immediately
+        # see the newly created directory immediately. TrueNAS and other NAS
+        # devices may have slight delays in making new directories visible
+        # to other clients.
         import time
-        time.sleep(1)
+        time.sleep(2)
 
     def _cleanup_stale_mount_point(
         self,
@@ -1318,6 +1320,7 @@ class ProxmoxAPI:
         ssh_port: int = 22,
         ssh_key: str | None = None,
         ssh_password: str | None = None,
+        smbversion: str | None = None,
     ) -> str:
         """Ensure a Backer repository is configured as Proxmox storage.
 
@@ -1342,6 +1345,8 @@ class ProxmoxAPI:
             ssh_key: Path to SSH private key
             ssh_password: SSH password (used if no key provided)
             storage_id: Override storage ID (default: "backer-{repo_name}")
+            smbversion: SMB protocol version (2.0, 2.1, 3, 3.0, 3.11, or default)
+                       If not specified, defaults to "3.0" for better NAS compatibility.
 
         Returns:
             The storage ID to use for backups
@@ -1453,15 +1458,15 @@ class ProxmoxAPI:
             domain = repository.get("domain")
 
             # Build subdir: {repo_path}/Hypervisors/{hypervisor_name}
-            # Note: Proxmox subdir should NOT have a leading slash - it's relative to share root
+            # Note: Proxmox requires subdir to be an absolute path (with leading slash)
             base_path = repository.get("path", "").strip("/")
             if hypervisor_name:
                 # Sanitize hypervisor name for folder
                 safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
                 subdir_parts = [p for p in [base_path, "Hypervisors", safe_hv_name] if p]
-                subdir = "/".join(subdir_parts)  # No leading slash
+                subdir = "/" + "/".join(subdir_parts)
             elif base_path:
-                subdir = base_path  # No leading slash
+                subdir = f"/{base_path}"
             else:
                 subdir = None
 
@@ -1477,9 +1482,14 @@ class ProxmoxAPI:
                     domain=domain,
                 )
 
+            # Use provided SMB version or default to 3.0 for modern NAS compatibility
+            # SMB 3.0 is widely supported by TrueNAS, Synology, QNAP, and other modern NAS
+            effective_smbversion = smbversion or repository.get("smb_version") or "3.0"
+
             logger.info(
                 f"Creating CIFS storage '{storage_id}' -> //{server}/{share} "
-                f"(user={username or 'guest'}, domain={domain or 'none'}, subdir={subdir or 'none'})"
+                f"(user={username or 'guest'}, domain={domain or 'none'}, "
+                f"subdir={subdir or 'none'}, smbversion={effective_smbversion})"
             )
 
             # Retry logic for storage creation - handles race condition where
@@ -1497,6 +1507,7 @@ class ProxmoxAPI:
                         password=password,
                         domain=domain,
                         subdir=subdir,
+                        smbversion=effective_smbversion,
                     )
                     break  # Success
                 except ProxmoxAPIError as e:
@@ -1529,17 +1540,22 @@ class ProxmoxAPI:
                             hint_msg = (
                                 f"Failed to activate storage '{storage_id}' after {max_retries} attempts.\n"
                                 f"Proxmox returned: {error_str}\n\n"
+                                f"Storage config: server={server}, share={share}, subdir={subdir}, "
+                                f"smbversion={effective_smbversion}\n\n"
                                 f"Possible causes:\n"
                                 f"1. Proxmox host ({self.host}) cannot reach SMB server ({server})\n"
-                                f"2. SMB credentials are incorrect or insufficient permissions\n"
-                                f"3. Stale mount point exists at /mnt/pve/{storage_id}\n\n"
+                                f"2. The subdir '{subdir}' does not exist on the share\n"
+                                f"3. SMB credentials are incorrect or insufficient permissions\n"
+                                f"4. SMB version mismatch - try a different version\n"
+                                f"5. Stale mount point exists at /mnt/pve/{storage_id}\n\n"
                                 f"To fix stale mount:\n"
                                 f"  ssh root@{self.host}\n"
                                 f"  umount -l /mnt/pve/{storage_id}\n"
                                 f"  rmdir /mnt/pve/{storage_id}\n\n"
                                 f"To test SMB from Proxmox:\n"
                                 f"  ssh root@{self.host}\n"
-                                f"  smbclient //{server}/{share} -U {username or 'guest'}"
+                                f"  smbclient //{server}/{share} -U {username or 'guest'} "
+                                f"-m SMB{effective_smbversion.replace('.', '')} -c 'cd {subdir}'"
                             )
                             raise ProxmoxAPIError(hint_msg) from e
 
@@ -1574,6 +1590,7 @@ class ProxmoxAPI:
                                     password=password,
                                     domain=domain,
                                     subdir=subdir,
+                                    smbversion=effective_smbversion,
                                 )
                                 break
                             else:
