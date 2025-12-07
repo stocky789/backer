@@ -1809,22 +1809,40 @@ class ProxmoxAPI:
         unique: bool = False,
         start: bool = False,
         bwlimit: int | None = None,
+        live_restore: bool = False,
     ) -> str:
         """Restore a VM or container from backup.
+
+        This method handles all VM configurations including:
+        - Standard BIOS VMs
+        - UEFI VMs with EFI disk (efidisk0)
+        - VMs with TPM state (tpmstate0) for Windows 11/Server 2022
+        - VMs with multiple disks on different storage
+
+        The vzdump backup archive contains the complete VM configuration
+        and all disk data, so restoring recreates the VM exactly as it was.
 
         Args:
             node: Target node for restore
             vmid: Target VM/container ID
             archive: Backup volume ID (e.g., "local:backup/vzdump-qemu-100-...")
             guest_type: QEMU or LXC
-            storage: Target storage for disks (optional, uses original if not set)
+            storage: Target storage for disks (optional, uses original if not set).
+                    This applies to all disks including efidisk0 and tpmstate0.
             force: Overwrite existing guest with same ID
-            unique: Assign unique random MAC addresses
+            unique: Assign unique random MAC addresses (useful for restoring
+                   deleted VMs to avoid network conflicts)
             start: Start guest after restore
             bwlimit: Bandwidth limit in KiB/s
+            live_restore: Start VM immediately and restore data in background
+                         (only works with Proxmox Backup Server archives)
 
         Returns:
             UPID of the restore task
+
+        Note:
+            For UEFI VMs, ensure the target storage supports the EFI disk format.
+            For TPM-enabled VMs, the target storage must support raw format.
         """
         endpoint = f"/nodes/{node}/{guest_type.value}"
 
@@ -1850,6 +1868,9 @@ class ProxmoxAPI:
             data["start"] = 1
         if bwlimit is not None:
             data["bwlimit"] = bwlimit
+        if live_restore and guest_type == ProxmoxGuestType.QEMU:
+            # Live restore only works with PBS backups for QEMU VMs
+            data["live-restore"] = 1
 
         result = self._make_request("POST", endpoint, data=data)
 
@@ -2245,10 +2266,17 @@ class ProxmoxBackupManager:
         storage: str | None = None,
         force: bool = False,
         start_after: bool = False,
+        unique: bool = False,
         progress_callback: Any | None = None,
         timeout: int = 7200,
     ) -> dict[str, Any]:
         """Restore a VM or container from backup.
+
+        This method fully restores VMs including:
+        - All disk data (system disks, data disks)
+        - EFI disk (efidisk0) for UEFI VMs
+        - TPM state (tpmstate0) for Windows 11/Server 2022
+        - Complete VM configuration (CPU, RAM, network, etc.)
 
         Args:
             vmid: Original VM/container ID (for finding backup)
@@ -2256,9 +2284,11 @@ class ProxmoxBackupManager:
             node: Target node for restore
             guest_type: QEMU or LXC
             target_vmid: Target VM ID (defaults to original)
-            storage: Target storage for disks
+            storage: Target storage for disks (applies to all disks)
             force: Overwrite existing guest
             start_after: Start guest after restore
+            unique: Assign unique random MAC addresses (recommended when
+                   restoring a deleted VM to avoid network conflicts)
             progress_callback: Optional callback for progress updates
             timeout: Maximum restore time in seconds
 
@@ -2302,6 +2332,7 @@ class ProxmoxBackupManager:
             guest_type=guest_type,
             storage=storage,
             force=force,
+            unique=unique,
             start=start_after,
         )
 
@@ -2337,6 +2368,39 @@ class ProxmoxBackupManager:
                 if "error" in line.lower() or "failed" in line.lower()
             ]
             result["errors"] = error_lines or [final_status.exitstatus]
+
+            # Provide helpful hints for common EFI/TPM restore issues
+            error_text = " ".join(str(e) for e in result["errors"]).lower()
+            hints = []
+
+            if "efidisk" in error_text or "efi" in error_text:
+                if "unexpected size" in error_text:
+                    hints.append(
+                        "EFI disk size mismatch: The backup may have been created with a different "
+                        "OVMF format (2M vs 4M). Try restoring to a storage that supports the "
+                        "original EFI disk size."
+                    )
+                else:
+                    hints.append(
+                        "EFI disk restore issue: Ensure the target storage supports EFI disk format. "
+                        "Some storage types may require specific configuration for UEFI VMs."
+                    )
+
+            if "tpmstate" in error_text or "tpm" in error_text:
+                hints.append(
+                    "TPM state restore issue: TPM state requires raw format storage. "
+                    "Ensure the target storage supports raw disk format. "
+                    "Note: TPM state cannot be cloned, only restored from backup."
+                )
+
+            if "storage" in error_text and "not found" in error_text:
+                hints.append(
+                    "The original storage used by this VM doesn't exist on the target node. "
+                    "Specify a different target storage using the 'storage' parameter."
+                )
+
+            if hints:
+                result["hints"] = hints
 
         return result
 

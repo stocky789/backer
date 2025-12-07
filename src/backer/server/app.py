@@ -4253,6 +4253,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         target_storage = body.get("storage")
         force = body.get("force", False)
         start_after = body.get("start", False)
+        unique = body.get("unique", False)  # Regenerate MAC addresses
 
         if not archive or not node:
             raise HTTPException(status_code=400, detail="archive and node are required")
@@ -4302,6 +4303,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     storage=target_storage,
                     force=force,
                     start_after=start_after,
+                    unique=unique,
                 )
 
                 task.progress = 100
@@ -4366,6 +4368,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         force = body.get("force", False)
         start_after = body.get("start", False)
         guest_type = body.get("guest_type", "qemu")
+        unique = body.get("unique", False)  # Regenerate MAC addresses
 
         if not filename:
             raise HTTPException(status_code=400, detail="filename is required")
@@ -4490,6 +4493,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     storage=target_storage,
                     force=force,
                     start_after=start_after,
+                    unique=unique,
                     progress_callback=progress_callback,
                 )
 
