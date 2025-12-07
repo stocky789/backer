@@ -2480,6 +2480,313 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "repository_id": repo_id,
             }
 
+    @app.post("/api/v1/repositories/{repo_id}/import-hypervisor-jobs")
+    def import_hypervisor_jobs_endpoint(
+        repo_id: str,
+        hypervisor_id: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Import hypervisor job configurations from repository metadata.
+
+        Scans the repository for hypervisor backup metadata and imports job
+        configurations. This enables recovery of job configurations after
+        reinstalling the Backer server.
+
+        The metadata is stored in: {repo}/Hypervisors/{hypervisor_name}/.backer/
+
+        Args:
+            repo_id: Repository ID to scan
+            hypervisor_id: Optional - only import jobs for this hypervisor
+        """
+        import json as json_module
+        import subprocess
+        import tempfile
+        from datetime import datetime as dt
+
+        from backer.server.repositories import smb_list_files, smb_read_file
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        repo_type = repo.get("repo_type", "smb")
+        subpath = repo.get("path", "")
+        server = repo.get("server", "")
+        share = repo.get("share", "")
+        username = repo.get("username")
+        password = storage.get_repository_password(repo_id)
+        domain = repo.get("domain")
+
+        imported = {"hypervisors": 0, "jobs": 0, "guests": 0, "skipped_jobs": 0}
+        errors: list[str] = []
+
+        try:
+            if repo_type == "smb":
+                # Build auth for smbclient
+                auth_parts = []
+                if username:
+                    pw = password or ''
+                    if domain:
+                        auth_parts.extend(["-U", f"{domain}\\{username}%{pw}"])
+                    else:
+                        auth_parts.extend(["-U", f"{username}%{pw}"])
+                else:
+                    auth_parts.extend(["-N"])
+
+                # List hypervisors in Hypervisors/ directory
+                hypervisors_path = f"{subpath}/Hypervisors" if subpath else "Hypervisors"
+                ok, hv_dirs = smb_list_files(server, share, hypervisors_path, username, password, domain)
+
+                if not ok:
+                    return {
+                        "success": False,
+                        "error": "No Hypervisors directory found in repository",
+                        "repository_id": repo_id,
+                    }
+
+                for hv_dir in hv_dirs:
+                    if hv_dir.startswith("."):
+                        continue
+
+                    # Read hypervisor jobs from .backer/hypervisor_jobs/
+                    jobs_path = f"{hypervisors_path}/{hv_dir}/.backer/hypervisor_jobs"
+                    ok2, job_files = smb_list_files(server, share, jobs_path, username, password, domain)
+
+                    if not ok2:
+                        continue
+
+                    for job_file in job_files:
+                        if not job_file.endswith(".json"):
+                            continue
+
+                        ok3, job_content = smb_read_file(
+                            server, share, f"{jobs_path}/{job_file}",
+                            username, password, domain
+                        )
+
+                        if not ok3:
+                            continue
+
+                        try:
+                            job_data = json_module.loads(job_content)
+                            job_id = job_data.get("job_id")
+                            job_name = job_data.get("name")
+                            job_hv_id = job_data.get("hypervisor_id")
+
+                            if not job_id or not job_name:
+                                continue
+
+                            # Filter by hypervisor_id if specified
+                            if hypervisor_id and job_hv_id != hypervisor_id:
+                                continue
+
+                            # Check if job already exists
+                            existing = storage.get_hypervisor_job(job_id)
+                            if existing:
+                                imported["skipped_jobs"] += 1
+                                continue
+
+                            # Check if job name already exists
+                            existing_by_name = storage.get_hypervisor_job_by_name(job_name)
+                            if existing_by_name:
+                                imported["skipped_jobs"] += 1
+                                continue
+
+                            # Check if the hypervisor exists
+                            hv = storage.get_hypervisor(job_hv_id)
+                            if not hv:
+                                # Try to find hypervisor by name or host
+                                hv_name = job_data.get("hypervisor_name")
+                                hv_host = job_data.get("hypervisor_host")
+
+                                all_hvs = storage.list_hypervisors()
+                                for existing_hv in all_hvs:
+                                    if existing_hv["name"] == hv_name or existing_hv["host"] == hv_host:
+                                        job_hv_id = existing_hv["id"]
+                                        hv = existing_hv
+                                        break
+
+                                if not hv:
+                                    errors.append(f"Hypervisor not found for job '{job_name}'")
+                                    continue
+
+                            # Create the job
+                            guest_ids = job_data.get("guest_ids")
+                            if guest_ids:
+                                guest_ids_json = json_module.dumps(guest_ids)
+                            else:
+                                guest_ids_json = None
+
+                            storage.add_hypervisor_job(
+                                job_id=job_id,
+                                name=job_name,
+                                hypervisor_id=job_hv_id,
+                                guest_ids=guest_ids_json,
+                                repository_id=repo_id,
+                                backup_mode=job_data.get("backup_mode", "snapshot"),
+                                compression=job_data.get("compression", "zstd"),
+                                schedule_cron=job_data.get("schedule_cron"),
+                                enabled=job_data.get("enabled", True),
+                                delete_before_backup=job_data.get("delete_before_backup", False),
+                            )
+                            imported["jobs"] += 1
+                            logger.info(f"Imported hypervisor job '{job_name}' from repository")
+
+                        except json_module.JSONDecodeError as e:
+                            errors.append(f"Invalid JSON in {job_file}: {e}")
+                        except Exception as e:
+                            errors.append(f"Error importing {job_file}: {e}")
+
+                return {
+                    "success": True,
+                    "repository_id": repo_id,
+                    "repository_name": repo.get("name"),
+                    "imported": imported,
+                    "errors": errors if errors else None,
+                }
+
+            elif repo_type == "nfs":
+                # NFS: temporarily mount and read
+                mount_point = tempfile.mkdtemp(prefix="backer_nfs_import_")
+                mounted = False
+
+                try:
+                    nfs_export = share or repo.get("path", "")
+                    mount_cmd = [
+                        "sudo", "-n", "mount", "-t", "nfs",
+                        "-o", "soft,timeo=50,retrans=2,ro",
+                        f"{server}:{nfs_export}",
+                        mount_point,
+                    ]
+                    result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        return {
+                            "success": False,
+                            "error": f"Failed to mount NFS: {result.stderr.strip()}",
+                            "repository_id": repo_id,
+                        }
+
+                    mounted = True
+
+                    # Scan Hypervisors directory
+                    hypervisors_dir = Path(mount_point) / "Hypervisors"
+                    if not hypervisors_dir.exists():
+                        return {
+                            "success": False,
+                            "error": "No Hypervisors directory found in repository",
+                            "repository_id": repo_id,
+                        }
+
+                    for hv_dir in hypervisors_dir.iterdir():
+                        if not hv_dir.is_dir() or hv_dir.name.startswith("."):
+                            continue
+
+                        jobs_dir = hv_dir / ".backer" / "hypervisor_jobs"
+                        if not jobs_dir.exists():
+                            continue
+
+                        for job_file in jobs_dir.glob("*.json"):
+                            try:
+                                job_data = json_module.loads(job_file.read_text())
+                                job_id = job_data.get("job_id")
+                                job_name = job_data.get("name")
+                                job_hv_id = job_data.get("hypervisor_id")
+
+                                if not job_id or not job_name:
+                                    continue
+
+                                # Filter by hypervisor_id if specified
+                                if hypervisor_id and job_hv_id != hypervisor_id:
+                                    continue
+
+                                # Check if job already exists
+                                existing = storage.get_hypervisor_job(job_id)
+                                if existing:
+                                    imported["skipped_jobs"] += 1
+                                    continue
+
+                                existing_by_name = storage.get_hypervisor_job_by_name(job_name)
+                                if existing_by_name:
+                                    imported["skipped_jobs"] += 1
+                                    continue
+
+                                # Check if the hypervisor exists
+                                hv = storage.get_hypervisor(job_hv_id)
+                                if not hv:
+                                    hv_name = job_data.get("hypervisor_name")
+                                    hv_host = job_data.get("hypervisor_host")
+
+                                    all_hvs = storage.list_hypervisors()
+                                    for existing_hv in all_hvs:
+                                        if existing_hv["name"] == hv_name or existing_hv["host"] == hv_host:
+                                            job_hv_id = existing_hv["id"]
+                                            hv = existing_hv
+                                            break
+
+                                    if not hv:
+                                        errors.append(f"Hypervisor not found for job '{job_name}'")
+                                        continue
+
+                                guest_ids = job_data.get("guest_ids")
+                                if guest_ids:
+                                    guest_ids_json = json_module.dumps(guest_ids)
+                                else:
+                                    guest_ids_json = None
+
+                                storage.add_hypervisor_job(
+                                    job_id=job_id,
+                                    name=job_name,
+                                    hypervisor_id=job_hv_id,
+                                    guest_ids=guest_ids_json,
+                                    repository_id=repo_id,
+                                    backup_mode=job_data.get("backup_mode", "snapshot"),
+                                    compression=job_data.get("compression", "zstd"),
+                                    schedule_cron=job_data.get("schedule_cron"),
+                                    enabled=job_data.get("enabled", True),
+                                    delete_before_backup=job_data.get("delete_before_backup", False),
+                                )
+                                imported["jobs"] += 1
+                                logger.info(f"Imported hypervisor job '{job_name}' from repository")
+
+                            except json_module.JSONDecodeError as e:
+                                errors.append(f"Invalid JSON in {job_file.name}: {e}")
+                            except Exception as e:
+                                errors.append(f"Error importing {job_file.name}: {e}")
+
+                    return {
+                        "success": True,
+                        "repository_id": repo_id,
+                        "repository_name": repo.get("name"),
+                        "imported": imported,
+                        "errors": errors if errors else None,
+                    }
+
+                finally:
+                    if mounted:
+                        try:
+                            subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=30)
+                        except Exception:
+                            pass
+                    try:
+                        Path(mount_point).rmdir()
+                    except Exception:
+                        pass
+
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unsupported repository type: {repo_type}",
+                    "repository_id": repo_id,
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to import hypervisor jobs from repository {repo_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "repository_id": repo_id,
+            }
+
     # ============ Hypervisor Management ============
 
     @app.get("/api/v1/hypervisors")
@@ -3899,6 +4206,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 name=hypervisor["name"],
                 hypervisor_type=hypervisor.get("hypervisor_type", "proxmox"),
                 host=hypervisor["host"],
+            )
+
+            # Save job configuration (for discovery on reinstall)
+            metadata.save_job(
+                job_id=job_id,
+                name=job["name"],
+                hypervisor_id=hypervisor["id"],
+                repository_id=job.get("repository_id", ""),
+                guest_ids=job.get("guest_ids"),
+                backup_mode=job.get("backup_mode", "snapshot"),
+                compression=job.get("compression", "zstd"),
+                schedule_cron=job.get("schedule_cron"),
+                enabled=job.get("enabled", True),
+                delete_before_backup=job.get("delete_before_backup", False),
+                hypervisor_name=hypervisor["name"],
+                hypervisor_host=hypervisor["host"],
             )
 
             # Save guest and run info for each result

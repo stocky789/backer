@@ -319,6 +319,85 @@ class HypervisorMetadata:
         runs = self.get_backup_runs(vmid, limit=1)
         return runs[0] if runs else None
 
+    def save_job(
+        self,
+        job_id: str,
+        name: str,
+        hypervisor_id: str,
+        repository_id: str,
+        guest_ids: list[int] | None = None,
+        backup_mode: str = "snapshot",
+        compression: str = "zstd",
+        schedule_cron: str | None = None,
+        enabled: bool = True,
+        delete_before_backup: bool = False,
+        **extra: Any,
+    ) -> bool:
+        """Save hypervisor job configuration.
+
+        Args:
+            job_id: Unique job ID
+            name: Job display name
+            hypervisor_id: Parent hypervisor ID
+            repository_id: Target repository ID
+            guest_ids: List of VMIDs to backup (None = all)
+            backup_mode: Backup mode (snapshot, suspend, stop)
+            compression: Compression type (zstd, lzo, gzip, none)
+            schedule_cron: Cron schedule expression
+            enabled: Whether job is enabled
+            delete_before_backup: Delete old backups before creating new
+            **extra: Additional metadata
+
+        Returns:
+            True if saved successfully
+        """
+        self._ensure_dirs()
+
+        jobs_dir = self.metadata_dir / "hypervisor_jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+
+        path = jobs_dir / f"{safe_filename(job_id)}.json"
+        existing = self._read_json(path) or {}
+
+        data = {
+            **existing,
+            "job_id": job_id,
+            "name": name,
+            "hypervisor_id": hypervisor_id,
+            "repository_id": repository_id,
+            "guest_ids": guest_ids,
+            "backup_mode": backup_mode,
+            "compression": compression,
+            "schedule_cron": schedule_cron,
+            "enabled": enabled,
+            "delete_before_backup": delete_before_backup,
+            "updated_at": datetime.now().isoformat(),
+            **extra,
+        }
+
+        if "created_at" not in data:
+            data["created_at"] = datetime.now().isoformat()
+
+        return self._write_json(path, data)
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        """Get job configuration by ID."""
+        path = self.metadata_dir / "hypervisor_jobs" / f"{safe_filename(job_id)}.json"
+        return self._read_json(path)
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        """List all hypervisor jobs in metadata."""
+        jobs_dir = self.metadata_dir / "hypervisor_jobs"
+        if not jobs_dir.exists():
+            return []
+
+        result = []
+        for path in jobs_dir.glob("*.json"):
+            data = self._read_json(path)
+            if data:
+                result.append(data)
+        return result
+
     def discover_all(self) -> dict[str, Any]:
         """Discover all metadata in this repository.
 
@@ -327,6 +406,7 @@ class HypervisorMetadata:
             - initialized: Whether metadata exists
             - hypervisors: List of hypervisor metadata
             - guests: List of guest metadata with their runs
+            - jobs: List of hypervisor job configurations
             - summary: Counts and stats
         """
         if not self.is_initialized():
@@ -334,15 +414,18 @@ class HypervisorMetadata:
                 "initialized": False,
                 "hypervisors": [],
                 "guests": [],
+                "jobs": [],
                 "summary": {
                     "hypervisor_count": 0,
                     "guest_count": 0,
+                    "job_count": 0,
                     "total_runs": 0,
                 },
             }
 
         hypervisors = self.list_hypervisors()
         guests = self.list_guests()
+        jobs = self.list_jobs()
 
         # Add run counts to each guest
         total_runs = 0
@@ -358,9 +441,11 @@ class HypervisorMetadata:
             "initialized": True,
             "hypervisors": hypervisors,
             "guests": guests,
+            "jobs": jobs,
             "summary": {
                 "hypervisor_count": len(hypervisors),
                 "guest_count": len(guests),
+                "job_count": len(jobs),
                 "total_runs": total_runs,
             },
         }
