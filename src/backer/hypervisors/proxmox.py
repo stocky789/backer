@@ -1029,9 +1029,9 @@ class ProxmoxAPI:
         Raises:
             ProxmoxAPIError: If unable to mount NFS or create directory
         """
+        import os
         import subprocess
         import tempfile
-        import os
 
         # Create a temporary mount point
         mount_point = tempfile.mkdtemp(prefix="backer_nfs_mkdir_")

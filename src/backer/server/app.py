@@ -3395,8 +3395,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         This allows the metadata to be discovered if the Backer server is reinstalled.
         Uses smbclient for SMB shares and temporary mount for NFS shares.
         """
-        import shutil
-        import subprocess
         import tempfile
 
         from backer.hypervisors.metadata import HypervisorMetadata

@@ -355,20 +355,27 @@ class NFSBrowser:
             # If that fails with permission error, try with sudo
             if result.returncode != 0:
                 error_msg = result.stderr.strip().lower()
-                if "permission" in error_msg or "setuid" in error_msg or "user" in error_msg or "fstab" in error_msg:
+                perm_errors = ("permission", "setuid", "user", "fstab")
+                if any(err in error_msg for err in perm_errors):
                     # Try with sudo
-                    mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{export}", str(mount_point)]
+                    mount_cmd = [
+                        "sudo", "-n", "mount", "-t", "nfs",
+                        "-o", nfs_opts, f"{server}:{export}", str(mount_point)
+                    ]
                     result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip()
                 # Provide helpful error for common NFS mount issues
-                if "setuid" in error_msg.lower() or "user" in error_msg.lower() or "fstab" in error_msg.lower():
+                perm_keywords = ("setuid", "user", "fstab")
+                if any(kw in error_msg.lower() for kw in perm_keywords):
                     return False, (
                         f"Failed to mount: {error_msg}\n\n"
                         "NFS mounts require root privileges. Options:\n"
                         "1. Run backer server as root\n"
-                        "2. Add passwordless sudo for mount: echo 'backer ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount' | sudo tee /etc/sudoers.d/backer-mount\n"
+                        "2. Add passwordless sudo for mount:\n"
+                        "   echo 'backer ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount' "
+                        "| sudo tee /etc/sudoers.d/backer-mount\n"
                         "3. Pre-mount the NFS share in /etc/fstab"
                     )
                 return False, f"Failed to mount: {error_msg}"
