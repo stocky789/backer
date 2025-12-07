@@ -2930,11 +2930,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         retention = body.get("retention", {})
         enabled = body.get("enabled", True)
 
-        # Incremental backup settings
-        enable_incremental = body.get("enable_incremental", False)
-        ssh_user = body.get("ssh_user", "root")
-        ssh_port = body.get("ssh_port", 22)
-        max_incrementals = body.get("max_incrementals", 7)
+        # Storage options
+        delete_before_backup = body.get("delete_before_backup", False)
 
         # Validate
         validate_name(name, "name")
@@ -2979,10 +2976,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             schedule_cron=schedule_cron,
             retention=retention,
             enabled=enabled,
-            enable_incremental=enable_incremental,
-            ssh_user=ssh_user,
-            ssh_port=ssh_port,
-            max_incrementals=max_incrementals,
+            delete_before_backup=delete_before_backup,
         )
 
         return {"id": job_id, "name": name, "status": "created"}
@@ -3044,15 +3038,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             update_kwargs["retention"] = body["retention"]
         if "enabled" in body:
             update_kwargs["enabled"] = body["enabled"]
-        # Incremental backup settings
-        if "enable_incremental" in body:
-            update_kwargs["enable_incremental"] = body["enable_incremental"]
-        if "ssh_user" in body:
-            update_kwargs["ssh_user"] = body["ssh_user"]
-        if "ssh_port" in body:
-            update_kwargs["ssh_port"] = body["ssh_port"]
-        if "max_incrementals" in body:
-            update_kwargs["max_incrementals"] = body["max_incrementals"]
+        # Storage options
+        if "delete_before_backup" in body:
+            update_kwargs["delete_before_backup"] = body["delete_before_backup"]
 
         storage.update_hypervisor_job(job_id, **update_kwargs)
 
@@ -3104,6 +3092,240 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if cleanup_errors:
             result["cleanup_warnings"] = cleanup_errors
         return result
+
+    def _delete_vm_backups_from_repository(
+        repository: dict[str, Any],
+        hypervisor_name: str,
+        vmid: int,
+    ) -> None:
+        """Delete all backup files for a specific VM from the repository.
+
+        This is used when delete_before_backup is enabled - deletes all existing
+        backups for the VM before creating a new one, ensuring only 1 copy exists.
+
+        Files are named: vzdump-{type}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
+        Also deletes associated .notes and .log files.
+
+        Location: {repo_path}/Hypervisors/{hypervisor_name}/dump/
+        """
+        repo_type = repository.get("repo_type", "").lower()
+        if repo_type not in ("smb", "nfs"):
+            logger.debug(f"delete_before_backup not supported for repo type: {repo_type}")
+            return
+
+        # Sanitize hypervisor name for folder
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
+
+        if repo_type == "smb":
+            _delete_vm_backups_smb(repository, safe_hv_name, vmid)
+        elif repo_type == "nfs":
+            _delete_vm_backups_nfs(repository, safe_hv_name, vmid)
+
+    def _delete_vm_backups_smb(
+        repository: dict[str, Any],
+        hypervisor_name: str,
+        vmid: int,
+    ) -> None:
+        """Delete all backups for a VM from SMB share using smbclient."""
+        import subprocess
+
+        server = repository.get("server", "")
+        share = repository.get("share", "")
+        subdir = repository.get("path", "").strip("/")
+        username = repository.get("username")
+        password = repository.get("password")
+        domain = repository.get("domain")
+
+        if not server or not share:
+            return
+
+        # Build path to dump directory
+        base_path = f"{subdir}/Hypervisors/{hypervisor_name}/dump" if subdir else f"Hypervisors/{hypervisor_name}/dump"
+
+        # Build smbclient auth
+        auth_opts = []
+        if username:
+            if password:
+                auth_opts = ["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"]
+            else:
+                auth_opts = ["-U", f"{domain}\\{username}" if domain else username]
+        else:
+            auth_opts = ["-N"]
+
+        # List all files matching the VMID pattern
+        # vzdump-qemu-{vmid}-* or vzdump-lxc-{vmid}-*
+        list_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; ls"]
+        try:
+            result = subprocess.run(list_cmd, capture_output=True, timeout=60, text=True)
+            if result.returncode != 0:
+                logger.debug(f"Could not list files in {base_path}: {result.stderr}")
+                return
+
+            # Parse file listing and find matches for this VMID
+            lines = result.stdout.strip().split("\n")
+            files_to_delete = []
+            for line in lines:
+                # smbclient ls format: "  filename                    size  date"
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                filename = parts[0]
+                # Match vzdump-{type}-{vmid}-{timestamp}.vma*
+                if (
+                    filename.startswith(f"vzdump-qemu-{vmid}-")
+                    or filename.startswith(f"vzdump-lxc-{vmid}-")
+                ):
+                    files_to_delete.append(filename)
+                    # Also look for associated .log file
+                    base_name = (
+                        filename.replace(".vma.zst", "")
+                        .replace(".vma.gz", "")
+                        .replace(".vma.lzo", "")
+                        .replace(".vma", "")
+                    )
+                    log_filename = f"{base_name}.log"
+                    if log_filename not in files_to_delete:
+                        files_to_delete.append(log_filename)
+                    # And .notes file
+                    notes_filename = f"{filename}.notes"
+                    if notes_filename not in files_to_delete:
+                        files_to_delete.append(notes_filename)
+
+            if not files_to_delete:
+                logger.debug(f"No existing backups found for VM {vmid}")
+                return
+
+            # Delete each file
+            deleted_count = 0
+            for filename in files_to_delete:
+                del_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; del \"{filename}\""]
+                result = subprocess.run(del_cmd, capture_output=True, timeout=30)
+                if result.returncode == 0:
+                    logger.info(f"Deleted pre-existing backup file: {filename}")
+                    deleted_count += 1
+                else:
+                    # Ignore errors for .log/.notes files that may not exist
+                    if not (filename.endswith(".log") or filename.endswith(".notes")):
+                        logger.debug(f"Failed to delete {filename}: {result.stderr.decode() if result.stderr else 'unknown error'}")
+
+            if deleted_count > 0:
+                logger.info(f"Deleted {deleted_count} pre-existing backup files for VM {vmid}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout deleting backups for VM {vmid} from SMB")
+        except Exception as e:
+            logger.warning(f"Error deleting backups for VM {vmid} from SMB: {e}")
+
+    def _delete_vm_backups_nfs(
+        repository: dict[str, Any],
+        hypervisor_name: str,
+        vmid: int,
+    ) -> None:
+        """Delete all backups for a VM from NFS share by mounting temporarily."""
+        import subprocess
+        import tempfile
+
+        server = repository.get("server", "")
+        export = repository.get("share", "")  # NFS export path
+        subdir = repository.get("path", "").strip("/")
+
+        if not server or not export:
+            return
+
+        # Create temp mount point
+        mount_point = tempfile.mkdtemp(prefix="backer_nfs_del_")
+
+        try:
+            # Mount the NFS share
+            mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", f"{server}:{export}", mount_point]
+            result = subprocess.run(mount_cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                logger.warning(f"Failed to mount NFS for backup deletion: {result.stderr.decode() if result.stderr else 'unknown error'}")
+                return
+
+            # Build path to dump directory
+            if subdir:
+                dump_dir = Path(mount_point) / subdir / "Hypervisors" / hypervisor_name / "dump"
+            else:
+                dump_dir = Path(mount_point) / "Hypervisors" / hypervisor_name / "dump"
+
+            if not dump_dir.exists():
+                logger.debug(f"Dump directory does not exist: {dump_dir}")
+                return
+
+            # Find all backup files for this VMID first (avoid modifying during iteration)
+            backup_files = [
+                entry for entry in dump_dir.iterdir()
+                if entry.is_file() and (
+                    entry.name.startswith(f"vzdump-qemu-{vmid}-") or
+                    entry.name.startswith(f"vzdump-lxc-{vmid}-")
+                )
+            ]
+
+            if not backup_files:
+                logger.debug(f"No existing backups found for VM {vmid}")
+                return
+
+            # Delete all found backup files and associated files
+            deleted = 0
+            for entry in backup_files:
+                # Delete the main backup file
+                try:
+                    entry.unlink()
+                    logger.info(f"Deleted pre-existing backup file: {entry.name}")
+                    deleted += 1
+                except OSError as e:
+                    logger.warning(f"Failed to delete {entry.name}: {e}")
+                    continue
+
+                # Delete associated .notes file if exists
+                notes_file = entry.parent / f"{entry.name}.notes"
+                if notes_file.exists():
+                    try:
+                        notes_file.unlink()
+                        logger.debug(f"Deleted notes file: {notes_file.name}")
+                        deleted += 1
+                    except OSError:
+                        pass
+
+                # Delete associated .log file if exists
+                base_name = (
+                    entry.name.replace(".vma.zst", "")
+                    .replace(".vma.gz", "")
+                    .replace(".vma.lzo", "")
+                    .replace(".vma", "")
+                )
+                log_file = entry.parent / f"{base_name}.log"
+                if log_file.exists():
+                    try:
+                        log_file.unlink()
+                        logger.debug(f"Deleted log file: {log_file.name}")
+                        deleted += 1
+                    except OSError:
+                        pass
+
+            logger.info(f"Deleted {deleted} pre-existing backup files for VM {vmid}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout deleting backups for VM {vmid} from NFS")
+        except Exception as e:
+            logger.warning(f"Error deleting backups for VM {vmid} from NFS: {e}")
+        finally:
+            # Unmount
+            try:
+                subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
+            except Exception:
+                try:
+                    subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
+                except Exception:
+                    pass
+
+            # Remove temp mount point
+            try:
+                import os
+                os.rmdir(mount_point)
+            except Exception:
+                pass
 
     def _cleanup_hypervisor_job_data(
         repository: dict[str, Any],
@@ -3729,7 +3951,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/hypervisor-jobs/{job_id}/run")
     def run_hypervisor_job(
         job_id: str,
-        force_full: bool = False,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Run a hypervisor backup job.
@@ -3737,17 +3958,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Backups are stored directly on the Backer repository by auto-configuring
         the repository as Proxmox storage (like Veeam does).
 
-        When incremental backups are enabled for the job, uses QEMU dirty bitmaps
-        to determine which VMs have changed. VMs with no changes can be skipped.
+        When delete_before_backup is enabled, existing backups for each VM are
+        deleted before creating a new backup, ensuring only 1 copy exists.
 
         Args:
             job_id: Hypervisor job ID
-            force_full: Force full backups for all VMs (ignore dirty bitmap state)
         """
-        from backer.hypervisors.incremental import (
-            BackupType,
-            IncrementalBackupManager,
-        )
         from backer.hypervisors.proxmox import (
             ProxmoxAPI,
             ProxmoxAPIError,
@@ -3817,10 +4033,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
-        # Get SSH credentials - used for both incremental backups and cleanup operations
-        # Use job-level SSH settings, fall back to hypervisor settings
-        ssh_user = job.get("ssh_user") or hypervisor.get("ssh_user", "root")
-        ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
+        # Get SSH credentials - used for cleanup operations
+        ssh_user = hypervisor.get("ssh_user", "root")
+        ssh_port = hypervisor.get("ssh_port", 22)
         ssh_key_path = hypervisor.get("ssh_key_path")
 
         # For SSH password: use API password if ssh_use_api_password is enabled
@@ -3828,22 +4043,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if hypervisor.get("ssh_use_api_password", True) and hv_password:
             ssh_password = hv_password
 
-        # Set up incremental backup manager if enabled
-        incremental_manager = None
-        enable_incremental = job.get("enable_incremental", False)
-        logger.info(f"Job '{job.get('name')}' enable_incremental={enable_incremental}")
-
-        if enable_incremental:
-            incremental_manager = IncrementalBackupManager(
-                host=hypervisor["host"],
-                hypervisor_id=hypervisor["id"],
-                storage=storage,
-                ssh_user=ssh_user,
-                ssh_port=ssh_port,
-                ssh_key=ssh_key_path,
-                ssh_password=ssh_password,
-                max_incrementals=job.get("max_incrementals", 7),
-            )
+        # Get delete_before_backup setting
+        delete_before_backup = job.get("delete_before_backup", False)
+        logger.info(f"Job '{job.get('name')}' delete_before_backup={delete_before_backup}")
 
         # Submit backup as background task
         def run_backup_task(task: Task) -> dict[str, Any]:
@@ -3888,10 +4090,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.info(f"Total guests to backup: {total}")
             if total == 0:
                 logger.warning("No guests to backup - returning early")
-                return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "skipped": 0, "results": []}
-
-            # Counters for incremental stats
-            skipped_count = 0
+                return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "results": []}
 
             for i, vmid in enumerate(guest_ids):
                 logger.info(f"=== Processing guest {i+1}/{total}: VMID {vmid} ===")
@@ -3901,56 +4100,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 vmid_type = type(vmid).__name__
                 logger.info(f"Guest lookup: vmid={vmid} ({vmid_type}), found={guest is not None}")
 
-                # Check if we can skip this VM (incremental mode with no changes)
-                backup_decision = None
-                backup_type_label = "full"
-
-                logger.info(f"Incremental check for VM {vmid}: manager={'set' if incremental_manager else 'None'}")
-                if incremental_manager:
-                    task.message = f"Checking changes for {guest_name} ({vmid})..."
-                    logger.info(f"Checking dirty bitmaps for VM {vmid}...")
+                # Delete previous backups for this VM if delete_before_backup is enabled
+                if delete_before_backup:
+                    task.message = f"Deleting previous backups for {guest_name} ({vmid})..."
+                    logger.info(f"delete_before_backup enabled - deleting previous backups for VM {vmid}")
                     try:
-                        backup_decision = incremental_manager.get_backup_decision(
+                        _delete_vm_backups_from_repository(
+                            repository=repo_with_password,
+                            hypervisor_name=hypervisor["name"],
                             vmid=vmid,
-                            force_full=force_full,
                         )
-                        backup_type_label = backup_decision.backup_type.value
-                        decision_type = backup_decision.backup_type.value
-                        logger.info(f"VM {vmid} backup decision: {decision_type} - {backup_decision.reason}")
-
-                        if backup_decision.backup_type == BackupType.SKIP:
-                            # No changes since last backup - skip this VM
-                            logger.info(
-                                f"Skipping VM {vmid} ({guest_name}): {backup_decision.reason}"
-                            )
-                            storage.save_hypervisor_run(
-                                run_id=run_id,
-                                job_id=job_id,
-                                job_name=job["name"],
-                                hypervisor_id=hypervisor["id"],
-                                guest_id=vmid,
-                                guest_name=guest_name,
-                                status="skipped",
-                                finished_at=datetime.now(),
-                                exit_status="no changes",
-                            )
-                            results.append({
-                                "success": True,
-                                "vmid": vmid,
-                                "skipped": True,
-                                "reason": backup_decision.reason,
-                            })
-                            skipped_count += 1
-                            continue
-
                     except Exception as e:
-                        logger.warning(
-                            f"Error checking incremental state for VM {vmid}: {e}. "
-                            "Falling back to full backup."
-                        )
-                        backup_decision = None
+                        logger.warning(f"Failed to delete previous backups for VM {vmid}: {e}")
+                        # Continue with backup anyway - this is not a fatal error
 
-                task.message = f"Backing up {guest_name} ({vmid}) [{backup_type_label}] to {repository['name']}..."
+                task.message = f"Backing up {guest_name} ({vmid}) to {repository['name']}..."
 
                 # Record pending
                 storage.save_hypervisor_run(
@@ -4009,8 +4173,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         progress_callback=progress_callback,
                     )
 
-                    # Add backup type to result
-                    result["backup_type"] = backup_type_label
+                    # Add backup type to result (always full with delete_before_backup)
+                    result["backup_type"] = "full"
 
                     # Update run record
                     storage.save_hypervisor_run(
@@ -4028,31 +4192,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         errors=result.get("errors"),
                     )
 
-                    # On success, update incremental tracking
-                    if result["success"] and incremental_manager and backup_decision:
-                        try:
-                            # Set up tracking if this was a full backup
-                            if backup_decision.backup_type == BackupType.FULL:
-                                incremental_manager.setup_tracking(vmid)
-
-                            # Update bitmap state
-                            incremental_manager.after_backup_success(vmid, backup_decision)
-                        except Exception as inc_err:
-                            logger.warning(
-                                f"Failed to update incremental state for VM {vmid}: {inc_err}"
-                            )
-
                     results.append(result)
 
                 except Exception as e:
                     logger.exception(f"Backup failed for VMID {vmid}: {e}")
-
-                    # Notify incremental manager of failure
-                    if incremental_manager and backup_decision:
-                        try:
-                            incremental_manager.after_backup_failure(vmid, backup_decision)
-                        except Exception:
-                            pass
 
                     storage.save_hypervisor_run(
                         run_id=run_id,
@@ -4096,14 +4239,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Log but don't fail the backup - cleanup is best-effort
                 logger.warning(f"Failed to cleanup Proxmox storage '{proxmox_storage_id}': {cleanup_err}")
 
-            success_count = sum(1 for r in results if r.get("success") and not r.get("skipped"))
+            success_count = sum(1 for r in results if r.get("success"))
+            failed_count = sum(1 for r in results if not r.get("success"))
             return {
                 "run_id": run_id,
                 "total": total,
                 "success": success_count,
-                "failed": total - success_count - skipped_count,
-                "skipped": skipped_count,
-                "incremental_enabled": enable_incremental,
+                "failed": failed_count,
                 "results": results,
             }
 

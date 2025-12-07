@@ -96,8 +96,8 @@
             <tr class="{% if not job.enabled %}row-disabled{% endif %}">
                 <td>
                     <strong>{{ job.name }}</strong>
-                    {% if job.enable_incremental %}
-                    <span class="badge badge-warning" title="Incremental backups enabled - VMs with no changes will be skipped">INC</span>
+                    {% if job.delete_before_backup %}
+                    <span class="badge badge-warning" title="Delete previous backups before creating new ones - only 1 copy per VM">1x</span>
                     {% endif %}
                 </td>
                 <td>{{ job.hypervisor_name or job.hypervisor_id }}</td>
@@ -395,38 +395,18 @@
                     <div class="form-hint">Leave empty for manual backups only. Example: 0 2 * * * = daily at 2am</div>
                 </div>
 
-                <!-- Incremental Backup Settings -->
-                <details class="form-details" id="incrementalDetails">
-                    <summary class="form-label" style="cursor: pointer;">Incremental Backup Settings</summary>
-                    <div style="margin-top: 10px; padding: 10px; background: var(--bg-primary); border-radius: 4px;">
-                        <div class="form-hint" style="margin-bottom: 15px;">
-                            Incremental backups use QEMU dirty bitmaps to skip VMs with no changes,
-                            reducing backup time and storage for frequently scheduled jobs.
-                        </div>
-
+                <!-- Storage Options -->
+                <details class="form-details" id="storageDetails">
+                    <summary class="form-label" style="cursor: pointer;">Storage Options</summary>
+                    <div style="margin-top: 10px; padding: 10px; background: var(--bg-hover); border-radius: var(--radius);">
                         <div class="form-group">
                             <label class="form-label">
-                                <input type="checkbox" id="jobEnableIncremental" onchange="onIncrementalChange()"> Enable Incremental Backups
+                                <input type="checkbox" id="jobDeleteBeforeBackup"> Delete previous backup before creating new
                             </label>
-                            <div class="form-hint">Skip unchanged VMs using dirty bitmap tracking (requires SSH access to hypervisor)</div>
-                        </div>
-
-                        <div id="incrementalOptions" style="display: none; margin-top: 10px;">
-                            <div class="form-group">
-                                <label class="form-label">Max Incrementals Before Full</label>
-                                <input type="number" id="jobMaxIncrementals" class="form-input" value="7" min="1" max="30">
-                                <div class="form-hint">Force a full backup after this many incremental backups</div>
-                            </div>
-
-                            <div class="form-row">
-                                <div class="form-group" style="flex: 2;">
-                                    <label class="form-label">SSH User</label>
-                                    <input type="text" id="jobSshUser" class="form-input" placeholder="root (uses hypervisor default)">
-                                </div>
-                                <div class="form-group" style="flex: 1;">
-                                    <label class="form-label">SSH Port</label>
-                                    <input type="number" id="jobSshPort" class="form-input" placeholder="22">
-                                </div>
+                            <div class="form-hint">
+                                For storage-constrained environments. Deletes all existing backups for each VM
+                                before creating a new backup, ensuring only 1 copy exists at a time.
+                                <strong>Warning:</strong> If the new backup fails, the old backup is already gone.
                             </div>
                         </div>
                     </div>
@@ -1117,11 +1097,9 @@ function showAddJobModal() {
     document.getElementById('jobError').style.display = 'none';
     document.getElementById('jobModal').style.display = 'flex';
 
-    // Reset incremental options
-    document.getElementById('jobEnableIncremental').checked = false;
-    document.getElementById('jobMaxIncrementals').value = 7;
-    document.getElementById('incrementalOptions').style.display = 'none';
-    document.getElementById('incrementalDetails').open = false;
+    // Reset storage options
+    document.getElementById('jobDeleteBeforeBackup').checked = false;
+    document.getElementById('storageDetails').open = false;
 
     // Load repositories
     loadRepositories();
@@ -1204,11 +1182,6 @@ async function onJobHypervisorChange() {
     }
 }
 
-function onIncrementalChange() {
-    const enabled = document.getElementById('jobEnableIncremental').checked;
-    document.getElementById('incrementalOptions').style.display = enabled ? 'block' : 'none';
-}
-
 async function submitJob(event) {
     event.preventDefault();
 
@@ -1230,11 +1203,8 @@ async function submitJob(event) {
         compress: document.getElementById('jobCompression').value,
         schedule_cron: document.getElementById('jobSchedule').value || null,
         enabled: document.getElementById('jobEnabled').checked,
-        // Incremental backup settings
-        enable_incremental: document.getElementById('jobEnableIncremental').checked,
-        max_incrementals: parseInt(document.getElementById('jobMaxIncrementals').value) || 7,
-        ssh_user: document.getElementById('jobSshUser').value || null,
-        ssh_port: parseInt(document.getElementById('jobSshPort').value) || null,
+        // Storage options
+        delete_before_backup: document.getElementById('jobDeleteBeforeBackup').checked,
     };
 
     const url = editingJobId ? `/api/v1/hypervisor-jobs/${editingJobId}` : '/api/v1/hypervisor-jobs';
@@ -1282,16 +1252,12 @@ async function editHypervisorJob(jobId) {
         document.getElementById('jobEnabled').checked = job.enabled;
         document.getElementById('jobRepository').value = job.repository_id || '';
 
-        // Incremental backup settings
-        document.getElementById('jobEnableIncremental').checked = job.enable_incremental || false;
-        document.getElementById('jobMaxIncrementals').value = job.max_incrementals || 7;
-        document.getElementById('jobSshUser').value = job.ssh_user || '';
-        document.getElementById('jobSshPort').value = job.ssh_port || '';
-        onIncrementalChange();  // Show/hide options based on checkbox
+        // Storage options
+        document.getElementById('jobDeleteBeforeBackup').checked = job.delete_before_backup || false;
 
-        // If incremental is enabled, expand the details
-        if (job.enable_incremental) {
-            document.getElementById('incrementalDetails').open = true;
+        // If delete_before_backup is enabled, expand the details
+        if (job.delete_before_backup) {
+            document.getElementById('storageDetails').open = true;
         }
 
         // Load guests for this hypervisor
