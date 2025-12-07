@@ -1517,16 +1517,16 @@ class ProxmoxAPI:
             if not base_export:
                 raise ProxmoxAPIError(f"NFS repository '{repo_name}' has no export path")
 
-            # Build the full export path including Hypervisors/{name} subdirectory
-            # NFS allows subdirectories within the export path, we just need to create them first
+            # NFS storage in Proxmox mounts the exact export path from the NFS server.
+            # Unlike CIFS, NFS does not support mounting subdirectories within an export.
+            # We use the base export path - vzdump creates dump/ automatically.
+            # Hypervisors/{name}/ folder structure is used for metadata only.
+            export = base_export
+
+            # Pre-create the Hypervisors/{name} directory for metadata storage
+            # The actual backups will go to dump/ at the export root
             if hypervisor_name:
                 safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
-                export = f"{base_export.rstrip('/')}/Hypervisors/{safe_hv_name}"
-            else:
-                export = base_export
-
-            # Create the subdirectory on the NFS share before Proxmox tries to mount it
-            if hypervisor_name:
                 self._ensure_nfs_directory_exists(
                     server=server,
                     base_export=base_export,

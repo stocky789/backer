@@ -3224,6 +3224,152 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         logger.info(f"Repository cleanup completed for hypervisor: {hypervisor['name']}")
 
+    def _write_metadata_nfs(
+        server: str,
+        export: str,
+        hypervisor_name: str,
+        backer_dir: Path,
+    ) -> None:
+        """Write metadata to NFS share by temporarily mounting it."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        mount_point = tempfile.mkdtemp(prefix="backer_nfs_meta_")
+
+        try:
+            # Mount the NFS export
+            mount_cmd = [
+                "sudo", "-n", "mount", "-t", "nfs",
+                "-o", "soft,timeo=50,retrans=2",
+                f"{server}:{export}",
+                mount_point,
+            ]
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                logger.warning(f"Failed to mount NFS for metadata write: {result.stderr.strip()}")
+                return
+
+            # Build target path: {mount}/Hypervisors/{hypervisor_name}/.backer
+            target_base = Path(mount_point) / "Hypervisors" / hypervisor_name
+            target_backer = target_base / ".backer"
+
+            # Create directories and copy files
+            try:
+                target_backer.mkdir(parents=True, exist_ok=True)
+
+                # Copy all files from backer_dir to target
+                for src_file in backer_dir.rglob("*"):
+                    if src_file.is_file():
+                        rel_path = src_file.relative_to(backer_dir)
+                        dest_file = target_backer / rel_path
+                        dest_file.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src_file, dest_file)
+                        logger.debug(f"Wrote metadata: {dest_file}")
+
+                logger.info(f"Wrote hypervisor backup metadata to {server}:{export}/Hypervisors/{hypervisor_name}")
+
+            except OSError as e:
+                logger.warning(f"Failed to write metadata files: {e}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout mounting NFS {server}:{export} for metadata")
+        finally:
+            # Unmount
+            try:
+                subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
+            except Exception:
+                try:
+                    subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
+                except Exception:
+                    pass
+
+            # Remove temp mount point
+            try:
+                import os
+                os.rmdir(mount_point)
+            except Exception:
+                pass
+
+    def _write_metadata_smb(
+        server: str,
+        share: str,
+        subdir: str,
+        hypervisor_name: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None,
+        backer_dir: Path,
+    ) -> None:
+        """Write metadata to SMB share using smbclient."""
+        import subprocess
+
+        # Build remote path: {repo_path}/Hypervisors/{hypervisor_name}/
+        base_path = subdir.strip("/") if subdir else ""
+        if base_path:
+            remote_base = f"{base_path}/Hypervisors/{hypervisor_name}"
+        else:
+            remote_base = f"Hypervisors/{hypervisor_name}"
+
+        # Build smbclient auth
+        auth_parts = []
+        if username:
+            auth_parts.extend(["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"])
+        else:
+            auth_parts.extend(["-N"])  # No password
+
+        # Track directories we've already created to avoid redundant mkdir calls
+        created_dirs: set[str] = set()
+
+        def ensure_remote_dir(dir_path: str) -> None:
+            """Create remote directory and all parents using smbclient."""
+            if not dir_path or dir_path in created_dirs:
+                return
+
+            # Build list of directories to create (from root to leaf)
+            parts = dir_path.split("/")
+            for i in range(1, len(parts) + 1):
+                partial_path = "/".join(parts[:i])
+                if partial_path and partial_path not in created_dirs:
+                    mkdir_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"mkdir {partial_path}"]
+                    subprocess.run(mkdir_cmd, capture_output=True, timeout=30)
+                    created_dirs.add(partial_path)
+
+        # Upload each file in .backer directory
+        for local_file in backer_dir.rglob("*"):
+            if not local_file.is_file():
+                continue
+
+            # rel_path is relative to backer_dir (e.g., "hypervisors/123.json" or "metadata.json")
+            rel_path = local_file.relative_to(backer_dir)
+            rel_path_str = str(rel_path).replace("\\", "/")
+
+            # Build remote directory path
+            # For "metadata.json" -> parent is "." -> remote_dir is just "{remote_base}/.backer"
+            # For "hypervisors/123.json" -> remote_dir is "{remote_base}/.backer/hypervisors"
+            parent_str = str(rel_path.parent).replace("\\", "/")
+            if parent_str == ".":
+                remote_dir = f"{remote_base}/.backer"
+            else:
+                remote_dir = f"{remote_base}/.backer/{parent_str}"
+
+            # Create remote directory (and all parents)
+            ensure_remote_dir(remote_dir)
+
+            # Upload file
+            remote_file = f"{remote_base}/.backer/{rel_path_str}"
+            put_cmd = [
+                "smbclient", f"//{server}/{share}", *auth_parts,
+                "-c", f"put {local_file} {remote_file}"
+            ]
+            result = subprocess.run(put_cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
+            else:
+                logger.debug(f"Uploaded metadata: {remote_file}")
+
+        logger.info(f"Wrote hypervisor backup metadata to //{server}/{share}/{remote_base}")
+
     def _write_hypervisor_backup_metadata(
         repository: dict[str, Any],
         hypervisor: dict[str, Any],
@@ -3233,11 +3379,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         results: list[dict[str, Any]],
         guest_map: dict[int, Any],
     ) -> None:
-        """Write backup metadata to the repository using smbclient.
+        """Write backup metadata to the repository.
 
         This allows the metadata to be discovered if the Backer server is reinstalled.
-        Uses smbclient to write directly to SMB shares without requiring mount.
+        Uses smbclient for SMB shares and temporary mount for NFS shares.
         """
+        import shutil
         import subprocess
         import tempfile
 
@@ -3258,6 +3405,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not server or not share:
             logger.warning("Cannot write metadata: missing server or share")
             return
+
+        # Sanitize hypervisor name for folder
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
 
         # Create metadata in a temp directory first
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3313,78 +3463,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     hypervisor_id=hypervisor["id"],
                 )
 
-            # Now upload the .backer directory to the SMB share
+            # Now upload the .backer directory to the share
             backer_dir = tmp_path / ".backer"
             if not backer_dir.exists():
                 return
 
-            # Build remote path: {repo_path}/Hypervisors/{hypervisor_name}/
-            base_path = subdir.strip("/") if subdir else ""
-            # Sanitize hypervisor name for folder
-            safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
-            if base_path:
-                remote_base = f"{base_path}/Hypervisors/{safe_hv_name}"
+            if repo_type == "nfs":
+                # For NFS: temporarily mount and copy files directly
+                _write_metadata_nfs(
+                    server=server,
+                    export=share,
+                    hypervisor_name=safe_hv_name,
+                    backer_dir=backer_dir,
+                )
             else:
-                remote_base = f"Hypervisors/{safe_hv_name}"
-
-            # Build smbclient auth
-            auth_parts = []
-            if username:
-                auth_parts.extend(["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"])
-            else:
-                auth_parts.extend(["-N"])  # No password
-
-            # Track directories we've already created to avoid redundant mkdir calls
-            created_dirs: set[str] = set()
-
-            def ensure_remote_dir(dir_path: str) -> None:
-                """Create remote directory and all parents using smbclient."""
-                if not dir_path or dir_path in created_dirs:
-                    return
-
-                # Build list of directories to create (from root to leaf)
-                parts = dir_path.split("/")
-                for i in range(1, len(parts) + 1):
-                    partial_path = "/".join(parts[:i])
-                    if partial_path and partial_path not in created_dirs:
-                        mkdir_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"mkdir {partial_path}"]
-                        subprocess.run(mkdir_cmd, capture_output=True, timeout=30)
-                        created_dirs.add(partial_path)
-
-            # Upload each file in .backer directory
-            for local_file in backer_dir.rglob("*"):
-                if not local_file.is_file():
-                    continue
-
-                # rel_path is relative to backer_dir (e.g., "hypervisors/123.json" or "metadata.json")
-                rel_path = local_file.relative_to(backer_dir)
-                rel_path_str = str(rel_path).replace("\\", "/")
-
-                # Build remote directory path
-                # For "metadata.json" -> parent is "." -> remote_dir is just "{remote_base}/.backer"
-                # For "hypervisors/123.json" -> remote_dir is "{remote_base}/.backer/hypervisors"
-                parent_str = str(rel_path.parent).replace("\\", "/")
-                if parent_str == ".":
-                    remote_dir = f"{remote_base}/.backer"
-                else:
-                    remote_dir = f"{remote_base}/.backer/{parent_str}"
-
-                # Create remote directory (and all parents)
-                ensure_remote_dir(remote_dir)
-
-                # Upload file
-                remote_file = f"{remote_base}/.backer/{rel_path_str}"
-                put_cmd = [
-                    "smbclient", f"//{server}/{share}", *auth_parts,
-                    "-c", f"put {local_file} {remote_file}"
-                ]
-                result = subprocess.run(put_cmd, capture_output=True, timeout=30)
-                if result.returncode != 0:
-                    logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
-                else:
-                    logger.debug(f"Uploaded metadata: {remote_file}")
-
-            logger.info(f"Wrote hypervisor backup metadata to //{server}/{share}/{remote_base}")
+                # For SMB: use smbclient
+                _write_metadata_smb(
+                    server=server,
+                    share=share,
+                    subdir=subdir,
+                    hypervisor_name=safe_hv_name,
+                    username=username,
+                    password=password,
+                    domain=domain,
+                    backer_dir=backer_dir,
+                )
 
     @app.post("/api/v1/hypervisor-jobs/{job_id}/run")
     def run_hypervisor_job(
