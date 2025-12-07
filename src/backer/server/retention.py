@@ -434,12 +434,11 @@ class RetentionManager:
 
         # Get repository path info
         hv_name = hypervisor.get("name", "unknown")
-        # Path structure: Hypervisors/{hv_name}/dump/ (shared by ALL jobs from same hypervisor)
-        # Individual job files are identified by their guest_id and timestamp
-        dump_path = f"Hypervisors/{hv_name}/dump"
 
         if repo_type == "nfs":
-            # For NFS, the export path is stored in the 'share' field
+            # NFS: Proxmox mounts the export root, vzdump creates dump/ there
+            # So backups are at: {export}/dump/vzdump-*.vma.zst
+            dump_path = "dump"
             self._delete_files_from_nfs(
                 repository.get("server"),
                 repository.get("share"),
@@ -447,6 +446,15 @@ class RetentionManager:
                 files_to_delete,
             )
         elif repo_type == "smb":
+            # SMB: Proxmox mounts at {share}/{subdir}/Hypervisors/{hv_name}
+            # and vzdump creates dump/ inside that
+            base_path = repository.get("path", "").strip("/")
+            hv_dump_path = f"Hypervisors/{hv_name}/dump"
+            if base_path:
+                dump_path = f"{base_path}/{hv_dump_path}"
+            else:
+                dump_path = hv_dump_path
+
             # Get password for SMB
             repo_password = None
             if repository.get("password_encrypted"):

@@ -3149,23 +3149,25 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.info(f"No backup runs found for job {job.get('name')} - nothing to clean up")
             return
 
-        logger.info(
-            f"Cleaning up {len(files_to_delete)} backup files for job '{job.get('name')}'"
-        )
-
-        # Backups are stored in Hypervisors/{hv_name}/dump/ (shared by all jobs from this hypervisor)
-        # For NFS, Proxmox mounts at the hypervisor level, so dump/ is relative to that
-        dump_path = f"Hypervisors/{hv_name}/dump"
+        # Log what we're about to clean up
+        for guest_id, dt in files_to_delete:
+            logger.info(f"  - Will look for VMID {guest_id} backup from {dt.isoformat()}")
 
         if repo_type == "nfs":
+            # NFS storage: Proxmox mounts the export root and vzdump creates dump/ there
+            # So backups are at: {export}/dump/vzdump-*.vma.zst
             export = repository.get("share", "")  # For NFS, 'share' contains the export path
             if not server or not export:
                 logger.warning("Cannot clean up NFS: missing server or export")
                 return
 
+            dump_path = "dump"  # Proxmox creates dump/ at the NFS export root
+            logger.info(f"NFS cleanup: {server}:{export}/{dump_path}")
             _cleanup_nfs_job_files(server, export, dump_path, files_to_delete)
 
         elif repo_type == "smb":
+            # SMB storage: Proxmox mounts at {share}/{subdir}/Hypervisors/{hv_name}
+            # and creates dump/ inside that
             share = repository.get("share", "")
             subdir = repository.get("path", "").strip("/")
             username = repository.get("username")
@@ -3176,17 +3178,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 logger.warning("Cannot clean up SMB: missing server or share")
                 return
 
-            # Prepend subdir if present
+            # Build full path: {subdir}/Hypervisors/{hv_name}/dump
+            hv_dump_path = f"Hypervisors/{hv_name}/dump"
             if subdir:
-                full_dump_path = f"{subdir}/{dump_path}"
+                full_dump_path = f"{subdir}/{hv_dump_path}"
             else:
-                full_dump_path = dump_path
+                full_dump_path = hv_dump_path
 
+            logger.info(f"SMB cleanup: //{server}/{share}/{full_dump_path}")
             _cleanup_smb_job_files(
                 server, share, username, repo_password, domain, full_dump_path, files_to_delete
             )
         else:
-            logger.debug(f"Repository cleanup not supported for type: {repo_type}")
+            logger.warning(f"Repository cleanup not supported for type: {repo_type}")
 
     def _cleanup_nfs_job_files(
         server: str,
@@ -3206,26 +3210,53 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import tempfile
         from datetime import datetime
 
+        logger.info(f"[NFS CLEANUP] Starting cleanup for {len(files_to_delete)} backup(s)")
+        logger.info(f"[NFS CLEANUP] Target: {server}:{export}/{dump_path}")
+
         mount_point = None
         try:
             # Create temporary mount point
             mount_point = tempfile.mkdtemp(prefix="backer_cleanup_")
             nfs_source = f"{server}:{export}"
+            logger.info(f"[NFS CLEANUP] Mounting {nfs_source} to {mount_point}")
 
             # Mount NFS with write access
             mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", "rw", nfs_source, mount_point]
             result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
-                logger.warning(f"Failed to mount NFS for cleanup: {result.stderr}")
+                logger.error(f"[NFS CLEANUP] Mount failed: {result.stderr.strip()}")
                 return
 
+            logger.info("[NFS CLEANUP] Mount successful")
+
             full_dump_path = Path(mount_point) / dump_path
+            logger.info(f"[NFS CLEANUP] Looking for files in: {full_dump_path}")
+
             if not full_dump_path.exists():
-                logger.debug(f"Dump path does not exist: {dump_path}")
+                logger.warning(f"[NFS CLEANUP] Dump path does not exist: {full_dump_path}")
+                # List what IS in the mount point to help debug
+                try:
+                    contents = list(Path(mount_point).iterdir())
+                    logger.info(f"[NFS CLEANUP] Mount point contents: {[e.name for e in contents[:20]]}")
+                except Exception as e:
+                    logger.warning(f"[NFS CLEANUP] Could not list mount point: {e}")
                 return
+
+            # List all files in dump directory
+            try:
+                all_files = [e.name for e in full_dump_path.iterdir() if e.is_file()]
+                logger.info(f"[NFS CLEANUP] Found {len(all_files)} files in dump directory")
+                for f in all_files[:10]:  # Log first 10
+                    logger.info(f"[NFS CLEANUP]   - {f}")
+                if len(all_files) > 10:
+                    logger.info(f"[NFS CLEANUP]   ... and {len(all_files) - 10} more")
+            except Exception as e:
+                logger.warning(f"[NFS CLEANUP] Could not list dump directory: {e}")
 
             deleted_count = 0
             for guest_id, timestamp in files_to_delete:
+                logger.info(f"[NFS CLEANUP] Looking for VMID {guest_id} from {timestamp.isoformat()}")
+
                 # Find vzdump files matching this guest_id and timestamp
                 for entry in full_dump_path.iterdir():
                     if not entry.is_file():
@@ -3245,39 +3276,50 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
                             )
                             # Check if within 5 minutes of run start time
-                            time_diff = abs((file_dt - timestamp).total_seconds())
+                            time_diff = abs((file_dt - timestamp.replace(tzinfo=None)).total_seconds())
+                            logger.info(
+                                f"[NFS CLEANUP] Found matching VMID file: {entry.name} "
+                                f"(file time: {file_dt}, run time: {timestamp}, diff: {time_diff:.0f}s)"
+                            )
+
                             if time_diff < 300:  # 5 minutes tolerance
                                 try:
                                     entry.unlink()
                                     deleted_count += 1
-                                    logger.info(f"Deleted backup file: {entry.name}")
+                                    logger.info(f"[NFS CLEANUP] DELETED: {entry.name}")
                                     # Also delete .notes file if exists
                                     notes_file = Path(str(entry) + ".notes")
                                     if notes_file.exists():
                                         notes_file.unlink()
+                                        logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
                                 except OSError as e:
-                                    logger.warning(f"Failed to delete {entry.name}: {e}")
-                        except ValueError:
+                                    logger.error(f"[NFS CLEANUP] Failed to delete {entry.name}: {e}")
+                            else:
+                                logger.info(f"[NFS CLEANUP] Skipping {entry.name} - time diff {time_diff:.0f}s > 300s")
+                        except ValueError as e:
+                            logger.warning(f"[NFS CLEANUP] Could not parse timestamp from {entry.name}: {e}")
                             continue
 
             if deleted_count > 0:
-                logger.info(f"NFS cleanup deleted {deleted_count} backup files")
+                logger.info(f"[NFS CLEANUP] SUCCESS: Deleted {deleted_count} backup files")
             else:
-                logger.info("No matching backup files found to delete")
+                logger.warning("[NFS CLEANUP] No matching backup files found to delete")
 
         except subprocess.TimeoutExpired:
-            logger.warning("NFS mount timeout during cleanup")
+            logger.error("[NFS CLEANUP] NFS mount timed out")
         except Exception as e:
-            logger.warning(f"Error during NFS cleanup: {e}")
+            logger.error(f"[NFS CLEANUP] Error: {e}", exc_info=True)
         finally:
             # Unmount
             if mount_point:
+                logger.info(f"[NFS CLEANUP] Unmounting {mount_point}")
                 try:
                     subprocess.run(
                         ["sudo", "-n", "umount", mount_point],
                         capture_output=True, timeout=30
                     )
                     os.rmdir(mount_point)
+                    logger.info("[NFS CLEANUP] Unmount successful")
                 except Exception:
                     # Try lazy unmount
                     try:
@@ -3286,8 +3328,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             capture_output=True, timeout=10
                         )
                         os.rmdir(mount_point)
-                    except Exception:
-                        pass
+                        logger.info("[NFS CLEANUP] Lazy unmount successful")
+                    except Exception as e:
+                        logger.warning(f"[NFS CLEANUP] Could not unmount: {e}")
 
     def _cleanup_smb_job_files(
         server: str,
