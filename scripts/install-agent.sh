@@ -9,8 +9,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash
 #
 # Options:
+#   --branch NAME   Install from specific branch (default: main)
 #   --uninstall     Remove backer-agent
-#   --version VER   Install specific version (default: latest)
+#   --version VER   Install specific version (default: latest from branch)
 #   --help          Show this help
 #
 
@@ -28,6 +29,7 @@ NC='\033[0m'
 INSTALL_DIR="/opt/backer"
 CONFIG_DIR="/etc/backer"
 BACKER_VERSION="latest"
+GIT_BRANCH="${BACKER_BRANCH:-main}"
 UNINSTALL=false
 
 # Print functions
@@ -40,6 +42,10 @@ step() { echo -e "${CYAN}==>${NC} $1"; }
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --branch)
+            GIT_BRANCH="$2"
+            shift 2
+            ;;
         --version)
             BACKER_VERSION="$2"
             shift 2
@@ -49,7 +55,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            head -18 "$0" | tail -14
+            head -20 "$0" | tail -16
             exit 0
             ;;
         *)
@@ -118,10 +124,10 @@ install_backer() {
     source "$INSTALL_DIR/venv/bin/activate"
     pip install --upgrade pip wheel setuptools -q
 
-    step "Installing backer from GitHub..."
+    step "Installing backer from GitHub (branch: $GIT_BRANCH)..."
     if [[ "$BACKER_VERSION" == "latest" ]]; then
-        pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git" || \
-            error "Failed to install backer"
+        pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git@$GIT_BRANCH" || \
+            error "Failed to install backer from branch $GIT_BRANCH"
     else
         pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" || \
             error "Failed to install backer version $BACKER_VERSION"
@@ -251,6 +257,9 @@ main() {
     echo
     echo -e "${BLUE}╔═══════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║       Backer Agent Installer          ║${NC}"
+    if [[ "$GIT_BRANCH" != "main" ]]; then
+    echo -e "${BLUE}║         Branch: $GIT_BRANCH${NC}"
+    fi
     echo -e "${BLUE}╚═══════════════════════════════════════╝${NC}"
     echo
 
