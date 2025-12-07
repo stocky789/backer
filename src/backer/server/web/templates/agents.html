@@ -86,7 +86,11 @@
         <p style="color: var(--text-muted); margin-bottom: 10px;">
             When the Backer Agent opens, enter this server address:
         </p>
-        <pre style="font-size: 14px; padding: 12px;">http://{{ request.host }}</pre>
+        <pre id="serverUrl" style="font-size: 14px; padding: 12px;">Loading...</pre>
+        <script>
+            // Get the actual server URL from the browser
+            document.getElementById('serverUrl').textContent = window.location.origin;
+        </script>
 
         <h4 style="margin-top: 20px; margin-bottom: 10px;">4. Click Connect</h4>
         <p style="color: var(--text-muted);">
@@ -109,9 +113,14 @@
         <pre>curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash</pre>
 
         <h4 style="margin-top: 20px; margin-bottom: 10px;">Or Manual Install</h4>
-        <pre>pip install backer
-backer agent register --server http://{{ request.host }}
+        <pre id="linuxManualInstall">pip install backer
+backer agent register --server [loading...]
 backer agent start</pre>
+        <script>
+            // Update Linux manual install command with actual server URL
+            document.getElementById('linuxManualInstall').textContent = 
+                `pip install backer\nbacker agent register --server ${window.location.origin}\nbacker agent start`;
+        </script>
 
         <p style="margin-top: 20px; color: var(--text-muted);">
             The agent will appear in the list above once registered and running.
