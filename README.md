@@ -1,10 +1,19 @@
-# Backer
+# Backer (Development Branch)
+
+> ⚠️ **This is the `dev` branch** - contains unstable/experimental features. For stable releases, see the [main branch](https://github.com/stocky789/backer/tree/main).
 
 Open-source backup management with web UI - like Veeam/UrBackup but simpler.
 
 **Self-contained**: Backer automatically downloads rclone, restic, and kopia - no manual tool installation required.
 
 **Default Login**: `admin` / `admin` (change after first login)
+
+## Quick Links
+
+- 📦 [Stable Releases](https://github.com/stocky789/backer/releases)
+- 🐛 [Report Issues](https://github.com/stocky789/backer/issues)
+- 📝 [Main Branch README](https://github.com/stocky789/backer/blob/main/README.md)
+- 🔧 [Development Setup](#development-setup)
 
 ## How It Works
 
@@ -42,9 +51,13 @@ Backer uses a **server + agent** architecture:
 
 Install the server on a Linux machine that will manage all your backups.
 
-### Option 1: One-Line Install (Recommended)
+### Option 1: One-Line Install (Dev Branch)
 
 ```bash
+# Install from dev branch (latest unstable)
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/install.sh | sudo bash -s -- --branch dev
+
+# Or for stable release:
 curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
 ```
 
@@ -69,10 +82,10 @@ docker run -d --name backer \
   ghcr.io/stocky789/backer:latest
 ```
 
-**Or using Docker Compose:**
+**Or using Docker Compose (dev branch):**
 
 ```bash
-git clone https://github.com/stocky789/backer.git
+git clone -b dev https://github.com/stocky789/backer.git
 cd backer
 docker compose up -d
 ```
@@ -81,14 +94,14 @@ docker compose up -d
 
 **Access Web UI:** `http://localhost:8420`
 
-### Option 3: Manual Install
+### Option 3: Manual Install (Dev Branch)
 
 ```bash
 # Install system dependencies (Debian/Ubuntu)
 sudo apt install python3 python3-venv python3-pip cifs-utils smbclient nfs-common
 
-# Clone and setup
-git clone https://github.com/stocky789/backer.git
+# Clone dev branch and setup
+git clone -b dev https://github.com/stocky789/backer.git
 cd backer
 python3 -m venv venv
 source venv/bin/activate
@@ -172,6 +185,10 @@ Use Windows Settings > Apps > Backer Agent, or run the installer again and choos
 ### Linux Agent
 
 ```bash
+# Install from dev branch
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/scripts/install-agent.sh | sudo bash -s -- --branch dev
+
+# Or stable:
 curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash
 ```
 
@@ -200,7 +217,7 @@ sudo systemctl stop backer-agent     # Stop
 **Uninstall:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/scripts/install-agent.sh | sudo bash -s -- --uninstall
 ```
 
 ---
@@ -347,26 +364,105 @@ See the full API by browsing the server routes in the source code.
 
 ---
 
-## Development
+## Development Setup
+
+### Prerequisites
 
 ```bash
-# Clone and setup dev environment
-git clone https://github.com/stocky789/backer.git
+# Debian/Ubuntu
+sudo apt install python3 python3-venv python3-pip cifs-utils smbclient nfs-common sshpass
+
+# Arch Linux
+sudo pacman -S python python-pip cifs-utils smbclient nfs-utils sshpass
+```
+
+### Clone and Setup
+
+```bash
+# Clone dev branch
+git clone -b dev https://github.com/stocky789/backer.git
 cd backer
+
+# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
-pip install -e ".[dev,all]"
 
-# Run tests
+# Install in development mode with all extras
+pip install -e ".[dev,all]"
+```
+
+### Running Locally
+
+```bash
+# Start server in foreground (for development)
+backer server start
+
+# Or run directly with Python for debugging
+python -m backer.server.daemon
+
+# Run agent (in another terminal)
+backer agent start
+```
+
+### Testing
+
+```bash
+# Run all tests
 make test
 
-# Lint and format
+# Run specific test file
+pytest tests/test_storage.py -v
+
+# Run with coverage
+pytest --cov=backer tests/
+```
+
+### Code Quality
+
+```bash
+# Lint (ruff)
 make lint
+
+# Format code
 make format
 
-# Run server in dev mode
-backer server start
+# Type checking
+make typecheck
+
+# Run all checks
+make check
 ```
+
+### Project Structure
+
+```
+src/backer/
+├── agent/          # Windows/Linux agent with GUI
+├── backends/       # Backup backends (rclone, restic, kopia)
+├── client/         # Agent client code
+├── core/           # Shared core functionality
+├── hypervisors/    # Proxmox/VMware integration
+│   ├── proxmox.py  # Proxmox API client
+│   ├── qmp.py      # QEMU Machine Protocol
+│   └── metadata.py # Backup metadata handling
+└── server/
+    ├── app.py      # FastAPI application
+    ├── storage.py  # SQLite database layer
+    ├── tasks.py    # Background task manager
+    ├── scheduler.py # Cron scheduler
+    ├── retention.py # Backup retention policies
+    └── web/        # Web UI templates
+```
+
+### Key Components
+
+| Component | Description |
+|-----------|-------------|
+| `app.py` | Main FastAPI server with all API endpoints |
+| `storage.py` | SQLite database operations, schema migrations |
+| `proxmox.py` | Proxmox VE API integration for hypervisor backups |
+| `tasks.py` | Async background task execution |
+| `retention.py` | Backup retention policy enforcement |
 
 ### Creating a Release
 
@@ -378,12 +474,47 @@ make release VERSION=0.2.0
 git push && git push --tags
 ```
 
-This will:
-1. Run tests on Linux and Windows
-2. Build Windows agent installer (`.exe`)
-3. Build Docker image and push to `ghcr.io`
-4. Build Python packages (`.whl`, `.tar.gz`)
-5. Create GitHub release with all downloads
+CI/CD Pipeline:
+1. Runs tests on Linux and Windows
+2. Builds Windows agent installer (`.exe`)
+3. Builds Docker image → `ghcr.io/stocky789/backer`
+4. Builds Python packages (`.whl`, `.tar.gz`)
+5. Creates GitHub release with all artifacts
+
+### Dev Branch Workflow
+
+```bash
+# Create feature branch from dev
+git checkout dev
+git pull origin dev
+git checkout -b feature/my-feature
+
+# Make changes, commit
+git add -A
+git commit -m "feat: add new feature"
+
+# Push and create PR to dev branch
+git push -u origin feature/my-feature
+```
+
+### Debugging Tips
+
+```bash
+# View server logs
+sudo journalctl -u backer -f
+
+# View agent logs
+sudo journalctl -u backer-agent -f
+
+# Check SQLite database
+sqlite3 ~/.local/share/backer/backer.db ".tables"
+
+# Test Proxmox connectivity
+curl -k https://proxmox-host:8006/api2/json/version
+
+# Test SMB share access
+smbclient //server/share -U username
+```
 
 ---
 
