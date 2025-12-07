@@ -404,6 +404,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     storage=proxmox_storage_id,
                     mode=mode,
                     compress=compress,
+                    retention=job.get("retention"),
                     timeout=7200,
                 )
 
@@ -3087,6 +3088,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     _cleanup_hypervisor_job_data(
                         repository=repository,
                         hypervisor=hypervisor,
+                        job=job,
                         storage=storage,
                         repository_id=repository_id,
                     )
@@ -3106,51 +3108,212 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def _cleanup_hypervisor_job_data(
         repository: dict[str, Any],
         hypervisor: dict[str, Any],
+        job: dict[str, Any],
         storage: Storage,
         repository_id: str,
     ) -> None:
-        """Clean up all job data from the repository.
+        """Clean up backup files for a specific job from the repository.
 
-        Deletes:
-        - Backup files in dump/
-        - Metadata in .backer/
-        - The hypervisor folder if empty after cleanup
+        IMPORTANT: Multiple jobs from the same hypervisor share the same dump/ folder.
+        We only delete backup files that belong to THIS job based on:
+        - The guest IDs configured in the job
+        - The timestamps from the job's run history
+
+        We do NOT delete the shared .backer/ metadata folder since other jobs need it.
         """
-        import subprocess
+        from datetime import datetime
 
         repo_type = repository.get("repo_type", "").lower()
-        if repo_type != "smb":
-            logger.debug(f"Repository cleanup not supported for type: {repo_type}")
-            return
-
         server = repository.get("server", "")
-        share = repository.get("share", "")
-        subdir = repository.get("path", "").strip("/")
-        username = repository.get("username")
-        domain = repository.get("domain")
 
-        # Get repository password
-        repo_password = storage.get_repository_password(repository_id)
+        # Get hypervisor name for path construction
+        hv_name = hypervisor.get("name", "unknown")
+        job_id = job.get("id")
 
-        if not server or not share:
-            logger.warning("Cannot clean up: missing server or share")
+        # Get all runs for this job to identify which backup files belong to it
+        runs = storage.get_hypervisor_runs(job_id=job_id, limit=10000)
+
+        # Build list of (guest_id, timestamp) tuples to match backup files
+        files_to_delete: list[tuple[int, datetime]] = []
+        for run in runs:
+            guest_id = run.get("guest_id")
+            started_at = run.get("started_at")
+            if guest_id and started_at:
+                try:
+                    dt = datetime.fromisoformat(started_at)
+                    files_to_delete.append((guest_id, dt))
+                except ValueError:
+                    pass
+
+        if not files_to_delete:
+            logger.info(f"No backup runs found for job {job.get('name')} - nothing to clean up")
             return
 
-        # Build hypervisor folder path
-        safe_hv_name = "".join(
-            c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+        logger.info(
+            f"Cleaning up {len(files_to_delete)} backup files for job '{job.get('name')}'"
         )
-        if subdir:
-            hv_path = f"{subdir}/Hypervisors/{safe_hv_name}"
+
+        # Backups are stored in Hypervisors/{hv_name}/dump/ (shared by all jobs from this hypervisor)
+        # For NFS, Proxmox mounts at the hypervisor level, so dump/ is relative to that
+        dump_path = f"Hypervisors/{hv_name}/dump"
+
+        if repo_type == "nfs":
+            export = repository.get("share", "")  # For NFS, 'share' contains the export path
+            if not server or not export:
+                logger.warning("Cannot clean up NFS: missing server or export")
+                return
+
+            _cleanup_nfs_job_files(server, export, dump_path, files_to_delete)
+
+        elif repo_type == "smb":
+            share = repository.get("share", "")
+            subdir = repository.get("path", "").strip("/")
+            username = repository.get("username")
+            domain = repository.get("domain")
+            repo_password = storage.get_repository_password(repository_id)
+
+            if not server or not share:
+                logger.warning("Cannot clean up SMB: missing server or share")
+                return
+
+            # Prepend subdir if present
+            if subdir:
+                full_dump_path = f"{subdir}/{dump_path}"
+            else:
+                full_dump_path = dump_path
+
+            _cleanup_smb_job_files(
+                server, share, username, repo_password, domain, full_dump_path, files_to_delete
+            )
         else:
-            hv_path = f"Hypervisors/{safe_hv_name}"
+            logger.debug(f"Repository cleanup not supported for type: {repo_type}")
+
+    def _cleanup_nfs_job_files(
+        server: str,
+        export: str,
+        dump_path: str,
+        files_to_delete: list[tuple[int, "datetime"]],
+    ) -> None:
+        """Clean up specific backup files from an NFS share.
+
+        Only deletes files that match the (guest_id, timestamp) pairs provided.
+        This ensures we only delete files belonging to the job being deleted,
+        not files from other jobs that share the same dump directory.
+        """
+        import os
+        import re
+        import subprocess
+        import tempfile
+        from datetime import datetime
+
+        mount_point = None
+        try:
+            # Create temporary mount point
+            mount_point = tempfile.mkdtemp(prefix="backer_cleanup_")
+            nfs_source = f"{server}:{export}"
+
+            # Mount NFS with write access
+            mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", "rw", nfs_source, mount_point]
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logger.warning(f"Failed to mount NFS for cleanup: {result.stderr}")
+                return
+
+            full_dump_path = Path(mount_point) / dump_path
+            if not full_dump_path.exists():
+                logger.debug(f"Dump path does not exist: {dump_path}")
+                return
+
+            deleted_count = 0
+            for guest_id, timestamp in files_to_delete:
+                # Find vzdump files matching this guest_id and timestamp
+                for entry in full_dump_path.iterdir():
+                    if not entry.is_file():
+                        continue
+
+                    # Match vzdump filename pattern
+                    match = re.match(
+                        rf"vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
+                        rf"(\d{{2}}_\d{{2}}_\d{{2}})\.vma(?:\.(zst|gz|lzo))?$",
+                        entry.name
+                    )
+                    if match:
+                        file_date = match.group(2)  # YYYY_MM_DD
+                        file_time = match.group(3)  # HH_MM_SS
+                        try:
+                            file_dt = datetime.strptime(
+                                f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
+                            )
+                            # Check if within 5 minutes of run start time
+                            time_diff = abs((file_dt - timestamp).total_seconds())
+                            if time_diff < 300:  # 5 minutes tolerance
+                                try:
+                                    entry.unlink()
+                                    deleted_count += 1
+                                    logger.info(f"Deleted backup file: {entry.name}")
+                                    # Also delete .notes file if exists
+                                    notes_file = Path(str(entry) + ".notes")
+                                    if notes_file.exists():
+                                        notes_file.unlink()
+                                except OSError as e:
+                                    logger.warning(f"Failed to delete {entry.name}: {e}")
+                        except ValueError:
+                            continue
+
+            if deleted_count > 0:
+                logger.info(f"NFS cleanup deleted {deleted_count} backup files")
+            else:
+                logger.info("No matching backup files found to delete")
+
+        except subprocess.TimeoutExpired:
+            logger.warning("NFS mount timeout during cleanup")
+        except Exception as e:
+            logger.warning(f"Error during NFS cleanup: {e}")
+        finally:
+            # Unmount
+            if mount_point:
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "umount", mount_point],
+                        capture_output=True, timeout=30
+                    )
+                    os.rmdir(mount_point)
+                except Exception:
+                    # Try lazy unmount
+                    try:
+                        subprocess.run(
+                            ["sudo", "-n", "umount", "-l", mount_point],
+                            capture_output=True, timeout=10
+                        )
+                        os.rmdir(mount_point)
+                    except Exception:
+                        pass
+
+    def _cleanup_smb_job_files(
+        server: str,
+        share: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None,
+        dump_path: str,
+        files_to_delete: list[tuple[int, "datetime"]],
+    ) -> None:
+        """Clean up specific backup files from an SMB share.
+
+        Only deletes files that match the (guest_id, timestamp) pairs provided.
+        This ensures we only delete files belonging to the job being deleted,
+        not files from other jobs that share the same dump directory.
+        """
+        import re
+        import subprocess
+        from datetime import datetime
 
         # Build smbclient auth
         if username:
             if domain:
-                auth_str = f"{domain}\\{username}%{repo_password or ''}"
+                auth_str = f"{domain}\\{username}%{password or ''}"
             else:
-                auth_str = f"{username}%{repo_password or ''}"
+                auth_str = f"{username}%{password or ''}"
             auth_parts = ["-U", auth_str]
         else:
             auth_parts = ["-N"]
@@ -3168,61 +3331,49 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except Exception as e:
                 return False, str(e)
 
-        # Step 1: Delete all files in dump/ folder
-        dump_path = f"{hv_path}/dump"
         logger.info(f"Cleaning up backup files in {dump_path}")
 
-        # List files first
+        # List files in dump directory
         ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
-        if ok:
-            # Delete each vzdump file
+        if not ok:
+            logger.debug(f"Could not list SMB dump path: {output}")
+            return
+
+        deleted_count = 0
+        for guest_id, timestamp in files_to_delete:
             for line in output.split("\n"):
-                if "vzdump-" in line:
-                    # Extract filename from smbclient ls output
-                    parts = line.strip().split()
-                    if parts:
-                        filename = parts[0]
-                        if filename.startswith("vzdump-"):
+                # Match vzdump filename in smbclient output
+                match = re.search(
+                    rf"(vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
+                    rf"(\d{{2}}_\d{{2}}_\d{{2}})\.vma(?:\.(zst|gz|lzo))?)",
+                    line
+                )
+                if match:
+                    filename = match.group(1)
+                    file_date = match.group(3)  # YYYY_MM_DD
+                    file_time = match.group(4)  # HH_MM_SS
+                    try:
+                        file_dt = datetime.strptime(
+                            f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
+                        )
+                        # Check if within 5 minutes of run start time
+                        time_diff = abs((file_dt - timestamp).total_seconds())
+                        if time_diff < 300:  # 5 minutes tolerance
                             del_ok, del_out = run_smb_cmd(
                                 f'del "{dump_path}/{filename}"'
                             )
                             if del_ok:
-                                logger.debug(f"Deleted backup: {filename}")
+                                deleted_count += 1
+                                logger.info(f"Deleted backup file: {filename}")
                             else:
                                 logger.warning(f"Failed to delete {filename}: {del_out}")
+                    except ValueError:
+                        continue
 
-        # Step 2: Delete metadata folder contents
-        backer_path = f"{hv_path}/.backer"
-        logger.info(f"Cleaning up metadata in {backer_path}")
-
-        # Delete files in subdirectories
-        for subpath in ["hypervisors", "guests", "runs", "jobs"]:
-            full_path = f"{backer_path}/{subpath}"
-            ok, output = run_smb_cmd(f'ls "{full_path}/*"')
-            if ok:
-                for line in output.split("\n"):
-                    if ".json" in line:
-                        parts = line.strip().split()
-                        if parts and parts[0].endswith(".json"):
-                            filename = parts[0]
-                            run_smb_cmd(f'del "{full_path}/{filename}"')
-
-            # Try to remove the empty directory
-            run_smb_cmd(f'rmdir "{full_path}"')
-
-        # Delete metadata.json
-        run_smb_cmd(f'del "{backer_path}/metadata.json"')
-
-        # Try to remove .backer directory
-        run_smb_cmd(f'rmdir "{backer_path}"')
-
-        # Step 3: Try to remove dump directory if empty
-        run_smb_cmd(f'rmdir "{dump_path}"')
-
-        # Step 4: Try to remove hypervisor folder if empty
-        run_smb_cmd(f'rmdir "{hv_path}"')
-
-        logger.info(f"Repository cleanup completed for hypervisor: {hypervisor['name']}")
+        if deleted_count > 0:
+            logger.info(f"SMB cleanup deleted {deleted_count} backup files")
+        else:
+            logger.info("No matching backup files found to delete")
 
     def _write_metadata_nfs(
         server: str,
@@ -3776,6 +3927,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         storage=proxmox_storage_id,
                         mode=backup_mode,
                         compress=compression,
+                        retention=job.get("retention"),
                         timeout=7200,
                         progress_callback=progress_callback,
                     )

@@ -2300,6 +2300,7 @@ class ProxmoxBackupManager:
         node: str | None = None,
         mode: ProxmoxBackupMode = ProxmoxBackupMode.SNAPSHOT,
         compress: ProxmoxCompression = ProxmoxCompression.ZSTD,
+        retention: dict[str, int] | None = None,
         progress_callback: Any | None = None,
         timeout: int = 7200,
     ) -> dict[str, Any]:
@@ -2314,6 +2315,8 @@ class ProxmoxBackupManager:
             node: Node name (auto-detected if None)
             mode: Backup mode
             compress: Compression algorithm
+            retention: Retention policy dict (e.g., {"keep_last": 3, "keep_daily": 7}).
+                       When provided, Proxmox will automatically prune old backups.
             progress_callback: Optional callback for progress updates
             timeout: Maximum backup time in seconds
 
@@ -2336,6 +2339,7 @@ class ProxmoxBackupManager:
             node=node,
             mode=mode,
             compress=compress,
+            retention=retention,
             progress_callback=progress_callback,
             timeout=timeout,
         )

@@ -155,10 +155,30 @@ class BackupScheduler:
             if progress_cleaned > 0:
                 logger.debug(f"Cleaned up {progress_cleaned} stale progress records")
 
+            # Apply retention policies to all jobs (every cleanup cycle)
+            self._apply_retention_policies()
+
             self._last_cleanup = now
 
         except Exception as e:
             logger.warning(f"Cleanup error: {e}")
+
+    def _apply_retention_policies(self) -> None:
+        """Apply retention policies to all jobs, deleting old backup runs."""
+        try:
+            from backer.server.retention import RetentionManager
+
+            manager = RetentionManager(self.storage)
+            results = manager.apply_all_retention(dry_run=False)
+
+            if results:
+                total_deleted = sum(len(runs) for runs in results.values())
+                logger.info(
+                    f"Retention cleanup: deleted {total_deleted} old runs "
+                    f"across {len(results)} jobs"
+                )
+        except Exception as e:
+            logger.warning(f"Retention policy error: {e}")
 
     def _check_and_run_jobs(self) -> None:
         """Check all jobs and run any that are due."""
