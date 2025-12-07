@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -3796,9 +3796,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         continue
 
                     # Match vzdump filename pattern
+                    # QEMU VMs use .vma extension, LXC containers use .tar extension
                     match = re.match(
                         rf"vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
-                        rf"(\d{{2}}_\d{{2}}_\d{{2}})\.vma(?:\.(zst|gz|lzo))?$",
+                        rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?$",
                         entry.name
                     )
                     if match:
@@ -3835,13 +3836,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     if notes_file.exists():
                                         notes_file.unlink()
                                         logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
-                                    # Log file has same base name but .log instead of .vma.zst
+                                    # Log file has same base name but .log instead of .vma.zst/.tar.zst
                                     # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
+                                    # vzdump-lxc-101-2025_12_07-16_19_19.tar.zst -> .log
                                     base_name = (
                                         entry.name.replace(".vma.zst", "")
                                         .replace(".vma.gz", "")
                                         .replace(".vma.lzo", "")
                                         .replace(".vma", "")
+                                        .replace(".tar.zst", "")
+                                        .replace(".tar.gz", "")
+                                        .replace(".tar.lzo", "")
+                                        .replace(".tar", "")
                                     )
                                     log_file = entry.parent / f"{base_name}.log"
                                     if log_file.exists():
@@ -3950,9 +3956,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         for guest_id, timestamp in files_to_delete:
             for line in output.split("\n"):
                 # Match vzdump filename in smbclient output
+                # QEMu VMs use .vma extension, LXC containers use .tar extension
                 match = re.search(
                     rf"(vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
-                    rf"(\d{{2}}_\d{{2}}_\d{{2}})\.vma(?:\.(zst|gz|lzo))?)",
+                    rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?)",
                     line
                 )
                 if match:
@@ -3963,8 +3970,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         file_dt = datetime.strptime(
                             f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
                         )
+                        # vzdump uses UTC time in filenames, but our timestamp may be local
+                        # Convert our timestamp to UTC for comparison
+                        timestamp_utc = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
                         # Check if within 5 minutes of run start time
-                        time_diff = abs((file_dt - timestamp).total_seconds())
+                        time_diff = abs((file_dt - timestamp_utc).total_seconds())
                         if time_diff < 300:  # 5 minutes tolerance
                             del_ok, del_out = run_smb_cmd(
                                 f'del "{dump_path}/{filename}"'
@@ -3984,6 +3994,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     .replace(".vma.gz", "")
                                     .replace(".vma.lzo", "")
                                     .replace(".vma", "")
+                                    .replace(".tar.zst", "")
+                                    .replace(".tar.gz", "")
+                                    .replace(".tar.lzo", "")
+                                    .replace(".tar", "")
                                 )
                                 log_filename = f"{base_name}.log"
                                 run_smb_cmd(f'del "{dump_path}/{log_filename}"')
@@ -4992,8 +5006,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                     # Extract vzdump filename from line
                     # smbclient format: "  filename  ATTR  SIZE  DATE"
+                    # QEMU VMs use .vma extension, LXC containers use .tar extension
                     vzdump_match = re.search(
-                        r"(vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.vma(?:\.(zst|gz|lzo))?)",
+                        r"(vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.(vma|tar)(?:\.(zst|gz|lzo))?)",
                         line
                     )
                     if vzdump_match:
@@ -5002,7 +5017,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         vmid = vzdump_match.group(3)
                         date_str = vzdump_match.group(4)
                         time_str = vzdump_match.group(5)
-                        compression = vzdump_match.group(6)
+                        # group 6 is now the extension (vma|tar), compression is group 7
+                        compression = vzdump_match.group(7)
 
                         # Try to extract size from the line (digits followed by date)
                         size_match = re.search(r"\s(\d+)\s+\w{3}\s+\w{3}", line)
@@ -5092,8 +5108,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         continue
 
                     # Parse vzdump filename: vzdump-qemu-100-2025_12_07-15_09_27.vma.zst
+                    # QEMU VMs use .vma extension, LXC containers use .tar extension
                     vzdump_match = re.match(
-                        r"vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.vma(?:\.(zst|gz|lzo))?$",
+                        r"vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.(vma|tar)(?:\.(zst|gz|lzo))?$",
                         entry.name
                     )
                     if vzdump_match:
@@ -5101,7 +5118,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         vmid = vzdump_match.group(2)
                         date_str = vzdump_match.group(3)
                         time_str = vzdump_match.group(4)
-                        compression = vzdump_match.group(5)
+                        file_format = vzdump_match.group(5)  # vma or tar
+                        compression = vzdump_match.group(6)
 
                         try:
                             # Get file size (may fail on stale NFS)
@@ -5120,7 +5138,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 "guest_type": guest_type,
                                 "ctime": backup_time.timestamp(),
                                 "size": size,
-                                "format": "vma",
+                                "format": file_format,
                                 "node": hypervisor_name,
                                 "compression": compression or "none",
                             })
