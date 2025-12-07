@@ -542,7 +542,12 @@ class RetentionManager:
                                         logger.info(f"Deleted notes file: {notes_file.name}")
                                     # Log file has same base name but .log instead of .vma.zst
                                     # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
-                                    base_name = entry.name.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                    base_name = (
+                                        entry.name.replace(".vma.zst", "")
+                                        .replace(".vma.gz", "")
+                                        .replace(".vma.lzo", "")
+                                        .replace(".vma", "")
+                                    )
                                     log_file = entry.parent / f"{base_name}.log"
                                     if log_file.exists():
                                         log_file.unlink()
@@ -646,7 +651,12 @@ class RetentionManager:
 
                                     # Also delete .log file if exists
                                     # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
-                                    base_name = filename.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                    base_name = (
+                                        filename.replace(".vma.zst", "")
+                                        .replace(".vma.gz", "")
+                                        .replace(".vma.lzo", "")
+                                        .replace(".vma", "")
+                                    )
                                     log_filename = f"{base_name}.log"
                                     log_cmd = [
                                         "smbclient", f"//{server}/{share}", *auth_opts,

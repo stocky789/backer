@@ -3206,7 +3206,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 else:
                     # Ignore errors for .log/.notes files that may not exist
                     if not (filename.endswith(".log") or filename.endswith(".notes")):
-                        logger.debug(f"Failed to delete {filename}: {result.stderr.decode() if result.stderr else 'unknown error'}")
+                        err = result.stderr.decode() if result.stderr else "unknown error"
+                        logger.debug(f"Failed to delete {filename}: {err}")
 
             if deleted_count > 0:
                 logger.info(f"Deleted {deleted_count} pre-existing backup files for VM {vmid}")
@@ -3240,7 +3241,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", f"{server}:{export}", mount_point]
             result = subprocess.run(mount_cmd, capture_output=True, timeout=30)
             if result.returncode != 0:
-                logger.warning(f"Failed to mount NFS for backup deletion: {result.stderr.decode() if result.stderr else 'unknown error'}")
+                err = result.stderr.decode() if result.stderr else "unknown error"
+                logger.warning(f"Failed to mount NFS for backup deletion: {err}")
                 return
 
             # Build path to dump directory
@@ -3530,20 +3532,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
                                     # Log file has same base name but .log instead of .vma.zst
                                     # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
-                                    base_name = entry.name.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                    base_name = (
+                                        entry.name.replace(".vma.zst", "")
+                                        .replace(".vma.gz", "")
+                                        .replace(".vma.lzo", "")
+                                        .replace(".vma", "")
+                                    )
                                     log_file = entry.parent / f"{base_name}.log"
                                     if log_file.exists():
                                         log_file.unlink()
                                         logger.info(f"[NFS CLEANUP] DELETED log: {log_file.name}")
                                 except Exception as e:
-                                    logger.error(f"[NFS CLEANUP] Failed to delete {entry.name}: {type(e).__name__}: {e}")
+                                    logger.error(
+                                        f"[NFS CLEANUP] Failed to delete {entry.name}: "
+                                        f"{type(e).__name__}: {e}"
+                                    )
                             else:
                                 logger.info(f"[NFS CLEANUP] Skipping {entry.name} - date mismatch")
                         except ValueError as e:
                             logger.warning(f"[NFS CLEANUP] Could not parse timestamp from {entry.name}: {e}")
                             continue
                         except Exception as e:
-                            logger.error(f"[NFS CLEANUP] Unexpected error processing {entry.name}: {type(e).__name__}: {e}")
+                            logger.error(
+                                f"[NFS CLEANUP] Unexpected error processing {entry.name}: "
+                                f"{type(e).__name__}: {e}"
+                            )
                             continue
 
             if deleted_count > 0:
@@ -3661,7 +3674,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                                 # Also delete .log file if exists
                                 # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
-                                base_name = filename.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
+                                base_name = (
+                                    filename.replace(".vma.zst", "")
+                                    .replace(".vma.gz", "")
+                                    .replace(".vma.lzo", "")
+                                    .replace(".vma", "")
+                                )
                                 log_filename = f"{base_name}.log"
                                 run_smb_cmd(f'del "{dump_path}/{log_filename}"')
                             else:
