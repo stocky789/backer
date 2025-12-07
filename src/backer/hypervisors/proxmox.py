@@ -1010,6 +1010,92 @@ class ProxmoxAPI:
         import time
         time.sleep(2)
 
+    def _ensure_nfs_directory_exists(
+        self,
+        server: str,
+        base_export: str,
+        subdir: str,
+    ) -> None:
+        """Ensure a directory exists on an NFS export by mounting and creating it.
+
+        NFS doesn't have a remote directory creation protocol like SMB's smbclient,
+        so we need to temporarily mount the base export and create the directory.
+
+        Args:
+            server: NFS server hostname/IP
+            base_export: Base NFS export path (e.g., /mnt/tank/Backups)
+            subdir: Subdirectory to create within the export (e.g., Hypervisors/MyProxmox)
+
+        Raises:
+            ProxmoxAPIError: If unable to mount NFS or create directory
+        """
+        import subprocess
+        import tempfile
+        import os
+
+        # Create a temporary mount point
+        mount_point = tempfile.mkdtemp(prefix="backer_nfs_mkdir_")
+
+        try:
+            # Mount the NFS export
+            # Use soft mount with timeout to avoid hangs
+            mount_cmd = [
+                "sudo", "-n", "mount", "-t", "nfs",
+                "-o", "soft,timeo=50,retrans=2",
+                f"{server}:{base_export}",
+                mount_point,
+            ]
+
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                error_msg = result.stderr.strip()
+                raise ProxmoxAPIError(
+                    f"Failed to mount NFS {server}:{base_export} for directory creation: {error_msg}"
+                )
+
+            # Create the subdirectory structure
+            full_path = os.path.join(mount_point, subdir)
+            try:
+                os.makedirs(full_path, exist_ok=True)
+                logger.info(f"Created NFS directory: {server}:{base_export}/{subdir}")
+            except OSError as e:
+                raise ProxmoxAPIError(
+                    f"Failed to create directory {subdir} on NFS {server}:{base_export}: {e}"
+                )
+
+        except subprocess.TimeoutExpired:
+            raise ProxmoxAPIError(
+                f"Timeout mounting NFS {server}:{base_export}"
+            )
+        finally:
+            # Always try to unmount
+            try:
+                subprocess.run(
+                    ["sudo", "-n", "umount", mount_point],
+                    capture_output=True,
+                    timeout=30,
+                )
+            except Exception:
+                # Try lazy unmount if normal unmount fails
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "umount", "-l", mount_point],
+                        capture_output=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
+
+            # Remove the temp mount point
+            try:
+                os.rmdir(mount_point)
+            except Exception:
+                pass
+
+        # Small delay for NFS directory visibility
+        import time
+        time.sleep(1)
+
     def _cleanup_stale_mount_point(
         self,
         storage_id: str,
@@ -1431,17 +1517,23 @@ class ProxmoxAPI:
             if not base_export:
                 raise ProxmoxAPIError(f"NFS repository '{repo_name}' has no export path")
 
-            # NFS doesn't support subdir like CIFS - the export path must exist on the server
-            # Use the base export path directly. Vzdump will create dump/ subfolder automatically.
-            # Note: For proper Hypervisors/ organization with NFS, the NFS export should be
-            # configured to point to the Hypervisors/{name} folder on the NFS server.
-            export = base_export
+            # Build the full export path including Hypervisors/{name} subdirectory
+            # NFS allows subdirectories within the export path, we just need to create them first
+            if hypervisor_name:
+                safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
+                export = f"{base_export.rstrip('/')}/Hypervisors/{safe_hv_name}"
+            else:
+                export = base_export
+
+            # Create the subdirectory on the NFS share before Proxmox tries to mount it
+            if hypervisor_name:
+                self._ensure_nfs_directory_exists(
+                    server=server,
+                    base_export=base_export,
+                    subdir=f"Hypervisors/{safe_hv_name}",
+                )
 
             logger.info(f"Creating NFS storage '{storage_id}' -> {server}:{export}")
-            logger.warning(
-                f"NFS storage does not support subdirectories. Backups will go to {export}/dump/. "
-                "For Hypervisors/ folder organization, configure NFS export path on the server."
-            )
             self.create_nfs_storage(
                 storage_id=storage_id,
                 server=server,
