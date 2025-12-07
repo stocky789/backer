@@ -661,6 +661,84 @@ class ProxmoxAPI:
             guests = self.list_guests()
             return next((g for g in guests if g.vmid == vmid), None)
 
+    def stop_guest(
+        self,
+        node: str,
+        vmid: int,
+        guest_type: ProxmoxGuestType,
+        timeout: int = 60,
+    ) -> str:
+        """Stop a VM or container immediately (hard stop).
+
+        Args:
+            node: Node where the guest is running
+            vmid: VM/container ID
+            guest_type: QEMU or LXC
+            timeout: Timeout in seconds
+
+        Returns:
+            UPID of the stop task
+        """
+        endpoint = f"/nodes/{node}/{guest_type.value}/{vmid}/status/stop"
+        data = {"timeout": timeout}
+
+        result = self._make_request("POST", endpoint, data=data)
+        upid = result.get("upid") if isinstance(result, dict) else result
+        if not upid:
+            raise ProxmoxAPIError(f"No UPID in response for stop task on VMID {vmid}")
+        return upid
+
+    def shutdown_guest(
+        self,
+        node: str,
+        vmid: int,
+        guest_type: ProxmoxGuestType,
+        timeout: int = 180,
+        force_stop: bool = False,
+    ) -> str:
+        """Gracefully shutdown a VM or container.
+
+        Args:
+            node: Node where the guest is running
+            vmid: VM/container ID
+            guest_type: QEMU or LXC
+            timeout: Timeout in seconds for graceful shutdown
+            force_stop: Force stop if graceful shutdown fails
+
+        Returns:
+            UPID of the shutdown task
+        """
+        endpoint = f"/nodes/{node}/{guest_type.value}/{vmid}/status/shutdown"
+        data: dict[str, Any] = {"timeout": timeout}
+        if force_stop:
+            data["forceStop"] = 1
+
+        result = self._make_request("POST", endpoint, data=data)
+        upid = result.get("upid") if isinstance(result, dict) else result
+        if not upid:
+            raise ProxmoxAPIError(f"No UPID in response for shutdown task on VMID {vmid}")
+        return upid
+
+    def get_guest_status(
+        self,
+        node: str,
+        vmid: int,
+        guest_type: ProxmoxGuestType,
+    ) -> str:
+        """Get the current status of a VM or container.
+
+        Args:
+            node: Node where the guest is located
+            vmid: VM/container ID
+            guest_type: QEMU or LXC
+
+        Returns:
+            Status string: "running", "stopped", "paused", etc.
+        """
+        endpoint = f"/nodes/{node}/{guest_type.value}/{vmid}/status/current"
+        result = self._make_request("GET", endpoint)
+        return result.get("status", "unknown") if isinstance(result, dict) else "unknown"
+
     # =========================================================================
     # Storage Operations
     # =========================================================================
@@ -2174,6 +2252,30 @@ class ProxmoxBackupManager:
         started_at = datetime.now()
 
         logger.info(f"Starting restore of {archive} to VMID {target_vmid} on {node}")
+
+        # Check if target VM exists and is running - must stop it first
+        if force:
+            try:
+                status = self.api.get_guest_status(node, target_vmid, guest_type)
+                if status == "running":
+                    logger.info(f"VM {target_vmid} is running, stopping before restore...")
+                    stop_upid = self.api.stop_guest(node, target_vmid, guest_type, timeout=120)
+
+                    # Wait for stop to complete
+                    stop_status = self.api.wait_for_task(node, stop_upid, timeout=120)
+                    if not stop_status.is_success:
+                        raise ProxmoxAPIError(
+                            f"Failed to stop VM {target_vmid} before restore: {stop_status.exitstatus}"
+                        )
+                    logger.info(f"VM {target_vmid} stopped successfully")
+
+                    # Small delay to ensure VM is fully stopped
+                    import time
+                    time.sleep(2)
+            except ProxmoxAPIError as e:
+                # If guest doesn't exist, that's fine - we're restoring fresh
+                if "does not exist" not in str(e).lower() and "not found" not in str(e).lower():
+                    raise
 
         upid = self.api.restore_guest(
             node=node,
