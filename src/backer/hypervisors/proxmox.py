@@ -10,6 +10,7 @@ Authentication is done via API tokens (recommended) or username/password tickets
 import json
 import logging
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -19,6 +20,11 @@ from enum import Enum
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Module-level reference counting for temporary Proxmox storage
+# This prevents race conditions when multiple tasks share the same storage ID
+_storage_ref_counts: dict[str, int] = {}
+_storage_ref_lock = threading.Lock()
 
 
 class ProxmoxAuthMethod(str, Enum):
@@ -1762,6 +1768,106 @@ class ProxmoxAPI:
                 "Backup may fail if mount is not ready."
             )
         return storage_id
+
+    def acquire_backer_storage(
+        self,
+        repository: dict[str, Any],
+        hypervisor_name: str | None = None,
+        storage_id: str | None = None,
+        ssh_user: str = "root",
+        ssh_port: int = 22,
+        ssh_key: str | None = None,
+        ssh_password: str | None = None,
+        smbversion: str | None = None,
+    ) -> str:
+        """Acquire a reference to Backer storage (creates if needed).
+
+        This is a wrapper around ensure_backer_storage that implements
+        reference counting. Multiple tasks can safely share the same storage
+        ID, and the storage will only be deleted when all tasks have released
+        their references via release_backer_storage().
+
+        Use this method instead of ensure_backer_storage() when the storage
+        will be cleaned up after the task completes.
+
+        Args:
+            Same as ensure_backer_storage()
+
+        Returns:
+            The storage ID to use for backups/restores
+        """
+        # Create or get the storage
+        storage_id = self.ensure_backer_storage(
+            repository=repository,
+            hypervisor_name=hypervisor_name,
+            storage_id=storage_id,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            ssh_key=ssh_key,
+            ssh_password=ssh_password,
+            smbversion=smbversion,
+        )
+
+        # Increment reference count
+        with _storage_ref_lock:
+            _storage_ref_counts[storage_id] = _storage_ref_counts.get(storage_id, 0) + 1
+            ref_count = _storage_ref_counts[storage_id]
+            logger.debug(f"Acquired storage '{storage_id}' (ref_count={ref_count})")
+
+        return storage_id
+
+    def release_backer_storage(self, storage_id: str) -> bool:
+        """Release a reference to Backer storage (deletes when last reference released).
+
+        This should be called when a task is done using the storage. The storage
+        will only be deleted from Proxmox when the last reference is released.
+
+        Args:
+            storage_id: The storage ID returned by acquire_backer_storage()
+
+        Returns:
+            True if storage was deleted, False if other references remain
+        """
+        with _storage_ref_lock:
+            if storage_id not in _storage_ref_counts:
+                logger.warning(
+                    f"release_backer_storage called for '{storage_id}' but no references tracked. "
+                    "Storage may have been cleaned up already."
+                )
+                # Try to delete anyway in case it exists
+                try:
+                    self.delete_storage(storage_id)
+                    logger.info(f"Deleted orphaned storage '{storage_id}'")
+                    return True
+                except Exception as e:
+                    logger.debug(f"Could not delete storage '{storage_id}': {e}")
+                    return False
+
+            _storage_ref_counts[storage_id] -= 1
+            ref_count = _storage_ref_counts[storage_id]
+            logger.debug(f"Released storage '{storage_id}' (ref_count={ref_count})")
+
+            if ref_count <= 0:
+                # Last reference - delete the storage
+                del _storage_ref_counts[storage_id]
+                # Release lock before making API call
+                should_delete = True
+            else:
+                should_delete = False
+
+        if should_delete:
+            try:
+                self.delete_storage(storage_id)
+                logger.info(f"Deleted Proxmox storage '{storage_id}' (last reference released)")
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to delete storage '{storage_id}': {e}")
+                return False
+
+        logger.info(
+            f"Storage '{storage_id}' still in use by {ref_count} other task(s), not deleting"
+        )
+        return False
 
     # =========================================================================
     # Backup Operations

@@ -332,10 +332,10 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         if hypervisor.get("ssh_use_api_password", True):
             ssh_password = _storage.get_hypervisor_password(hypervisor["id"])
 
-        # Ensure Proxmox storage exists for this repository
+        # Acquire Proxmox storage for this repository (with reference counting)
         # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
         try:
-            proxmox_storage_id = api.ensure_backer_storage(
+            proxmox_storage_id = api.acquire_backer_storage(
                 repo_with_password,
                 hypervisor_name=hypervisor["name"],
                 ssh_user=ssh_user,
@@ -450,23 +450,21 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     errors=[str(e)],
                 )
 
-        # Clean up: remove the temporary Proxmox storage
-        # This unmounts the share, keeping Proxmox UI clean
-        try:
-            api.delete_storage(proxmox_storage_id)
-            logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
-        except Exception as cleanup_err:
-            # Log but don't fail the backup - cleanup is best-effort
-            logger.warning(f"Failed to cleanup Proxmox storage '{proxmox_storage_id}': {cleanup_err}")
+        # Release storage reference (only deletes if no other tasks using it)
+        # This unmounts the share when last task completes, keeping Proxmox UI clean
+        if proxmox_storage_id:
+            deleted = api.release_backer_storage(proxmox_storage_id)
+            if deleted:
+                logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
 
         logger.info(f"Scheduled hypervisor job '{job.get('name')}' completed")
 
     except Exception as e:
         logger.exception(f"Hypervisor job {job_id} failed: {e}")
-        # Try to cleanup storage even on failure
+        # Release storage reference even on failure
         if proxmox_storage_id:
             try:
-                api.delete_storage(proxmox_storage_id)
+                api.release_backer_storage(proxmox_storage_id)
             except Exception:
                 pass  # Best effort cleanup
 
@@ -4067,11 +4065,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Submit backup as background task
         def run_backup_task(task: Task) -> dict[str, Any]:
-            # Ensure Proxmox storage exists for this repository (done in background to avoid blocking API)
+            # Acquire Proxmox storage for this repository (with reference counting)
             # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
             task.message = "Configuring backup storage..."
+            proxmox_storage_id = None
             try:
-                proxmox_storage_id = api.ensure_backer_storage(
+                proxmox_storage_id = api.acquire_backer_storage(
                     repo_with_password,
                     hypervisor_name=hypervisor["name"],
                     ssh_user=ssh_user,
@@ -4247,15 +4246,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Don't fail backup if metadata write fails
                 logger.warning(f"Failed to write backup metadata: {meta_err}")
 
-            # Clean up: remove the temporary Proxmox storage
-            # This unmounts the share, keeping Proxmox UI clean
-            try:
+            # Release storage reference (only deletes if no other tasks using it)
+            # This unmounts the share when last task completes, keeping Proxmox UI clean
+            if proxmox_storage_id:
                 task.message = "Cleaning up temporary storage..."
-                api.delete_storage(proxmox_storage_id)
-                logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
-            except Exception as cleanup_err:
-                # Log but don't fail the backup - cleanup is best-effort
-                logger.warning(f"Failed to cleanup Proxmox storage '{proxmox_storage_id}': {cleanup_err}")
+                deleted = api.release_backer_storage(proxmox_storage_id)
+                if deleted:
+                    logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
 
             success_count = sum(1 for r in results if r.get("success"))
             failed_count = sum(1 for r in results if not r.get("success"))
@@ -5045,11 +5042,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         def run_restore_task(task: Task) -> dict[str, Any]:
             proxmox_storage_id = None
             try:
-                # Step 1: Mount repository as Proxmox storage
+                # Step 1: Acquire repository as Proxmox storage (with reference counting)
                 task.message = "Mounting backup repository..."
                 task.progress = 10
                 try:
-                    proxmox_storage_id = api.ensure_backer_storage(
+                    proxmox_storage_id = api.acquire_backer_storage(
                         repo_with_password,
                         hypervisor_name=hypervisor["name"],
                         ssh_user=ssh_user,
@@ -5128,11 +5125,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return {"success": False, "error": str(e)}
 
             finally:
-                # Step 5: Clean up temporary storage mount
+                # Step 5: Release storage reference (only deletes if no other tasks using it)
                 if proxmox_storage_id:
                     try:
-                        api.delete_storage(proxmox_storage_id)
-                        logger.info(f"Cleaned up temporary Proxmox storage '{proxmox_storage_id}'")
+                        deleted = api.release_backer_storage(proxmox_storage_id)
+                        if deleted:
+                            logger.info(f"Cleaned up temporary Proxmox storage '{proxmox_storage_id}'")
                     except Exception as cleanup_err:
                         logger.warning(f"Failed to cleanup storage '{proxmox_storage_id}': {cleanup_err}")
 
