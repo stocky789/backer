@@ -330,7 +330,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         # Get SSH password if configured to use API password for SSH
         ssh_password = None
         if hypervisor.get("ssh_use_api_password", True):
-            ssh_password = _storage.get_hypervisor_password(hypervisor_id)
+            ssh_password = _storage.get_hypervisor_password(hypervisor["id"])
 
         # Ensure Proxmox storage exists for this repository
         # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
