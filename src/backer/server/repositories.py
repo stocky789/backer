@@ -344,22 +344,26 @@ class NFSBrowser:
 
         try:
             # Try mounting the NFS export
+            # Use explicit options to avoid inheriting fstab defaults
+            # -o nfsvers=3 provides broad compatibility, soft,timeo=50 prevents hangs
+            nfs_opts = "soft,timeo=50,retrans=2"
+
             # First try without sudo (works if running as root or setuid mount.nfs)
-            mount_cmd = ["mount", "-t", "nfs", f"{server}:{export}", str(mount_point)]
+            mount_cmd = ["mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{export}", str(mount_point)]
             result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
 
             # If that fails with permission error, try with sudo
             if result.returncode != 0:
                 error_msg = result.stderr.strip().lower()
-                if "permission" in error_msg or "setuid" in error_msg or "user" in error_msg:
+                if "permission" in error_msg or "setuid" in error_msg or "user" in error_msg or "fstab" in error_msg:
                     # Try with sudo
-                    mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", f"{server}:{export}", str(mount_point)]
+                    mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{export}", str(mount_point)]
                     result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip()
                 # Provide helpful error for common NFS mount issues
-                if "setuid" in error_msg.lower() or "user" in error_msg.lower():
+                if "setuid" in error_msg.lower() or "user" in error_msg.lower() or "fstab" in error_msg.lower():
                     return False, (
                         f"Failed to mount: {error_msg}\n\n"
                         "NFS mounts require root privileges. Options:\n"
