@@ -172,8 +172,8 @@
 
 <style>
 .running-job {
-    padding: 15px 20px;
-    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-light);
 }
 .running-job:last-child {
     border-bottom: none;
@@ -182,29 +182,31 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 .running-job-name {
-    font-weight: bold;
+    font-weight: 600;
+    color: var(--text);
 }
 .running-job-status {
-    font-size: 0.85em;
+    font-size: 12px;
     color: var(--text-muted);
 }
 .progress-bar-container {
-    background: var(--bg-tertiary);
+    background: var(--bg-input);
     border-radius: 4px;
-    height: 8px;
+    height: 6px;
     overflow: hidden;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
 }
 .progress-bar {
-    background: var(--info);
+    background: var(--accent);
     height: 100%;
     transition: width 0.3s ease;
+    border-radius: 4px;
 }
 .running-job-details {
-    font-size: 0.85em;
+    font-size: 12px;
     color: var(--text-muted);
     display: flex;
     justify-content: space-between;

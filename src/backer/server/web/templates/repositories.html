@@ -173,50 +173,57 @@
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(0, 0, 0, 0.5);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 1000;
+    backdrop-filter: blur(4px);
 }
 
 .modal-content {
-    background: var(--bg-secondary);
-    border-radius: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--border-radius-lg);
     width: 90%;
     max-height: 90vh;
     overflow-y: auto;
+    box-shadow: var(--shadow-lg);
 }
 
 .modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 15px 20px;
-    border-bottom: 1px solid var(--border);
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border-light);
 }
 
 .modal-header h3 {
     margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
 }
 
 .modal-body {
-    padding: 20px;
+    padding: 24px;
 }
 
 .browser-list {
     border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-primary);
+    border-radius: var(--border-radius);
+    background: var(--bg-card);
 }
 
 .browser-item {
-    padding: 10px 15px;
-    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-light);
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
+    transition: background-color 0.15s ease;
 }
 
 .browser-item:last-child {
@@ -224,23 +231,25 @@
 }
 
 .browser-item:hover {
-    background: var(--bg-secondary);
+    background: var(--bg-card-hover);
 }
 
 .browser-item.selected {
-    background: var(--accent);
-    color: white;
+    background: var(--accent-light);
+    border-color: var(--accent);
 }
 
 .browser-item .icon {
     width: 20px;
     height: 20px;
     flex-shrink: 0;
-    color: var(--warning);
+    opacity: 0.7;
 }
 
 .browser-item .name {
     flex: 1;
+    color: var(--text);
+    font-weight: 500;
 }
 
 .browser-item .meta {
@@ -250,13 +259,14 @@
 
 .error-msg {
     color: var(--error);
-    padding: 10px;
-    background: rgba(255, 107, 107, 0.1);
-    border-radius: 4px;
+    padding: 12px 14px;
+    background: var(--error-bg);
+    border-radius: var(--border-radius);
+    font-size: 13px;
 }
 
 .breadcrumb {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-muted);
 }
 
@@ -267,7 +277,7 @@
 
 .loading {
     text-align: center;
-    padding: 20px;
+    padding: 24px;
     color: var(--text-muted);
 }
 </style>
@@ -904,8 +914,8 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 <style>
 .scan-section {
     margin-bottom: 20px;
-    padding-bottom: 15px;
-    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-light);
 }
 
 .scan-section:last-child {
@@ -913,20 +923,23 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 }
 
 .scan-section h4 {
-    margin: 0 0 10px 0;
-    color: var(--text-primary);
+    margin: 0 0 12px 0;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
 }
 
 .scan-stats {
     display: flex;
-    gap: 20px;
+    gap: 16px;
     flex-wrap: wrap;
 }
 
 .stat-item {
-    background: var(--bg-primary);
-    padding: 15px 20px;
-    border-radius: 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    padding: 16px 20px;
+    border-radius: var(--border-radius);
     text-align: center;
     min-width: 100px;
 }
@@ -934,15 +947,17 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 .stat-value {
     display: block;
     font-size: 24px;
-    font-weight: bold;
+    font-weight: 700;
     color: var(--accent);
 }
 
 .stat-label {
     display: block;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-muted);
-    margin-top: 5px;
+    margin-top: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 .scan-table {
@@ -953,18 +968,25 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 
 .scan-table th,
 .scan-table td {
-    padding: 8px 12px;
+    padding: 10px 14px;
     text-align: left;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-light);
 }
 
 .scan-table th {
-    background: var(--bg-primary);
+    background: var(--bg-input);
     font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.scan-table tr:last-child td {
+    border-bottom: none;
 }
 
 .scan-table tr:hover {
-    background: var(--bg-primary);
+    background: var(--bg-card-hover);
 }
 </style>
 {% endblock %}
