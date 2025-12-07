@@ -15,6 +15,7 @@
 #   sudo ./install.sh
 #
 # Options:
+#   --branch NAME   Install from specific branch (default: main)
 #   --uninstall     Remove backer server
 #   --help          Show this help
 #
@@ -32,6 +33,7 @@ NC='\033[0m' # No Color
 INSTALL_DIR="${BACKER_INSTALL_DIR:-/opt/backer}"
 DATA_DIR="${BACKER_DATA_DIR:-/var/lib/backer}"
 SERVICE_USER="${BACKER_USER:-backer}"
+GIT_BRANCH="${BACKER_BRANCH:-main}"
 UNINSTALL=false
 
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -43,12 +45,16 @@ step() { echo -e "${CYAN}==>${NC} $1"; }
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --branch)
+            GIT_BRANCH="$2"
+            shift 2
+            ;;
         --uninstall)
             UNINSTALL=true
             shift
             ;;
         --help|-h)
-            head -20 "$0" | tail -16
+            head -22 "$0" | tail -18
             exit 0
             ;;
         *)
@@ -60,6 +66,9 @@ done
 echo ""
 echo "========================================"
 echo "       Backer Server Installer"
+if [[ "$GIT_BRANCH" != "main" ]]; then
+echo "         Branch: $GIT_BRANCH"
+fi
 echo "========================================"
 echo ""
 
@@ -281,13 +290,16 @@ mkdir -p "$DATA_DIR/logs"
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "Updating existing installation..."
     cd "$INSTALL_DIR"
-    git pull --quiet
+    # Switch to the correct branch and pull
+    git fetch --quiet origin
+    git checkout --quiet "$GIT_BRANCH" 2>/dev/null || git checkout --quiet -b "$GIT_BRANCH" "origin/$GIT_BRANCH"
+    git pull --quiet origin "$GIT_BRANCH"
 else
-    info "Cloning Backer repository..."
-    git clone --quiet https://github.com/stocky789/backer.git "$INSTALL_DIR"
+    info "Cloning Backer repository (branch: $GIT_BRANCH)..."
+    git clone --quiet --branch "$GIT_BRANCH" https://github.com/stocky789/backer.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
-success "Source code ready"
+success "Source code ready (branch: $GIT_BRANCH)"
 
 # Create virtual environment
 info "Setting up Python environment..."
