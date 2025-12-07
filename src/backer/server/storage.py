@@ -190,10 +190,7 @@ class Storage:
                     schedule_cron TEXT,
                     retention TEXT DEFAULT '{}',  -- JSON retention policy
                     enabled INTEGER DEFAULT 1,
-                    enable_incremental INTEGER DEFAULT 0,  -- Enable incremental backups using dirty bitmaps
-                    ssh_user TEXT DEFAULT 'root',  -- SSH user for QMP access (incremental backups)
-                    ssh_port INTEGER DEFAULT 22,  -- SSH port for QMP access
-                    max_incrementals INTEGER DEFAULT 7,  -- Force full backup after this many incrementals
+                    delete_before_backup INTEGER DEFAULT 0,  -- Delete existing backups before new backup
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id),
@@ -247,6 +244,16 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_hv ON vm_bitmap_state(hypervisor_id);
                 CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_vm ON vm_bitmap_state(hypervisor_id, vmid);
             """)
+
+            # Migration: Add delete_before_backup column if it doesn't exist
+            # (replaces old enable_incremental, ssh_user, ssh_port, max_incrementals columns)
+            try:
+                conn.execute(
+                    "ALTER TABLE hypervisor_jobs ADD COLUMN delete_before_backup "
+                    "INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
@@ -1380,10 +1387,7 @@ class Storage:
         schedule_cron: str | None = None,
         retention: dict[str, int] | None = None,
         enabled: bool = True,
-        enable_incremental: bool = False,
-        ssh_user: str = "root",
-        ssh_port: int = 22,
-        max_incrementals: int = 7,
+        delete_before_backup: bool = False,
     ) -> None:
         """Add a new hypervisor backup job."""
         now = datetime.now().isoformat()
@@ -1393,9 +1397,8 @@ class Storage:
                 INSERT INTO hypervisor_jobs (
                     id, name, hypervisor_id, guest_ids, repository_id,
                     backup_mode, compression, schedule_cron, retention,
-                    enabled, enable_incremental, ssh_user, ssh_port,
-                    max_incrementals, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, delete_before_backup, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -1408,10 +1411,7 @@ class Storage:
                     schedule_cron,
                     json.dumps(retention or {}),
                     1 if enabled else 0,
-                    1 if enable_incremental else 0,
-                    ssh_user,
-                    ssh_port,
-                    max_incrementals,
+                    1 if delete_before_backup else 0,
                     now,
                     now,
                 ),
@@ -1428,10 +1428,7 @@ class Storage:
         schedule_cron: str | None = None,
         retention: dict[str, int] | None = None,
         enabled: bool | None = None,
-        enable_incremental: bool | None = None,
-        ssh_user: str | None = None,
-        ssh_port: int | None = None,
-        max_incrementals: int | None = None,
+        delete_before_backup: bool | None = None,
     ) -> bool:
         """Update a hypervisor job."""
         updates = ["updated_at = ?"]
@@ -1461,18 +1458,9 @@ class Storage:
         if enabled is not None:
             updates.append("enabled = ?")
             params.append(1 if enabled else 0)
-        if enable_incremental is not None:
-            updates.append("enable_incremental = ?")
-            params.append(1 if enable_incremental else 0)
-        if ssh_user is not None:
-            updates.append("ssh_user = ?")
-            params.append(ssh_user)
-        if ssh_port is not None:
-            updates.append("ssh_port = ?")
-            params.append(ssh_port)
-        if max_incrementals is not None:
-            updates.append("max_incrementals = ?")
-            params.append(max_incrementals)
+        if delete_before_backup is not None:
+            updates.append("delete_before_backup = ?")
+            params.append(1 if delete_before_backup else 0)
 
         params.append(job_id)
 
@@ -1546,10 +1534,9 @@ class Storage:
             "schedule_cron": row["schedule_cron"],
             "retention": json.loads(row["retention"]) if row["retention"] else {},
             "enabled": row["enabled"] == 1,
-            "enable_incremental": row["enable_incremental"] == 1 if "enable_incremental" in keys else False,
-            "ssh_user": row["ssh_user"] if "ssh_user" in keys else "root",
-            "ssh_port": row["ssh_port"] if "ssh_port" in keys else 22,
-            "max_incrementals": row["max_incrementals"] if "max_incrementals" in keys else 7,
+            "delete_before_backup": (
+                row["delete_before_backup"] == 1 if "delete_before_backup" in keys else False
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
