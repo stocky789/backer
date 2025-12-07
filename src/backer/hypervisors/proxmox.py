@@ -1453,14 +1453,15 @@ class ProxmoxAPI:
             domain = repository.get("domain")
 
             # Build subdir: {repo_path}/Hypervisors/{hypervisor_name}
+            # Note: Proxmox subdir should NOT have a leading slash - it's relative to share root
             base_path = repository.get("path", "").strip("/")
             if hypervisor_name:
                 # Sanitize hypervisor name for folder
                 safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
                 subdir_parts = [p for p in [base_path, "Hypervisors", safe_hv_name] if p]
-                subdir = "/" + "/".join(subdir_parts)
+                subdir = "/".join(subdir_parts)  # No leading slash
             elif base_path:
-                subdir = f"/{base_path}"
+                subdir = base_path  # No leading slash
             else:
                 subdir = None
 
