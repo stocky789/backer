@@ -2501,7 +2501,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import json as json_module
         import subprocess
         import tempfile
-        from datetime import datetime as dt
 
         from backer.server.repositories import smb_list_files, smb_read_file
 
@@ -2611,17 +2610,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     continue
 
                             # Create the job
-                            guest_ids = job_data.get("guest_ids")
-                            if guest_ids:
-                                guest_ids_json = json_module.dumps(guest_ids)
-                            else:
-                                guest_ids_json = None
+                            # guest_ids from metadata is already a list, pass it directly
+                            # (add_hypervisor_job handles JSON encoding internally)
+                            guest_ids = job_data.get("guest_ids") or []
 
                             storage.add_hypervisor_job(
                                 job_id=job_id,
                                 name=job_name,
                                 hypervisor_id=job_hv_id,
-                                guest_ids=guest_ids_json,
+                                guest_ids=guest_ids,
                                 repository_id=repo_id,
                                 backup_mode=job_data.get("backup_mode", "snapshot"),
                                 compression=job_data.get("compression", "zstd"),
@@ -2727,17 +2724,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         errors.append(f"Hypervisor not found for job '{job_name}'")
                                         continue
 
-                                guest_ids = job_data.get("guest_ids")
-                                if guest_ids:
-                                    guest_ids_json = json_module.dumps(guest_ids)
-                                else:
-                                    guest_ids_json = None
+                                # guest_ids from metadata is already a list, pass it directly
+                                # (add_hypervisor_job handles JSON encoding internally)
+                                guest_ids = job_data.get("guest_ids") or []
 
                                 storage.add_hypervisor_job(
                                     job_id=job_id,
                                     name=job_name,
                                     hypervisor_id=job_hv_id,
-                                    guest_ids=guest_ids_json,
+                                    guest_ids=guest_ids,
                                     repository_id=repo_id,
                                     backup_mode=job_data.get("backup_mode", "snapshot"),
                                     compression=job_data.get("compression", "zstd"),
@@ -2968,13 +2963,81 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hypervisor_id: str,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Delete a hypervisor and its jobs."""
+        """Delete a hypervisor and all associated data.
+
+        This permanently deletes:
+        - All backup jobs for this hypervisor
+        - All backup files from repositories
+        - All metadata from repositories
+        - The hypervisor configuration
+
+        After deletion, the repository will be clean with no trace of this hypervisor.
+        """
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
+        cleanup_errors: list[str] = []
+        jobs_cleaned = 0
+        repos_cleaned = set()
+
+        # Get all jobs for this hypervisor
+        all_jobs = storage.list_hypervisor_jobs()
+        hypervisor_jobs = [j for j in all_jobs if j.get("hypervisor_id") == hypervisor_id]
+
+        logger.info(f"Deleting hypervisor '{hypervisor.get('name')}' with {len(hypervisor_jobs)} jobs")
+
+        # Clean up each job's backup data
+        for job in hypervisor_jobs:
+            repository_id = job.get("repository_id")
+            if repository_id:
+                repository = storage.get_repository(repository_id)
+                if repository:
+                    try:
+                        _cleanup_hypervisor_job_data(
+                            repository=repository,
+                            hypervisor=hypervisor,
+                            job=job,
+                            storage=storage,
+                            repository_id=repository_id,
+                        )
+                        jobs_cleaned += 1
+                        repos_cleaned.add(repository_id)
+                        logger.info(f"Cleaned up job '{job.get('name')}' data from repository")
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up job '{job.get('name')}': {e}")
+                        cleanup_errors.append(f"Job {job.get('name')}: {e}")
+
+        # Clean up the hypervisor folder entirely from each repository
+        # This removes the Hypervisors/{hv_name} folder and all its contents
+        for repository_id in repos_cleaned:
+            repository = storage.get_repository(repository_id)
+            if repository:
+                try:
+                    _cleanup_hypervisor_folder(
+                        repository=repository,
+                        hypervisor=hypervisor,
+                        storage=storage,
+                        repository_id=repository_id,
+                    )
+                    logger.info(f"Cleaned up hypervisor folder from repository '{repository.get('name')}'")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up hypervisor folder: {e}")
+                    cleanup_errors.append(f"Hypervisor folder cleanup: {e}")
+
+        # Delete from database (this also deletes jobs and runs)
         storage.delete_hypervisor(hypervisor_id)
-        return {"id": hypervisor_id, "status": "deleted"}
+
+        result: dict[str, Any] = {
+            "id": hypervisor_id,
+            "status": "deleted",
+            "jobs_cleaned": jobs_cleaned,
+            "repositories_cleaned": len(repos_cleaned),
+        }
+        if cleanup_errors:
+            result["cleanup_warnings"] = cleanup_errors
+
+        return result
 
     @app.post("/api/v1/hypervisors/{hypervisor_id}/test")
     def test_hypervisor_connection(
@@ -3377,6 +3440,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             hypervisor = storage.get_hypervisor(hypervisor_id)
 
             if repository and hypervisor:
+                # Clean up backup files first
                 try:
                     _cleanup_hypervisor_job_data(
                         repository=repository,
@@ -3385,10 +3449,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         storage=storage,
                         repository_id=repository_id,
                     )
-                    logger.info(f"Cleaned up repository data for job {job_id}")
+                    logger.info(f"Cleaned up backup files for job {job_id}")
                 except Exception as e:
-                    logger.warning(f"Failed to clean up repository data: {e}")
-                    cleanup_errors.append(str(e))
+                    logger.warning(f"Failed to clean up backup files: {e}")
+                    cleanup_errors.append(f"Backup files: {e}")
+
+                # Clean up metadata files (job config and run records)
+                try:
+                    _cleanup_hypervisor_job_metadata(
+                        repository=repository,
+                        hypervisor=hypervisor,
+                        job=job,
+                        storage=storage,
+                        repository_id=repository_id,
+                    )
+                    logger.info(f"Cleaned up metadata files for job {job_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up metadata files: {e}")
+                    cleanup_errors.append(f"Metadata: {e}")
 
         # Delete local database records
         storage.delete_hypervisor_job(job_id)
@@ -3721,6 +3799,188 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         else:
             logger.warning(f"Repository cleanup not supported for type: {repo_type}")
 
+    def _cleanup_hypervisor_job_metadata(
+        repository: dict[str, Any],
+        hypervisor: dict[str, Any],
+        job: dict[str, Any],
+        storage: Storage,
+        repository_id: str,
+    ) -> None:
+        """Clean up job metadata files from the repository.
+
+        This removes:
+        - .backer/hypervisor_jobs/{job_id}.json
+        - .backer/hypervisor_backups/{vmid}/runs/{run_id}.json for runs belonging to this job
+
+        Guest metadata (.backer/hypervisor_backups/{vmid}/guest.json) is preserved
+        as other jobs may reference the same guests.
+        """
+        repo_type = repository.get("repo_type", "").lower()
+        server = repository.get("server", "")
+        hv_name = hypervisor.get("name", "unknown")
+        job_id = job.get("id", "")
+
+        # Get run IDs for this job from the database before they're deleted
+        runs = storage.get_hypervisor_runs(job_id=job_id, limit=10000)
+        run_ids = [(r.get("guest_id"), r.get("id")) for r in runs if r.get("id")]
+
+        logger.info(f"[METADATA CLEANUP] Cleaning up metadata for job '{job.get('name')}' "
+                    f"({len(run_ids)} run records)")
+
+        if repo_type == "nfs":
+            export = repository.get("share", "")
+            if not server or not export:
+                logger.warning("Cannot clean up NFS metadata: missing server or export")
+                return
+            _cleanup_nfs_job_metadata(server, export, hv_name, job_id, run_ids)
+
+        elif repo_type == "smb":
+            share = repository.get("share", "")
+            subdir = repository.get("path", "").strip("/")
+            username = repository.get("username")
+            domain = repository.get("domain")
+            repo_password = storage.get_repository_password(repository_id)
+
+            if not server or not share:
+                logger.warning("Cannot clean up SMB metadata: missing server or share")
+                return
+
+            _cleanup_smb_job_metadata(
+                server, share, username, repo_password, domain, subdir, hv_name, job_id, run_ids
+            )
+        else:
+            logger.warning(f"Metadata cleanup not supported for type: {repo_type}")
+
+    def _cleanup_nfs_job_metadata(
+        server: str,
+        export: str,
+        hypervisor_name: str,
+        job_id: str,
+        run_ids: list[tuple[int | None, str]],
+    ) -> None:
+        """Clean up job metadata files from an NFS share."""
+        import os
+        import subprocess
+        import tempfile
+
+        # Sanitize hypervisor name
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
+
+        logger.info(f"[NFS METADATA] Cleaning up job metadata from {server}:{export}")
+
+        mount_point = None
+        try:
+            mount_point = tempfile.mkdtemp(prefix="backer_meta_cleanup_")
+            nfs_source = f"{server}:{export}"
+
+            mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", "rw", nfs_source, mount_point]
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"[NFS METADATA] Mount failed: {result.stderr.strip()}")
+                return
+
+            # Path to .backer metadata folder
+            backer_path = Path(mount_point) / "Hypervisors" / safe_hv_name / ".backer"
+
+            # Delete job metadata file
+            job_file = backer_path / "hypervisor_jobs" / f"{job_id}.json"
+            if job_file.exists():
+                job_file.unlink()
+                logger.info(f"[NFS METADATA] Deleted job metadata: {job_file.name}")
+
+            # Delete run record files
+            deleted_runs = 0
+            for guest_id, run_id in run_ids:
+                if guest_id:
+                    run_file = backer_path / "hypervisor_backups" / str(guest_id) / "runs" / f"{run_id}.json"
+                    if run_file.exists():
+                        run_file.unlink()
+                        deleted_runs += 1
+
+            if deleted_runs > 0:
+                logger.info(f"[NFS METADATA] Deleted {deleted_runs} run record files")
+
+            logger.info("[NFS METADATA] Job metadata cleanup completed")
+
+        except subprocess.TimeoutExpired:
+            logger.error("[NFS METADATA] NFS mount timed out")
+        except Exception as e:
+            logger.error(f"[NFS METADATA] Error: {e}", exc_info=True)
+        finally:
+            if mount_point:
+                try:
+                    subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
+                    os.rmdir(mount_point)
+                except Exception:
+                    try:
+                        subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
+                        os.rmdir(mount_point)
+                    except Exception as e:
+                        logger.warning(f"[NFS METADATA] Could not unmount: {e}")
+
+    def _cleanup_smb_job_metadata(
+        server: str,
+        share: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None,
+        subdir: str,
+        hypervisor_name: str,
+        job_id: str,
+        run_ids: list[tuple[int | None, str]],
+    ) -> None:
+        """Clean up job metadata files from an SMB share."""
+        import subprocess
+
+        # Sanitize hypervisor name
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
+
+        # Build smbclient auth
+        if username:
+            if domain:
+                auth_str = f"{domain}\\{username}%{password or ''}"
+            else:
+                auth_str = f"{username}%{password or ''}"
+            auth_parts = ["-U", auth_str]
+        else:
+            auth_parts = ["-N"]
+
+        def run_smb_cmd(cmd: str) -> tuple[bool, str]:
+            full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
+            try:
+                result = subprocess.run(full_cmd, capture_output=True, timeout=60, text=True)
+                return result.returncode == 0, result.stderr or result.stdout
+            except Exception as e:
+                return False, str(e)
+
+        # Build path to .backer folder
+        if subdir:
+            backer_path = f"{subdir}/Hypervisors/{safe_hv_name}/.backer"
+        else:
+            backer_path = f"Hypervisors/{safe_hv_name}/.backer"
+
+        logger.info(f"[SMB METADATA] Cleaning up job metadata from //{server}/{share}/{backer_path}")
+
+        # Delete job metadata file
+        job_file_path = f"{backer_path}/hypervisor_jobs/{job_id}.json"
+        ok, _ = run_smb_cmd(f'del "{job_file_path}"')
+        if ok:
+            logger.info("[SMB METADATA] Deleted job metadata file")
+
+        # Delete run record files
+        deleted_runs = 0
+        for guest_id, run_id in run_ids:
+            if guest_id:
+                run_file_path = f"{backer_path}/hypervisor_backups/{guest_id}/runs/{run_id}.json"
+                ok, _ = run_smb_cmd(f'del "{run_file_path}"')
+                if ok:
+                    deleted_runs += 1
+
+        if deleted_runs > 0:
+            logger.info(f"[SMB METADATA] Deleted {deleted_runs} run record files")
+
+        logger.info("[SMB METADATA] Job metadata cleanup completed")
+
     def _cleanup_nfs_job_files(
         server: str,
         export: str,
@@ -3809,24 +4069,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             file_dt = datetime.strptime(
                                 f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
                             )
-                            # Compare by DATE only - Proxmox uses local time, we may have UTC
-                            # This avoids timezone conversion issues
-                            run_date = timestamp.replace(tzinfo=None).date()
-                            file_date_obj = file_dt.date()
+                            # Compare using time tolerance to handle timezone differences
+                            # Vzdump uses local time, our timestamp may be UTC
+                            # Use 10 minute tolerance to account for backup start delays
+                            timestamp_naive = timestamp.replace(tzinfo=None)
+                            time_diff = abs((file_dt - timestamp_naive).total_seconds())
 
                             logger.info(
                                 f"[NFS CLEANUP] Found matching VMID file: {entry.name} "
-                                f"(file date: {file_date_obj}, run date: {run_date})"
+                                f"(file time: {file_dt}, run time: {timestamp_naive}, diff: {time_diff}s)"
                             )
 
-                            # Match if same date (handles timezone differences)
-                            # Since we're already filtering by job runs and VMID, date match is sufficient
-                            logger.info(
-                                f"[NFS CLEANUP] Comparing dates: file={file_date_obj} vs run={run_date}, "
-                                f"equal={file_date_obj == run_date}"
-                            )
-                            if file_date_obj == run_date:
-                                logger.info(f"[NFS CLEANUP] Date match! Attempting to delete {entry.name}...")
+                            # Match if within 10 minutes (600 seconds) of run start time
+                            # This is more precise than date-only matching
+                            if time_diff < 600:
+                                logger.info(
+                                    f"[NFS CLEANUP] Time match (diff: {time_diff:.0f}s)! Deleting {entry.name}..."
+                                )
                                 try:
                                     entry.unlink()
                                     deleted_count += 1
@@ -3859,7 +4118,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         f"{type(e).__name__}: {e}"
                                     )
                             else:
-                                logger.info(f"[NFS CLEANUP] Skipping {entry.name} - date mismatch")
+                                logger.info(
+                                    f"[NFS CLEANUP] Skipping {entry.name} - time mismatch (diff: {time_diff:.0f}s)"
+                                )
                         except ValueError as e:
                             logger.warning(f"[NFS CLEANUP] Could not parse timestamp from {entry.name}: {e}")
                             continue
@@ -4010,6 +4271,226 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.info(f"SMB cleanup deleted {deleted_count} backup files")
         else:
             logger.info("No matching backup files found to delete")
+
+    def _cleanup_hypervisor_folder(
+        repository: dict[str, Any],
+        hypervisor: dict[str, Any],
+        storage: Storage,
+        repository_id: str,
+    ) -> None:
+        """Clean up the entire hypervisor folder from a repository.
+
+        This removes the Hypervisors/{hv_name} folder and all contents including:
+        - dump/ folder with all backup files
+        - .backer/ metadata folder
+
+        Used when deleting a hypervisor to completely remove all traces.
+        """
+        repo_type = repository.get("repo_type", "").lower()
+        server = repository.get("server", "")
+        hv_name = hypervisor.get("name", "unknown")
+
+        # Sanitize hypervisor name for folder
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hv_name)
+
+        if repo_type == "nfs":
+            export = repository.get("share", "")
+            if not server or not export:
+                logger.warning("Cannot clean up NFS: missing server or export")
+                return
+
+            # NFS: backups are at {export}/dump/ (Proxmox puts them at root)
+            # Metadata is at {export}/.backer/
+            # For hypervisor-specific cleanup, we need to remove hypervisor entries from metadata
+            _cleanup_nfs_hypervisor_folder(server, export, safe_hv_name)
+
+        elif repo_type == "smb":
+            share = repository.get("share", "")
+            subdir = repository.get("path", "").strip("/")
+            username = repository.get("username")
+            domain = repository.get("domain")
+            repo_password = storage.get_repository_password(repository_id)
+
+            if not server or not share:
+                logger.warning("Cannot clean up SMB: missing server or share")
+                return
+
+            # SMB: hypervisor folder is at {subdir}/Hypervisors/{hv_name}
+            hv_folder = f"Hypervisors/{safe_hv_name}"
+            if subdir:
+                full_hv_path = f"{subdir}/{hv_folder}"
+            else:
+                full_hv_path = hv_folder
+
+            _cleanup_smb_hypervisor_folder(
+                server, share, username, repo_password, domain, full_hv_path
+            )
+        else:
+            logger.warning(f"Hypervisor folder cleanup not supported for type: {repo_type}")
+
+    def _cleanup_nfs_hypervisor_folder(
+        server: str,
+        export: str,
+        hypervisor_name: str,
+    ) -> None:
+        """Clean up hypervisor-specific data from an NFS share.
+
+        For NFS, Proxmox stores backups at the export root in dump/.
+        We need to remove hypervisor metadata entries from .backer/.
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        logger.info(f"[NFS HV CLEANUP] Cleaning up hypervisor '{hypervisor_name}' from {server}:{export}")
+
+        mount_point = None
+        try:
+            mount_point = tempfile.mkdtemp(prefix="backer_hv_cleanup_")
+            nfs_source = f"{server}:{export}"
+
+            mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", "rw", nfs_source, mount_point]
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"[NFS HV CLEANUP] Mount failed: {result.stderr.strip()}")
+                return
+
+            # Remove hypervisor entry from .backer/hypervisors/
+            hypervisors_dir = Path(mount_point) / ".backer" / "hypervisors"
+            if hypervisors_dir.exists():
+                hv_file = hypervisors_dir / f"{hypervisor_name}.json"
+                if hv_file.exists():
+                    hv_file.unlink()
+                    logger.info(f"[NFS HV CLEANUP] Deleted hypervisor metadata: {hv_file.name}")
+
+            # Remove hypervisor job entries from .backer/hypervisor_jobs/
+            jobs_dir = Path(mount_point) / ".backer" / "hypervisor_jobs"
+            if jobs_dir.exists():
+                for job_file in jobs_dir.glob("*.json"):
+                    try:
+                        import json
+                        data = json.loads(job_file.read_text())
+                        # Check if this job belongs to the hypervisor being deleted
+                        if data.get("hypervisor_id") == hypervisor_name or \
+                           data.get("hypervisor_name") == hypervisor_name:
+                            job_file.unlink()
+                            logger.info(f"[NFS HV CLEANUP] Deleted job metadata: {job_file.name}")
+                    except Exception as e:
+                        logger.warning(f"[NFS HV CLEANUP] Could not check job file {job_file}: {e}")
+
+            # For NFS, backups are shared in dump/ - we've already cleaned up per-job
+            # Don't delete the entire dump folder as other hypervisors may use it
+            logger.info("[NFS HV CLEANUP] Hypervisor cleanup completed")
+
+        except subprocess.TimeoutExpired:
+            logger.error("[NFS HV CLEANUP] NFS mount timed out")
+        except Exception as e:
+            logger.error(f"[NFS HV CLEANUP] Error: {e}", exc_info=True)
+        finally:
+            if mount_point:
+                try:
+                    subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
+                    os.rmdir(mount_point)
+                except Exception:
+                    try:
+                        subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
+                        os.rmdir(mount_point)
+                    except Exception as e:
+                        logger.warning(f"[NFS HV CLEANUP] Could not unmount: {e}")
+
+    def _cleanup_smb_hypervisor_folder(
+        server: str,
+        share: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None,
+        hypervisor_path: str,
+    ) -> None:
+        """Clean up the entire hypervisor folder from an SMB share.
+
+        This removes the Hypervisors/{hv_name} folder recursively.
+        """
+        import subprocess
+
+        # Build smbclient auth
+        if username:
+            if domain:
+                auth_str = f"{domain}\\{username}%{password or ''}"
+            else:
+                auth_str = f"{username}%{password or ''}"
+            auth_parts = ["-U", auth_str]
+        else:
+            auth_parts = ["-N"]
+
+        def run_smb_cmd(cmd: str) -> tuple[bool, str]:
+            """Run an smbclient command and return success status and output."""
+            full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
+            try:
+                result = subprocess.run(
+                    full_cmd, capture_output=True, timeout=60, text=True
+                )
+                return result.returncode == 0, result.stderr or result.stdout
+            except subprocess.TimeoutExpired:
+                return False, "Command timed out"
+            except Exception as e:
+                return False, str(e)
+
+        logger.info(f"[SMB HV CLEANUP] Removing hypervisor folder: {hypervisor_path}")
+
+        # First, recursively delete contents of dump/ folder
+        dump_path = f"{hypervisor_path}/dump"
+        ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
+        if ok:
+            # Delete all files in dump/
+            for line in output.split("\n"):
+                # Extract filename from smbclient ls output
+                parts = line.strip().split()
+                if parts and not parts[0].startswith("."):
+                    filename = parts[0]
+                    if filename not in (".", ".."):
+                        run_smb_cmd(f'del "{dump_path}/{filename}"')
+            # Try to remove the dump directory
+            run_smb_cmd(f'rmdir "{dump_path}"')
+            logger.info("[SMB HV CLEANUP] Cleaned dump folder")
+
+        # Delete .backer metadata folder contents
+        backer_path = f"{hypervisor_path}/.backer"
+
+        # Delete hypervisor_backups subdirs
+        hv_backups_path = f"{backer_path}/hypervisor_backups"
+        ok, output = run_smb_cmd(f'ls "{hv_backups_path}"')
+        if ok:
+            for line in output.split("\n"):
+                parts = line.strip().split()
+                if parts and parts[0] not in (".", "..") and "D" in line:
+                    vmid_dir = parts[0]
+                    # Delete runs inside
+                    runs_path = f"{hv_backups_path}/{vmid_dir}/runs"
+                    run_smb_cmd(f'del "{runs_path}/*"')
+                    run_smb_cmd(f'rmdir "{runs_path}"')
+                    # Delete guest.json
+                    run_smb_cmd(f'del "{hv_backups_path}/{vmid_dir}/guest.json"')
+                    run_smb_cmd(f'rmdir "{hv_backups_path}/{vmid_dir}"')
+            run_smb_cmd(f'rmdir "{hv_backups_path}"')
+
+        # Delete hypervisor_jobs folder
+        jobs_path = f"{backer_path}/hypervisor_jobs"
+        run_smb_cmd(f'del "{jobs_path}/*"')
+        run_smb_cmd(f'rmdir "{jobs_path}"')
+
+        # Delete hypervisors folder
+        hypervisors_path = f"{backer_path}/hypervisors"
+        run_smb_cmd(f'del "{hypervisors_path}/*"')
+        run_smb_cmd(f'rmdir "{hypervisors_path}"')
+
+        # Delete metadata.json and .backer folder
+        run_smb_cmd(f'del "{backer_path}/metadata.json"')
+        run_smb_cmd(f'rmdir "{backer_path}"')
+
+        # Finally, remove the hypervisor folder itself
+        run_smb_cmd(f'rmdir "{hypervisor_path}"')
+
+        logger.info("[SMB HV CLEANUP] Hypervisor folder cleanup completed")
 
     def _write_metadata_nfs(
         server: str,
