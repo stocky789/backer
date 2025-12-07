@@ -167,52 +167,9 @@
 </div>
 
 <style>
-.modal {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    backdrop-filter: blur(4px);
-}
-
-.modal-content {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--border-radius-lg);
-    width: 90%;
-    max-height: 90vh;
-    overflow-y: auto;
-    box-shadow: var(--shadow-lg);
-}
-
-.modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 18px 24px;
-    border-bottom: 1px solid var(--border-light);
-}
-
-.modal-header h3 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text);
-}
-
-.modal-body {
-    padding: 24px;
-}
-
 .browser-list {
     border: 1px solid var(--border);
-    border-radius: var(--border-radius);
+    border-radius: var(--radius);
     background: var(--bg-card);
 }
 
@@ -231,11 +188,11 @@
 }
 
 .browser-item:hover {
-    background: var(--bg-card-hover);
+    background: var(--bg-hover);
 }
 
 .browser-item.selected {
-    background: var(--accent-light);
+    background: rgba(50, 130, 240, 0.1);
     border-color: var(--accent);
 }
 
@@ -255,14 +212,6 @@
 .browser-item .meta {
     color: var(--text-muted);
     font-size: 12px;
-}
-
-.error-msg {
-    color: var(--error);
-    padding: 12px 14px;
-    background: var(--error-bg);
-    border-radius: var(--border-radius);
-    font-size: 13px;
 }
 
 .breadcrumb {
@@ -936,10 +885,10 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 }
 
 .stat-item {
-    background: var(--bg-input);
+    background: var(--bg-page);
     border: 1px solid var(--border);
     padding: 16px 20px;
-    border-radius: var(--border-radius);
+    border-radius: var(--radius);
     text-align: center;
     min-width: 100px;
 }
@@ -974,7 +923,7 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 }
 
 .scan-table th {
-    background: var(--bg-input);
+    background: var(--bg-page);
     font-weight: 600;
     font-size: 11px;
     text-transform: uppercase;
@@ -986,7 +935,7 @@ document.getElementById('scanModal')?.addEventListener('click', function(e) {
 }
 
 .scan-table tr:hover {
-    background: var(--bg-card-hover);
+    background: var(--bg-hover);
 }
 </style>
 {% endblock %}

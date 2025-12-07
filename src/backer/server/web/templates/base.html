@@ -7,116 +7,130 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <!-- Mobile menu toggle -->
-    <button class="mobile-menu-toggle" onclick="toggleMobileMenu()" aria-label="Toggle menu">
-        <span class="hamburger-line"></span>
-        <span class="hamburger-line"></span>
-        <span class="hamburger-line"></span>
-    </button>
-    <div class="mobile-overlay" onclick="toggleMobileMenu()"></div>
-
-    <div class="sidebar">
-        <div class="logo">
-            <img src="/static/logo.svg" alt="Backer" class="logo-icon">
-            Backer
-            <button class="mobile-close" onclick="toggleMobileMenu()" aria-label="Close menu">&times;</button>
+    <!-- Top Navigation Bar -->
+    <header class="global-header">
+        <div class="header-left">
+            <a href="/" class="logo">
+                <img src="/static/logo.svg" alt="Backer" class="logo-icon">
+                <span class="logo-text">Backer</span>
+            </a>
+            <nav class="main-nav">
+                <a href="/" class="nav-tab {% if active == 'dashboard' %}active{% endif %}">
+                    Dashboard
+                </a>
+                <a href="/agents" class="nav-tab {% if active == 'agents' %}active{% endif %}">
+                    Agents
+                </a>
+                <a href="/hypervisors" class="nav-tab {% if active == 'hypervisors' %}active{% endif %}">
+                    Hypervisors
+                </a>
+                <a href="/storage" class="nav-tab {% if active == 'storage' %}active{% endif %}">
+                    Storage
+                </a>
+                <a href="/jobs" class="nav-tab {% if active == 'jobs' %}active{% endif %}">
+                    Backups
+                </a>
+                <a href="/history" class="nav-tab {% if active == 'history' %}active{% endif %}">
+                    History
+                </a>
+                <a href="/restore" class="nav-tab {% if active == 'restore' %}active{% endif %}">
+                    Restore
+                </a>
+            </nav>
         </div>
-        <nav>
-            <a href="/" class="nav-item {% if active == 'dashboard' %}active{% endif %}">
-                <img src="/static/icons/dashboard.svg" class="nav-icon" alt=""> Dashboard
-            </a>
-            <a href="/agents" class="nav-item {% if active == 'agents' %}active{% endif %}">
-                <img src="/static/icons/agents.svg" class="nav-icon" alt=""> Agents
-            </a>
-            <a href="/hypervisors" class="nav-item {% if active == 'hypervisors' %}active{% endif %}">
-                <img src="/static/icons/hypervisors.svg" class="nav-icon" alt=""> Hypervisors
-            </a>
-            <a href="/storage" class="nav-item {% if active == 'storage' %}active{% endif %}">
-                <img src="/static/icons/storage.svg" class="nav-icon" alt=""> Storage
-            </a>
-            <a href="/jobs" class="nav-item {% if active == 'jobs' %}active{% endif %}">
-                <img src="/static/icons/backups.svg" class="nav-icon" alt=""> Backups
-            </a>
-            <a href="/history" class="nav-item {% if active == 'history' %}active{% endif %}">
-                <img src="/static/icons/history.svg" class="nav-icon" alt=""> History
-            </a>
-            <a href="/restore" class="nav-item {% if active == 'restore' %}active{% endif %}">
-                <img src="/static/icons/restore.svg" class="nav-icon" alt=""> Restore
-            </a>
-            <a href="/logs" class="nav-item {% if active == 'logs' %}active{% endif %}">
-                <img src="/static/icons/logs.svg" class="nav-icon" alt=""> Logs
-            </a>
-            <a href="/settings" class="nav-item {% if active == 'settings' %}active{% endif %}">
-                <img src="/static/icons/settings.svg" class="nav-icon" alt=""> Settings
-            </a>
-        </nav>
-        <div class="sidebar-footer">
-            <div class="server-status">
-                <span class="status-dot online"></span>
-                Server Online
-            </div>
-        </div>
-    </div>
-
-    <main class="main-content">
-        <header class="top-bar">
-            <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
-            <div class="top-bar-center">
-                <!-- Background Tasks Widget - Always visible -->
-                <div id="tasksWidget" class="tasks-widget">
-                    <div class="tasks-indicator" onclick="toggleTasksPanel()">
-                        <span class="tasks-spinner"></span>
-                        <span id="tasksLabel">No background tasks</span>
+        <div class="header-right">
+            <!-- Background Tasks Widget -->
+            <div id="tasksWidget" class="tasks-widget">
+                <button class="header-btn" onclick="toggleTasksPanel()" title="Background Tasks">
+                    <span class="tasks-icon">⟳</span>
+                    <span id="tasksCount" class="tasks-count" style="display: none;">0</span>
+                </button>
+                <div id="tasksPanel" class="dropdown-panel tasks-panel">
+                    <div class="dropdown-header">
+                        <strong>Background Tasks</strong>
+                        <button class="dropdown-close" onclick="toggleTasksPanel()">&times;</button>
                     </div>
-                    <div id="tasksPanel" class="tasks-panel">
-                        <div class="tasks-panel-header">
-                            <strong>Background Tasks</strong>
-                            <button class="tasks-close" onclick="toggleTasksPanel()">&times;</button>
+                    <div id="tasksList" class="tasks-list"></div>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <a href="/logs" class="header-btn" title="View Logs">
+                <span>📋</span>
+            </a>
+
+            <!-- Settings -->
+            <a href="/settings" class="header-btn" title="Settings">
+                <span>⚙</span>
+            </a>
+
+            <!-- Profile Widget -->
+            {% if user %}
+            <div class="profile-widget">
+                <button class="profile-btn" onclick="toggleProfileMenu()">
+                    <span class="avatar">{{ user.display_name[0] | upper }}</span>
+                    <span class="profile-name">{{ user.display_name }}</span>
+                    <span class="caret">▾</span>
+                </button>
+                <div id="profileMenu" class="dropdown-panel profile-dropdown">
+                    <div class="dropdown-header profile-header">
+                        <span class="avatar avatar-lg">{{ user.display_name[0] | upper }}</span>
+                        <div class="profile-info">
+                            <strong>{{ user.display_name }}</strong>
+                            <span>{{ user.username }}</span>
                         </div>
-                        <div id="tasksList" class="tasks-list">
-                            <!-- Tasks will be populated here -->
-                        </div>
+                    </div>
+                    <div class="dropdown-menu">
+                        <a href="/profile" class="dropdown-item">
+                            <span class="dropdown-icon">👤</span>
+                            Profile Settings
+                        </a>
+                        <form method="POST" action="/logout" style="margin: 0;">
+                            <button type="submit" class="dropdown-item dropdown-item-danger">
+                                <span class="dropdown-icon">↪</span>
+                                Sign Out
+                            </button>
+                        </form>
                     </div>
                 </div>
             </div>
-            <div class="top-bar-actions">
-                {% block actions %}{% endblock %}
+            {% endif %}
+        </div>
 
-                <!-- Profile Widget -->
-                {% if user %}
-                <div class="profile-widget">
-                    <button class="profile-button" onclick="toggleProfileMenu()">
-                        <span class="profile-avatar">{{ user.display_name[0] | upper }}</span>
-                        <span class="profile-name">{{ user.display_name }}</span>
-                        <span class="profile-arrow">▾</span>
-                    </button>
-                    <div id="profileMenu" class="profile-menu">
-                        <div class="profile-menu-header">
-                            <span class="profile-avatar-lg">{{ user.display_name[0] | upper }}</span>
-                            <div class="profile-menu-info">
-                                <strong>{{ user.display_name }}</strong>
-                                <span>{{ user.username }}</span>
-                            </div>
-                        </div>
-                        <div class="profile-menu-items">
-                            <a href="/profile" class="profile-menu-item">
-                                <span class="profile-menu-icon">⚙</span>
-                                Settings
-                            </a>
-                            <form method="POST" action="/logout" style="margin: 0;">
-                                <button type="submit" class="profile-menu-item profile-menu-logout">
-                                    <span class="profile-menu-icon">↪</span>
-                                    Sign Out
-                                </button>
-                            </form>
-                        </div>
-                    </div>
+        <!-- Mobile menu toggle -->
+        <button class="mobile-toggle" onclick="toggleMobileMenu()" aria-label="Toggle menu">
+            <span></span><span></span><span></span>
+        </button>
+    </header>
+
+    <!-- Mobile Navigation Overlay -->
+    <div class="mobile-nav-overlay" onclick="toggleMobileMenu()"></div>
+    <nav class="mobile-nav">
+        <a href="/" class="mobile-nav-item {% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="/agents" class="mobile-nav-item {% if active == 'agents' %}active{% endif %}">Agents</a>
+        <a href="/hypervisors" class="mobile-nav-item {% if active == 'hypervisors' %}active{% endif %}">Hypervisors</a>
+        <a href="/storage" class="mobile-nav-item {% if active == 'storage' %}active{% endif %}">Storage</a>
+        <a href="/jobs" class="mobile-nav-item {% if active == 'jobs' %}active{% endif %}">Backups</a>
+        <a href="/history" class="mobile-nav-item {% if active == 'history' %}active{% endif %}">History</a>
+        <a href="/restore" class="mobile-nav-item {% if active == 'restore' %}active{% endif %}">Restore</a>
+        <a href="/logs" class="mobile-nav-item {% if active == 'logs' %}active{% endif %}">Logs</a>
+        <a href="/settings" class="mobile-nav-item {% if active == 'settings' %}active{% endif %}">Settings</a>
+    </nav>
+
+    <!-- Page Content -->
+    <main class="page-wrapper">
+        <!-- Page Header -->
+        <div class="page-header">
+            <div class="page-header-content">
+                <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+                <div class="page-actions">
+                    {% block actions %}{% endblock %}
                 </div>
-                {% endif %}
             </div>
-        </header>
+        </div>
 
-        <div class="content">
+        <!-- Main Content -->
+        <div class="page-content">
             {% block content %}{% endblock %}
         </div>
     </main>
@@ -142,22 +156,22 @@
     }
 
     function updateTasksWidget(tasks) {
-        const widget = document.getElementById('tasksWidget');
-        const labelEl = document.getElementById('tasksLabel');
+        const countEl = document.getElementById('tasksCount');
         const listEl = document.getElementById('tasksList');
+        const headerBtn = document.querySelector('.tasks-widget .header-btn');
 
         // Count active tasks
         const activeTasks = tasks.filter(t => t.status === 'pending' || t.status === 'running');
         const recentTasks = tasks.slice(0, 10);
 
-        // Update label based on active task count
-        const indicator = widget.querySelector('.tasks-indicator');
+        // Update count badge
         if (activeTasks.length > 0) {
-            labelEl.textContent = activeTasks.length + ' task(s) running';
-            indicator.classList.add('active');
+            countEl.textContent = activeTasks.length;
+            countEl.style.display = 'flex';
+            headerBtn?.classList.add('has-activity');
         } else {
-            labelEl.textContent = 'No background tasks';
-            indicator.classList.remove('active');
+            countEl.style.display = 'none';
+            headerBtn?.classList.remove('has-activity');
         }
 
         // Update tasks list
@@ -189,6 +203,7 @@
     }
 
     function escapeHtml(text) {
+        if (!text) return '';
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
@@ -241,7 +256,7 @@
     }
 
     // Close mobile menu on nav item click
-    document.querySelectorAll('.sidebar .nav-item').forEach(item => {
+    document.querySelectorAll('.mobile-nav-item').forEach(item => {
         item.addEventListener('click', () => {
             if (mobileMenuOpen) {
                 toggleMobileMenu();
