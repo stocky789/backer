@@ -15,7 +15,7 @@
     /* Content area - Light theme */
     --bg-page: #f6f8fa;
     --bg-card: #ffffff;
-    --bg-card-hover: #f8fafc;
+    --bg-hover: #f3f4f6;
     --bg-input: #f6f8fa;
     --bg-input-focus: #ffffff;
     --border: #d1d9e0;
@@ -59,6 +59,67 @@
     --shadow: 0 1px 3px rgba(31, 35, 40, 0.12), 0 8px 24px rgba(66, 74, 83, 0.12);
     --shadow-lg: 0 8px 24px rgba(66, 74, 83, 0.2);
     --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* Dark Theme */
+body.dark-theme {
+    --bg-page: #0d1117;
+    --bg-card: #161b22;
+    --bg-hover: #21262d;
+    --bg-input: #0d1117;
+    --bg-input-focus: #161b22;
+    --border: #30363d;
+    --border-light: #21262d;
+    --border-muted: #30363d;
+    
+    --text: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7781;
+    --text-light: #484f58;
+    
+    --accent: #388bfd;
+    --accent-hover: #58a6ff;
+    --accent-light: rgba(56, 139, 253, 0.15);
+    --accent-emphasis: #58a6ff;
+    
+    --success: #3fb950;
+    --success-light: rgba(63, 185, 80, 0.15);
+    --warning: #d29922;
+    --warning-light: rgba(210, 153, 34, 0.15);
+    --error: #f85149;
+    --error-light: rgba(248, 81, 73, 0.15);
+    --info: #388bfd;
+    --info-light: rgba(56, 139, 253, 0.15);
+    
+    --shadow-sm: 0 0 transparent;
+    --shadow: 0 0 transparent;
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Theme Toggle Button */
+.theme-toggle {
+    position: relative;
+}
+
+.theme-toggle .icon-sun,
+.theme-toggle .icon-moon {
+    position: absolute;
+    transition: opacity 0.2s, transform 0.2s;
+}
+
+.theme-toggle .icon-moon {
+    opacity: 0;
+    transform: rotate(-90deg);
+}
+
+body.dark-theme .theme-toggle .icon-sun {
+    opacity: 0;
+    transform: rotate(90deg);
+}
+
+body.dark-theme .theme-toggle .icon-moon {
+    opacity: 1;
+    transform: rotate(0deg);
 }
 
 * {
@@ -215,7 +276,23 @@ body {
 }
 
 .tasks-icon {
-    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.header-btn.has-activity .tasks-icon {
+    animation: spin 2s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Spinning icon in task list */
+.task-icon svg.spinning {
+    animation: spin 1.5s linear infinite;
 }
 
 /* Profile Widget */
@@ -298,7 +375,7 @@ body {
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    background: var(--bg-input);
+    background: var(--bg-hover);
     border-bottom: 1px solid var(--border-light);
     font-size: 13px;
     font-weight: 600;
@@ -340,7 +417,7 @@ body {
 }
 
 .dropdown-item:hover {
-    background: var(--bg-input);
+    background: var(--bg-hover);
 }
 
 .dropdown-item-danger {
@@ -401,10 +478,24 @@ body {
 }
 
 .task-icon {
-    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 20px;
-    text-align: center;
     flex-shrink: 0;
+    color: var(--text-muted);
+}
+
+.task-running .task-icon {
+    color: var(--accent);
+}
+
+.task-completed .task-icon {
+    color: var(--success);
+}
+
+.task-failed .task-icon {
+    color: var(--error);
 }
 
 .task-pending .task-icon { color: var(--text-muted); }
