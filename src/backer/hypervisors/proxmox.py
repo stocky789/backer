@@ -1006,9 +1006,9 @@ class ProxmoxAPI:
         # This helps with race conditions where Proxmox CIFS mount doesn't
         # see the newly created directory immediately. TrueNAS and other NAS
         # devices may have slight delays in making new directories visible
-        # to other clients.
+        # to other clients. Increased from 2s to 5s for better reliability.
         import time
-        time.sleep(2)
+        time.sleep(5)
 
     def _ensure_nfs_directory_exists(
         self,
@@ -1175,18 +1175,29 @@ class ProxmoxAPI:
             )
 
         try:
-            # Step 1: Check if mount point exists
-            # Use a simple test that won't hang on stale mounts
-            rc, stdout, stderr = run_ssh(f"test -d {mount_point} && echo EXISTS || echo MISSING", timeout=10)
+            # Step 1: Check if mount point directory exists using multiple methods
+            # The directory can exist in several states:
+            # - Normal directory (empty or with contents)
+            # - Mounted filesystem (active CIFS/NFS mount)
+            # - Stale mount (transport endpoint disconnected, hangs on access)
+            # - Empty directory left after unmount
+            #
+            # We use ls -la on the parent directory which won't hang even if
+            # the mount point itself is stale
+            rc, stdout, stderr = run_ssh(
+                f"ls -la /mnt/pve/ 2>/dev/null | grep -E '^d.*{storage_id}$' && echo PATH_EXISTS || echo PATH_MISSING",
+                timeout=10
+            )
 
             # If SSH itself fails, we can't proceed
             if "Permission denied" in stderr or "Connection refused" in stderr:
                 logger.warning(f"SSH connection failed: {stderr.strip()}")
                 return False
 
-            # Check if directory exists
-            if "MISSING" in stdout or (rc != 0 and "EXISTS" not in stdout):
-                # Directory doesn't exist, nothing to clean up
+            path_exists = "PATH_EXISTS" in stdout
+
+            # If directory doesn't exist in parent listing, nothing to clean up
+            if not path_exists:
                 logger.debug(f"Mount point {mount_point} does not exist - nothing to clean up")
                 return True
 
