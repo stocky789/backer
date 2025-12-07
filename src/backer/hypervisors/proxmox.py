@@ -686,7 +686,8 @@ class ProxmoxAPI:
             UPID of the stop task
         """
         endpoint = f"/nodes/{node}/{guest_type.value}/{vmid}/status/stop"
-        data = {"timeout": timeout}
+        # Only QEMU VMs accept timeout parameter, LXC containers don't
+        data: dict[str, Any] = {"timeout": timeout} if guest_type == ProxmoxGuestType.QEMU else {}
 
         result = self._make_request("POST", endpoint, data=data)
         upid = result.get("upid") if isinstance(result, dict) else result
@@ -715,8 +716,9 @@ class ProxmoxAPI:
             UPID of the shutdown task
         """
         endpoint = f"/nodes/{node}/{guest_type.value}/{vmid}/status/shutdown"
+        # LXC shutdown accepts timeout, but QEMU uses different param names
         data: dict[str, Any] = {"timeout": timeout}
-        if force_stop:
+        if force_stop and guest_type == ProxmoxGuestType.QEMU:
             data["forceStop"] = 1
 
         result = self._make_request("POST", endpoint, data=data)
