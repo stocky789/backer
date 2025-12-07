@@ -3231,7 +3231,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         backer_dir: Path,
     ) -> None:
         """Write metadata to NFS share by temporarily mounting it."""
-        import shutil
         import subprocess
         import tempfile
 
@@ -3251,26 +3250,38 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return
 
             # Build target path: {mount}/Hypervisors/{hypervisor_name}/.backer
-            target_base = Path(mount_point) / "Hypervisors" / hypervisor_name
-            target_backer = target_base / ".backer"
+            target_backer = f"{mount_point}/Hypervisors/{hypervisor_name}/.backer"
 
-            # Create directories and copy files
+            # Create directory and copy files using shell commands
+            # This handles NFS permissions better than Python's shutil
             try:
-                target_backer.mkdir(parents=True, exist_ok=True)
+                # Create target directory
+                mkdir_result = subprocess.run(
+                    ["mkdir", "-p", target_backer],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if mkdir_result.returncode != 0:
+                    logger.warning(f"Failed to create metadata directory: {mkdir_result.stderr.strip()}")
+                    return
 
-                # Copy all files from backer_dir to target
-                for src_file in backer_dir.rglob("*"):
-                    if src_file.is_file():
-                        rel_path = src_file.relative_to(backer_dir)
-                        dest_file = target_backer / rel_path
-                        dest_file.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src_file, dest_file)
-                        logger.debug(f"Wrote metadata: {dest_file}")
+                # Copy all files from backer_dir to target using cp -r
+                # Use the contents of backer_dir (trailing /.) to copy contents, not the dir itself
+                cp_result = subprocess.run(
+                    ["cp", "-r", f"{backer_dir}/.", target_backer],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if cp_result.returncode != 0:
+                    logger.warning(f"Failed to copy metadata files: {cp_result.stderr.strip()}")
+                    return
 
                 logger.info(f"Wrote hypervisor backup metadata to {server}:{export}/Hypervisors/{hypervisor_name}")
 
-            except OSError as e:
-                logger.warning(f"Failed to write metadata files: {e}")
+            except subprocess.TimeoutExpired:
+                logger.warning("Timeout writing metadata files to NFS")
 
         except subprocess.TimeoutExpired:
             logger.warning(f"Timeout mounting NFS {server}:{export} for metadata")
