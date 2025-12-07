@@ -1136,6 +1136,7 @@ class ProxmoxAPI:
         content: list[str] | None = None,
         nodes: list[str] | None = None,
         subdir: str | None = None,
+        smbversion: str | None = None,
         disable: bool = False,
         max_protected_backups: int = 5,
     ) -> dict[str, Any]:
@@ -1151,6 +1152,7 @@ class ProxmoxAPI:
             content: Content types (default: ["backup"])
             nodes: List of nodes to enable storage on (None = all)
             subdir: Subdirectory within the share
+            smbversion: SMB protocol version (2.0, 2.1, 3, 3.0, 3.11, or default)
             disable: Whether to create storage disabled
             max_protected_backups: Max protected backups (default 5)
 
@@ -1175,6 +1177,8 @@ class ProxmoxAPI:
             data["nodes"] = ",".join(nodes)
         if subdir:
             data["subdir"] = subdir
+        if smbversion:
+            data["smbversion"] = smbversion
         if disable:
             data["disable"] = 1
         if max_protected_backups != 5:
@@ -1418,13 +1422,17 @@ class ProxmoxAPI:
                     break  # Success
                 except ProxmoxAPIError as e:
                     error_str = str(e)
+                    error_lower = error_str.lower()
+
+                    # Log the actual Proxmox error for debugging
+                    logger.error(f"Proxmox storage creation error: {error_str}")
 
                     # Handle "directory does not exist" or "unreachable" - may be stale mount point
-                    if "does not exist" in error_str or "unreachable" in error_str:
+                    if "does not exist" in error_lower or "unreachable" in error_lower:
                         if attempt < max_retries - 1:
                             logger.warning(
                                 f"Storage activation failed (attempt {attempt + 1}/{max_retries}): "
-                                f"directory unreachable. Trying cleanup and retry in {retry_delay}s..."
+                                f"{error_str}. Trying cleanup and retry in {retry_delay}s..."
                             )
                             # Try to clean up stale mount point - this is often the root cause
                             self._cleanup_stale_mount_point(
@@ -1438,15 +1446,26 @@ class ProxmoxAPI:
                             retry_delay *= 2  # Exponential backoff
                             continue
                         else:
-                            raise ProxmoxAPIError(
-                                f"Failed to activate storage '{storage_id}' after {max_retries} "
-                                f"attempts. The SMB directory may not be accessible from Proxmox. "
-                                f"Try: sudo umount -l /mnt/pve/{storage_id}; "
-                                f"sudo rmdir /mnt/pve/{storage_id}"
-                            ) from e
+                            # Build a helpful error message
+                            hint_msg = (
+                                f"Failed to activate storage '{storage_id}' after {max_retries} attempts.\n"
+                                f"Proxmox returned: {error_str}\n\n"
+                                f"Possible causes:\n"
+                                f"1. Proxmox host ({self.host}) cannot reach SMB server ({server})\n"
+                                f"2. SMB credentials are incorrect or insufficient permissions\n"
+                                f"3. Stale mount point exists at /mnt/pve/{storage_id}\n\n"
+                                f"To fix stale mount:\n"
+                                f"  ssh root@{self.host}\n"
+                                f"  umount -l /mnt/pve/{storage_id}\n"
+                                f"  rmdir /mnt/pve/{storage_id}\n\n"
+                                f"To test SMB from Proxmox:\n"
+                                f"  ssh root@{self.host}\n"
+                                f"  smbclient //{server}/{share} -U {username or 'guest'}"
+                            )
+                            raise ProxmoxAPIError(hint_msg) from e
 
                     # Handle "mkdir: File exists" error - stale mount point from previous run
-                    elif "File exists" in error_str or "already exists" in error_str.lower():
+                    elif "file exists" in error_lower or "already exists" in error_lower:
                         logger.warning(
                             f"Storage creation failed due to stale mount point. "
                             f"Attempting to clean up /mnt/pve/{storage_id}..."

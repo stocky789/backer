@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cifs-utils \
     smbclient \
     nfs-common \
+    sshpass \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user
@@ -27,7 +28,7 @@ COPY . /app
 RUN pip install --no-cache-dir -e ".[server]"
 
 # Create data directory
-RUN mkdir -p /data/tools /data/logs && chown -R backer:backer /data
+RUN mkdir -p /data/tools /data/logs
 
 # Set environment before setup so tools are downloaded to /data/tools
 ENV BACKER_DATA_DIR=/data
@@ -36,6 +37,9 @@ ENV PYTHONUNBUFFERED=1
 # Download backup tools (rclone, restic, kopia)
 # This will fail the build if tools cannot be downloaded - intentional for reliability
 RUN backer setup
+
+# Fix ownership after tools are downloaded
+RUN chown -R backer:backer /data
 
 # Switch to app user
 USER backer

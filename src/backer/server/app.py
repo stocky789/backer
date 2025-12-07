@@ -327,6 +327,11 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         ssh_port = job.get("ssh_port") or hypervisor.get("ssh_port", 22)
         ssh_key_path = hypervisor.get("ssh_key_path")
 
+        # Get SSH password if configured to use API password for SSH
+        ssh_password = None
+        if hypervisor.get("ssh_use_api_password", True):
+            ssh_password = _storage.get_hypervisor_password(hypervisor_id)
+
         # Ensure Proxmox storage exists for this repository
         # Backups go to: {repo_path}/Hypervisors/{hypervisor_name}/dump/
         try:
@@ -336,6 +341,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                 ssh_user=ssh_user,
                 ssh_port=ssh_port,
                 ssh_key=ssh_key_path,
+                ssh_password=ssh_password,
             )
         except ProxmoxAPIError as e:
             logger.error(f"Failed to configure Proxmox storage for repository: {e}")
