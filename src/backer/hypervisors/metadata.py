@@ -385,6 +385,84 @@ class HypervisorMetadata:
         path = self.metadata_dir / "hypervisor_jobs" / f"{safe_filename(job_id)}.json"
         return self._read_json(path)
 
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a job and record it as deleted to prevent re-import.
+
+        Args:
+            job_id: Job ID to delete
+
+        Returns:
+            True if deleted successfully
+        """
+        # First, record the deletion
+        self.mark_job_deleted(job_id)
+
+        # Then delete the job file
+        path = self.metadata_dir / "hypervisor_jobs" / f"{safe_filename(job_id)}.json"
+        try:
+            if path.exists():
+                path.unlink()
+                logger.info(f"Deleted job metadata file: {path.name}")
+                return True
+            return False
+        except OSError as e:
+            logger.warning(f"Failed to delete job file {path}: {e}")
+            return False
+
+    def mark_job_deleted(self, job_id: str) -> bool:
+        """Record a job as deleted to prevent re-import.
+
+        This is stored in .backer/deleted_jobs.json as a list of job IDs
+        with deletion timestamps. This ensures that even if the job
+        metadata file isn't successfully deleted, we won't re-import it.
+
+        Args:
+            job_id: Job ID to mark as deleted
+
+        Returns:
+            True if recorded successfully
+        """
+        self._ensure_dirs()
+        deleted_file = self.metadata_dir / "deleted_jobs.json"
+        deleted_jobs = self._read_json(deleted_file) or {"jobs": []}
+
+        # Check if already recorded
+        existing_ids = {j.get("job_id") for j in deleted_jobs.get("jobs", [])}
+        if job_id in existing_ids:
+            return True
+
+        # Add the deletion record
+        deleted_jobs.setdefault("jobs", []).append({
+            "job_id": job_id,
+            "deleted_at": datetime.now().isoformat(),
+        })
+
+        return self._write_json(deleted_file, deleted_jobs)
+
+    def is_job_deleted(self, job_id: str) -> bool:
+        """Check if a job has been marked as deleted.
+
+        Args:
+            job_id: Job ID to check
+
+        Returns:
+            True if the job was previously deleted
+        """
+        deleted_file = self.metadata_dir / "deleted_jobs.json"
+        deleted_jobs = self._read_json(deleted_file) or {"jobs": []}
+        deleted_ids = {j.get("job_id") for j in deleted_jobs.get("jobs", [])}
+        return job_id in deleted_ids
+
+    def get_deleted_job_ids(self) -> set[str]:
+        """Get all deleted job IDs.
+
+        Returns:
+            Set of job IDs that have been deleted
+        """
+        deleted_file = self.metadata_dir / "deleted_jobs.json"
+        deleted_jobs = self._read_json(deleted_file) or {"jobs": []}
+        return {j.get("job_id") for j in deleted_jobs.get("jobs", []) if j.get("job_id")}
+
     def list_jobs(self) -> list[dict[str, Any]]:
         """List all hypervisor jobs in metadata."""
         jobs_dir = self.metadata_dir / "hypervisor_jobs"

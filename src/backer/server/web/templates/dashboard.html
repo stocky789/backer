@@ -12,28 +12,72 @@
     <div id="runningJobsList"></div>
 </div>
 
-<!-- Stats -->
-<div class="stats-grid">
+<!-- Stats Overview -->
+<div class="stats-grid stats-grid-6">
     <div class="stat-card">
-        <div class="stat-label">Agents Online</div>
-        <div class="stat-value success">{{ stats.agents_online }}/{{ stats.total_agents }}</div>
+        <div class="stat-label">Agents</div>
+        <div class="stat-value {% if stats.agents_online > 0 %}success{% endif %}">{{ stats.agents_online }}/{{ stats.total_agents }}</div>
+        <div class="stat-sublabel">online</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Backup Jobs</div>
+        <div class="stat-label">Hypervisors</div>
+        <div class="stat-value {% if stats.hypervisors_connected > 0 %}success{% endif %}">{{ stats.hypervisors_connected }}/{{ stats.total_hypervisors }}</div>
+        <div class="stat-sublabel">connected</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Agent Jobs</div>
         <div class="stat-value">{{ stats.total_jobs }}</div>
+        <div class="stat-sublabel">configured</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Storage Repos</div>
+        <div class="stat-label">VM Jobs</div>
+        <div class="stat-value">{{ stats.total_hv_jobs }}</div>
+        <div class="stat-sublabel">configured</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Repositories</div>
         <div class="stat-value">{{ stats.total_repositories }}</div>
+        <div class="stat-sublabel">storage targets</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Backups Today</div>
-        <div class="stat-value">{{ stats.backups_today }}</div>
+        <div class="stat-label">Today</div>
+        <div class="stat-value {% if stats.backups_today > 0 %}success{% endif %}">{{ stats.backups_today }}</div>
+        <div class="stat-sublabel">backups</div>
     </div>
 </div>
 
+<!-- Storage Repositories Section -->
+{% if repositories %}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Storage Repositories</span>
+        <a href="/storage" class="btn btn-secondary btn-sm">Manage</a>
+    </div>
+    <div class="storage-grid" id="storageGrid">
+        {% for repo in repositories %}
+        <div class="storage-card" data-repo-id="{{ repo.id }}">
+            <div class="storage-header">
+                <span class="storage-name">{{ repo.name }}</span>
+                <span class="badge badge-{% if repo.repo_type == 'smb' %}info{% elif repo.repo_type == 'nfs' %}warning{% else %}muted{% endif %}">{{ repo.repo_type|upper }}</span>
+            </div>
+            <div class="storage-server">{{ repo.server }}{% if repo.share %}:{{ repo.share }}{% endif %}</div>
+            <div class="storage-usage">
+                <div class="storage-bar-container">
+                    <div class="storage-bar" style="width: 0%"></div>
+                </div>
+                <div class="storage-stats">
+                    <span class="storage-used">Loading...</span>
+                    <span class="storage-total"></span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 <div class="grid grid-2">
-    <!-- Agents -->
+    <!-- Agents Section -->
     <div class="card">
         <div class="card-header">
             <span class="card-title">Agents</span>
@@ -72,105 +116,339 @@
         {% endif %}
     </div>
 
-    <!-- Recent Activity -->
+    <!-- Hypervisors Section -->
     <div class="card">
         <div class="card-header">
-            <span class="card-title">Recent Activity</span>
-            <a href="/history" class="btn btn-secondary btn-sm">View All</a>
+            <span class="card-title">Hypervisors</span>
+            <a href="/hypervisors" class="btn btn-secondary btn-sm">View All</a>
         </div>
-        {% if recent_runs %}
+        {% if hypervisors %}
         <table>
             <thead>
                 <tr>
-                    <th>Job</th>
+                    <th>Name</th>
+                    <th>Type</th>
                     <th>Status</th>
-                    <th>Time</th>
+                    <th>Last Checked</th>
                 </tr>
             </thead>
             <tbody>
-                {% for run in recent_runs[:5] %}
+                {% for hv in hypervisors[:5] %}
                 <tr>
-                    <td>{{ run.job_name }}</td>
+                    <td><strong>{{ hv.name }}</strong></td>
+                    <td><span class="badge badge-info">{{ hv.hypervisor_type|upper }}</span></td>
                     <td>
-                        {% if run.status == 'success' %}
-                        <span class="badge badge-success">Success</span>
-                        {% elif run.status == 'failed' %}
-                        <span class="badge badge-error">Failed</span>
-                        {% elif run.status == 'running' %}
-                        <span class="badge badge-info">Running</span>
+                        {% if hv.status == 'connected' %}
+                        <span class="badge badge-success">Connected</span>
+                        {% elif hv.status == 'error' %}
+                        <span class="badge badge-error">Error</span>
                         {% else %}
-                        <span class="badge badge-muted">{{ run.status }}</span>
+                        <span class="badge badge-muted">{{ hv.status or 'Unknown' }}</span>
                         {% endif %}
                     </td>
-                    <td style="color: var(--text-muted)">{{ run.started_at_ago }}</td>
+                    <td style="color: var(--text-muted)">{{ hv.last_checked_ago }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
         {% else %}
         <div class="empty-state">
-            <p>No backup history yet</p>
+            <p>No hypervisors configured</p>
+            <a href="/hypervisors" class="btn btn-primary btn-sm">Add Hypervisor</a>
         </div>
         {% endif %}
     </div>
 </div>
 
-<!-- Jobs -->
+<!-- Recent Activity -->
 <div class="card">
     <div class="card-header">
-        <span class="card-title">Backup Jobs</span>
-        <a href="/jobs/new" class="btn btn-primary btn-sm">+ New Job</a>
+        <span class="card-title">Recent Activity</span>
+        <a href="/history" class="btn btn-secondary btn-sm">View All</a>
     </div>
-    {% if jobs %}
+    {% if recent_runs %}
     <table>
         <thead>
             <tr>
-                <th>Name</th>
-                <th>Agent</th>
-                <th>Source</th>
-                <th>Destination</th>
-                <th>Last Status</th>
-                <th>Actions</th>
+                <th>Job</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Time</th>
             </tr>
         </thead>
         <tbody>
-            {% for job in jobs %}
+            {% for run in recent_runs[:10] %}
             <tr>
-                <td><strong>{{ job.name }}</strong></td>
-                <td>{{ job.client_id or 'Any' }}</td>
-                <td><code>{% if job.source_path %}{{ job.source_path[:25] }}{% if job.source_path|length > 25 %}...{% endif %}{% else %}-{% endif %}</code></td>
-                <td><code>{% if job.destination_path %}{{ job.destination_path[:25] }}{% if job.destination_path|length > 25 %}...{% endif %}{% else %}-{% endif %}</code></td>
                 <td>
-                    {% if job.last_status == 'success' %}
-                    <span class="badge badge-success">Success</span>
-                    {% elif job.last_status == 'failed' %}
-                    <span class="badge badge-error">Failed</span>
-                    {% elif job.last_status %}
-                    <span class="badge badge-muted">{{ job.last_status }}</span>
-                    {% else %}
-                    <span class="badge badge-muted">Never Run</span>
+                    <strong>{{ run.job_name }}</strong>
+                    {% if run.run_type == 'hypervisor' and run.guest_name %}
+                    <span style="color: var(--text-muted);"> - {{ run.guest_name }}</span>
                     {% endif %}
                 </td>
                 <td>
-                    <button class="btn btn-primary btn-sm"
-                            onclick="runJob('{{ job.name }}')">
-                        Run Now
-                    </button>
+                    {% if run.run_type == 'hypervisor' %}
+                    <span class="badge badge-warning">VM</span>
+                    {% else %}
+                    <span class="badge badge-info">Agent</span>
+                    {% endif %}
                 </td>
+                <td>
+                    {% if run.status == 'success' %}
+                    <span class="badge badge-success">Success</span>
+                    {% elif run.status == 'failed' %}
+                    <span class="badge badge-error">Failed</span>
+                    {% elif run.status == 'running' %}
+                    <span class="badge badge-info">Running</span>
+                    {% else %}
+                    <span class="badge badge-muted">{{ run.status }}</span>
+                    {% endif %}
+                </td>
+                <td style="color: var(--text-muted)">{{ run.started_at_ago }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
     {% else %}
     <div class="empty-state">
-        <h3>No Backup Jobs</h3>
-        <p>Create a backup job to start protecting your data</p>
-        <a href="/jobs/new" class="btn btn-primary">Create First Job</a>
+        <p>No backup history yet</p>
     </div>
     {% endif %}
 </div>
 
+<div class="grid grid-2">
+    <!-- Agent Jobs -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Agent Backup Jobs</span>
+            <a href="/jobs/new" class="btn btn-primary btn-sm">+ New Job</a>
+        </div>
+        {% if jobs %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Source</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in jobs[:5] %}
+                <tr>
+                    <td><strong>{{ job.name }}</strong></td>
+                    <td><code>{% if job.source_path %}{{ job.source_path[:20] }}{% if job.source_path|length > 20 %}...{% endif %}{% else %}-{% endif %}</code></td>
+                    <td>
+                        {% if job.last_status == 'success' %}
+                        <span class="badge badge-success">Success</span>
+                        {% elif job.last_status == 'failed' %}
+                        <span class="badge badge-error">Failed</span>
+                        {% elif job.last_status %}
+                        <span class="badge badge-muted">{{ job.last_status }}</span>
+                        {% else %}
+                        <span class="badge badge-muted">Never Run</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="runJob('{{ job.name }}')">Run</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if jobs|length > 5 %}
+        <div style="padding: 12px 20px; text-align: center; border-top: 1px solid var(--border-light);">
+            <a href="/jobs" style="color: var(--accent);">View all {{ jobs|length }} jobs</a>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="empty-state">
+            <p>No backup jobs configured</p>
+            <a href="/jobs/new" class="btn btn-primary btn-sm">Create Job</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Hypervisor Jobs -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Hypervisor Backup Jobs</span>
+            <a href="/hypervisors" class="btn btn-primary btn-sm">+ New Job</a>
+        </div>
+        {% if hv_jobs %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Hypervisor</th>
+                    <th>Status</th>
+                    <th>Last Run</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in hv_jobs[:5] %}
+                <tr class="{% if not job.enabled %}row-disabled{% endif %}">
+                    <td>
+                        <strong>{{ job.name }}</strong>
+                        {% if job.guest_count > 0 %}
+                        <span class="badge badge-muted" style="margin-left: 4px;">{{ job.guest_count }} VM{% if job.guest_count > 1 %}s{% endif %}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ job.hypervisor_name or '-' }}</td>
+                    <td>
+                        {% if not job.enabled %}
+                        <span class="badge badge-muted">Disabled</span>
+                        {% elif job.last_status == 'success' %}
+                        <span class="badge badge-success">Success</span>
+                        {% elif job.last_status == 'failed' %}
+                        <span class="badge badge-error">Failed</span>
+                        {% elif job.last_status %}
+                        <span class="badge badge-muted">{{ job.last_status }}</span>
+                        {% else %}
+                        <span class="badge badge-muted">Never Run</span>
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--text-muted)">{{ job.last_run_ago or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if hv_jobs|length > 5 %}
+        <div style="padding: 12px 20px; text-align: center; border-top: 1px solid var(--border-light);">
+            <a href="/hypervisors" style="color: var(--accent);">View all {{ hv_jobs|length }} jobs</a>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="empty-state">
+            <p>No hypervisor backup jobs</p>
+            <a href="/hypervisors" class="btn btn-primary btn-sm">Configure</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
 <style>
+/* Stats Grid - 6 columns */
+.stats-grid-6 {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+@media (max-width: 1200px) {
+    .stats-grid-6 {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .stats-grid-6 {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+}
+
+.stat-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.stat-value {
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.2;
+}
+
+.stat-value.success {
+    color: var(--success);
+}
+
+.stat-sublabel {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* Storage Grid */
+.storage-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    padding: 16px 20px;
+}
+
+.storage-card {
+    background: var(--bg-page);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.storage-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.storage-name {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.storage-server {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    font-family: var(--font-mono);
+}
+
+.storage-bar-container {
+    background: var(--bg-card);
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.storage-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.5s ease, background-color 0.3s ease;
+}
+
+.storage-bar.warning {
+    background: var(--warning);
+}
+
+.storage-bar.danger {
+    background: var(--error);
+}
+
+.storage-stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.storage-used {
+    font-weight: 500;
+}
+
+/* Running Jobs */
 .running-job {
     padding: 16px 20px;
     border-bottom: 1px solid var(--border-light);
@@ -216,6 +494,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Row styling */
+.row-disabled {
+    opacity: 0.6;
 }
 </style>
 
@@ -269,9 +552,56 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Initial load and poll every 2 seconds
+// Fetch storage stats for each repository
+function loadStorageStats() {
+    document.querySelectorAll('.storage-card').forEach(card => {
+        const repoId = card.dataset.repoId;
+        if (!repoId) return;
+
+        fetch(`/api/v1/repositories/${repoId}/stats`)
+            .then(response => {
+                if (!response.ok) throw new Error('Failed to fetch');
+                return response.json();
+            })
+            .then(stats => {
+                const bar = card.querySelector('.storage-bar');
+                const used = card.querySelector('.storage-used');
+                const total = card.querySelector('.storage-total');
+
+                if (stats.used_bytes !== undefined && stats.total_bytes !== undefined) {
+                    const percent = stats.total_bytes > 0
+                        ? Math.round((stats.used_bytes / stats.total_bytes) * 100)
+                        : 0;
+
+                    bar.style.width = percent + '%';
+
+                    // Color based on usage
+                    if (percent >= 90) {
+                        bar.classList.add('danger');
+                    } else if (percent >= 75) {
+                        bar.classList.add('warning');
+                    }
+
+                    used.textContent = formatBytes(stats.used_bytes) + ' used';
+                    total.textContent = formatBytes(stats.total_bytes) + ' total';
+                } else {
+                    used.textContent = 'Stats unavailable';
+                    total.textContent = '';
+                }
+            })
+            .catch(err => {
+                const used = card.querySelector('.storage-used');
+                used.textContent = 'Unable to fetch stats';
+            });
+    });
+}
+
+// Initial load and poll every 2 seconds for running jobs
 updateRunningJobs();
 setInterval(updateRunningJobs, 2000);
+
+// Load storage stats on page load (one-time, not polling)
+loadStorageStats();
 
 async function runJob(jobName) {
     try {

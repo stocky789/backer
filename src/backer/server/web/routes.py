@@ -116,32 +116,88 @@ async def dashboard(request: Request):
             "last_run": latest["started_at"] if latest else None,
         })
 
-    # Get recent runs
+    # Get recent runs (agent backups)
     recent_runs = []
     for job in jobs_raw[:10]:
         runs = storage.get_job_runs(job["name"], limit=5)
         for run in runs:
             recent_runs.append({
                 **run,
+                "run_type": "agent",
                 "started_at_ago": time_ago(run.get("started_at")),
             })
+
+    # Get hypervisors and hypervisor jobs
+    hypervisors_raw = storage.list_hypervisors()
+    hypervisors = []
+    connected_hv_count = 0
+
+    for hv in hypervisors_raw:
+        is_connected = hv.get("status") == "connected"
+        if is_connected:
+            connected_hv_count += 1
+        hypervisors.append({
+            **hv,
+            "last_checked_ago": time_ago(hv.get("last_checked")),
+        })
+
+    # Get hypervisor jobs
+    hv_jobs_raw = storage.list_hypervisor_jobs()
+    hv_jobs = []
+    for job in hv_jobs_raw:
+        latest = storage.get_latest_hypervisor_run(job["id"])
+        hv = storage.get_hypervisor(job["hypervisor_id"])
+        guest_ids = job.get("guest_ids") or []
+        hv_jobs.append({
+            **job,
+            "hypervisor_name": hv.get("name") if hv else None,
+            "guest_count": len(guest_ids) if guest_ids else 0,
+            "last_status": latest["status"] if latest else None,
+            "last_run_ago": time_ago(latest.get("started_at")) if latest else None,
+        })
+
+    # Get recent hypervisor runs
+    hv_runs = storage.get_hypervisor_runs(limit=10)
+    for run in hv_runs:
+        # Get job name
+        job = storage.get_hypervisor_job(run.get("job_id"))
+        recent_runs.append({
+            **run,
+            "run_type": "hypervisor",
+            "job_name": job.get("name") if job else f"VM {run.get('guest_id')}",
+            "started_at_ago": time_ago(run.get("started_at")),
+        })
 
     # Sort by time and take top 10
     recent_runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
     recent_runs = recent_runs[:10]
 
-    # Get repositories count
+    # Get repositories with storage stats
     repositories = storage.list_repositories()
+    repos_with_stats = []
+
+    for repo in repositories:
+        repo_stats = repo.copy()
+        # Storage stats will be fetched via API call from frontend for performance
+        repo_stats["used_bytes"] = None
+        repo_stats["total_bytes"] = None
+        repo_stats["used_percent"] = None
+        repos_with_stats.append(repo_stats)
 
     # Stats
     today = datetime.now().strftime("%Y-%m-%d")
     backups_today = sum(1 for r in recent_runs if r.get("started_at", "")[:10] == today)
+
     stats = {
         "agents_online": online_count,
         "total_agents": len(agents),
         "total_jobs": len(jobs),
         "total_repositories": len(repositories),
         "backups_today": backups_today,
+        # Hypervisor stats
+        "hypervisors_connected": connected_hv_count,
+        "total_hypervisors": len(hypervisors),
+        "total_hv_jobs": len(hv_jobs),
     }
 
     return templates.TemplateResponse("dashboard.html", {
@@ -151,6 +207,9 @@ async def dashboard(request: Request):
         "agents": agents,
         "jobs": jobs,
         "recent_runs": recent_runs,
+        "hypervisors": hypervisors,
+        "hv_jobs": hv_jobs,
+        "repositories": repos_with_stats,
         "user": get_current_user(request),
     })
 

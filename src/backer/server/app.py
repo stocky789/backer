@@ -1869,6 +1869,167 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         return {"task_id": task.id, "status": "testing", "message": "Connection test started"}
 
+    @app.get("/api/v1/repositories/{repo_id}/stats")
+    def get_repository_stats(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
+        """Get storage statistics for a repository.
+
+        Returns disk space usage information (used, available, total).
+        """
+        import subprocess
+        import tempfile
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        repo_type = repo.get("repo_type", "smb")
+        server = repo.get("server", "")
+        share = repo.get("share", "")
+        username = repo.get("username")
+        password = storage.get_repository_password(repo_id)
+        domain = repo.get("domain")
+
+        try:
+            if repo_type == "smb":
+                # Use smbclient to get disk info
+                if username:
+                    if domain:
+                        auth_str = f"{domain}\\{username}%{password or ''}"
+                    else:
+                        auth_str = f"{username}%{password or ''}"
+                    auth_parts = ["-U", auth_str]
+                else:
+                    auth_parts = ["-N"]
+
+                cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", "du"]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+                if result.returncode == 0:
+                    # Parse smbclient du output
+                    # Format: "        xxxxx blocks of size yyyy. zzzzz blocks available"
+                    output = result.stdout + result.stderr
+                    import re
+                    match = re.search(
+                        r"(\d+)\s+blocks\s+of\s+size\s+(\d+)\.\s+(\d+)\s+blocks\s+available",
+                        output
+                    )
+                    if match:
+                        total_blocks = int(match.group(1))
+                        block_size = int(match.group(2))
+                        avail_blocks = int(match.group(3))
+
+                        total_bytes = total_blocks * block_size
+                        avail_bytes = avail_blocks * block_size
+                        used_bytes = total_bytes - avail_bytes
+
+                        return {
+                            "repo_id": repo_id,
+                            "used_bytes": used_bytes,
+                            "available_bytes": avail_bytes,
+                            "total_bytes": total_bytes,
+                            "used_percent": round((used_bytes / total_bytes * 100), 1) if total_bytes > 0 else 0,
+                        }
+
+                return {"repo_id": repo_id, "error": "Could not retrieve stats"}
+
+            elif repo_type == "nfs":
+                # Mount temporarily and use df
+                mount_point = tempfile.mkdtemp(prefix="backer_stats_")
+                mounted = False
+
+                try:
+                    mount_cmd = [
+                        "sudo", "-n", "mount", "-t", "nfs",
+                        "-o", "soft,timeo=30,retrans=2,ro",
+                        f"{server}:{share}",
+                        mount_point,
+                    ]
+                    result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+                    if result.returncode != 0:
+                        return {"repo_id": repo_id, "error": "Could not mount NFS share"}
+
+                    mounted = True
+
+                    # Use df to get stats
+                    df_result = subprocess.run(
+                        ["df", "-B1", mount_point],
+                        capture_output=True, text=True, timeout=10
+                    )
+
+                    if df_result.returncode == 0:
+                        lines = df_result.stdout.strip().split("\n")
+                        if len(lines) >= 2:
+                            # Parse df output: Filesystem 1B-blocks Used Available Use% Mounted
+                            parts = lines[1].split()
+                            if len(parts) >= 4:
+                                total_bytes = int(parts[1])
+                                used_bytes = int(parts[2])
+                                avail_bytes = int(parts[3])
+
+                                pct = round((used_bytes / total_bytes * 100), 1) if total_bytes > 0 else 0
+                                return {
+                                    "repo_id": repo_id,
+                                    "used_bytes": used_bytes,
+                                    "available_bytes": avail_bytes,
+                                    "total_bytes": total_bytes,
+                                    "used_percent": pct,
+                                }
+
+                    return {"repo_id": repo_id, "error": "Could not parse df output"}
+
+                finally:
+                    if mounted:
+                        try:
+                            subprocess.run(
+                                ["sudo", "-n", "umount", "-l", mount_point],
+                                capture_output=True, timeout=10
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        Path(mount_point).rmdir()
+                    except Exception:
+                        pass
+
+            elif repo_type == "local":
+                # Use df for local path
+                local_path = repo.get("share", "") or repo.get("path", "")
+                if not local_path or not Path(local_path).exists():
+                    return {"repo_id": repo_id, "error": "Local path not found"}
+
+                df_result = subprocess.run(
+                    ["df", "-B1", local_path],
+                    capture_output=True, text=True, timeout=10
+                )
+
+                if df_result.returncode == 0:
+                    lines = df_result.stdout.strip().split("\n")
+                    if len(lines) >= 2:
+                        parts = lines[1].split()
+                        if len(parts) >= 4:
+                            total_bytes = int(parts[1])
+                            used_bytes = int(parts[2])
+                            avail_bytes = int(parts[3])
+
+                            return {
+                                "repo_id": repo_id,
+                                "used_bytes": used_bytes,
+                                "available_bytes": avail_bytes,
+                                "total_bytes": total_bytes,
+                                "used_percent": round((used_bytes / total_bytes * 100), 1) if total_bytes > 0 else 0,
+                            }
+
+                return {"repo_id": repo_id, "error": "Could not get local stats"}
+
+            else:
+                return {"repo_id": repo_id, "error": f"Stats not supported for {repo_type}"}
+
+        except subprocess.TimeoutExpired:
+            return {"repo_id": repo_id, "error": "Timeout getting stats"}
+        except Exception as e:
+            logger.warning(f"Failed to get repository stats: {e}")
+            return {"repo_id": repo_id, "error": str(e)}
+
     @app.post("/api/v1/repositories/{repo_id}/scan")
     def scan_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
         """Scan a repository for existing Backer metadata and backups.
@@ -3331,6 +3492,30 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if storage.get_hypervisor_job_by_name(name):
             raise HTTPException(status_code=400, detail="Job with this name already exists")
 
+        # Auto-import any existing jobs from repository metadata for this hypervisor
+        # This enables disaster recovery - if reinstalling backer, jobs are auto-recovered
+        imported_jobs = _auto_import_hypervisor_jobs(
+            storage=storage,
+            repository=repository,
+            repository_id=repository_id,
+            hypervisor=hypervisor,
+            hypervisor_id=hypervisor_id,
+        )
+        if imported_jobs > 0:
+            logger.info(f"Auto-imported {imported_jobs} existing jobs from repository metadata")
+            # Check if the job we're trying to create was just imported
+            existing_by_name = storage.get_hypervisor_job_by_name(name)
+            if existing_by_name:
+                # Job was imported, return it instead of creating duplicate
+                return {
+                    "id": existing_by_name["id"],
+                    "name": name,
+                    "status": "imported",
+                    "message": f"Job '{name}' was auto-imported from repository metadata "
+                               f"along with {imported_jobs} other job(s)",
+                    "imported_count": imported_jobs,
+                }
+
         job_id = str(uuid4())
 
         storage.add_hypervisor_job(
@@ -3712,6 +3897,231 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except Exception:
                 pass
 
+    def _auto_import_hypervisor_jobs(
+        storage: Storage,
+        repository: dict[str, Any],
+        repository_id: str,
+        hypervisor: dict[str, Any],
+        hypervisor_id: str,
+    ) -> int:
+        """Auto-import existing job configurations from repository metadata.
+
+        When a user creates a new job for a hypervisor+repository combination,
+        this function checks if there are existing job configurations stored
+        in the repository metadata (.backer/hypervisor_jobs/) and imports them
+        automatically. This enables disaster recovery - if the backer server
+        is reinstalled, jobs are auto-recovered when recreating them.
+
+        Args:
+            storage: Database storage
+            repository: Repository dict
+            repository_id: Repository ID
+            hypervisor: Hypervisor dict
+            hypervisor_id: Hypervisor ID
+
+        Returns:
+            Number of jobs imported
+        """
+        import json as json_module
+        import subprocess
+        import tempfile
+
+        from backer.server.repositories import smb_list_files, smb_read_file
+
+        # Check if we already have jobs for this hypervisor+repo combination
+        existing_jobs = storage.list_hypervisor_jobs()
+        has_existing = any(
+            j.get("hypervisor_id") == hypervisor_id and j.get("repository_id") == repository_id
+            for j in existing_jobs
+        )
+        if has_existing:
+            # Already have jobs, skip auto-import
+            return 0
+
+        repo_type = repository.get("repo_type", "").lower()
+        server = repository.get("server", "")
+        hv_name = hypervisor.get("name", "unknown")
+        hv_host = hypervisor.get("host", "")
+
+        # Sanitize hypervisor name for path matching
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hv_name)
+
+        imported_count = 0
+
+        try:
+            if repo_type == "smb":
+                share = repository.get("share", "")
+                subpath = repository.get("path", "")
+                username = repository.get("username")
+                password = storage.get_repository_password(repository_id)
+                domain = repository.get("domain")
+
+                # Path to .backer/ in the hypervisor folder
+                backer_path = f"{subpath}/Hypervisors/{safe_hv_name}/.backer" if subpath else \
+                              f"Hypervisors/{safe_hv_name}/.backer"
+                jobs_path = f"{backer_path}/hypervisor_jobs"
+
+                # Get list of deleted jobs to skip
+                deleted_job_ids = _get_deleted_job_ids_smb(
+                    server, share, backer_path, username, password, domain
+                )
+                if deleted_job_ids:
+                    logger.debug(f"Found {len(deleted_job_ids)} deleted jobs to skip")
+
+                ok, job_files = smb_list_files(server, share, jobs_path, username, password, domain)
+                if not ok:
+                    logger.debug(f"No job metadata found at {jobs_path}")
+                    return 0
+
+                for job_file in job_files:
+                    if not job_file.endswith(".json"):
+                        continue
+
+                    ok2, job_content = smb_read_file(
+                        server, share, f"{jobs_path}/{job_file}",
+                        username, password, domain
+                    )
+                    if not ok2:
+                        continue
+
+                    try:
+                        job_data = json_module.loads(job_content)
+                        imported_count += _import_single_job(
+                            storage, job_data, hypervisor_id, repository_id, hv_name, hv_host,
+                            deleted_job_ids
+                        )
+                    except (json_module.JSONDecodeError, Exception) as e:
+                        logger.warning(f"Failed to import job from {job_file}: {e}")
+
+            elif repo_type == "nfs":
+                export = repository.get("share", "")
+                mount_point = tempfile.mkdtemp(prefix="backer_auto_import_")
+                mounted = False
+
+                try:
+                    mount_cmd = [
+                        "sudo", "-n", "mount", "-t", "nfs",
+                        "-o", "soft,timeo=50,retrans=2,ro",
+                        f"{server}:{export}",
+                        mount_point,
+                    ]
+                    result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        logger.debug(f"Could not mount NFS for auto-import: {result.stderr.strip()}")
+                        return 0
+
+                    mounted = True
+
+                    # Path to .backer/ in the hypervisor folder
+                    backer_path = Path(mount_point) / "Hypervisors" / safe_hv_name / ".backer"
+                    jobs_dir = backer_path / "hypervisor_jobs"
+
+                    if not jobs_dir.exists():
+                        logger.debug(f"No job metadata found at {jobs_dir}")
+                        return 0
+
+                    # Get list of deleted jobs to skip
+                    deleted_job_ids = _get_deleted_job_ids_from_path(backer_path)
+                    if deleted_job_ids:
+                        logger.debug(f"Found {len(deleted_job_ids)} deleted jobs to skip")
+
+                    for job_file in jobs_dir.glob("*.json"):
+                        try:
+                            job_data = json_module.loads(job_file.read_text())
+                            imported_count += _import_single_job(
+                                storage, job_data, hypervisor_id, repository_id, hv_name, hv_host,
+                                deleted_job_ids
+                            )
+                        except (json_module.JSONDecodeError, Exception) as e:
+                            logger.warning(f"Failed to import job from {job_file.name}: {e}")
+
+                finally:
+                    if mounted:
+                        try:
+                            subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=30)
+                        except Exception:
+                            pass
+                    try:
+                        Path(mount_point).rmdir()
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.warning(f"Auto-import failed: {e}")
+
+        return imported_count
+
+    def _import_single_job(
+        storage: Storage,
+        job_data: dict[str, Any],
+        hypervisor_id: str,
+        repository_id: str,
+        hv_name: str,
+        hv_host: str,
+        deleted_job_ids: set[str] | None = None,
+    ) -> int:
+        """Import a single job from metadata.
+
+        Args:
+            storage: Database storage
+            job_data: Job metadata dict
+            hypervisor_id: Target hypervisor ID
+            repository_id: Target repository ID
+            hv_name: Hypervisor name for matching
+            hv_host: Hypervisor host for matching
+            deleted_job_ids: Set of job IDs that have been deleted (skip these)
+
+        Returns:
+            1 if imported, 0 if skipped.
+        """
+        job_id = job_data.get("job_id")
+        job_name = job_data.get("name")
+
+        if not job_id or not job_name:
+            return 0
+
+        # Check if job was previously deleted - don't re-import
+        if deleted_job_ids and job_id in deleted_job_ids:
+            logger.debug(f"Skipping job '{job_name}' - previously deleted")
+            return 0
+
+        # Check if job already exists by ID
+        if storage.get_hypervisor_job(job_id):
+            return 0
+
+        # Check if job exists by name
+        if storage.get_hypervisor_job_by_name(job_name):
+            return 0
+
+        # Verify this job was for the same hypervisor (by ID, name, or host)
+        job_hv_id = job_data.get("hypervisor_id")
+        job_hv_name = job_data.get("hypervisor_name")
+        job_hv_host = job_data.get("hypervisor_host")
+
+        # Must match by at least one identifier
+        if not (job_hv_id == hypervisor_id or job_hv_name == hv_name or job_hv_host == hv_host):
+            logger.debug(f"Skipping job '{job_name}' - hypervisor mismatch")
+            return 0
+
+        # Import the job
+        guest_ids = job_data.get("guest_ids") or []
+
+        storage.add_hypervisor_job(
+            job_id=job_id,
+            name=job_name,
+            hypervisor_id=hypervisor_id,
+            guest_ids=guest_ids,
+            repository_id=repository_id,
+            backup_mode=job_data.get("backup_mode", "snapshot"),
+            compression=job_data.get("compression", "zstd"),
+            schedule_cron=job_data.get("schedule_cron"),
+            enabled=job_data.get("enabled", True),
+            delete_before_backup=job_data.get("delete_before_backup", False),
+        )
+
+        logger.info(f"Auto-imported job '{job_name}' from repository metadata")
+        return 1
+
     def _cleanup_hypervisor_job_data(
         repository: dict[str, Any],
         hypervisor: dict[str, Any],
@@ -3851,6 +4261,173 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         else:
             logger.warning(f"Metadata cleanup not supported for type: {repo_type}")
 
+    def _record_deleted_job(backer_path: Path, job_id: str) -> None:
+        """Record a job deletion in the deleted_jobs.json file.
+
+        This ensures deleted jobs won't be re-imported even if the job
+        metadata file deletion fails.
+
+        Args:
+            backer_path: Path to the .backer metadata folder
+            job_id: Job ID being deleted
+        """
+        import json as json_module
+        from datetime import datetime
+
+        deleted_file = backer_path / "deleted_jobs.json"
+
+        try:
+            # Read existing deleted jobs
+            if deleted_file.exists():
+                deleted_jobs = json_module.loads(deleted_file.read_text(encoding="utf-8"))
+            else:
+                deleted_jobs = {"jobs": []}
+
+            # Check if already recorded
+            existing_ids = {j.get("job_id") for j in deleted_jobs.get("jobs", [])}
+            if job_id in existing_ids:
+                return
+
+            # Add the deletion record
+            deleted_jobs.setdefault("jobs", []).append({
+                "job_id": job_id,
+                "deleted_at": datetime.now().isoformat(),
+            })
+
+            # Write back
+            deleted_file.parent.mkdir(parents=True, exist_ok=True)
+            deleted_file.write_text(json_module.dumps(deleted_jobs, indent=2), encoding="utf-8")
+            logger.info(f"[METADATA] Recorded job {job_id} as deleted")
+
+        except Exception as e:
+            logger.warning(f"[METADATA] Failed to record job deletion: {e}")
+
+    def _record_deleted_job_smb(
+        server: str,
+        share: str,
+        auth_parts: list[str],
+        backer_path: str,
+        job_id: str,
+    ) -> None:
+        """Record a job deletion in the deleted_jobs.json file on SMB share.
+
+        Args:
+            server: SMB server
+            share: SMB share name
+            auth_parts: Authentication arguments for smbclient
+            backer_path: Path to .backer folder within the share
+            job_id: Job ID being deleted
+        """
+        import json as json_module
+        import subprocess
+        import tempfile
+        from datetime import datetime
+
+        deleted_file_path = f"{backer_path}/deleted_jobs.json"
+
+        try:
+            # Read existing file
+            with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as tmp:
+                tmp_path = tmp.name
+
+            # Try to download existing file
+            get_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f'get "{deleted_file_path}" {tmp_path}']
+            result = subprocess.run(get_cmd, capture_output=True, timeout=60, text=True)
+
+            if result.returncode == 0:
+                with open(tmp_path, encoding="utf-8") as f:
+                    deleted_jobs = json_module.load(f)
+            else:
+                deleted_jobs = {"jobs": []}
+
+            # Check if already recorded
+            existing_ids = {j.get("job_id") for j in deleted_jobs.get("jobs", [])}
+            if job_id in existing_ids:
+                return
+
+            # Add the deletion record
+            deleted_jobs.setdefault("jobs", []).append({
+                "job_id": job_id,
+                "deleted_at": datetime.now().isoformat(),
+            })
+
+            # Write to temp file and upload
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json_module.dump(deleted_jobs, f, indent=2)
+
+            put_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f'put {tmp_path} "{deleted_file_path}"']
+            result = subprocess.run(put_cmd, capture_output=True, timeout=60, text=True)
+
+            if result.returncode == 0:
+                logger.info(f"[SMB METADATA] Recorded job {job_id} as deleted")
+            else:
+                logger.warning(f"[SMB METADATA] Failed to write deleted_jobs.json: {result.stderr}")
+
+        except Exception as e:
+            logger.warning(f"[SMB METADATA] Failed to record job deletion: {e}")
+        finally:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _get_deleted_job_ids_from_path(backer_path: Path) -> set[str]:
+        """Read deleted job IDs from a .backer folder.
+
+        Args:
+            backer_path: Path to the .backer metadata folder
+
+        Returns:
+            Set of deleted job IDs
+        """
+        import json as json_module
+
+        deleted_file = backer_path / "deleted_jobs.json"
+        try:
+            if deleted_file.exists():
+                deleted_jobs = json_module.loads(deleted_file.read_text(encoding="utf-8"))
+                return {j.get("job_id") for j in deleted_jobs.get("jobs", []) if j.get("job_id")}
+        except Exception as e:
+            logger.warning(f"[METADATA] Failed to read deleted_jobs.json: {e}")
+        return set()
+
+    def _get_deleted_job_ids_smb(
+        server: str,
+        share: str,
+        backer_path: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None,
+    ) -> set[str]:
+        """Read deleted job IDs from a .backer folder on SMB share.
+
+        Args:
+            server: SMB server
+            share: SMB share name
+            backer_path: Path to .backer folder within the share
+            username: SMB username
+            password: SMB password
+            domain: SMB domain
+
+        Returns:
+            Set of deleted job IDs
+        """
+        import json as json_module
+
+        from backer.server.repositories import smb_read_file
+
+        deleted_file_path = f"{backer_path}/deleted_jobs.json"
+        ok, content = smb_read_file(server, share, deleted_file_path, username, password, domain)
+
+        if ok and content:
+            try:
+                deleted_jobs = json_module.loads(content)
+                return {j.get("job_id") for j in deleted_jobs.get("jobs", []) if j.get("job_id")}
+            except json_module.JSONDecodeError:
+                pass
+
+        return set()
+
     def _cleanup_nfs_job_metadata(
         server: str,
         export: str,
@@ -3881,6 +4458,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             # Path to .backer metadata folder
             backer_path = Path(mount_point) / "Hypervisors" / safe_hv_name / ".backer"
+
+            # Record the job as deleted FIRST to prevent re-import
+            # This is done before deleting the job file so even if deletion fails,
+            # the job won't be re-imported on a fresh install
+            _record_deleted_job(backer_path, job_id)
 
             # Delete job metadata file
             job_file = backer_path / "hypervisor_jobs" / f"{job_id}.json"
@@ -3960,6 +4542,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             backer_path = f"Hypervisors/{safe_hv_name}/.backer"
 
         logger.info(f"[SMB METADATA] Cleaning up job metadata from //{server}/{share}/{backer_path}")
+
+        # Record the job as deleted FIRST to prevent re-import
+        # This is done before deleting the job file so even if deletion fails,
+        # the job won't be re-imported on a fresh install
+        _record_deleted_job_smb(server, share, auth_parts, backer_path, job_id)
 
         # Delete job metadata file
         job_file_path = f"{backer_path}/hypervisor_jobs/{job_id}.json"
