@@ -524,17 +524,24 @@ class RetentionManager:
                             file_dt = datetime.strptime(
                                 f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
                             )
-                            # Check if within 5 minutes of run start time
-                            time_diff = abs((file_dt - timestamp).total_seconds())
-                            if time_diff < 300:  # 5 minutes tolerance
+                            # Compare by DATE only - Proxmox uses local time, we may have UTC
+                            # This avoids timezone conversion issues
+                            run_date = timestamp.replace(tzinfo=None).date()
+                            file_date_obj = file_dt.date()
+
+                            # Match if same date (handles timezone differences)
+                            if file_date_obj == run_date:
                                 try:
                                     entry.unlink()
                                     deleted_count += 1
                                     logger.info(f"Deleted backup file: {entry.name}")
-                                    # Also delete .notes file if exists
-                                    notes_file = entry.with_suffix(entry.suffix + ".notes")
+                                    # Also delete .notes and .log files if exists
+                                    notes_file = Path(str(entry) + ".notes")
                                     if notes_file.exists():
                                         notes_file.unlink()
+                                    log_file = entry.with_suffix(".log")
+                                    if log_file.exists():
+                                        log_file.unlink()
                                 except OSError as e:
                                     logger.warning(f"Failed to delete {entry.name}: {e}")
                         except ValueError:
@@ -607,8 +614,11 @@ class RetentionManager:
                             file_dt = datetime.strptime(
                                 f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
                             )
-                            time_diff = abs((file_dt - timestamp).total_seconds())
-                            if time_diff < 300:  # 5 minutes tolerance
+                            # Compare by DATE only - Proxmox uses local time, we may have UTC
+                            run_date = timestamp.replace(tzinfo=None).date()
+                            file_date_obj = file_dt.date()
+
+                            if file_date_obj == run_date:
                                 # Delete file via smbclient
                                 del_cmd = [
                                     "smbclient", f"//{server}/{share}", *auth_opts,

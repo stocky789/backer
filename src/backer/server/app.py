@@ -3212,6 +3212,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         logger.info(f"[NFS CLEANUP] Starting cleanup for {len(files_to_delete)} backup(s)")
         logger.info(f"[NFS CLEANUP] Target: {server}:{export}/{dump_path}")
+        logger.info(f"[NFS CLEANUP] Files to delete list: {files_to_delete}")
 
         mount_point = None
         try:
@@ -3255,7 +3256,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             deleted_count = 0
             for guest_id, timestamp in files_to_delete:
-                logger.info(f"[NFS CLEANUP] Looking for VMID {guest_id} from {timestamp.isoformat()}")
+                logger.info(
+                    f"[NFS CLEANUP] Looking for VMID {guest_id} from {timestamp} "
+                    f"(type={type(timestamp).__name__})"
+                )
 
                 # Find vzdump files matching this guest_id and timestamp
                 for entry in full_dump_path.iterdir():
@@ -3275,29 +3279,46 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             file_dt = datetime.strptime(
                                 f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
                             )
-                            # Check if within 5 minutes of run start time
-                            time_diff = abs((file_dt - timestamp.replace(tzinfo=None)).total_seconds())
+                            # Compare by DATE only - Proxmox uses local time, we may have UTC
+                            # This avoids timezone conversion issues
+                            run_date = timestamp.replace(tzinfo=None).date()
+                            file_date_obj = file_dt.date()
+
                             logger.info(
                                 f"[NFS CLEANUP] Found matching VMID file: {entry.name} "
-                                f"(file time: {file_dt}, run time: {timestamp}, diff: {time_diff:.0f}s)"
+                                f"(file date: {file_date_obj}, run date: {run_date})"
                             )
 
-                            if time_diff < 300:  # 5 minutes tolerance
+                            # Match if same date (handles timezone differences)
+                            # Since we're already filtering by job runs and VMID, date match is sufficient
+                            logger.info(
+                                f"[NFS CLEANUP] Comparing dates: file={file_date_obj} vs run={run_date}, "
+                                f"equal={file_date_obj == run_date}"
+                            )
+                            if file_date_obj == run_date:
+                                logger.info(f"[NFS CLEANUP] Date match! Attempting to delete {entry.name}...")
                                 try:
                                     entry.unlink()
                                     deleted_count += 1
                                     logger.info(f"[NFS CLEANUP] DELETED: {entry.name}")
-                                    # Also delete .notes file if exists
+                                    # Also delete .notes and .log files if they exist
                                     notes_file = Path(str(entry) + ".notes")
                                     if notes_file.exists():
                                         notes_file.unlink()
                                         logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
-                                except OSError as e:
-                                    logger.error(f"[NFS CLEANUP] Failed to delete {entry.name}: {e}")
+                                    log_file = entry.with_suffix(".log")
+                                    if log_file.exists():
+                                        log_file.unlink()
+                                        logger.info(f"[NFS CLEANUP] DELETED log: {log_file.name}")
+                                except Exception as e:
+                                    logger.error(f"[NFS CLEANUP] Failed to delete {entry.name}: {type(e).__name__}: {e}")
                             else:
-                                logger.info(f"[NFS CLEANUP] Skipping {entry.name} - time diff {time_diff:.0f}s > 300s")
+                                logger.info(f"[NFS CLEANUP] Skipping {entry.name} - date mismatch")
                         except ValueError as e:
                             logger.warning(f"[NFS CLEANUP] Could not parse timestamp from {entry.name}: {e}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"[NFS CLEANUP] Unexpected error processing {entry.name}: {type(e).__name__}: {e}")
                             continue
 
             if deleted_count > 0:
