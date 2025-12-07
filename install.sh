@@ -79,6 +79,7 @@ uninstall() {
 
     rm -f /usr/local/bin/backer
     rm -rf "$INSTALL_DIR"
+    rm -f /etc/sudoers.d/backer-mount
 
     echo ""
     warn "Data directory preserved at: $DATA_DIR"
@@ -252,6 +253,21 @@ if ! id "$SERVICE_USER" &>/dev/null; then
     success "User $SERVICE_USER created"
 else
     info "User $SERVICE_USER already exists"
+fi
+
+# Configure sudoers for NFS mount access
+# This allows the backer user to mount/unmount NFS shares without password
+SUDOERS_FILE="/etc/sudoers.d/backer-mount"
+if [ ! -f "$SUDOERS_FILE" ]; then
+    info "Configuring sudo access for NFS mounts..."
+    cat > "$SUDOERS_FILE" << EOF
+# Allow backer user to mount/unmount filesystems for NFS repository access
+$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount
+EOF
+    chmod 440 "$SUDOERS_FILE"
+    success "Sudo access configured for mount/umount"
+else
+    info "Sudo mount access already configured"
 fi
 
 # Create directories

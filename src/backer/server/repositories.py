@@ -337,18 +337,37 @@ class NFSBrowser:
     ) -> tuple[bool, list[DirectoryEntry] | str]:
         """List contents of a directory on an NFS export.
 
-        Note: This requires temporarily mounting the export.
+        Note: This requires temporarily mounting the export, which needs root/sudo.
         """
         # Create temp mount point
         mount_point = Path(tempfile.mkdtemp(prefix="backer_nfs_"))
 
         try:
-            # Mount the NFS export
+            # Try mounting the NFS export
+            # First try without sudo (works if running as root or setuid mount.nfs)
             mount_cmd = ["mount", "-t", "nfs", f"{server}:{export}", str(mount_point)]
             result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
 
+            # If that fails with permission error, try with sudo
             if result.returncode != 0:
-                return False, f"Failed to mount: {result.stderr.strip()}"
+                error_msg = result.stderr.strip().lower()
+                if "permission" in error_msg or "setuid" in error_msg or "user" in error_msg:
+                    # Try with sudo
+                    mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", f"{server}:{export}", str(mount_point)]
+                    result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip()
+                # Provide helpful error for common NFS mount issues
+                if "setuid" in error_msg.lower() or "user" in error_msg.lower():
+                    return False, (
+                        f"Failed to mount: {error_msg}\n\n"
+                        "NFS mounts require root privileges. Options:\n"
+                        "1. Run backer server as root\n"
+                        "2. Add passwordless sudo for mount: echo 'backer ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount' | sudo tee /etc/sudoers.d/backer-mount\n"
+                        "3. Pre-mount the NFS share in /etc/fstab"
+                    )
+                return False, f"Failed to mount: {error_msg}"
 
             # List the directory
             full_path = mount_point / path.lstrip("/") if path else mount_point
@@ -384,8 +403,11 @@ class NFSBrowser:
 
         finally:
             # Always try to unmount and cleanup
+            # Try without sudo first, then with sudo
             try:
-                subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=10)
+                result = subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=10)
+                if result.returncode != 0:
+                    subprocess.run(["sudo", "-n", "umount", str(mount_point)], capture_output=True, timeout=10)
             except Exception:
                 pass
             try:
