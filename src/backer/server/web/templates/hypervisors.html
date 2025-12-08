@@ -664,15 +664,7 @@
     background: var(--bg-hover);
 }
 
-/* Guest Types */
-.guest-type-vm {
-    color: var(--accent);
-    font-weight: 500;
-}
-.guest-type-lxc {
-    color: var(--success);
-    font-weight: 500;
-}
+/* Guest Types - now using global .status-badge.vm and .status-badge.lxc */
 
 /* Status */
 .status-running {
@@ -1025,7 +1017,7 @@ async function loadGuests(hvId) {
         </tr></thead><tbody>`;
 
         for (const guest of guests) {
-            const typeClass = guest.type === 'qemu' ? 'guest-type-vm' : 'guest-type-lxc';
+            const typeBadgeClass = guest.type === 'qemu' ? 'vm' : 'lxc';
             const typeLabel = guest.type === 'qemu' ? 'VM' : 'LXC';
             const statusClass = guest.status === 'running' ? 'status-running' : 'status-stopped';
             const memGB = guest.maxmem_gb || 0;
@@ -1033,7 +1025,7 @@ async function loadGuests(hvId) {
             html += `<tr>
                 <td><strong>${guest.vmid}</strong></td>
                 <td>${escapeHtml(guest.name)}</td>
-                <td><span class="${typeClass}">${typeLabel}</span></td>
+                <td><span class="status-badge ${typeBadgeClass}">${typeLabel}</span></td>
                 <td><span class="${statusClass}">${guest.status}</span></td>
                 <td>${escapeHtml(guest.node)}</td>
                 <td>${guest.cpus || '-'}</td>
@@ -1109,12 +1101,13 @@ async function loadBackups(hvId) {
             const sizeGB = (backup.size / 1024 / 1024 / 1024).toFixed(2);
             const date = backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : '-';
             const guestType = backup.guest_type || 'qemu';
-            const typeLabel = guestType === 'lxc' ? 'CT' : 'VM';
+            const typeLabel = guestType === 'lxc' ? 'LXC' : 'VM';
+            const typeBadgeClass = guestType === 'lxc' ? 'lxc' : 'vm';
 
             html += `<div class="backup-item">
                 <div class="backup-info">
                     <div class="backup-name">${escapeHtml(backup.volid)}</div>
-                    <div class="backup-meta">${typeLabel} ${backup.vmid} | Size: ${sizeGB} GB | Date: ${date} | Node: ${escapeHtml(backup.node)}</div>
+                    <div class="backup-meta"><span class="status-badge ${typeBadgeClass}">${typeLabel} ${backup.vmid}</span> | Size: ${sizeGB} GB | Date: ${date} | Node: ${escapeHtml(backup.node)}</div>
                 </div>
                 <div class="backup-actions">
                     <button class="btn btn-primary btn-sm" onclick="showRestoreDialog('${hvId}', '${escapeHtml(backup.volid)}', '${escapeHtml(backup.node)}', '${guestType}')">Restore</button>
@@ -1251,10 +1244,11 @@ async function onJobHypervisorChange() {
             let html = '';
             for (const guest of guests) {
                 const typeLabel = guest.type === 'qemu' ? 'VM' : 'LXC';
+                const typeBadgeClass = guest.type === 'qemu' ? 'vm' : 'lxc';
                 html += `<label class="guest-item">
                     <input type="checkbox" name="guests" value="${guest.vmid}">
                     <span class="guest-name">${escapeHtml(guest.name)}</span>
-                    <span class="guest-meta">${typeLabel} (${guest.vmid})</span>
+                    <span class="status-badge ${typeBadgeClass}">${typeLabel} (${guest.vmid})</span>
                     <span class="guest-status ${guest.status === 'running' ? 'status-running' : 'status-stopped'}">${guest.status}</span>
                 </label>`;
             }
@@ -1411,12 +1405,13 @@ async function loadJobBackups(jobId, hvId) {
             const sizeGB = (backup.size / 1024 / 1024 / 1024).toFixed(2);
             const date = backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : '-';
             const guestType = backup.guest_type || 'qemu';
-            const typeLabel = guestType === 'lxc' ? 'CT' : 'VM';
+            const typeLabel = guestType === 'lxc' ? 'LXC' : 'VM';
+            const typeBadgeClass = guestType === 'lxc' ? 'lxc' : 'vm';
 
             html += `<div class="backup-item">
                 <div class="backup-info">
                     <div class="backup-name">${escapeHtml(backup.filename || backup.volid)}</div>
-                    <div class="backup-meta">${typeLabel} ${backup.vmid} | Size: ${sizeGB} GB | Date: ${date}</div>
+                    <div class="backup-meta"><span class="status-badge ${typeBadgeClass}">${typeLabel} ${backup.vmid}</span> | Size: ${sizeGB} GB | Date: ${date}</div>
                 </div>
                 <div class="backup-actions">
                     <button class="btn btn-primary btn-sm" onclick="showRestoreFromRepoDialog('${hvId}', '${escapeHtml(backup.filename)}', '${guestType}', ${backup.vmid})">Restore</button>

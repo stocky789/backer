@@ -738,6 +738,21 @@ body.dark-theme .data-grid tr:hover td {
     background: var(--bg-hover);
 }
 
+.status-badge.vm {
+    color: var(--status-success);
+    background: rgba(16, 124, 16, 0.1);
+}
+
+.status-badge.lxc {
+    color: var(--status-warning);
+    background: rgba(255, 140, 0, 0.1);
+}
+
+.status-badge.info {
+    color: var(--accent);
+    background: rgba(0, 120, 212, 0.1);
+}
+
 /* Status dot for inline use */
 .status-dot {
     width: 8px;
