@@ -2191,14 +2191,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     folders_to_scan = []
                     if ok:
                         # Filter to get just directory names (legacy job subfolders at root)
-                        legacy_folders = [e for e in entries if not e.startswith('.') and not e.endswith('.json') and e != 'Agents' and e != 'Hypervisors']
+                        legacy_folders = [
+                            e for e in entries
+                            if not e.startswith('.') and not e.endswith('.json')
+                            and e != 'Agents' and e != 'Hypervisors'
+                        ]
                         for folder in legacy_folders:
                             folder_path = f"{base_path}/{folder}" if base_path else folder
                             folders_to_scan.append((folder, folder_path))
 
                     if ok_agents_folder:
                         # Job subfolders under Agents/
-                        agent_job_folders = [e for e in agent_entries if not e.startswith('.') and not e.endswith('.json')]
+                        agent_job_folders = [
+                            e for e in agent_entries
+                            if not e.startswith('.') and not e.endswith('.json')
+                        ]
                         for folder in agent_job_folders:
                             folder_path = f"{agents_path}/{folder}"
                             folders_to_scan.append((folder, folder_path))
@@ -2686,7 +2693,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 )
                 if ok:
                     found_any_metadata = True
-                    logger.info(f"[IMPORT] Found legacy metadata at root level")
+                    logger.info("[IMPORT] Found legacy metadata at root level")
                     import_from_metadata_base(legacy_metadata_base, "")
 
                 # Scan Agents/ folder for job-specific metadata (new structure)
@@ -2714,7 +2721,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if not found_any_metadata:
                     return {"error": "Repository has no Backer metadata"}
 
-                logger.info(f"[IMPORT] Imported {imported['jobs']} jobs, {imported['runs']} runs, discovered {imported['agents']} agents")
+                logger.info(
+                    f"[IMPORT] Imported {imported['jobs']} jobs, {imported['runs']} runs, "
+                    f"discovered {imported['agents']} agents"
+                )
 
                 return {
                     "success": True,
@@ -3046,7 +3056,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/v1/repositories/{repo_id}/wipe")
     def wipe_repository(
         repo_id: str,
-        background_tasks: BackgroundTasks,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Wipe all contents of a repository.
@@ -3069,18 +3078,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         username = repo.get("username")
         password = storage.get_repository_password(repo_id)
         domain = repo.get("domain")
+        repo_name = repo.get("name", repo_id)
 
-        # Create a background task for the wipe operation
-        task = BackgroundTask(
-            id=str(uuid.uuid4()),
-            task_type="wipe_repository",
-            status="pending",
-            message="Starting repository wipe...",
-            created_at=datetime.now().isoformat(),
-        )
-        background_tasks_store[task.id] = task
-
-        def wipe_smb_recursive() -> dict[str, Any]:
+        def wipe_smb_recursive(task: Task) -> dict[str, Any]:
             """Recursively wipe all contents from an SMB share path."""
             deleted_items = 0
             errors: list[str] = []
@@ -3113,7 +3113,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     return 0
 
                 count = 0
-                task.message = f"Scanning {path}..."
+                task.update_progress(message=f"Scanning {path}...")
 
                 # List contents
                 success, entries = smb_list_files(server, share, path, username, password, domain)
@@ -3136,7 +3136,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         count += delete_path_recursive(entry_path, depth + 1)
 
                         # Then delete the empty directory
-                        task.message = f"Removing directory {entry_path}..."
+                        task.update_progress(message=f"Removing directory {entry_path}...")
                         rc, _, err = run_smb_command(f'rmdir "{entry_path}"')
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
                             count += 1
@@ -3144,7 +3144,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             errors.append(f"rmdir {entry_path}: {err.strip()[:100]}")
                     else:
                         # It's a file, delete it
-                        task.message = f"Deleting {entry_path}..."
+                        task.update_progress(message=f"Deleting {entry_path}...")
                         rc, _, err = run_smb_command(f'del "{entry_path}"')
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
                             count += 1
@@ -3177,31 +3177,196 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "repository_id": repo_id,
                 }
 
-        def run_wipe():
-            try:
-                task.status = "running"
-                task.message = "Wiping repository contents..."
+        def wipe_nfs_recursive(task: Task) -> dict[str, Any]:
+            """Recursively wipe all contents from an NFS share path."""
+            import tempfile
 
-                if repo_type == "smb":
-                    result = wipe_smb_recursive()
-                else:
-                    result = {
+            deleted_items = 0
+            errors: list[str] = []
+            mount_point = None
+            mounted = False
+
+            try:
+                # Create temp mount point
+                mount_point = tempfile.mkdtemp(prefix="backer_nfs_wipe_")
+
+                # Build NFS source
+                nfs_export = share or repo.get("path", "")
+                nfs_source = f"{server}:{nfs_export}"
+
+                task.update_progress(message=f"Mounting NFS share {nfs_source}...")
+
+                # Mount the NFS share with read-write access
+                mount_cmd = [
+                    "sudo", "-n", "mount", "-t", "nfs",
+                    "-o", "soft,timeo=50,retrans=2,rw",
+                    nfs_source, mount_point,
+                ]
+                result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    return {
                         "success": False,
-                        "error": f"Wipe not supported for repository type: {repo_type}",
+                        "error": f"Failed to mount NFS: {result.stderr.strip()}",
                         "repository_id": repo_id,
                     }
 
-                task.result = result
-                task.status = "completed"
-                task.message = f"Wipe complete. Deleted {result.get('deleted_items', 0)} items."
+                mounted = True
+
+                # Determine base path within the mount
+                if subpath:
+                    base_path = Path(mount_point) / subpath.strip("/")
+                else:
+                    base_path = Path(mount_point)
+
+                if not base_path.exists():
+                    return {
+                        "success": True,
+                        "deleted_items": 0,
+                        "errors": [],
+                        "repository_id": repo_id,
+                        "message": "Path does not exist, nothing to wipe",
+                    }
+
+                task.update_progress(message="Scanning directory contents...")
+
+                # Count items first for progress reporting
+                def count_items(path: Path) -> int:
+                    count = 0
+                    try:
+                        for item in path.iterdir():
+                            count += 1
+                            if item.is_dir() and not item.is_symlink():
+                                count += count_items(item)
+                    except PermissionError:
+                        pass
+                    return count
+
+                total_items = count_items(base_path)
+                processed = 0
+
+                def delete_contents(path: Path, depth: int = 0) -> int:
+                    """Recursively delete contents of a directory."""
+                    nonlocal errors, processed
+                    if depth > 50:
+                        errors.append(f"Max depth exceeded at {path}")
+                        return 0
+
+                    count = 0
+                    try:
+                        for item in list(path.iterdir()):
+                            processed += 1
+                            if total_items > 0:
+                                progress = int((processed / total_items) * 80) + 10
+                                task.update_progress(
+                                    progress=min(progress, 90),
+                                    message=f"Deleting {item.name}..."
+                                )
+
+                            try:
+                                if item.is_symlink():
+                                    item.unlink()
+                                    count += 1
+                                elif item.is_dir():
+                                    # Recursively delete directory contents first
+                                    count += delete_contents(item, depth + 1)
+                                    # Then remove the empty directory
+                                    item.rmdir()
+                                    count += 1
+                                else:
+                                    item.unlink()
+                                    count += 1
+                            except PermissionError:
+                                # Try with sudo for stubborn files
+                                try:
+                                    if item.is_dir():
+                                        subprocess.run(
+                                            ["sudo", "-n", "rm", "-rf", str(item)],
+                                            capture_output=True, timeout=30
+                                        )
+                                    else:
+                                        subprocess.run(
+                                            ["sudo", "-n", "rm", "-f", str(item)],
+                                            capture_output=True, timeout=30
+                                        )
+                                    count += 1
+                                except Exception:
+                                    errors.append(f"Permission denied: {item}")
+                            except Exception as e:
+                                errors.append(f"Error deleting {item}: {str(e)[:50]}")
+                    except PermissionError:
+                        errors.append(f"Cannot access directory: {path}")
+                    except Exception as e:
+                        errors.append(f"Error scanning {path}: {str(e)[:50]}")
+
+                    return count
+
+                # Delete contents (but not the base directory itself)
+                deleted_items = delete_contents(base_path)
+
+                if errors:
+                    logger.warning(f"NFS wipe completed with {len(errors)} errors: {errors[:5]}")
+
+                return {
+                    "success": True,
+                    "deleted_items": deleted_items,
+                    "errors": errors[:10] if errors else [],
+                    "repository_id": repo_id,
+                }
 
             except Exception as e:
-                task.status = "failed"
-                task.error = str(e)
-                task.message = f"Wipe failed: {e}"
-                logger.exception(f"Wipe task failed: {e}")
+                logger.exception(f"Error during NFS wipe: {e}")
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "deleted_items": deleted_items,
+                    "repository_id": repo_id,
+                }
 
-        background_tasks.add_task(run_wipe)
+            finally:
+                # Unmount
+                if mounted and mount_point:
+                    task.update_progress(message="Unmounting NFS share...")
+                    try:
+                        subprocess.run(
+                            ["sudo", "-n", "umount", mount_point],
+                            capture_output=True, timeout=30
+                        )
+                    except Exception:
+                        try:
+                            subprocess.run(
+                                ["sudo", "-n", "umount", "-l", mount_point],
+                                capture_output=True, timeout=10
+                            )
+                        except Exception:
+                            pass
+
+                # Remove temp mount point
+                if mount_point:
+                    try:
+                        Path(mount_point).rmdir()
+                    except Exception:
+                        pass
+
+        def run_wipe(task: Task) -> dict[str, Any]:
+            task.update_progress(message="Wiping repository contents...")
+
+            if repo_type == "smb":
+                return wipe_smb_recursive(task)
+            elif repo_type == "nfs":
+                return wipe_nfs_recursive(task)
+            else:
+                return {
+                    "success": False,
+                    "error": f"Wipe not supported for repository type: {repo_type}",
+                    "repository_id": repo_id,
+                }
+
+        task_manager = get_task_manager()
+        task = task_manager.submit(
+            task_type="wipe_repository",
+            description=f"Wiping all contents from repository '{repo_name}'",
+            func=run_wipe,
+        )
 
         return {"task_id": task.id, "status": "wiping", "message": "Repository wipe started"}
 
@@ -4055,7 +4220,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 files_to_delete.append(f"{backup_file}.notes")
 
                 for filename in files_to_delete:
-                    del_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; del \"{filename}\""]
+                    smb_del_cmd = f'cd {base_path}; del "{filename}"'
+                    del_cmd = [
+                        "smbclient", f"//{server}/{share}", *auth_opts, "-c", smb_del_cmd
+                    ]
                     del_result = subprocess.run(del_cmd, capture_output=True, timeout=30)
                     if del_result.returncode == 0:
                         logger.info(f"Deleted old backup file: {filename}")
@@ -4068,7 +4236,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             logger.warning(f"Failed to delete {filename}: {err}")
 
             if deleted_count > 0:
-                logger.info(f"Retention enforcement: deleted {deleted_count} old backups for VM {vmid}, keeping {copies_to_keep}")
+                logger.info(
+                    f"Retention enforcement: deleted {deleted_count} old backups "
+                    f"for VM {vmid}, keeping {copies_to_keep}"
+                )
 
         except subprocess.TimeoutExpired:
             logger.warning(f"Timeout enforcing retention for VM {vmid} from SMB")
@@ -4183,7 +4354,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         pass
 
             if deleted > 0:
-                logger.info(f"Retention enforcement: deleted {deleted} old backups for VM {vmid}, keeping {copies_to_keep}")
+                logger.info(
+                    f"Retention enforcement: deleted {deleted} old backups "
+                    f"for VM {vmid}, keeping {copies_to_keep}"
+                )
 
         except subprocess.TimeoutExpired:
             logger.warning(f"Timeout enforcing retention for VM {vmid} from NFS")
