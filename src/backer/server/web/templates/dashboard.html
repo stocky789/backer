@@ -78,7 +78,7 @@
                 </thead>
                 <tbody>
                     {% for job in jobs %}
-                    <tr class="job-row" data-name="{{ job.name }}">
+                    <tr class="job-row" data-name="{{ job.name }}" data-job-id="{{ job.name }}" data-job-type="agent">
                         <td>
                             <div class="row-icon">
                                 <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
@@ -156,7 +156,7 @@
                 </thead>
                 <tbody>
                     {% for job in hv_jobs %}
-                    <tr>
+                    <tr data-job-id="{{ job.id }}" data-job-type="hypervisor">
                         <td>
                             <div class="row-icon">
                                 <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/></svg>
@@ -367,8 +367,64 @@ async function updateRunningJobs() {
     }
 }
 
-// Poll for running jobs
+// Poll for running jobs using LiveUpdate system
 updateRunningJobs();
-setInterval(updateRunningJobs, 3000);
+
+// Also update job statuses in the table
+async function updateJobStatuses() {
+    try {
+        // Fetch agent jobs
+        const agentResp = await fetch('/api/v1/jobs');
+        if (agentResp.ok) {
+            const agentJobs = await agentResp.json();
+            agentJobs.forEach(job => {
+                const row = document.querySelector(`tr[data-job-id="${job.name}"][data-job-type="agent"]`);
+                if (!row) return;
+                updateJobRow(row, job.last_status, job.last_run_ago);
+            });
+        }
+
+        // Fetch hypervisor jobs
+        const hvResp = await fetch('/api/v1/hypervisor-jobs');
+        if (hvResp.ok) {
+            const hvJobs = await hvResp.json();
+            hvJobs.forEach(job => {
+                const row = document.querySelector(`tr[data-job-id="${job.id}"][data-job-type="hypervisor"]`);
+                if (!row) return;
+                updateJobRow(row, job.last_status, job.last_run_ago, !job.enabled);
+            });
+        }
+    } catch(e) { /* ignore */ }
+}
+
+function updateJobRow(row, status, lastRun, disabled) {
+    const statusCell = row.querySelectorAll('td')[5]; // Last Result column (index 5)
+    const lastRunCell = row.querySelectorAll('td')[4]; // Last Run column (index 4)
+    if (!statusCell) return;
+
+    let statusHtml = '';
+    if (disabled) {
+        statusHtml = '<span class="status-badge muted">Disabled</span>';
+    } else if (status === 'success') {
+        statusHtml = '<span class="status-badge success">Success</span>';
+    } else if (status === 'failed') {
+        statusHtml = '<span class="status-badge error">Failed</span>';
+    } else if (status === 'running') {
+        statusHtml = '<span class="status-badge running"><svg class="status-icon spinning" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>Running</span>';
+    } else {
+        statusHtml = '<span class="status-badge muted">Never run</span>';
+    }
+    statusCell.innerHTML = statusHtml;
+
+    if (lastRunCell && lastRun) {
+        lastRunCell.textContent = lastRun;
+    }
+}
+
+// Register with LiveUpdate system
+document.addEventListener('liveUpdate', function() {
+    updateRunningJobs();
+    updateJobStatuses();
+});
 </script>
 {% endblock %}

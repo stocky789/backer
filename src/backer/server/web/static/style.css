@@ -1443,6 +1443,248 @@ textarea.form-control {
 }
 
 /* ============================================
+   Activity Widget (title bar)
+   ============================================ */
+.activity-widget {
+    position: relative;
+    margin-right: 8px;
+}
+
+.activity-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-inverse);
+    border-radius: 4px;
+    position: relative;
+    transition: background 0.15s;
+}
+
+.activity-btn:hover {
+    background: rgba(255,255,255,0.1);
+}
+
+.activity-btn.has-activity {
+    color: var(--accent);
+}
+
+.activity-btn.has-activity .activity-icon {
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.activity-icon {
+    width: 16px;
+    height: 16px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+}
+
+.activity-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 14px;
+    height: 14px;
+    background: var(--status-error);
+    color: white;
+    font-size: 9px;
+    font-weight: 600;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.activity-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: 380px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    z-index: 1000;
+    display: none;
+    overflow: hidden;
+}
+
+.activity-panel.active {
+    display: block;
+    animation: slideDown 0.15s ease-out;
+}
+
+@keyframes slideDown {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.activity-panel-header {
+    padding: 12px 16px;
+    background: var(--bg-header);
+    color: var(--text-inverse);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.activity-panel-title {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.activity-panel-close {
+    background: transparent;
+    border: none;
+    color: var(--text-inverse);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    opacity: 0.7;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.activity-panel-close:hover {
+    opacity: 1;
+    background: rgba(255,255,255,0.1);
+}
+
+.activity-panel-body {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.activity-empty {
+    padding: 32px;
+    text-align: center;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.activity-empty svg {
+    width: 32px;
+    height: 32px;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    fill: none;
+    opacity: 0.5;
+}
+
+.activity-item {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.activity-item:last-child {
+    border-bottom: none;
+}
+
+.activity-item-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.activity-item-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.activity-item-icon svg {
+    width: 14px;
+    height: 14px;
+    stroke: var(--accent);
+    stroke-width: 2;
+    fill: none;
+}
+
+.activity-item-icon svg.spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.activity-item-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.activity-item-status {
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+}
+
+.activity-item-status.status-running {
+    background: rgba(0, 120, 212, 0.15);
+    color: var(--status-running);
+}
+
+.activity-item-status.status-pending {
+    background: rgba(255, 140, 0, 0.15);
+    color: var(--status-warning);
+}
+
+.activity-item-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.activity-progress-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.activity-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), #4da3ff);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.activity-item-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+/* ============================================
    Profile Widget (title bar)
    ============================================ */
 .profile-widget {

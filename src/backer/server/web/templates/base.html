@@ -24,6 +24,25 @@
         </div>
         <div class="title-bar-right">
             {% if user %}
+            <!-- Activity Status Widget -->
+            <div class="activity-widget">
+                <button class="activity-btn" onclick="toggleActivityPanel()" title="View running tasks">
+                    <svg class="activity-icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                    <span class="activity-badge" id="activityBadge" style="display: none;">0</span>
+                </button>
+                <div id="activityPanel" class="activity-panel">
+                    <div class="activity-panel-header">
+                        <span class="activity-panel-title">Running Tasks</span>
+                        <button class="activity-panel-close" onclick="toggleActivityPanel()">&times;</button>
+                    </div>
+                    <div class="activity-panel-body" id="activityList">
+                        <div class="activity-empty">
+                            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            <span>No active tasks</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div class="profile-widget">
                 <button class="profile-btn" onclick="toggleProfileMenu()">
                     <span class="avatar">{{ user.display_name[0] | upper }}</span>
@@ -253,6 +272,202 @@
         if (widget && profileMenuOpen && !widget.contains(e.target)) {
             profileMenuOpen = false;
             document.getElementById('profileMenu')?.classList.remove('active');
+        }
+        // Close activity panel on outside click
+        const activityWidget = document.querySelector('.activity-widget');
+        if (activityWidget && activityPanelOpen && !activityWidget.contains(e.target)) {
+            activityPanelOpen = false;
+            document.getElementById('activityPanel')?.classList.remove('active');
+        }
+    });
+
+    // Activity Panel
+    let activityPanelOpen = false;
+    let activityPollInterval = null;
+
+    function toggleActivityPanel() {
+        activityPanelOpen = !activityPanelOpen;
+        const panel = document.getElementById('activityPanel');
+        if (panel) {
+            panel.classList.toggle('active', activityPanelOpen);
+            if (activityPanelOpen) {
+                refreshActivityList();
+            }
+        }
+    }
+
+    function refreshActivityList() {
+        fetch('/api/v1/tasks?active_only=true')
+            .then(r => r.json())
+            .then(tasks => {
+                const list = document.getElementById('activityList');
+                const badge = document.getElementById('activityBadge');
+                const btn = document.querySelector('.activity-btn');
+
+                if (tasks.length === 0) {
+                    list.innerHTML = `
+                        <div class="activity-empty">
+                            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            <span>No active tasks</span>
+                        </div>`;
+                    badge.style.display = 'none';
+                    btn.classList.remove('has-activity');
+                } else {
+                    badge.textContent = tasks.length;
+                    badge.style.display = 'flex';
+                    btn.classList.add('has-activity');
+
+                    let html = '';
+                    tasks.forEach(task => {
+                        const progress = task.progress || 0;
+                        const statusIcon = task.status === 'running'
+                            ? '<svg class="spinning" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>'
+                            : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+
+                        html += `
+                            <div class="activity-item">
+                                <div class="activity-item-header">
+                                    <span class="activity-item-icon">${statusIcon}</span>
+                                    <span class="activity-item-title">${escapeHtml(task.name || task.task_type)}</span>
+                                    <span class="activity-item-status status-${task.status}">${task.status}</span>
+                                </div>
+                                <div class="activity-item-detail">${escapeHtml(task.description || '')}</div>
+                                <div class="activity-progress-bar">
+                                    <div class="activity-progress-fill" style="width: ${progress}%"></div>
+                                </div>
+                                <div class="activity-item-meta">
+                                    <span>${progress}%</span>
+                                    <span>${timeAgo(task.started_at)}</span>
+                                </div>
+                            </div>`;
+                    });
+                    list.innerHTML = html;
+                }
+            })
+            .catch(err => console.error('Failed to fetch tasks:', err));
+    }
+
+    // Poll for activity updates
+    function startActivityPolling() {
+        refreshActivityList();
+        activityPollInterval = setInterval(refreshActivityList, 2000);
+    }
+
+    // Start polling when page loads
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startActivityPolling);
+    } else {
+        startActivityPolling();
+    }
+
+    // ============================================
+    // Global Live Update System
+    // ============================================
+    const LiveUpdate = {
+        interval: null,
+        callbacks: [],
+        paused: false,
+
+        // Register a callback to be called on each update cycle
+        register(callback) {
+            if (typeof callback === 'function') {
+                this.callbacks.push(callback);
+            }
+        },
+
+        // Start the live update polling
+        start(intervalMs = 3000) {
+            if (this.interval) return;
+            this.interval = setInterval(() => {
+                if (!this.paused && !document.hidden) {
+                    this.tick();
+                }
+            }, intervalMs);
+            // Also run immediately
+            this.tick();
+        },
+
+        // Run all registered callbacks
+        tick() {
+            this.callbacks.forEach(cb => {
+                try { cb(); } catch(e) { console.error('LiveUpdate callback error:', e); }
+            });
+        },
+
+        // Pause updates (e.g., when modal is open)
+        pause() { this.paused = true; },
+        resume() { this.paused = false; },
+
+        // Force an immediate update
+        refresh() { this.tick(); }
+    };
+
+    // Update status badges dynamically
+    function updateStatusBadges() {
+        document.querySelectorAll('[data-live-status]').forEach(async (el) => {
+            const url = el.dataset.liveStatus;
+            if (!url) return;
+            try {
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.status) {
+                        // Update badge class
+                        el.className = el.className.replace(/status-\w+/g, '');
+                        el.classList.add('status-badge', data.status);
+                        // Update text if there's a status_text
+                        if (data.status_text) {
+                            el.textContent = data.status_text;
+                        }
+                    }
+                }
+            } catch(e) { /* ignore */ }
+        });
+    }
+
+    // Update elements that show live data from an API
+    function updateLiveElements() {
+        document.querySelectorAll('[data-live-refresh]').forEach(async (el) => {
+            const url = el.dataset.liveRefresh;
+            const prop = el.dataset.liveProp || 'value';
+            if (!url) return;
+            try {
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const value = prop.split('.').reduce((o, k) => o?.[k], data);
+                    if (value !== undefined) {
+                        el.textContent = value;
+                    }
+                }
+            } catch(e) { /* ignore */ }
+        });
+    }
+
+    // Trigger custom event for page-specific handlers
+    function triggerLiveUpdateEvent() {
+        document.dispatchEvent(new CustomEvent('liveUpdate'));
+    }
+
+    // Register default update handlers
+    LiveUpdate.register(updateStatusBadges);
+    LiveUpdate.register(updateLiveElements);
+    LiveUpdate.register(triggerLiveUpdateEvent);
+
+    // Start live updates when page loads
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => LiveUpdate.start(3000));
+    } else {
+        LiveUpdate.start(3000);
+    }
+
+    // Pause when tab is hidden, resume when visible
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            LiveUpdate.pause();
+        } else {
+            LiveUpdate.resume();
+            LiveUpdate.refresh(); // Immediate refresh when coming back
         }
     });
 

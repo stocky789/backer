@@ -141,7 +141,7 @@
                 </thead>
                 <tbody>
                     {% for job in jobs %}
-                    <tr class="job-row {% if not job.enabled %}row-disabled{% endif %}" data-name="{{ job.name }}" data-hv="{{ job.hypervisor_name }}">
+                    <tr class="job-row {% if not job.enabled %}row-disabled{% endif %}" data-job-id="{{ job.id }}" data-name="{{ job.name }}" data-hv="{{ job.hypervisor_name }}">
                         <td>
                             <div class="row-icon">
                                 <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
@@ -1506,6 +1506,45 @@ async function submitRestore(event) {
 
 document.getElementById('restoreModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideRestoreModal();
+});
+
+// Live update handler for job statuses
+document.addEventListener('liveUpdate', async function() {
+    try {
+        // Fetch all jobs and update their status badges
+        const resp = await fetch('/api/v1/hypervisor-jobs');
+        if (!resp.ok) return;
+        const jobs = await resp.json();
+
+        jobs.forEach(job => {
+            const row = document.querySelector(`tr[data-job-id="${job.id}"]`);
+            if (!row) return;
+
+            // Find and update the status cell (5th td)
+            const statusCell = row.querySelectorAll('td')[4];
+            if (!statusCell) return;
+
+            let statusHtml = '';
+            if (!job.enabled) {
+                statusHtml = '<span class="status-badge muted">Disabled</span>';
+            } else if (job.last_status === 'success') {
+                statusHtml = '<span class="status-badge success">Success</span>';
+            } else if (job.last_status === 'failed') {
+                statusHtml = '<span class="status-badge error">Failed</span>';
+            } else if (job.last_status === 'running') {
+                statusHtml = '<span class="status-badge running"><svg class="status-icon spinning" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>Running</span>';
+            } else {
+                statusHtml = '<span class="status-badge muted">Never run</span>';
+            }
+            statusCell.innerHTML = statusHtml;
+
+            // Update last run time (6th td)
+            const lastRunCell = row.querySelectorAll('td')[5];
+            if (lastRunCell) {
+                lastRunCell.textContent = job.last_run_ago || '-';
+            }
+        });
+    } catch(e) { /* ignore */ }
 });
 </script>
 {% endblock %}

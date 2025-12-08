@@ -447,5 +447,62 @@ document.querySelectorAll('.run-row').forEach(row => {
         row.style.opacity = '0.7';
     }
 });
+
+// Live update handler for history page
+document.addEventListener('liveUpdate', async function() {
+    try {
+        const resp = await fetch('/api/v1/runs?limit=50');
+        if (!resp.ok) return;
+        const runs = await resp.json();
+
+        runs.forEach(run => {
+            const runId = run.run_id || '';
+            const row = document.querySelector(`tr[data-run-id="${runId}"]`);
+            if (!row) return;
+
+            // Find and update the status cell (5th td, index 4)
+            const statusCell = row.querySelectorAll('td')[4];
+            if (!statusCell) return;
+
+            let statusHtml = '';
+            if (run.status === 'success') {
+                statusHtml = '<span class="status-badge success"><svg class="status-icon" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>Success</span>';
+            } else if (run.status === 'failed') {
+                statusHtml = '<span class="status-badge error"><svg class="status-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>Failed</span>';
+            } else if (run.status === 'running') {
+                statusHtml = '<span class="status-badge running"><svg class="status-icon spinning" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>Running</span>';
+            } else if (run.status === 'skipped') {
+                statusHtml = '<span class="status-badge muted">Skipped</span>';
+            } else {
+                statusHtml = `<span class="status-badge muted">${run.status}</span>`;
+            }
+            statusCell.innerHTML = statusHtml;
+
+            // Update duration (7th td, index 6)
+            const durationCell = row.querySelectorAll('td')[6];
+            if (durationCell && run.duration) {
+                durationCell.textContent = run.duration;
+            }
+        });
+
+        // Update stat cards
+        const successCount = runs.filter(r => r.status === 'success').length;
+        const failedCount = runs.filter(r => r.status === 'failed').length;
+        const runningCount = runs.filter(r => r.status === 'running').length;
+
+        const statCards = document.querySelectorAll('.stat-card');
+        if (statCards[1]) statCards[1].querySelector('.stat-value').textContent = successCount;
+        if (statCards[2]) {
+            const val = statCards[2].querySelector('.stat-value');
+            val.textContent = failedCount;
+            val.className = 'stat-value' + (failedCount > 0 ? ' error' : '');
+        }
+        if (statCards[3]) {
+            const val = statCards[3].querySelector('.stat-value');
+            val.textContent = runningCount;
+            val.className = 'stat-value' + (runningCount > 0 ? ' info' : '');
+        }
+    } catch(e) { /* ignore */ }
+});
 </script>
 {% endblock %}
