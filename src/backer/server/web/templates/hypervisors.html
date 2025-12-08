@@ -217,9 +217,12 @@
 
 <!-- Add Hypervisor Modal -->
 <div id="addHypervisorModal" class="modal" style="display: none;">
-    <div class="modal-content" style="max-width: 600px;">
+    <div class="modal-content modal-lg">
         <div class="modal-header">
-            <h3>Add Hypervisor</h3>
+            <span class="modal-title">
+                <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg>
+                Add Hypervisor
+            </span>
             <button class="modal-close" onclick="hideAddHypervisorModal()">&times;</button>
         </div>
         <div class="modal-body">
@@ -345,9 +348,12 @@
 
 <!-- View Hypervisor Modal -->
 <div id="viewHypervisorModal" class="modal" style="display: none;">
-    <div class="modal-content" style="max-width: 900px;">
+    <div class="modal-content modal-xl">
         <div class="modal-header">
-            <h3>Hypervisor: <span id="viewHvName"></span></h3>
+            <span class="modal-title">
+                <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/></svg>
+                <span id="viewHvName"></span>
+            </span>
             <button class="modal-close" onclick="hideViewHypervisorModal()">&times;</button>
         </div>
         <div class="modal-body">
@@ -378,9 +384,12 @@
 
 <!-- Add/Edit Job Modal -->
 <div id="jobModal" class="modal" style="display: none;">
-    <div class="modal-content" style="max-width: 700px;">
+    <div class="modal-content modal-lg">
         <div class="modal-header">
-            <h3 id="jobModalTitle">Create Backup Job</h3>
+            <span class="modal-title">
+                <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+                <span id="jobModalTitle">Create Backup Job</span>
+            </span>
             <button class="modal-close" onclick="hideJobModal()">&times;</button>
         </div>
         <div class="modal-body">
@@ -480,9 +489,12 @@
 
 <!-- Restore Modal -->
 <div id="restoreModal" class="modal" style="display: none;">
-    <div class="modal-content" style="max-width: 600px;">
+    <div class="modal-content">
         <div class="modal-header">
-            <h3>Restore VM/Container</h3>
+            <span class="modal-title">
+                <svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                Restore VM/Container
+            </span>
             <button class="modal-close" onclick="hideRestoreModal()">&times;</button>
         </div>
         <div class="modal-body">
