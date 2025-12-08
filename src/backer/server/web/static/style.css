@@ -912,6 +912,9 @@ body.dark-theme .data-grid tr:hover td {
     background: var(--accent);
     color: white;
     border-color: var(--accent);
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 .btn-primary:hover {
