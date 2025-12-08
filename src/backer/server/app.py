@@ -2557,116 +2557,164 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             # For SMB shares, use smbclient to read metadata directly
             elif repo_type == "smb":
-                metadata_base = f"{subpath}/.backer" if subpath else ".backer"
+                base_path = subpath if subpath else ""
                 imported = {"agents": 0, "jobs": 0, "runs": 0}
+                agent_ids_seen = set()
 
-                # Check if repository has backer metadata
-                success, content = smb_read_file(
-                    server, share, f"{metadata_base}/metadata.json",
-                    username, password, domain
-                )
-
-                if not success:
-                    return {"error": "Repository has no Backer metadata"}
-
-                # Read and import jobs
                 # Build the repository path for imported jobs
                 repo_path = f"//{server}/{share}"
                 if subpath:
                     repo_path = f"{repo_path}/{subpath}"
 
-                ok, job_dirs = smb_list_files(
-                    server, share, f"{metadata_base}/jobs", username, password, domain
+                # Helper function to import from a job folder's .backer directory
+                def import_from_metadata_base(metadata_base: str, job_folder: str) -> None:
+                    # Read and import jobs from this metadata location
+                    ok, job_dirs = smb_list_files(
+                        server, share, f"{metadata_base}/jobs", username, password, domain
+                    )
+                    if ok:
+                        for job_dir in job_dirs:
+                            ok2, job_content = smb_read_file(
+                                server, share, f"{metadata_base}/jobs/{job_dir}/config.json",
+                                username, password, domain
+                            )
+                            if ok2:
+                                try:
+                                    job_data = json_module.loads(job_content)
+                                    job_name = job_data.get("job_name")
+                                    config = job_data.get("config", {})
+
+                                    if job_name:
+                                        existing = storage.get_job(job_name)
+                                        if not existing:
+                                            config["repository_id"] = repo_id
+                                            config["imported_at"] = dt.now().isoformat()
+                                            config["imported_from_repo"] = True
+                                            config["job_folder"] = job_folder
+                                            # Set destination_path to repo path for restores
+                                            if not config.get("destination_path"):
+                                                config["destination_path"] = repo_path
+                                            # Set backend if not present
+                                            if not config.get("backend"):
+                                                config["backend"] = "kopia"
+                                            storage.save_job(job_name, config)
+                                            imported["jobs"] += 1
+
+                                            # Import job runs
+                                            ok3, run_files = smb_list_files(
+                                                server, share,
+                                                f"{metadata_base}/jobs/{job_dir}/runs",
+                                                username, password, domain
+                                            )
+                                            if ok3:
+                                                for run_file in run_files:
+                                                    if run_file.endswith(".json"):
+                                                        ok4, run_content = smb_read_file(
+                                                            server, share,
+                                                            f"{metadata_base}/jobs/{job_dir}/runs/{run_file}",
+                                                            username, password, domain
+                                                        )
+                                                        if ok4:
+                                                            try:
+                                                                run = json_module.loads(run_content)
+                                                                run_id = run.get("run_id")
+                                                                if run_id:
+                                                                    started_at = dt.now()
+                                                                    finished_at = None
+                                                                    if run.get("started_at"):
+                                                                        try:
+                                                                            started_at = dt.fromisoformat(
+                                                                                run["started_at"]
+                                                                            )
+                                                                        except (ValueError, TypeError):
+                                                                            pass
+                                                                    if run.get("finished_at"):
+                                                                        try:
+                                                                            finished_at = dt.fromisoformat(
+                                                                                run["finished_at"]
+                                                                            )
+                                                                        except (ValueError, TypeError):
+                                                                            pass
+                                                                    storage.save_job_run(
+                                                                        run_id=run_id,
+                                                                        job_name=job_name,
+                                                                        status=run.get("status", "unknown"),
+                                                                        started_at=started_at,
+                                                                        finished_at=finished_at,
+                                                                        bytes_transferred=run.get(
+                                                                            "bytes_transferred", 0
+                                                                        ),
+                                                                        files_transferred=run.get(
+                                                                            "files_transferred", 0
+                                                                        ),
+                                                                        snapshot_id=run.get("snapshot_id"),
+                                                                    )
+                                                                    imported["runs"] += 1
+                                                            except json_module.JSONDecodeError:
+                                                                pass
+                                except json_module.JSONDecodeError:
+                                    pass
+
+                    # Read agents (dedup by agent_id)
+                    ok, agent_files = smb_list_files(
+                        server, share, f"{metadata_base}/agents", username, password, domain
+                    )
+                    if ok:
+                        for f in agent_files:
+                            if f.endswith(".json"):
+                                ok2, c = smb_read_file(
+                                    server, share, f"{metadata_base}/agents/{f}",
+                                    username, password, domain
+                                )
+                                if ok2:
+                                    try:
+                                        agent = json_module.loads(c)
+                                        agent_id = agent.get("agent_id")
+                                        if agent_id and agent_id not in agent_ids_seen:
+                                            agent_ids_seen.add(agent_id)
+                                            imported["agents"] += 1
+                                    except json_module.JSONDecodeError:
+                                        pass
+
+                found_any_metadata = False
+
+                # First try legacy structure: root/.backer/
+                legacy_metadata_base = f"{base_path}/.backer" if base_path else ".backer"
+                ok, _ = smb_read_file(
+                    server, share, f"{legacy_metadata_base}/metadata.json",
+                    username, password, domain
                 )
                 if ok:
-                    for job_dir in job_dirs:
-                        ok2, job_content = smb_read_file(
-                            server, share, f"{metadata_base}/jobs/{job_dir}/config.json",
+                    found_any_metadata = True
+                    logger.info(f"[IMPORT] Found legacy metadata at root level")
+                    import_from_metadata_base(legacy_metadata_base, "")
+
+                # Scan Agents/ folder for job-specific metadata (new structure)
+                agents_path = f"{base_path}/Agents" if base_path else "Agents"
+                ok, agent_folders = smb_list_files(
+                    server, share, agents_path, username, password, domain
+                )
+                if ok:
+                    for job_folder in agent_folders:
+                        if job_folder.startswith('.'):
+                            continue
+                        folder_path = f"{agents_path}/{job_folder}"
+                        metadata_base = f"{folder_path}/.backer"
+
+                        # Check if this folder has metadata
+                        ok2, _ = smb_read_file(
+                            server, share, f"{metadata_base}/metadata.json",
                             username, password, domain
                         )
                         if ok2:
-                            try:
-                                job_data = json_module.loads(job_content)
-                                job_name = job_data.get("job_name")
-                                config = job_data.get("config", {})
+                            found_any_metadata = True
+                            logger.info(f"[IMPORT] Found metadata in Agents/{job_folder}")
+                            import_from_metadata_base(metadata_base, job_folder)
 
-                                if job_name:
-                                    existing = storage.get_job(job_name)
-                                    if not existing:
-                                        config["repository_id"] = repo_id
-                                        config["imported_at"] = dt.now().isoformat()
-                                        config["imported_from_repo"] = True
-                                        # Set destination_path to repo path for restores
-                                        if not config.get("destination_path"):
-                                            config["destination_path"] = repo_path
-                                        # Set backend if not present
-                                        if not config.get("backend"):
-                                            config["backend"] = "kopia"
-                                        storage.save_job(job_name, config)
-                                        imported["jobs"] += 1
+                if not found_any_metadata:
+                    return {"error": "Repository has no Backer metadata"}
 
-                                        # Import job runs
-                                        ok3, run_files = smb_list_files(
-                                            server, share,
-                                            f"{metadata_base}/jobs/{job_dir}/runs",
-                                            username, password, domain
-                                        )
-                                        if ok3:
-                                            for run_file in run_files:
-                                                if run_file.endswith(".json"):
-                                                    ok4, run_content = smb_read_file(
-                                                        server, share,
-                                                        f"{metadata_base}/jobs/{job_dir}/runs/{run_file}",
-                                                        username, password, domain
-                                                    )
-                                                    if ok4:
-                                                        try:
-                                                            run = json_module.loads(run_content)
-                                                            run_id = run.get("run_id")
-                                                            if run_id:
-                                                                started_at = dt.now()
-                                                                finished_at = None
-                                                                if run.get("started_at"):
-                                                                    try:
-                                                                        started_at = dt.fromisoformat(
-                                                                            run["started_at"]
-                                                                        )
-                                                                    except (ValueError, TypeError):
-                                                                        pass
-                                                                if run.get("finished_at"):
-                                                                    try:
-                                                                        finished_at = dt.fromisoformat(
-                                                                            run["finished_at"]
-                                                                        )
-                                                                    except (ValueError, TypeError):
-                                                                        pass
-                                                                storage.save_job_run(
-                                                                    run_id=run_id,
-                                                                    job_name=job_name,
-                                                                    status=run.get("status", "unknown"),
-                                                                    started_at=started_at,
-                                                                    finished_at=finished_at,
-                                                                    bytes_transferred=run.get(
-                                                                        "bytes_transferred", 0
-                                                                    ),
-                                                                    files_transferred=run.get(
-                                                                        "files_transferred", 0
-                                                                    ),
-                                                                    snapshot_id=run.get("snapshot_id"),
-                                                                )
-                                                                imported["runs"] += 1
-                                                        except json_module.JSONDecodeError:
-                                                            pass
-                            except json_module.JSONDecodeError:
-                                pass
-
-                # Read agents (just count them - we can't fully import without secrets)
-                ok, agent_files = smb_list_files(
-                    server, share, f"{metadata_base}/agents", username, password, domain
-                )
-                if ok:
-                    imported["agents"] = len([f for f in agent_files if f.endswith(".json")])
-                    logger.info(f"Discovered {imported['agents']} agents in repository metadata")
+                logger.info(f"[IMPORT] Imported {imported['jobs']} jobs, {imported['runs']} runs, discovered {imported['agents']} agents")
 
                 return {
                     "success": True,

@@ -350,46 +350,52 @@ Creating New Backup Job
     gap: 12px;
 }
 .backup-method-card {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 14px;
+    border: 2px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
     cursor: pointer;
     transition: all 0.15s;
-    background: var(--bg-secondary);
+    background: var(--bg-panel);
 }
 .backup-method-card:hover {
     border-color: var(--accent);
+    background: var(--bg-hover);
 }
 .backup-method-card.selected {
     border-color: var(--accent);
-    background: rgba(0, 120, 212, 0.08);
+    background: var(--accent-light);
+    box-shadow: 0 0 0 1px var(--accent);
 }
 .method-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 .method-name {
-    font-weight: 600;
-    font-size: 13px;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text-primary);
 }
 .method-badge {
     font-size: 9px;
-    padding: 2px 6px;
+    padding: 3px 8px;
     border-radius: 3px;
     background: var(--bg-tertiary);
-    color: var(--text-muted);
+    color: var(--text-secondary);
     text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.3px;
 }
 .method-badge.recommended {
-    background: var(--success);
+    background: var(--status-success);
     color: white;
 }
 .method-desc {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    line-height: 1.4;
 }
 .method-features {
     list-style: none;
@@ -398,8 +404,16 @@ Creating New Backup Job
     font-size: 11px;
 }
 .method-features li {
-    padding: 2px 0;
-    color: var(--text-muted);
+    padding: 3px 0;
+    color: var(--status-success);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.method-features li::before {
+    content: "✓";
+    font-weight: bold;
+    font-size: 10px;
 }
 .file-browser-agent-info {
     margin-bottom: 12px;
