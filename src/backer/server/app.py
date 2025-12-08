@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -4781,7 +4781,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             job_id: Job ID being deleted
         """
         import json as json_module
-        from datetime import datetime
 
         deleted_file = backer_path / "deleted_jobs.json"
 
@@ -4830,7 +4829,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import json as json_module
         import subprocess
         import tempfile
-        from datetime import datetime
 
         deleted_file_path = f"{backer_path}/deleted_jobs.json"
 
@@ -5098,7 +5096,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         total_files = len(filenames_to_delete) + len(timestamp_fallback)
         logger.info(f"[NFS CLEANUP] Starting cleanup for {total_files} backup(s)")
         logger.info(f"[NFS CLEANUP] Target: {server}:{export}/{dump_path}")
-        logger.info(f"[NFS CLEANUP] Direct filenames: {len(filenames_to_delete)}, Timestamp fallback: {len(timestamp_fallback)}")
+        logger.info(
+            f"[NFS CLEANUP] Direct filenames: {len(filenames_to_delete)}, "
+            f"Timestamp fallback: {len(timestamp_fallback)}"
+        )
 
         mount_point = None
         try:
@@ -5302,7 +5303,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         total_files = len(filenames_to_delete) + len(timestamp_fallback)
         logger.info(f"[SMB CLEANUP] Starting cleanup for {total_files} backup(s) in {dump_path}")
-        logger.info(f"[SMB CLEANUP] Direct filenames: {len(filenames_to_delete)}, Timestamp fallback: {len(timestamp_fallback)}")
+        logger.info(
+            f"[SMB CLEANUP] Direct filenames: {len(filenames_to_delete)}, "
+            f"Timestamp fallback: {len(timestamp_fallback)}"
+        )
 
         deleted_count = 0
 

@@ -8,7 +8,6 @@ of datetime.now() throughout the codebase to ensure consistent timestamps.
 import logging
 import time
 from datetime import datetime
-from functools import lru_cache
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -150,7 +149,7 @@ class TimezoneFormatter(logging.Formatter):
 
     converter = None  # Disable default converter
 
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+    def format_time(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         """Format the time using the configured timezone."""
         # Get time from record and convert to configured timezone
         ct = datetime.fromtimestamp(record.created, tz=ZoneInfo("UTC"))
