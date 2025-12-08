@@ -97,6 +97,7 @@
                         <td>
                             <div class="btn-group">
                                 <button class="btn btn-primary btn-sm" onclick="viewHypervisor('{{ hv.id }}')">View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="editHypervisor('{{ hv.id }}')">Edit</button>
                                 <button class="btn btn-secondary btn-sm" onclick="testHypervisor('{{ hv.id }}')">Test</button>
                                 <button class="btn btn-danger btn-sm" onclick="deleteHypervisor('{{ hv.id }}', '{{ hv.name }}')">Delete</button>
                             </div>
@@ -690,9 +691,16 @@
     align-items: center;
     gap: 12px;
     transition: background-color 0.15s;
+    background: var(--bg-secondary);
+}
+.backup-item:first-child {
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
 }
 .backup-item:last-child {
     border-bottom: none;
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
 }
 .backup-item:hover {
     background: var(--bg-hover);
@@ -706,6 +714,7 @@
     font-size: 12px;
     margin-bottom: 4px;
     word-break: break-all;
+    color: var(--text-primary);
 }
 .backup-meta {
     color: var(--text-muted);
@@ -714,6 +723,15 @@
 .backup-actions {
     display: flex;
     gap: 6px;
+    flex-shrink: 0;
+}
+
+/* Backups list container */
+#backupsList {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    max-height: 400px;
+    overflow-y: auto;
 }
 </style>
 {% endblock %}
@@ -843,6 +861,99 @@ async function submitAddHypervisor(event) {
 document.getElementById('addHypervisorModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideAddHypervisorModal();
 });
+
+// ========== Edit Hypervisor ==========
+
+let editingHypervisorId = null;
+
+async function editHypervisor(hvId) {
+    editingHypervisorId = hvId;
+    document.getElementById('addHypervisorModal').style.display = 'flex';
+    document.getElementById('addHypervisorError').style.display = 'none';
+
+    // Update modal title
+    document.querySelector('#addHypervisorModal .modal-title').innerHTML = `
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg>
+        Edit Hypervisor
+    `;
+    document.querySelector('#addHypervisorForm button[type="submit"]').textContent = 'Save Changes';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}`);
+        const hv = await response.json();
+
+        document.getElementById('hvType').value = hv.hypervisor_type || 'proxmox';
+        document.getElementById('hvName').value = hv.name || '';
+        document.getElementById('hvHost').value = hv.host || '';
+        document.getElementById('hvPort').value = hv.port || 8006;
+        document.getElementById('hvVerifySSL').checked = hv.verify_ssl || false;
+        document.getElementById('hvSshUser').value = hv.ssh_user || 'root';
+        document.getElementById('hvSshPort').value = hv.ssh_port || 22;
+        document.getElementById('hvSshKeyPath').value = hv.ssh_key_path || '';
+        document.getElementById('hvSshUseApiPassword').checked = hv.ssh_use_api_password !== false;
+
+        // Set auth method
+        if (hv.token_id) {
+            document.getElementById('hvAuthMethod').value = 'token';
+            document.getElementById('hvTokenUser').value = hv.username || '';
+            document.getElementById('hvTokenId').value = hv.token_id || '';
+            document.getElementById('hvTokenSecret').value = ''; // Don't show existing secret
+        } else {
+            document.getElementById('hvAuthMethod').value = 'password';
+            document.getElementById('hvUsername').value = hv.username || '';
+            document.getElementById('hvPassword').value = ''; // Don't show existing password
+        }
+        onAuthMethodChange();
+    } catch (e) {
+        document.getElementById('addHypervisorError').textContent = 'Failed to load hypervisor: ' + e.message;
+        document.getElementById('addHypervisorError').style.display = 'block';
+    }
+}
+
+async function submitAddHypervisorOrEdit(event) {
+    event.preventDefault();
+
+    const data = getHypervisorFormData();
+    const errorDiv = document.getElementById('addHypervisorError');
+    errorDiv.style.display = 'none';
+
+    const url = editingHypervisorId ? `/api/v1/hypervisors/${editingHypervisorId}` : '/api/v1/hypervisors';
+    const method = editingHypervisorId ? 'PUT' : 'POST';
+
+    try {
+        const response = await fetch(url, {
+            method: method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+            location.reload();
+        } else {
+            const result = await response.json();
+            errorDiv.textContent = result.detail || 'Failed to save hypervisor';
+            errorDiv.style.display = 'block';
+        }
+    } catch (e) {
+        errorDiv.textContent = 'Error: ' + e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+// Override the original form submission
+document.getElementById('addHypervisorForm').onsubmit = submitAddHypervisorOrEdit;
+
+// Reset modal when showing add dialog
+const originalShowAddHypervisorModal = showAddHypervisorModal;
+showAddHypervisorModal = function() {
+    editingHypervisorId = null;
+    document.querySelector('#addHypervisorModal .modal-title').innerHTML = `
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg>
+        Add Hypervisor
+    `;
+    document.querySelector('#addHypervisorForm button[type="submit"]').textContent = 'Add Hypervisor';
+    originalShowAddHypervisorModal();
+};
 
 // ========== View Hypervisor ==========
 

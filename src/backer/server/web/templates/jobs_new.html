@@ -786,13 +786,30 @@ function renderFileList(entries, path) {
                 <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             </span>
             <span class="file-browser-item-name">${escapeHtml(entry.name)}</span>`;
-        item.onclick = () => {
-            document.querySelectorAll('.file-browser-item.selected').forEach(el => el.classList.remove('selected'));
-            item.classList.add('selected');
-            selectedBrowsePath = entry.path;
-            document.getElementById('selectPathBtn').disabled = false;
+
+        // Use a timer to distinguish single click from double click
+        let clickTimer = null;
+        item.onclick = (e) => {
+            if (clickTimer) {
+                clearTimeout(clickTimer);
+                clickTimer = null;
+                return; // This is a double-click, don't select
+            }
+            clickTimer = setTimeout(() => {
+                clickTimer = null;
+                document.querySelectorAll('.file-browser-item.selected').forEach(el => el.classList.remove('selected'));
+                item.classList.add('selected');
+                selectedBrowsePath = entry.path;
+                document.getElementById('selectPathBtn').disabled = false;
+            }, 200);
         };
-        item.ondblclick = () => browsePath(entry.path);
+        item.ondblclick = () => {
+            if (clickTimer) {
+                clearTimeout(clickTimer);
+                clickTimer = null;
+            }
+            browsePath(entry.path);
+        };
         listEl.appendChild(item);
     });
 }

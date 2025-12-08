@@ -1487,8 +1487,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Append job-specific subfolder to backup source
         # This matches where _build_backup_command_payload puts the backup
+        # Structure is: {repo_path}/Agents/{job_name}
         job_subfolder = _get_job_subfolder(job_name)
-        backup_source = f"{backup_source.rstrip('/')}/{job_subfolder}"
+        backup_source = f"{backup_source.rstrip('/')}/Agents/{job_subfolder}"
 
         backend = job.get("backend", "rclone")
         source_subfolder = data.get("source_subfolder", "")
@@ -2167,29 +2168,49 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     task.progress = 15
                     logger.info(f"[SCAN] Listing job subfolders at //{server}/{share}/{base_path}")
 
-                    # List directories at the repo root (these are job subfolders)
-                    ok, entries = smb_list_files(
-                        server, share, base_path,
-                        username, password, domain
-                    )
-
                     all_agents = []
                     all_jobs = []
                     all_snapshots = []
                     found_any_metadata = False
                     agent_ids_seen = set()
 
-                    if ok:
-                        # Filter to get just directory names (job subfolders)
-                        job_folders = [e for e in entries if not e.startswith('.') and not e.endswith('.json')]
+                    # List directories at the repo root (legacy: job subfolders at root)
+                    ok, entries = smb_list_files(
+                        server, share, base_path,
+                        username, password, domain
+                    )
 
-                        total_folders = len(job_folders)
-                        for idx, job_folder in enumerate(job_folders):
+                    # Also scan inside Agents/ folder (new structure)
+                    agents_path = f"{base_path}/Agents" if base_path else "Agents"
+                    ok_agents_folder, agent_entries = smb_list_files(
+                        server, share, agents_path,
+                        username, password, domain
+                    )
+
+                    # Build combined list of folders to scan with their base paths
+                    folders_to_scan = []
+                    if ok:
+                        # Filter to get just directory names (legacy job subfolders at root)
+                        legacy_folders = [e for e in entries if not e.startswith('.') and not e.endswith('.json') and e != 'Agents' and e != 'Hypervisors']
+                        for folder in legacy_folders:
+                            folder_path = f"{base_path}/{folder}" if base_path else folder
+                            folders_to_scan.append((folder, folder_path))
+
+                    if ok_agents_folder:
+                        # Job subfolders under Agents/
+                        agent_job_folders = [e for e in agent_entries if not e.startswith('.') and not e.endswith('.json')]
+                        for folder in agent_job_folders:
+                            folder_path = f"{agents_path}/{folder}"
+                            folders_to_scan.append((folder, folder_path))
+                        logger.info(f"[SCAN] Found {len(agent_job_folders)} job folders under Agents/")
+
+                    if folders_to_scan:
+                        total_folders = len(folders_to_scan)
+                        for idx, (job_folder, folder_path) in enumerate(folders_to_scan):
                             progress_pct = 20 + int((idx / max(total_folders, 1)) * 60)
                             task.progress = progress_pct
                             task.message = f"Scanning job folder: {job_folder}..."
 
-                            folder_path = f"{base_path}/{job_folder}" if base_path else job_folder
                             metadata_base = f"{folder_path}/.backer"
 
                             # Check if this folder has .backer metadata

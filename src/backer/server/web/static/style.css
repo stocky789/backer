@@ -816,6 +816,21 @@ body.dark-theme .data-grid tr:hover td {
     gap: 6px;
 }
 
+.status-separator {
+    color: var(--border);
+    margin: 0 4px;
+}
+
+.status-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.status-item .count {
+    font-weight: 600;
+}
+
 /* ============================================
    Cards
    ============================================ */
@@ -997,6 +1012,10 @@ textarea.form-control {
     display: flex;
     flex-direction: column;
     animation: modalSlideIn 0.2s ease-out;
+}
+
+.modal-content.modal-md {
+    max-width: 550px;
 }
 
 .modal-content.modal-lg {
