@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from backer.server import timezone as tz
 from backer.server.storage import Storage
 from backer.server.web.auth import (
     clear_session_cookie,
@@ -603,6 +604,9 @@ async def settings_save(
     """Save settings."""
     storage = get_storage(request)
     storage.set_setting("timezone", timezone)
+
+    # Clear timezone cache so new setting takes effect immediately
+    tz.clear_cache()
 
     return RedirectResponse("/settings?saved=1", status_code=303)
 

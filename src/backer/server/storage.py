@@ -215,6 +215,7 @@ class Storage:
                     finished_at TEXT,
                     duration_seconds REAL,
                     backup_size INTEGER DEFAULT 0,
+                    backup_filename TEXT,
                     exit_status TEXT,
                     errors TEXT DEFAULT '[]',
                     FOREIGN KEY (job_id) REFERENCES hypervisor_jobs(id),
@@ -283,6 +284,14 @@ class Storage:
                 conn.execute(
                     "ALTER TABLE hypervisor_runs ADD COLUMN guest_type "
                     "TEXT DEFAULT 'qemu'"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            # Migration: Add backup_filename column to hypervisor_runs if it doesn't exist
+            try:
+                conn.execute(
+                    "ALTER TABLE hypervisor_runs ADD COLUMN backup_filename TEXT"
                 )
             except sqlite3.OperationalError:
                 pass  # Column already exists
@@ -1590,6 +1599,7 @@ class Storage:
         finished_at: datetime | None = None,
         duration_seconds: float | None = None,
         backup_size: int = 0,
+        backup_filename: str | None = None,
         exit_status: str | None = None,
         errors: list[str] | None = None,
     ) -> None:
@@ -1609,7 +1619,8 @@ class Storage:
                     """
                     UPDATE hypervisor_runs SET
                         status = ?, upid = ?, finished_at = ?,
-                        duration_seconds = ?, backup_size = ?, exit_status = ?, errors = ?
+                        duration_seconds = ?, backup_size = ?, backup_filename = ?,
+                        exit_status = ?, errors = ?
                     WHERE run_id = ? AND guest_id = ?
                     """,
                     (
@@ -1618,6 +1629,7 @@ class Storage:
                         finished_at.isoformat() if finished_at else None,
                         duration_seconds,
                         backup_size,
+                        backup_filename,
                         exit_status,
                         json.dumps(errors or []),
                         run_id,
@@ -1631,8 +1643,8 @@ class Storage:
                     INSERT INTO hypervisor_runs (
                         run_id, job_id, job_name, hypervisor_id, guest_id,
                         guest_name, guest_type, status, upid, started_at, finished_at,
-                        duration_seconds, backup_size, exit_status, errors
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        duration_seconds, backup_size, backup_filename, exit_status, errors
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -1648,6 +1660,7 @@ class Storage:
                         finished_at.isoformat() if finished_at else None,
                         duration_seconds,
                         backup_size,
+                        backup_filename,
                         exit_status,
                         json.dumps(errors or []),
                     ),
@@ -1727,6 +1740,7 @@ class Storage:
             "finished_at": row["finished_at"],
             "duration_seconds": row["duration_seconds"],
             "backup_size": row["backup_size"] if "backup_size" in keys else 0,
+            "backup_filename": row["backup_filename"] if "backup_filename" in keys else None,
             "exit_status": row["exit_status"],
             "errors": json.loads(row["errors"]) if row["errors"] else [],
         }

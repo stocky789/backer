@@ -9,15 +9,21 @@ from pathlib import Path
 import uvicorn
 
 from backer.server.app import create_app
+from backer.server.timezone import TimezoneFormatter, get_now
 
 
 def setup_logging(data_dir: Path, log_level: str = "INFO") -> None:
-    """Configure logging to both console and file."""
+    """Configure logging to both console and file.
+
+    Note: Initially uses system time until timezone module is initialized.
+    Once the app is created and timezone.init_timezone() is called,
+    log timestamps will use the configured timezone.
+    """
     log_dir = data_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create log file with date
-    log_file = log_dir / f"backer-server-{datetime.now().strftime('%Y-%m-%d')}.log"
+    # Create log file with date (use get_now for configured timezone)
+    log_file = log_dir / f"backer-server-{get_now().strftime('%Y-%m-%d')}.log"
 
     # Configure root logger
     root_logger = logging.getLogger()
@@ -26,20 +32,20 @@ def setup_logging(data_dir: Path, log_level: str = "INFO") -> None:
     # Clear any existing handlers
     root_logger.handlers.clear()
 
-    # Console handler
+    # Console handler with timezone-aware formatter
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter(
+    console_format = TimezoneFormatter(
         "%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S"
     )
     console_handler.setFormatter(console_format)
     root_logger.addHandler(console_handler)
 
-    # File handler with more detail
+    # File handler with timezone-aware formatter
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
-    file_format = logging.Formatter(
+    file_format = TimezoneFormatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )

@@ -19,6 +19,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from backer import __version__
+from backer.server import timezone as tz
 from backer.server.models import (
     BackupResult,
     Client,
@@ -199,8 +200,9 @@ def trigger_job_internal(job_name: str) -> None:
         logger.error(f"Agent {client_id} not found for job {job_name}")
         return
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    started_at = datetime.now()
+    now = tz.get_now()
+    run_id = now.strftime("%Y%m%d_%H%M%S_%f")
+    started_at = now
 
     # Save the run record as "pending"
     _storage.save_job_run(
@@ -295,7 +297,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
 
     auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_id = tz.get_now().strftime("%Y%m%d_%H%M%S_%f")
     proxmox_storage_id = None  # Track for cleanup
 
     try:
@@ -411,6 +413,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                 )
 
                 backup_size = result.get("backup_size", 0)
+                backup_filename = result.get("backup_filename")
 
                 # Update run record
                 _storage.save_hypervisor_run(
@@ -425,10 +428,11 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     upid=result.get("upid"),
                     finished_at=(
                         datetime.fromisoformat(result["finished_at"])
-                        if result.get("finished_at") else datetime.now()
+                        if result.get("finished_at") else tz.get_now()
                     ),
                     duration_seconds=result.get("duration_seconds"),
                     backup_size=backup_size,
+                    backup_filename=backup_filename,
                     exit_status=result.get("exit_status"),
                     errors=result.get("errors"),
                 )
@@ -452,7 +456,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     guest_name=guest_name,
                     guest_type=guest_type,
                     status="failed",
-                    finished_at=datetime.now(),
+                    finished_at=tz.get_now(),
                     errors=[str(e)],
                 )
 
@@ -508,6 +512,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         data_dir = Path.home() / ".local" / "share" / "backer"
 
     _storage = Storage(data_dir / "backer.db")
+
+    # Initialize timezone module with storage reference
+    tz.init_timezone(_storage)
+    logger.info(f"Timezone configured: {tz.get_timezone()}")
 
     # Initialize scheduler
     _scheduler = BackupScheduler(
@@ -630,7 +638,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             hostname=request.hostname,
             ip_address=req.client.host if req.client else None,
             status=ClientStatus.ONLINE,
-            last_seen=datetime.now(),
+            last_seen=tz.get_now(),
             version=request.version,
             os_info=request.os_info,
             tags=request.tags,
@@ -1170,8 +1178,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
 
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        started_at = datetime.now()
+        now = tz.get_now()
+        run_id = now.strftime("%Y%m%d_%H%M%S_%f")
+        started_at = now
 
         # Save the run record as "pending"
         storage.save_job_run(
@@ -1366,7 +1375,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         path = data.get("path", "")
 
         # Generate a unique request ID
-        request_id = f"browse_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        request_id = f"browse_{tz.get_now().strftime('%Y%m%d_%H%M%S_%f')}"
 
         # Queue the browse command for the agent
         storage.queue_command(
@@ -1505,8 +1514,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if source_subfolder and backend != "restic":
             backup_source = f"{backup_source}/{source_subfolder}"
 
-        restore_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        started_at = datetime.now()
+        now = tz.get_now()
+        restore_id = now.strftime("%Y%m%d_%H%M%S_%f")
+        started_at = now
 
         # Save restore record
         storage.save_job_run(
@@ -4636,25 +4646,35 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get all runs for this job to identify which backup files belong to it
         runs = storage.get_hypervisor_runs(job_id=job_id, limit=10000)
 
-        # Build list of (guest_id, timestamp) tuples to match backup files
-        files_to_delete: list[tuple[int, datetime]] = []
-        for run in runs:
-            guest_id = run.get("guest_id")
-            started_at = run.get("started_at")
-            if guest_id and started_at:
-                try:
-                    dt = datetime.fromisoformat(started_at)
-                    files_to_delete.append((guest_id, dt))
-                except ValueError:
-                    pass
+        # Build list of filenames to delete - prefer stored filenames, fall back to timestamp matching
+        filenames_to_delete: list[str] = []
+        timestamp_fallback: list[tuple[int, datetime]] = []
 
-        if not files_to_delete:
+        for run in runs:
+            backup_filename = run.get("backup_filename")
+            if backup_filename:
+                # New approach: use the exact filename stored during backup
+                filenames_to_delete.append(backup_filename)
+            else:
+                # Legacy fallback for runs without stored filename
+                guest_id = run.get("guest_id")
+                started_at = run.get("started_at")
+                if guest_id and started_at:
+                    try:
+                        dt = datetime.fromisoformat(started_at)
+                        timestamp_fallback.append((guest_id, dt))
+                    except ValueError:
+                        pass
+
+        if not filenames_to_delete and not timestamp_fallback:
             logger.info(f"No backup runs found for job {job.get('name')} - nothing to clean up")
             return
 
         # Log what we're about to clean up
-        for guest_id, dt in files_to_delete:
-            logger.info(f"  - Will look for VMID {guest_id} backup from {dt.isoformat()}")
+        for filename in filenames_to_delete:
+            logger.info(f"  - Will delete backup file: {filename}")
+        for guest_id, dt in timestamp_fallback:
+            logger.info(f"  - Will look for VMID {guest_id} backup from {dt.isoformat()} (legacy timestamp match)")
 
         if repo_type == "nfs":
             # NFS storage: Proxmox mounts the export root and vzdump creates dump/ there
@@ -4666,7 +4686,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             dump_path = "dump"  # Proxmox creates dump/ at the NFS export root
             logger.info(f"NFS cleanup: {server}:{export}/{dump_path}")
-            _cleanup_nfs_job_files(server, export, dump_path, files_to_delete)
+            _cleanup_nfs_job_files(
+                server, export, dump_path, filenames_to_delete, timestamp_fallback
+            )
 
         elif repo_type == "smb":
             # SMB storage: Proxmox mounts at {share}/{subdir}/Hypervisors/{hv_name}
@@ -4690,7 +4712,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             logger.info(f"SMB cleanup: //{server}/{share}/{full_dump_path}")
             _cleanup_smb_job_files(
-                server, share, username, repo_password, domain, full_dump_path, files_to_delete
+                server, share, username, repo_password, domain, full_dump_path,
+                filenames_to_delete, timestamp_fallback
             )
         else:
             logger.warning(f"Repository cleanup not supported for type: {repo_type}")
@@ -4777,7 +4800,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Add the deletion record
             deleted_jobs.setdefault("jobs", []).append({
                 "job_id": job_id,
-                "deleted_at": datetime.now().isoformat(),
+                "deleted_at": tz.get_now().isoformat(),
             })
 
             # Write back
@@ -4834,7 +4857,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Add the deletion record
             deleted_jobs.setdefault("jobs", []).append({
                 "job_id": job_id,
-                "deleted_at": datetime.now().isoformat(),
+                "deleted_at": tz.get_now().isoformat(),
             })
 
             # Write to temp file and upload
@@ -5058,13 +5081,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server: str,
         export: str,
         dump_path: str,
-        files_to_delete: list[tuple[int, "datetime"]],
+        filenames_to_delete: list[str],
+        timestamp_fallback: list[tuple[int, "datetime"]],
     ) -> None:
         """Clean up specific backup files from an NFS share.
 
-        Only deletes files that match the (guest_id, timestamp) pairs provided.
-        This ensures we only delete files belonging to the job being deleted,
-        not files from other jobs that share the same dump directory.
+        Deletes files by exact filename when available (new method),
+        falling back to timestamp matching for legacy runs.
         """
         import os
         import re
@@ -5072,9 +5095,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import tempfile
         from datetime import datetime
 
-        logger.info(f"[NFS CLEANUP] Starting cleanup for {len(files_to_delete)} backup(s)")
+        total_files = len(filenames_to_delete) + len(timestamp_fallback)
+        logger.info(f"[NFS CLEANUP] Starting cleanup for {total_files} backup(s)")
         logger.info(f"[NFS CLEANUP] Target: {server}:{export}/{dump_path}")
-        logger.info(f"[NFS CLEANUP] Files to delete list: {files_to_delete}")
+        logger.info(f"[NFS CLEANUP] Direct filenames: {len(filenames_to_delete)}, Timestamp fallback: {len(timestamp_fallback)}")
 
         mount_point = None
         try:
@@ -5097,7 +5121,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             if not full_dump_path.exists():
                 logger.warning(f"[NFS CLEANUP] Dump path does not exist: {full_dump_path}")
-                # List what IS in the mount point to help debug
                 try:
                     contents = list(Path(mount_point).iterdir())
                     logger.info(f"[NFS CLEANUP] Mount point contents: {[e.name for e in contents[:20]]}")
@@ -5105,104 +5128,81 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     logger.warning(f"[NFS CLEANUP] Could not list mount point: {e}")
                 return
 
-            # List all files in dump directory
-            try:
-                all_files = [e.name for e in full_dump_path.iterdir() if e.is_file()]
-                logger.info(f"[NFS CLEANUP] Found {len(all_files)} files in dump directory")
-                for f in all_files[:10]:  # Log first 10
-                    logger.info(f"[NFS CLEANUP]   - {f}")
-                if len(all_files) > 10:
-                    logger.info(f"[NFS CLEANUP]   ... and {len(all_files) - 10} more")
-            except Exception as e:
-                logger.warning(f"[NFS CLEANUP] Could not list dump directory: {e}")
-
             deleted_count = 0
-            for guest_id, timestamp in files_to_delete:
-                logger.info(
-                    f"[NFS CLEANUP] Looking for VMID {guest_id} from {timestamp} "
-                    f"(type={type(timestamp).__name__})"
-                )
 
-                # Find vzdump files matching this guest_id and timestamp
-                for entry in full_dump_path.iterdir():
-                    if not entry.is_file():
-                        continue
+            # Helper function to delete a backup file and its associated files
+            def delete_backup_file(file_path: Path) -> bool:
+                nonlocal deleted_count
+                try:
+                    if file_path.exists():
+                        file_path.unlink()
+                        deleted_count += 1
+                        logger.info(f"[NFS CLEANUP] DELETED: {file_path.name}")
 
-                    # Match vzdump filename pattern
-                    # QEMU VMs use .vma extension, LXC containers use .tar extension
-                    match = re.match(
-                        rf"vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
-                        rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?$",
-                        entry.name
-                    )
-                    if match:
-                        file_date = match.group(2)  # YYYY_MM_DD
-                        file_time = match.group(3)  # HH_MM_SS
-                        try:
-                            file_dt = datetime.strptime(
-                                f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
-                            )
-                            # Compare using time tolerance to handle timezone differences
-                            # Vzdump uses local time, our timestamp may be UTC
-                            # Use 10 minute tolerance to account for backup start delays
-                            timestamp_naive = timestamp.replace(tzinfo=None)
-                            time_diff = abs((file_dt - timestamp_naive).total_seconds())
+                        # Also delete .notes file if exists
+                        notes_file = Path(str(file_path) + ".notes")
+                        if notes_file.exists():
+                            notes_file.unlink()
+                            logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
 
-                            logger.info(
-                                f"[NFS CLEANUP] Found matching VMID file: {entry.name} "
-                                f"(file time: {file_dt}, run time: {timestamp_naive}, diff: {time_diff}s)"
-                            )
+                        # Delete .log file (same base name)
+                        base_name = (
+                            file_path.name.replace(".vma.zst", "")
+                            .replace(".vma.gz", "")
+                            .replace(".vma.lzo", "")
+                            .replace(".vma", "")
+                            .replace(".tar.zst", "")
+                            .replace(".tar.gz", "")
+                            .replace(".tar.lzo", "")
+                            .replace(".tar", "")
+                        )
+                        log_file = file_path.parent / f"{base_name}.log"
+                        if log_file.exists():
+                            log_file.unlink()
+                            logger.info(f"[NFS CLEANUP] DELETED log: {log_file.name}")
+                        return True
+                    else:
+                        logger.warning(f"[NFS CLEANUP] File not found: {file_path.name}")
+                        return False
+                except Exception as e:
+                    logger.error(f"[NFS CLEANUP] Failed to delete {file_path.name}: {type(e).__name__}: {e}")
+                    return False
 
-                            # Match if within 10 minutes (600 seconds) of run start time
-                            # This is more precise than date-only matching
-                            if time_diff < 600:
-                                logger.info(
-                                    f"[NFS CLEANUP] Time match (diff: {time_diff:.0f}s)! Deleting {entry.name}..."
-                                )
-                                try:
-                                    entry.unlink()
-                                    deleted_count += 1
-                                    logger.info(f"[NFS CLEANUP] DELETED: {entry.name}")
-                                    # Also delete .notes and .log files if they exist
-                                    notes_file = Path(str(entry) + ".notes")
-                                    if notes_file.exists():
-                                        notes_file.unlink()
-                                        logger.info(f"[NFS CLEANUP] DELETED notes: {notes_file.name}")
-                                    # Log file has same base name but .log instead of .vma.zst/.tar.zst
-                                    # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
-                                    # vzdump-lxc-101-2025_12_07-16_19_19.tar.zst -> .log
-                                    base_name = (
-                                        entry.name.replace(".vma.zst", "")
-                                        .replace(".vma.gz", "")
-                                        .replace(".vma.lzo", "")
-                                        .replace(".vma", "")
-                                        .replace(".tar.zst", "")
-                                        .replace(".tar.gz", "")
-                                        .replace(".tar.lzo", "")
-                                        .replace(".tar", "")
-                                    )
-                                    log_file = entry.parent / f"{base_name}.log"
-                                    if log_file.exists():
-                                        log_file.unlink()
-                                        logger.info(f"[NFS CLEANUP] DELETED log: {log_file.name}")
-                                except Exception as e:
-                                    logger.error(
-                                        f"[NFS CLEANUP] Failed to delete {entry.name}: "
-                                        f"{type(e).__name__}: {e}"
-                                    )
-                            else:
-                                logger.info(
-                                    f"[NFS CLEANUP] Skipping {entry.name} - time mismatch (diff: {time_diff:.0f}s)"
-                                )
-                        except ValueError as e:
-                            logger.warning(f"[NFS CLEANUP] Could not parse timestamp from {entry.name}: {e}")
+            # Method 1: Delete by exact filename (preferred)
+            for filename in filenames_to_delete:
+                logger.info(f"[NFS CLEANUP] Deleting by filename: {filename}")
+                file_path = full_dump_path / filename
+                delete_backup_file(file_path)
+
+            # Method 2: Fallback to timestamp matching for legacy runs
+            if timestamp_fallback:
+                logger.info(f"[NFS CLEANUP] Processing {len(timestamp_fallback)} legacy timestamp matches")
+                for guest_id, timestamp in timestamp_fallback:
+                    logger.info(f"[NFS CLEANUP] Looking for VMID {guest_id} from {timestamp}")
+
+                    for entry in full_dump_path.iterdir():
+                        if not entry.is_file():
                             continue
-                        except Exception as e:
-                            logger.error(
-                                f"[NFS CLEANUP] Unexpected error processing {entry.name}: "
-                                f"{type(e).__name__}: {e}"
-                            )
-                            continue
+
+                        match = re.match(
+                            rf"vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
+                            rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?$",
+                            entry.name
+                        )
+                        if match:
+                            file_date = match.group(2)
+                            file_time = match.group(3)
+                            try:
+                                file_dt = datetime.strptime(f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S")
+                                timestamp_naive = timestamp.replace(tzinfo=None)
+                                time_diff = abs((file_dt - timestamp_naive).total_seconds())
+
+                                # Match if within 10 minutes
+                                if time_diff < 600:
+                                    logger.info(f"[NFS CLEANUP] Timestamp match (diff: {time_diff:.0f}s): {entry.name}")
+                                    delete_backup_file(entry)
+                            except ValueError:
+                                continue
 
             if deleted_count > 0:
                 logger.info(f"[NFS CLEANUP] SUCCESS: Deleted {deleted_count} backup files")
@@ -5214,23 +5214,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except Exception as e:
             logger.error(f"[NFS CLEANUP] Error: {e}", exc_info=True)
         finally:
-            # Unmount
             if mount_point:
                 logger.info(f"[NFS CLEANUP] Unmounting {mount_point}")
                 try:
-                    subprocess.run(
-                        ["sudo", "-n", "umount", mount_point],
-                        capture_output=True, timeout=30
-                    )
+                    subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
                     os.rmdir(mount_point)
                     logger.info("[NFS CLEANUP] Unmount successful")
                 except Exception:
-                    # Try lazy unmount
                     try:
-                        subprocess.run(
-                            ["sudo", "-n", "umount", "-l", mount_point],
-                            capture_output=True, timeout=10
-                        )
+                        subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
                         os.rmdir(mount_point)
                         logger.info("[NFS CLEANUP] Lazy unmount successful")
                     except Exception as e:
@@ -5243,13 +5235,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         password: str | None,
         domain: str | None,
         dump_path: str,
-        files_to_delete: list[tuple[int, "datetime"]],
+        filenames_to_delete: list[str],
+        timestamp_fallback: list[tuple[int, "datetime"]],
     ) -> None:
         """Clean up specific backup files from an SMB share.
 
-        Only deletes files that match the (guest_id, timestamp) pairs provided.
-        This ensures we only delete files belonging to the job being deleted,
-        not files from other jobs that share the same dump directory.
+        Deletes files by exact filename when available (new method),
+        falling back to timestamp matching for legacy runs.
         """
         import re
         import subprocess
@@ -5278,72 +5270,82 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except Exception as e:
                 return False, str(e)
 
-        logger.info(f"Cleaning up backup files in {dump_path}")
+        def delete_backup_file(filename: str) -> bool:
+            """Delete a backup file and its associated .notes and .log files."""
+            nonlocal deleted_count
+            del_ok, del_out = run_smb_cmd(f'del "{dump_path}/{filename}"')
+            if del_ok:
+                deleted_count += 1
+                logger.info(f"[SMB CLEANUP] DELETED: {filename}")
 
-        # List files in dump directory
-        ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
-        if not ok:
-            logger.debug(f"Could not list SMB dump path: {output}")
-            return
+                # Also delete .notes file if exists
+                notes_filename = f"{filename}.notes"
+                run_smb_cmd(f'del "{dump_path}/{notes_filename}"')
+
+                # Also delete .log file if exists
+                base_name = (
+                    filename.replace(".vma.zst", "")
+                    .replace(".vma.gz", "")
+                    .replace(".vma.lzo", "")
+                    .replace(".vma", "")
+                    .replace(".tar.zst", "")
+                    .replace(".tar.gz", "")
+                    .replace(".tar.lzo", "")
+                    .replace(".tar", "")
+                )
+                log_filename = f"{base_name}.log"
+                run_smb_cmd(f'del "{dump_path}/{log_filename}"')
+                return True
+            else:
+                logger.warning(f"[SMB CLEANUP] Failed to delete {filename}: {del_out}")
+                return False
+
+        total_files = len(filenames_to_delete) + len(timestamp_fallback)
+        logger.info(f"[SMB CLEANUP] Starting cleanup for {total_files} backup(s) in {dump_path}")
+        logger.info(f"[SMB CLEANUP] Direct filenames: {len(filenames_to_delete)}, Timestamp fallback: {len(timestamp_fallback)}")
 
         deleted_count = 0
-        for guest_id, timestamp in files_to_delete:
-            for line in output.split("\n"):
-                # Match vzdump filename in smbclient output
-                # QEMu VMs use .vma extension, LXC containers use .tar extension
-                match = re.search(
-                    rf"(vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
-                    rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?)",
-                    line
-                )
-                if match:
-                    filename = match.group(1)
-                    file_date = match.group(3)  # YYYY_MM_DD
-                    file_time = match.group(4)  # HH_MM_SS
-                    try:
-                        file_dt = datetime.strptime(
-                            f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S"
+
+        # Method 1: Delete by exact filename (preferred)
+        for filename in filenames_to_delete:
+            logger.info(f"[SMB CLEANUP] Deleting by filename: {filename}")
+            delete_backup_file(filename)
+
+        # Method 2: Fallback to timestamp matching for legacy runs
+        if timestamp_fallback:
+            logger.info(f"[SMB CLEANUP] Processing {len(timestamp_fallback)} legacy timestamp matches")
+
+            # List files in dump directory for timestamp matching
+            ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
+            if not ok:
+                logger.debug(f"[SMB CLEANUP] Could not list SMB dump path: {output}")
+            else:
+                for guest_id, timestamp in timestamp_fallback:
+                    for line in output.split("\n"):
+                        match = re.search(
+                            rf"(vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
+                            rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?)",
+                            line
                         )
-                        # vzdump uses UTC time in filenames, but our timestamp may be local
-                        # Convert our timestamp to UTC for comparison
-                        timestamp_utc = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-                        # Check if within 5 minutes of run start time
-                        time_diff = abs((file_dt - timestamp_utc).total_seconds())
-                        if time_diff < 300:  # 5 minutes tolerance
-                            del_ok, del_out = run_smb_cmd(
-                                f'del "{dump_path}/{filename}"'
-                            )
-                            if del_ok:
-                                deleted_count += 1
-                                logger.info(f"Deleted backup file: {filename}")
-
-                                # Also delete .notes file if exists
-                                notes_filename = f"{filename}.notes"
-                                run_smb_cmd(f'del "{dump_path}/{notes_filename}"')
-
-                                # Also delete .log file if exists
-                                # vzdump-qemu-100-2025_12_07-16_19_19.vma.zst -> .log
-                                base_name = (
-                                    filename.replace(".vma.zst", "")
-                                    .replace(".vma.gz", "")
-                                    .replace(".vma.lzo", "")
-                                    .replace(".vma", "")
-                                    .replace(".tar.zst", "")
-                                    .replace(".tar.gz", "")
-                                    .replace(".tar.lzo", "")
-                                    .replace(".tar", "")
-                                )
-                                log_filename = f"{base_name}.log"
-                                run_smb_cmd(f'del "{dump_path}/{log_filename}"')
-                            else:
-                                logger.warning(f"Failed to delete {filename}: {del_out}")
-                    except ValueError:
-                        continue
+                        if match:
+                            filename = match.group(1)
+                            file_date = match.group(3)
+                            file_time = match.group(4)
+                            try:
+                                file_dt = datetime.strptime(f"{file_date}_{file_time}", "%Y_%m_%d_%H_%M_%S")
+                                timestamp_naive = timestamp.replace(tzinfo=None)
+                                time_diff = abs((file_dt - timestamp_naive).total_seconds())
+                                # Match if within 10 minutes
+                                if time_diff < 600:
+                                    logger.info(f"[SMB CLEANUP] Timestamp match (diff: {time_diff:.0f}s): {filename}")
+                                    delete_backup_file(filename)
+                            except ValueError:
+                                continue
 
         if deleted_count > 0:
-            logger.info(f"SMB cleanup deleted {deleted_count} backup files")
+            logger.info(f"[SMB CLEANUP] SUCCESS: Deleted {deleted_count} backup files")
         else:
-            logger.info("No matching backup files found to delete")
+            logger.info("[SMB CLEANUP] No matching backup files found to delete")
 
     def _cleanup_hypervisor_folder(
         repository: dict[str, Any],
@@ -5818,7 +5820,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     run_id=run_id,
                     status="success" if result.get("success") else "failed",
                     backup_file=result.get("archive_name", ""),
-                    started_at=result.get("started_at", datetime.now().isoformat()),
+                    started_at=result.get("started_at", tz.get_now().isoformat()),
                     finished_at=result.get("finished_at"),
                     size_bytes=result.get("archive_size"),
                     duration_seconds=result.get("duration_seconds"),
@@ -5938,7 +5940,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Create repository dict with password for ensure_backer_storage
         repo_with_password = {**repository, "password": repo_password}
 
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        run_id = tz.get_now().strftime("%Y%m%d_%H%M%S_%f")
 
         # Get SSH credentials - used for cleanup operations
         ssh_user = hypervisor.get("ssh_user", "root")
@@ -6072,6 +6074,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # Add backup type to result
                     result["backup_type"] = "full"
                     backup_size = result.get("backup_size", 0)
+                    backup_filename = result.get("backup_filename")
 
                     # Update run record
                     storage.save_hypervisor_run(
@@ -6087,6 +6090,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         finished_at=datetime.fromisoformat(result["finished_at"]),
                         duration_seconds=result.get("duration_seconds"),
                         backup_size=backup_size,
+                        backup_filename=backup_filename,
                         exit_status=result.get("exit_status"),
                         errors=result.get("errors"),
                     )
@@ -6120,7 +6124,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         guest_name=guest_name,
                         guest_type=guest_type,
                         status="failed",
-                        finished_at=datetime.now(),
+                        finished_at=tz.get_now(),
                         errors=[str(e)],
                     )
                     results.append({"success": False, "vmid": vmid, "error": str(e)})
