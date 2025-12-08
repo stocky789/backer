@@ -104,6 +104,7 @@
                             <div class="btn-group">
                                 <button class="btn btn-secondary btn-sm" onclick="testRepo('{{ repo.id }}')">Test</button>
                                 <button class="btn btn-secondary btn-sm" onclick="scanRepo('{{ repo.id }}', '{{ repo.name }}')">Scan</button>
+                                <button class="btn btn-warning btn-sm" onclick="wipeRepo('{{ repo.id }}', '{{ repo.name }}')" title="Delete ALL data in repository">Wipe</button>
                                 <button class="btn btn-danger btn-sm" onclick="deleteRepo('{{ repo.id }}', '{{ repo.name }}')">Delete</button>
                             </div>
                         </td>
@@ -893,5 +894,70 @@ async function importMetadata() {
 document.getElementById('scanModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideScanModal();
 });
+
+// ============ Repository Wipe ============
+
+function wipeRepo(repoId, repoName) {
+    showConfirmModal({
+        title: 'WIPE Repository',
+        message: `This will PERMANENTLY DELETE ALL DATA in repository '${repoName}' including all backups, metadata, and files. This CANNOT be undone!`,
+        confirmText: 'Wipe Everything',
+        requireInput: 'deletenow',
+        inputLabel: 'Type "deletenow" to confirm:',
+        onConfirm: async () => {
+            Toast.info('Wiping repository...');
+            try {
+                const response = await fetch(`/api/v1/repositories/${repoId}/wipe`, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.task_id) {
+                    // Background task - poll for completion
+                    const taskId = data.task_id;
+                    let attempts = 0;
+
+                    const checkTask = async () => {
+                        attempts++;
+                        try {
+                            const taskResponse = await fetch(`/api/v1/tasks/${taskId}`);
+                            const task = await taskResponse.json();
+
+                            if (task.message) {
+                                Toast.info(task.message);
+                            }
+
+                            if (task.status === 'completed') {
+                                const result = task.result || {};
+                                if (result.success) {
+                                    Toast.success(`Repository wiped! Deleted ${result.deleted_items || 0} items.`);
+                                    setTimeout(() => location.reload(), 1500);
+                                } else {
+                                    Toast.error('Wipe failed: ' + (result.error || 'Unknown error'));
+                                }
+                            } else if (task.status === 'failed') {
+                                Toast.error('Wipe failed: ' + (task.error || 'Unknown error'));
+                            } else if (attempts < 300) {
+                                // Allow up to 5 minutes for large repos
+                                setTimeout(checkTask, 1000);
+                            } else {
+                                Toast.error('Wipe operation timed out');
+                            }
+                        } catch (pollError) {
+                            if (attempts < 300) setTimeout(checkTask, 1000);
+                        }
+                    };
+
+                    setTimeout(checkTask, 500);
+                } else if (data.success) {
+                    Toast.success(`Repository wiped! Deleted ${data.deleted_items || 0} items.`);
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    Toast.error('Wipe failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) {
+                Toast.error('Wipe failed: ' + e.message);
+            }
+        }
+    });
+}
 </script>
 {% endblock %}

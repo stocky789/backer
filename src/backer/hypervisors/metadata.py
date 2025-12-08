@@ -330,7 +330,7 @@ class HypervisorMetadata:
         compression: str = "zstd",
         schedule_cron: str | None = None,
         enabled: bool = True,
-        delete_before_backup: bool = False,
+        copies_to_keep: int = 0,
         **extra: Any,
     ) -> bool:
         """Save hypervisor job configuration.
@@ -345,7 +345,7 @@ class HypervisorMetadata:
             compression: Compression type (zstd, lzo, gzip, none)
             schedule_cron: Cron schedule expression
             enabled: Whether job is enabled
-            delete_before_backup: Delete old backups before creating new
+            copies_to_keep: Number of backup copies to keep per VM (0 = unlimited)
             **extra: Additional metadata
 
         Returns:
@@ -370,7 +370,7 @@ class HypervisorMetadata:
             "compression": compression,
             "schedule_cron": schedule_cron,
             "enabled": enabled,
-            "delete_before_backup": delete_before_backup,
+            "copies_to_keep": copies_to_keep,
             "updated_at": datetime.now().isoformat(),
             **extra,
         }

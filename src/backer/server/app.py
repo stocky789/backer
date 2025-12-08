@@ -2885,7 +2885,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 compression=job_data.get("compression", "zstd"),
                                 schedule_cron=job_data.get("schedule_cron"),
                                 enabled=job_data.get("enabled", True),
-                                delete_before_backup=job_data.get("delete_before_backup", False),
+                                copies_to_keep=job_data.get("copies_to_keep", 0),
                             )
                             imported["jobs"] += 1
                             logger.info(f"Imported hypervisor job '{job_name}' from repository")
@@ -2999,7 +2999,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     compression=job_data.get("compression", "zstd"),
                                     schedule_cron=job_data.get("schedule_cron"),
                                     enabled=job_data.get("enabled", True),
-                                    delete_before_backup=job_data.get("delete_before_backup", False),
+                                    copies_to_keep=job_data.get("copies_to_keep", 0),
                                 )
                                 imported["jobs"] += 1
                                 logger.info(f"Imported hypervisor job '{job_name}' from repository")
@@ -3042,6 +3042,168 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "error": str(e),
                 "repository_id": repo_id,
             }
+
+    @app.post("/api/v1/repositories/{repo_id}/wipe")
+    def wipe_repository(
+        repo_id: str,
+        background_tasks: BackgroundTasks,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Wipe all contents of a repository.
+
+        This is a DESTRUCTIVE operation that recursively deletes ALL files
+        and directories within the repository path. Use with extreme caution.
+        """
+        import subprocess
+
+        from backer.server.repositories import smb_auth_file, smb_list_files
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        repo_type = repo.get("repo_type", "smb")
+        subpath = repo.get("path", "")
+        server = repo.get("server", "")
+        share = repo.get("share", "")
+        username = repo.get("username")
+        password = storage.get_repository_password(repo_id)
+        domain = repo.get("domain")
+
+        # Create a background task for the wipe operation
+        task = BackgroundTask(
+            id=str(uuid.uuid4()),
+            task_type="wipe_repository",
+            status="pending",
+            message="Starting repository wipe...",
+            created_at=datetime.now().isoformat(),
+        )
+        background_tasks_store[task.id] = task
+
+        def wipe_smb_recursive() -> dict[str, Any]:
+            """Recursively wipe all contents from an SMB share path."""
+            deleted_items = 0
+            errors: list[str] = []
+
+            def run_smb_command(commands: str, timeout: int = 30) -> tuple[int, str, str]:
+                """Run smbclient with given commands."""
+                with smb_auth_file(username, password, domain) as auth_path:
+                    cmd = ["smbclient", f"//{server}/{share}", "-t", "10"]
+
+                    if auth_path:
+                        cmd.extend(["-A", auth_path])
+                    else:
+                        cmd.append("-N")
+
+                    cmd.extend(["-c", commands])
+
+                    try:
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                        return result.returncode, result.stdout, result.stderr
+                    except subprocess.TimeoutExpired:
+                        return -1, "", "Command timed out"
+                    except Exception as e:
+                        return -1, "", str(e)
+
+            def delete_path_recursive(path: str, depth: int = 0) -> int:
+                """Recursively delete a path. Returns count of deleted items."""
+                nonlocal errors
+                if depth > 50:  # Prevent infinite recursion
+                    errors.append(f"Max depth exceeded at {path}")
+                    return 0
+
+                count = 0
+                task.message = f"Scanning {path}..."
+
+                # List contents
+                success, entries = smb_list_files(server, share, path, username, password, domain)
+                if not success:
+                    # Path might not exist or be inaccessible
+                    return 0
+
+                # Process each entry
+                for entry in entries:
+                    if entry in [".", ".."]:
+                        continue
+
+                    entry_path = f"{path}/{entry}" if path else entry
+
+                    # Check if it's a directory by trying to list it
+                    is_dir_success, dir_entries = smb_list_files(server, share, entry_path, username, password, domain)
+
+                    if is_dir_success:
+                        # It's a directory, recurse first
+                        count += delete_path_recursive(entry_path, depth + 1)
+
+                        # Then delete the empty directory
+                        task.message = f"Removing directory {entry_path}..."
+                        rc, _, err = run_smb_command(f'rmdir "{entry_path}"')
+                        if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
+                            count += 1
+                        elif "NT_STATUS_DIRECTORY_NOT_EMPTY" not in err:
+                            errors.append(f"rmdir {entry_path}: {err.strip()[:100]}")
+                    else:
+                        # It's a file, delete it
+                        task.message = f"Deleting {entry_path}..."
+                        rc, _, err = run_smb_command(f'del "{entry_path}"')
+                        if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
+                            count += 1
+                        else:
+                            errors.append(f"del {entry_path}: {err.strip()[:100]}")
+
+                return count
+
+            try:
+                # Start from the repository's subpath
+                base_path = subpath.strip("/") if subpath else ""
+                deleted_items = delete_path_recursive(base_path)
+
+                if errors:
+                    logger.warning(f"Wipe completed with {len(errors)} errors: {errors[:5]}")
+
+                return {
+                    "success": True,
+                    "deleted_items": deleted_items,
+                    "errors": errors[:10] if errors else [],
+                    "repository_id": repo_id,
+                }
+
+            except Exception as e:
+                logger.exception(f"Error during wipe: {e}")
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "deleted_items": deleted_items,
+                    "repository_id": repo_id,
+                }
+
+        def run_wipe():
+            try:
+                task.status = "running"
+                task.message = "Wiping repository contents..."
+
+                if repo_type == "smb":
+                    result = wipe_smb_recursive()
+                else:
+                    result = {
+                        "success": False,
+                        "error": f"Wipe not supported for repository type: {repo_type}",
+                        "repository_id": repo_id,
+                    }
+
+                task.result = result
+                task.status = "completed"
+                task.message = f"Wipe complete. Deleted {result.get('deleted_items', 0)} items."
+
+            except Exception as e:
+                task.status = "failed"
+                task.error = str(e)
+                task.message = f"Wipe failed: {e}"
+                logger.exception(f"Wipe task failed: {e}")
+
+        background_tasks.add_task(run_wipe)
+
+        return {"task_id": task.id, "status": "wiping", "message": "Repository wipe started"}
 
     # ============ Hypervisor Management ============
 
@@ -3560,7 +3722,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         enabled = body.get("enabled", True)
 
         # Storage options
-        delete_before_backup = body.get("delete_before_backup", False)
+        copies_to_keep = body.get("copies_to_keep", 0)
 
         # Validate
         validate_name(name, "name")
@@ -3629,7 +3791,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             schedule_cron=schedule_cron,
             retention=retention,
             enabled=enabled,
-            delete_before_backup=delete_before_backup,
+            copies_to_keep=copies_to_keep,
         )
 
         return {"id": job_id, "name": name, "status": "created"}
@@ -3692,8 +3854,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if "enabled" in body:
             update_kwargs["enabled"] = body["enabled"]
         # Storage options
-        if "delete_before_backup" in body:
-            update_kwargs["delete_before_backup"] = body["delete_before_backup"]
+        if "copies_to_keep" in body:
+            update_kwargs["copies_to_keep"] = body["copies_to_keep"]
 
         storage.update_hypervisor_job(job_id, **update_kwargs)
 
@@ -3761,40 +3923,53 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             result["cleanup_warnings"] = cleanup_errors
         return result
 
-    def _delete_vm_backups_from_repository(
+    def _enforce_copies_limit(
         repository: dict[str, Any],
         hypervisor_name: str,
         vmid: int,
+        copies_to_keep: int,
     ) -> None:
-        """Delete all backup files for a specific VM from the repository.
+        """Enforce the copies_to_keep limit by deleting oldest backups.
 
-        This is used when delete_before_backup is enabled - deletes all existing
-        backups for the VM before creating a new one, ensuring only 1 copy exists.
+        After a successful backup, this function checks how many backups exist
+        for the VM and deletes the oldest ones to stay within the limit.
+
+        Args:
+            repository: Repository configuration dict
+            hypervisor_name: Name of the hypervisor
+            vmid: VM ID
+            copies_to_keep: Number of backups to keep (0 = unlimited, delete nothing)
 
         Files are named: vzdump-{type}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
         Also deletes associated .notes and .log files.
 
         Location: {repo_path}/Hypervisors/{hypervisor_name}/dump/
         """
+        if copies_to_keep <= 0:
+            # 0 means unlimited - don't delete anything
+            return
+
         repo_type = repository.get("repo_type", "").lower()
         if repo_type not in ("smb", "nfs"):
-            logger.debug(f"delete_before_backup not supported for repo type: {repo_type}")
+            logger.debug(f"copies_to_keep enforcement not supported for repo type: {repo_type}")
             return
 
         # Sanitize hypervisor name for folder
         safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
 
         if repo_type == "smb":
-            _delete_vm_backups_smb(repository, safe_hv_name, vmid)
+            _enforce_copies_limit_smb(repository, safe_hv_name, vmid, copies_to_keep)
         elif repo_type == "nfs":
-            _delete_vm_backups_nfs(repository, safe_hv_name, vmid)
+            _enforce_copies_limit_nfs(repository, safe_hv_name, vmid, copies_to_keep)
 
-    def _delete_vm_backups_smb(
+    def _enforce_copies_limit_smb(
         repository: dict[str, Any],
         hypervisor_name: str,
         vmid: int,
+        copies_to_keep: int,
     ) -> None:
-        """Delete all backups for a VM from SMB share using smbclient."""
+        """Enforce backup copies limit for a VM on SMB share by deleting oldest backups."""
+        import re
         import subprocess
 
         server = repository.get("server", "")
@@ -3829,11 +4004,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 logger.debug(f"Could not list files in {base_path}: {result.stderr}")
                 return
 
-            # Parse file listing and find matches for this VMID
+            # Parse file listing and find backup files for this VMID
+            # Pattern: vzdump-{qemu|lxc}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
             lines = result.stdout.strip().split("\n")
-            files_to_delete = []
+            backup_files: list[tuple[str, str]] = []  # (timestamp, filename)
+            timestamp_pattern = re.compile(r"vzdump-(?:qemu|lxc)-\d+-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})\.vma")
+
             for line in lines:
-                # smbclient ls format: "  filename                    size  date"
                 parts = line.strip().split()
                 if not parts:
                     continue
@@ -3842,55 +4019,70 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if (
                     filename.startswith(f"vzdump-qemu-{vmid}-")
                     or filename.startswith(f"vzdump-lxc-{vmid}-")
-                ):
-                    files_to_delete.append(filename)
-                    # Also look for associated .log file
-                    base_name = (
-                        filename.replace(".vma.zst", "")
-                        .replace(".vma.gz", "")
-                        .replace(".vma.lzo", "")
-                        .replace(".vma", "")
-                    )
-                    log_filename = f"{base_name}.log"
-                    if log_filename not in files_to_delete:
-                        files_to_delete.append(log_filename)
-                    # And .notes file
-                    notes_filename = f"{filename}.notes"
-                    if notes_filename not in files_to_delete:
-                        files_to_delete.append(notes_filename)
+                ) and ".vma" in filename:
+                    # Extract timestamp for sorting
+                    match = timestamp_pattern.search(filename)
+                    if match:
+                        timestamp = match.group(1)
+                        backup_files.append((timestamp, filename))
 
-            if not files_to_delete:
-                logger.debug(f"No existing backups found for VM {vmid}")
+            # Sort by timestamp (oldest first)
+            backup_files.sort(key=lambda x: x[0])
+
+            current_count = len(backup_files)
+            logger.info(f"VM {vmid}: Found {current_count} backups, limit is {copies_to_keep}")
+
+            if current_count <= copies_to_keep:
+                logger.debug(f"VM {vmid}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
                 return
 
-            # Delete each file
+            # Delete oldest backups to stay within limit
+            backups_to_delete = current_count - copies_to_keep
             deleted_count = 0
-            for filename in files_to_delete:
-                del_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; del \"{filename}\""]
-                result = subprocess.run(del_cmd, capture_output=True, timeout=30)
-                if result.returncode == 0:
-                    logger.info(f"Deleted pre-existing backup file: {filename}")
-                    deleted_count += 1
-                else:
-                    # Ignore errors for .log/.notes files that may not exist
-                    if not (filename.endswith(".log") or filename.endswith(".notes")):
-                        err = result.stderr.decode() if result.stderr else "unknown error"
-                        logger.debug(f"Failed to delete {filename}: {err}")
+
+            for i in range(backups_to_delete):
+                timestamp, backup_file = backup_files[i]
+                files_to_delete = [backup_file]
+
+                # Also delete associated .log and .notes files
+                base_name = (
+                    backup_file.replace(".vma.zst", "")
+                    .replace(".vma.gz", "")
+                    .replace(".vma.lzo", "")
+                    .replace(".vma", "")
+                )
+                files_to_delete.append(f"{base_name}.log")
+                files_to_delete.append(f"{backup_file}.notes")
+
+                for filename in files_to_delete:
+                    del_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; del \"{filename}\""]
+                    del_result = subprocess.run(del_cmd, capture_output=True, timeout=30)
+                    if del_result.returncode == 0:
+                        logger.info(f"Deleted old backup file: {filename}")
+                        if filename == backup_file:
+                            deleted_count += 1
+                    else:
+                        # Ignore errors for .log/.notes files that may not exist
+                        if filename == backup_file:
+                            err = del_result.stderr.decode() if del_result.stderr else "unknown error"
+                            logger.warning(f"Failed to delete {filename}: {err}")
 
             if deleted_count > 0:
-                logger.info(f"Deleted {deleted_count} pre-existing backup files for VM {vmid}")
+                logger.info(f"Retention enforcement: deleted {deleted_count} old backups for VM {vmid}, keeping {copies_to_keep}")
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"Timeout deleting backups for VM {vmid} from SMB")
+            logger.warning(f"Timeout enforcing retention for VM {vmid} from SMB")
         except Exception as e:
-            logger.warning(f"Error deleting backups for VM {vmid} from SMB: {e}")
+            logger.warning(f"Error enforcing retention for VM {vmid} from SMB: {e}")
 
-    def _delete_vm_backups_nfs(
+    def _enforce_copies_limit_nfs(
         repository: dict[str, Any],
         hypervisor_name: str,
         vmid: int,
+        copies_to_keep: int,
     ) -> None:
-        """Delete all backups for a VM from NFS share by mounting temporarily."""
+        """Enforce backup copies limit for a VM on NFS share by deleting oldest backups."""
+        import re
         import subprocess
         import tempfile
 
@@ -3910,7 +4102,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             result = subprocess.run(mount_cmd, capture_output=True, timeout=30)
             if result.returncode != 0:
                 err = result.stderr.decode() if result.stderr else "unknown error"
-                logger.warning(f"Failed to mount NFS for backup deletion: {err}")
+                logger.warning(f"Failed to mount NFS for retention enforcement: {err}")
                 return
 
             # Build path to dump directory
@@ -3923,26 +4115,44 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 logger.debug(f"Dump directory does not exist: {dump_dir}")
                 return
 
-            # Find all backup files for this VMID first (avoid modifying during iteration)
-            backup_files = [
-                entry for entry in dump_dir.iterdir()
-                if entry.is_file() and (
-                    entry.name.startswith(f"vzdump-qemu-{vmid}-") or
-                    entry.name.startswith(f"vzdump-lxc-{vmid}-")
-                )
-            ]
+            # Find all backup files for this VMID with timestamps
+            # Pattern: vzdump-{qemu|lxc}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
+            timestamp_pattern = re.compile(r"vzdump-(?:qemu|lxc)-\d+-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})\.vma")
+            backup_files: list[tuple[str, Path]] = []  # (timestamp, path)
 
-            if not backup_files:
-                logger.debug(f"No existing backups found for VM {vmid}")
+            for entry in dump_dir.iterdir():
+                if not entry.is_file():
+                    continue
+                if (
+                    entry.name.startswith(f"vzdump-qemu-{vmid}-")
+                    or entry.name.startswith(f"vzdump-lxc-{vmid}-")
+                ) and ".vma" in entry.name:
+                    match = timestamp_pattern.search(entry.name)
+                    if match:
+                        timestamp = match.group(1)
+                        backup_files.append((timestamp, entry))
+
+            # Sort by timestamp (oldest first)
+            backup_files.sort(key=lambda x: x[0])
+
+            current_count = len(backup_files)
+            logger.info(f"VM {vmid}: Found {current_count} backups, limit is {copies_to_keep}")
+
+            if current_count <= copies_to_keep:
+                logger.debug(f"VM {vmid}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
                 return
 
-            # Delete all found backup files and associated files
+            # Delete oldest backups to stay within limit
+            backups_to_delete = current_count - copies_to_keep
             deleted = 0
-            for entry in backup_files:
+
+            for i in range(backups_to_delete):
+                timestamp, entry = backup_files[i]
+
                 # Delete the main backup file
                 try:
                     entry.unlink()
-                    logger.info(f"Deleted pre-existing backup file: {entry.name}")
+                    logger.info(f"Deleted old backup file: {entry.name}")
                     deleted += 1
                 except OSError as e:
                     logger.warning(f"Failed to delete {entry.name}: {e}")
@@ -3954,7 +4164,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     try:
                         notes_file.unlink()
                         logger.debug(f"Deleted notes file: {notes_file.name}")
-                        deleted += 1
                     except OSError:
                         pass
 
@@ -3970,16 +4179,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     try:
                         log_file.unlink()
                         logger.debug(f"Deleted log file: {log_file.name}")
-                        deleted += 1
                     except OSError:
                         pass
 
-            logger.info(f"Deleted {deleted} pre-existing backup files for VM {vmid}")
+            if deleted > 0:
+                logger.info(f"Retention enforcement: deleted {deleted} old backups for VM {vmid}, keeping {copies_to_keep}")
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"Timeout deleting backups for VM {vmid} from NFS")
+            logger.warning(f"Timeout enforcing retention for VM {vmid} from NFS")
         except Exception as e:
-            logger.warning(f"Error deleting backups for VM {vmid} from NFS: {e}")
+            logger.warning(f"Error enforcing retention for VM {vmid} from NFS: {e}")
         finally:
             # Unmount
             try:
@@ -4216,7 +4425,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             compression=job_data.get("compression", "zstd"),
             schedule_cron=job_data.get("schedule_cron"),
             enabled=job_data.get("enabled", True),
-            delete_before_backup=job_data.get("delete_before_backup", False),
+            copies_to_keep=job_data.get("copies_to_keep", 0),
         )
 
         logger.info(f"Auto-imported job '{job_name}' from repository metadata")
@@ -5401,7 +5610,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 compression=job.get("compression", "zstd"),
                 schedule_cron=job.get("schedule_cron"),
                 enabled=job.get("enabled", True),
-                delete_before_backup=job.get("delete_before_backup", False),
+                copies_to_keep=job.get("copies_to_keep", 0),
                 hypervisor_name=hypervisor["name"],
                 hypervisor_host=hypervisor["host"],
             )
@@ -5479,8 +5688,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Backups are stored directly on the Backer repository by auto-configuring
         the repository as Proxmox storage (like Veeam does).
 
-        When delete_before_backup is enabled, existing backups for each VM are
-        deleted before creating a new backup, ensuring only 1 copy exists.
+        When copies_to_keep is set (> 0), retention is enforced after each successful
+        backup by deleting the oldest backups to stay within the limit.
 
         Args:
             job_id: Hypervisor job ID
@@ -5564,9 +5773,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if hypervisor.get("ssh_use_api_password", True) and hv_password:
             ssh_password = hv_password
 
-        # Get delete_before_backup setting
-        delete_before_backup = job.get("delete_before_backup", False)
-        logger.info(f"Job '{job.get('name')}' delete_before_backup={delete_before_backup}")
+        # Get copies_to_keep setting (0 = unlimited)
+        copies_to_keep = job.get("copies_to_keep", 0)
+        logger.info(f"Job '{job.get('name')}' copies_to_keep={copies_to_keep}")
 
         # Submit backup as background task
         def run_backup_task(task: Task) -> dict[str, Any]:
@@ -5621,20 +5830,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 guest_name = guest.name if guest else f"VM {vmid}"
                 vmid_type = type(vmid).__name__
                 logger.info(f"Guest lookup: vmid={vmid} ({vmid_type}), found={guest is not None}")
-
-                # Delete previous backups for this VM if delete_before_backup is enabled
-                if delete_before_backup:
-                    task.message = f"Deleting previous backups for {guest_name} ({vmid})..."
-                    logger.info(f"delete_before_backup enabled - deleting previous backups for VM {vmid}")
-                    try:
-                        _delete_vm_backups_from_repository(
-                            repository=repo_with_password,
-                            hypervisor_name=hypervisor["name"],
-                            vmid=vmid,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to delete previous backups for VM {vmid}: {e}")
-                        # Continue with backup anyway - this is not a fatal error
 
                 task.message = f"Backing up {guest_name} ({vmid}) to {repository['name']}..."
 
@@ -5695,7 +5890,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         progress_callback=progress_callback,
                     )
 
-                    # Add backup type to result (always full with delete_before_backup)
+                    # Add backup type to result
                     result["backup_type"] = "full"
 
                     # Update run record
@@ -5713,6 +5908,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         exit_status=result.get("exit_status"),
                         errors=result.get("errors"),
                     )
+
+                    # Enforce copies_to_keep retention after successful backup
+                    if result["success"] and copies_to_keep > 0:
+                        task.message = f"Enforcing retention for {guest_name} ({vmid})..."
+                        logger.info(f"Enforcing copies_to_keep={copies_to_keep} for VM {vmid}")
+                        try:
+                            _enforce_copies_limit(
+                                repository=repo_with_password,
+                                hypervisor_name=hypervisor["name"],
+                                vmid=vmid,
+                                copies_to_keep=copies_to_keep,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to enforce retention for VM {vmid}: {e}")
+                            # Don't fail backup if retention enforcement fails
 
                     results.append(result)
 

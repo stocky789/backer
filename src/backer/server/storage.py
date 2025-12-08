@@ -190,7 +190,7 @@ class Storage:
                     schedule_cron TEXT,
                     retention TEXT DEFAULT '{}',  -- JSON retention policy
                     enabled INTEGER DEFAULT 1,
-                    delete_before_backup INTEGER DEFAULT 0,  -- Delete existing backups before new backup
+                    copies_to_keep INTEGER DEFAULT 0,  -- Number of backup copies to keep (0 = unlimited)
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (hypervisor_id) REFERENCES hypervisors(id),
@@ -245,15 +245,27 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_vm ON vm_bitmap_state(hypervisor_id, vmid);
             """)
 
-            # Migration: Add delete_before_backup column if it doesn't exist
-            # (replaces old enable_incremental, ssh_user, ssh_port, max_incrementals columns)
+            # Migration: Add copies_to_keep column if it doesn't exist
             try:
                 conn.execute(
-                    "ALTER TABLE hypervisor_jobs ADD COLUMN delete_before_backup "
+                    "ALTER TABLE hypervisor_jobs ADD COLUMN copies_to_keep "
                     "INTEGER DEFAULT 0"
                 )
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Migration: Convert delete_before_backup to copies_to_keep
+            # If delete_before_backup was 1, set copies_to_keep to 1
+            try:
+                conn.execute(
+                    """
+                    UPDATE hypervisor_jobs
+                    SET copies_to_keep = 1
+                    WHERE delete_before_backup = 1 AND copies_to_keep = 0
+                    """
+                )
+            except sqlite3.OperationalError:
+                pass  # delete_before_backup column doesn't exist (fresh install)
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
@@ -1387,7 +1399,7 @@ class Storage:
         schedule_cron: str | None = None,
         retention: dict[str, int] | None = None,
         enabled: bool = True,
-        delete_before_backup: bool = False,
+        copies_to_keep: int = 0,
     ) -> None:
         """Add a new hypervisor backup job."""
         now = datetime.now().isoformat()
@@ -1397,7 +1409,7 @@ class Storage:
                 INSERT INTO hypervisor_jobs (
                     id, name, hypervisor_id, guest_ids, repository_id,
                     backup_mode, compression, schedule_cron, retention,
-                    enabled, delete_before_backup, created_at, updated_at
+                    enabled, copies_to_keep, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -1411,7 +1423,7 @@ class Storage:
                     schedule_cron,
                     json.dumps(retention or {}),
                     1 if enabled else 0,
-                    1 if delete_before_backup else 0,
+                    copies_to_keep,
                     now,
                     now,
                 ),
@@ -1428,7 +1440,7 @@ class Storage:
         schedule_cron: str | None = None,
         retention: dict[str, int] | None = None,
         enabled: bool | None = None,
-        delete_before_backup: bool | None = None,
+        copies_to_keep: int | None = None,
     ) -> bool:
         """Update a hypervisor job."""
         updates = ["updated_at = ?"]
@@ -1458,9 +1470,9 @@ class Storage:
         if enabled is not None:
             updates.append("enabled = ?")
             params.append(1 if enabled else 0)
-        if delete_before_backup is not None:
-            updates.append("delete_before_backup = ?")
-            params.append(1 if delete_before_backup else 0)
+        if copies_to_keep is not None:
+            updates.append("copies_to_keep = ?")
+            params.append(copies_to_keep)
 
         params.append(job_id)
 
@@ -1534,9 +1546,7 @@ class Storage:
             "schedule_cron": row["schedule_cron"],
             "retention": json.loads(row["retention"]) if row["retention"] else {},
             "enabled": row["enabled"] == 1,
-            "delete_before_backup": (
-                row["delete_before_backup"] == 1 if "delete_before_backup" in keys else False
-            ),
+            "copies_to_keep": row["copies_to_keep"] if "copies_to_keep" in keys else 0,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

@@ -150,8 +150,8 @@
                         </td>
                         <td>
                             <strong>{{ job.name }}</strong>
-                            {% if job.delete_before_backup %}
-                            <span class="status-badge warning" style="margin-left: 6px;" title="Delete previous backups before creating new ones">1x</span>
+                            {% if job.copies_to_keep and job.copies_to_keep > 0 %}
+                            <span class="status-badge info" style="margin-left: 6px;" title="Keep {{ job.copies_to_keep }} backup copies per VM">{{ job.copies_to_keep }}x</span>
                             {% endif %}
                         </td>
                         <td>{{ job.hypervisor_name or job.hypervisor_id }}</td>
@@ -458,13 +458,13 @@
                     <summary>Storage Options</summary>
                     <div class="form-details-content">
                         <div class="form-group">
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="jobDeleteBeforeBackup">
-                                <span>Delete previous backup before creating new</span>
-                            </label>
+                            <label class="form-label">Copies to Keep</label>
+                            <input type="number" id="jobCopiesToKeep" class="form-input" min="0" value="0" style="width: 100px;">
                             <div class="form-hint">
-                                For storage-constrained environments. Only 1 copy exists at a time.
-                                <strong>Warning:</strong> If the new backup fails, the old backup is already gone.
+                                Number of backup copies to retain per VM/LXC. After each backup, older copies exceeding this limit are automatically deleted.
+                                <br><strong>0</strong> = Unlimited (keep all backups)
+                                <br><strong>1</strong> = Keep only the latest backup
+                                <br><strong>3</strong> = Keep the 3 most recent backups, delete older ones
                             </div>
                         </div>
                     </div>
@@ -1191,7 +1191,7 @@ function showAddJobModal() {
     document.getElementById('jobGuestsList').innerHTML = '<div class="loading-state">Select a hypervisor first</div>';
     document.getElementById('jobError').style.display = 'none';
     document.getElementById('jobModal').style.display = 'flex';
-    document.getElementById('jobDeleteBeforeBackup').checked = false;
+    document.getElementById('jobCopiesToKeep').value = 0;
     document.getElementById('storageDetails').open = false;
     loadRepositories();
 }
@@ -1285,7 +1285,7 @@ async function submitJob(event) {
         compress: document.getElementById('jobCompression').value,
         schedule_cron: document.getElementById('jobSchedule').value || null,
         enabled: document.getElementById('jobEnabled').checked,
-        delete_before_backup: document.getElementById('jobDeleteBeforeBackup').checked,
+        copies_to_keep: parseInt(document.getElementById('jobCopiesToKeep').value) || 0,
     };
 
     const url = editingJobId ? `/api/v1/hypervisor-jobs/${editingJobId}` : '/api/v1/hypervisor-jobs';
@@ -1331,9 +1331,9 @@ async function editHypervisorJob(jobId) {
         document.getElementById('jobSchedule').value = job.schedule_cron || '';
         document.getElementById('jobEnabled').checked = job.enabled;
         document.getElementById('jobRepository').value = job.repository_id || '';
-        document.getElementById('jobDeleteBeforeBackup').checked = job.delete_before_backup || false;
+        document.getElementById('jobCopiesToKeep').value = job.copies_to_keep || 0;
 
-        if (job.delete_before_backup) {
+        if (job.copies_to_keep && job.copies_to_keep > 0) {
             document.getElementById('storageDetails').open = true;
         }
 

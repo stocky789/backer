@@ -137,6 +137,7 @@
                                         data-job-name="{{ job.name }}"
                                         data-client-id="{{ job.client_id or '' }}"
                                         data-source-path="{{ job.source_path or '' }}"
+                                        data-repository="{{ job.repository_id or '' }}"
                                         {% if not job.has_backups %}disabled title="Run a successful backup first"{% endif %}>
                                     Restore
                                 </button>
@@ -242,17 +243,57 @@
 
 <!-- Quick Restore Modal -->
 <div id="restoreModal" class="modal" style="display: none;">
-    <div class="modal-content modal-md">
+    <div class="modal-content modal-lg">
         <div class="modal-header">
             <span class="modal-title">
                 <svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                Quick Restore: <span id="restoreJobName"></span>
+                Quick Restore
             </span>
             <button class="modal-close" onclick="hideRestoreModal()">&times;</button>
         </div>
         <div class="modal-body">
+            <!-- Job Info Panel -->
+            <div class="restore-info-panel">
+                <div class="restore-info-header">
+                    <svg viewBox="0 0 24 24" width="18" height="18"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+                    <span id="restoreJobName" style="font-weight: 600;"></span>
+                </div>
+                <div class="restore-info-details">
+                    <div class="restore-info-item">
+                        <span class="restore-info-label">Source</span>
+                        <span id="restoreSourcePath" class="restore-info-value">-</span>
+                    </div>
+                    <div class="restore-info-item">
+                        <span class="restore-info-label">Repository</span>
+                        <span id="restoreRepoName" class="restore-info-value">-</span>
+                    </div>
+                    <div class="restore-info-item">
+                        <span class="restore-info-label">Available Backups</span>
+                        <span id="restoreBackupCount" class="restore-info-value">Loading...</span>
+                    </div>
+                </div>
+            </div>
+
             <form id="restoreForm" onsubmit="submitRestore(event)">
                 <input type="hidden" id="restoreJobNameInput">
+
+                <div class="form-section-title">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    Backup Selection
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Backup Point</label>
+                    <select id="restoreBackupSelect" class="form-input">
+                        <option value="">Latest backup</option>
+                    </select>
+                    <div class="form-hint">Select which backup point to restore from</div>
+                </div>
+
+                <div class="form-section-title">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Restore Target
+                </div>
 
                 <div class="form-group">
                     <label class="form-label">Restore To Agent</label>
@@ -274,35 +315,47 @@
                 </div>
 
                 <div class="form-group">
-                    <label class="form-label">Backup Point</label>
-                    <select id="restoreBackupSelect" class="form-input">
-                        <option value="">Latest backup</option>
-                    </select>
-                    <div class="form-hint">Select which backup to restore from</div>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Destination Path (Optional)</label>
+                    <label class="form-label">Destination Path</label>
                     <input type="text" id="restoreDestPath" class="form-input"
                            placeholder="Leave empty to restore to original location">
-                    <div class="form-hint">Where to restore files. Empty = original source path.</div>
+                    <div class="form-hint">Where to restore files. Leave empty to use original source path.</div>
                 </div>
 
-                <div class="form-group">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="restoreClean">
-                        <span>Clean Restore</span>
-                    </label>
-                    <div class="form-hint">Delete files at destination that don't exist in the backup</div>
+                <div class="form-section-title">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    Options
                 </div>
 
-                <div id="restoreError" class="error-msg" style="display: none;"></div>
-                <div id="restoreSuccess" class="success-msg" style="display: none;"></div>
+                <div class="form-row" style="gap: 24px;">
+                    <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="restoreClean">
+                            <span>Clean Restore</span>
+                        </label>
+                        <div class="form-hint">Delete files at destination that don't exist in the backup</div>
+                    </div>
+                    <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="restoreDryRun">
+                            <span>Dry Run</span>
+                        </label>
+                        <div class="form-hint">Preview changes without actually restoring</div>
+                    </div>
+                </div>
+
+                <div id="restoreError" class="error-msg" style="display: none; margin-top: 16px;"></div>
+                <div id="restoreSuccess" class="success-msg" style="display: none; margin-top: 16px;"></div>
 
                 <div class="modal-footer">
-                    <button type="submit" class="btn btn-primary">Start Restore</button>
+                    <button type="submit" class="btn btn-primary">
+                        <svg viewBox="0 0 24 24" width="14" height="14" style="margin-right: 6px;"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                        Start Restore
+                    </button>
                     <button type="button" class="btn btn-secondary" onclick="hideRestoreModal()">Cancel</button>
-                    <a href="/restore" class="btn btn-secondary" style="margin-left: auto;">Advanced</a>
+                    <a href="/restore" class="btn btn-secondary" style="margin-left: auto;">
+                        <svg viewBox="0 0 24 24" width="14" height="14" style="margin-right: 4px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                        Advanced Options
+                    </a>
                 </div>
             </form>
         </div>
@@ -354,6 +407,92 @@
     border-radius: 4px;
     font-size: 12px;
 }
+
+/* Restore Modal Styles */
+.restore-info-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 20px;
+}
+.restore-info-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+.restore-info-header svg {
+    stroke: var(--accent);
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.restore-info-details {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+.restore-info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.restore-info-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+}
+.restore-info-value {
+    font-size: 12px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.form-section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    margin: 20px 0 12px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+.form-section-title:first-of-type {
+    margin-top: 0;
+}
+.form-section-title svg {
+    stroke: var(--text-muted);
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.form-row {
+    display: flex;
+    gap: 16px;
+}
+.btn svg {
+    display: inline-block;
+    vertical-align: middle;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
 </style>
 {% endblock %}
 
@@ -379,7 +518,8 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.addEventListener('click', () => quickRestore(
             btn.dataset.jobName,
             btn.dataset.clientId,
-            btn.dataset.sourcePath
+            btn.dataset.sourcePath,
+            btn.dataset.repository
         ));
     });
 
@@ -537,12 +677,19 @@ document.getElementById('editModal')?.addEventListener('click', function(e) {
 });
 
 // Quick Restore Functions
-async function quickRestore(jobName, clientId, sourcePath) {
+async function quickRestore(jobName, clientId, sourcePath, repository) {
+    // Populate info panel
     document.getElementById('restoreJobName').textContent = jobName;
+    document.getElementById('restoreSourcePath').textContent = sourcePath || '-';
+    document.getElementById('restoreRepoName').textContent = repository || '-';
+    document.getElementById('restoreBackupCount').textContent = 'Loading...';
+
+    // Reset form
     document.getElementById('restoreJobNameInput').value = jobName;
     document.getElementById('restoreDestPath').placeholder = sourcePath ? `Default: ${sourcePath}` : 'Leave empty to restore to original location';
     document.getElementById('restoreDestPath').value = '';
     document.getElementById('restoreClean').checked = false;
+    document.getElementById('restoreDryRun').checked = false;
     document.getElementById('restoreError').style.display = 'none';
     document.getElementById('restoreSuccess').style.display = 'none';
     document.getElementById('restoreForm').style.display = 'block';
@@ -550,6 +697,9 @@ async function quickRestore(jobName, clientId, sourcePath) {
     if (clientId) {
         document.getElementById('restoreClientId').value = clientId;
     }
+
+    // Show modal immediately for better UX
+    document.getElementById('restoreModal').style.display = 'flex';
 
     try {
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/backups`);
@@ -560,14 +710,17 @@ async function quickRestore(jobName, clientId, sourcePath) {
 
         backups.forEach(backup => {
             const date = new Date(backup.started_at).toLocaleString();
+            const size = formatBytes(backup.bytes_transferred || 0);
             const snapshotLabel = backup.snapshot_id ? ` [${backup.snapshot_id.substring(0, 8)}]` : '';
-            select.innerHTML += `<option value="${backup.run_id}" data-snapshot="${backup.snapshot_id || ''}">${date}${snapshotLabel} (${backup.files_transferred} files)</option>`;
+            select.innerHTML += `<option value="${backup.run_id}" data-snapshot="${backup.snapshot_id || ''}">${date}${snapshotLabel} (${backup.files_transferred} files, ${size})</option>`;
         });
+
+        // Update backup count in info panel
+        document.getElementById('restoreBackupCount').textContent = backups.length > 0 ? `${backups.length} backup${backups.length > 1 ? 's' : ''}` : 'None';
     } catch (e) {
         console.error('Failed to load backups:', e);
+        document.getElementById('restoreBackupCount').textContent = 'Error loading';
     }
-
-    document.getElementById('restoreModal').style.display = 'flex';
 }
 
 function hideRestoreModal() {
@@ -581,6 +734,7 @@ async function submitRestore(event) {
     const clientId = document.getElementById('restoreClientId').value;
     const destPath = document.getElementById('restoreDestPath').value;
     const cleanRestore = document.getElementById('restoreClean').checked;
+    const dryRun = document.getElementById('restoreDryRun').checked;
     const backupSelect = document.getElementById('restoreBackupSelect');
     const backupRunId = backupSelect.value;
     const snapshotId = backupSelect.options[backupSelect.selectedIndex]?.dataset?.snapshot || null;
@@ -601,14 +755,15 @@ async function submitRestore(event) {
                 clean_restore: cleanRestore,
                 run_id: backupRunId || null,
                 snapshot: snapshotId || null,
-                dry_run: false,
+                dry_run: dryRun,
             })
         });
 
         const data = await response.json();
 
         if (response.ok) {
-            successDiv.innerHTML = `<strong>Restore Started!</strong><br>Run ID: <code>${data.restore_id}</code><br><a href="/">View progress on Dashboard</a>`;
+            const dryRunNote = dryRun ? '<br><em style="color: var(--warning);">This is a dry run - no files will be changed</em>' : '';
+            successDiv.innerHTML = `<strong>Restore Started!</strong>${dryRunNote}<br>Run ID: <code>${data.restore_id}</code><br><a href="/">View progress on Dashboard</a>`;
             successDiv.style.display = 'block';
             document.getElementById('restoreForm').style.display = 'none';
         } else {
