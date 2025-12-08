@@ -385,6 +385,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         for vmid in guest_ids:
             guest = guest_map.get(vmid)
             guest_name = guest.name if guest else f"VM {vmid}"
+            guest_type = guest.guest_type.value if guest else "qemu"
 
             # Save run as running
             _storage.save_hypervisor_run(
@@ -394,6 +395,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                 hypervisor_id=hypervisor["id"],
                 guest_id=vmid,
                 guest_name=guest_name,
+                guest_type=guest_type,
                 status="running",
             )
 
@@ -408,6 +410,8 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     timeout=7200,
                 )
 
+                backup_size = result.get("backup_size", 0)
+
                 # Update run record
                 _storage.save_hypervisor_run(
                     run_id=run_id,
@@ -416,6 +420,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     hypervisor_id=hypervisor["id"],
                     guest_id=vmid,
                     guest_name=guest_name,
+                    guest_type=guest_type,
                     status="success" if result.get("success") else "failed",
                     upid=result.get("upid"),
                     finished_at=(
@@ -423,12 +428,12 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                         if result.get("finished_at") else datetime.now()
                     ),
                     duration_seconds=result.get("duration_seconds"),
+                    backup_size=backup_size,
                     exit_status=result.get("exit_status"),
                     errors=result.get("errors"),
                 )
 
                 if result.get("success"):
-                    backup_size = result.get("backup_size", 0)
                     logger.info(
                         f"Backup succeeded for VMID {vmid} -> {proxmox_storage_id} "
                         f"({backup_size / 1024 / 1024:.1f} MB)"
@@ -445,6 +450,7 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
                     hypervisor_id=hypervisor["id"],
                     guest_id=vmid,
                     guest_name=guest_name,
+                    guest_type=guest_type,
                     status="failed",
                     finished_at=datetime.now(),
                     errors=[str(e)],
@@ -5999,6 +6005,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 task.progress = int((i / total) * 100)
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
+                guest_type = guest.guest_type.value if guest else "qemu"
                 vmid_type = type(vmid).__name__
                 logger.info(f"Guest lookup: vmid={vmid} ({vmid_type}), found={guest is not None}")
 
@@ -6012,6 +6019,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     hypervisor_id=hypervisor["id"],
                     guest_id=vmid,
                     guest_name=guest_name,
+                    guest_type=guest_type,
                     status="running",
                 )
 
@@ -6063,6 +6071,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                     # Add backup type to result
                     result["backup_type"] = "full"
+                    backup_size = result.get("backup_size", 0)
 
                     # Update run record
                     storage.save_hypervisor_run(
@@ -6072,10 +6081,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         hypervisor_id=hypervisor["id"],
                         guest_id=vmid,
                         guest_name=guest_name,
+                        guest_type=guest_type,
                         status="success" if result["success"] else "failed",
                         upid=result.get("upid"),
                         finished_at=datetime.fromisoformat(result["finished_at"]),
                         duration_seconds=result.get("duration_seconds"),
+                        backup_size=backup_size,
                         exit_status=result.get("exit_status"),
                         errors=result.get("errors"),
                     )
@@ -6107,6 +6118,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         hypervisor_id=hypervisor["id"],
                         guest_id=vmid,
                         guest_name=guest_name,
+                        guest_type=guest_type,
                         status="failed",
                         finished_at=datetime.now(),
                         errors=[str(e)],

@@ -208,11 +208,13 @@ class Storage:
                     hypervisor_id TEXT NOT NULL,
                     guest_id INTEGER NOT NULL,
                     guest_name TEXT,
+                    guest_type TEXT DEFAULT 'qemu',
                     status TEXT NOT NULL,
                     upid TEXT,
                     started_at TEXT NOT NULL,
                     finished_at TEXT,
                     duration_seconds REAL,
+                    backup_size INTEGER DEFAULT 0,
                     exit_status TEXT,
                     errors TEXT DEFAULT '[]',
                     FOREIGN KEY (job_id) REFERENCES hypervisor_jobs(id),
@@ -266,6 +268,24 @@ class Storage:
                 )
             except sqlite3.OperationalError:
                 pass  # delete_before_backup column doesn't exist (fresh install)
+
+            # Migration: Add backup_size column to hypervisor_runs if it doesn't exist
+            try:
+                conn.execute(
+                    "ALTER TABLE hypervisor_runs ADD COLUMN backup_size "
+                    "INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            # Migration: Add guest_type column to hypervisor_runs if it doesn't exist
+            try:
+                conn.execute(
+                    "ALTER TABLE hypervisor_runs ADD COLUMN guest_type "
+                    "TEXT DEFAULT 'qemu'"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
@@ -1563,11 +1583,13 @@ class Storage:
         hypervisor_id: str,
         guest_id: int,
         guest_name: str | None = None,
+        guest_type: str = "qemu",
         status: str = "pending",
         upid: str | None = None,
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
         duration_seconds: float | None = None,
+        backup_size: int = 0,
         exit_status: str | None = None,
         errors: list[str] | None = None,
     ) -> None:
@@ -1587,7 +1609,7 @@ class Storage:
                     """
                     UPDATE hypervisor_runs SET
                         status = ?, upid = ?, finished_at = ?,
-                        duration_seconds = ?, exit_status = ?, errors = ?
+                        duration_seconds = ?, backup_size = ?, exit_status = ?, errors = ?
                     WHERE run_id = ? AND guest_id = ?
                     """,
                     (
@@ -1595,6 +1617,7 @@ class Storage:
                         upid,
                         finished_at.isoformat() if finished_at else None,
                         duration_seconds,
+                        backup_size,
                         exit_status,
                         json.dumps(errors or []),
                         run_id,
@@ -1607,9 +1630,9 @@ class Storage:
                     """
                     INSERT INTO hypervisor_runs (
                         run_id, job_id, job_name, hypervisor_id, guest_id,
-                        guest_name, status, upid, started_at, finished_at,
-                        duration_seconds, exit_status, errors
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        guest_name, guest_type, status, upid, started_at, finished_at,
+                        duration_seconds, backup_size, exit_status, errors
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -1618,11 +1641,13 @@ class Storage:
                         hypervisor_id,
                         guest_id,
                         guest_name,
+                        guest_type,
                         status,
                         upid,
                         started,
                         finished_at.isoformat() if finished_at else None,
                         duration_seconds,
+                        backup_size,
                         exit_status,
                         json.dumps(errors or []),
                     ),
@@ -1686,6 +1711,7 @@ class Storage:
 
     def _row_to_hypervisor_run(self, row: sqlite3.Row) -> dict[str, Any]:
         """Convert a database row to a hypervisor run dict."""
+        keys = row.keys()
         return {
             "id": row["id"],
             "run_id": row["run_id"],
@@ -1694,11 +1720,13 @@ class Storage:
             "hypervisor_id": row["hypervisor_id"],
             "guest_id": row["guest_id"],
             "guest_name": row["guest_name"],
+            "guest_type": row["guest_type"] if "guest_type" in keys else "qemu",
             "status": row["status"],
             "upid": row["upid"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
             "duration_seconds": row["duration_seconds"],
+            "backup_size": row["backup_size"] if "backup_size" in keys else 0,
             "exit_status": row["exit_status"],
             "errors": json.loads(row["errors"]) if row["errors"] else [],
         }

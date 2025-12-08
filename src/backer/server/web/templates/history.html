@@ -74,7 +74,11 @@
                         </td>
                         <td>
                             {% if run.run_type == 'hypervisor' %}
-                            <span class="status-badge info">VM</span>
+                                {% if run.guest_type == 'lxc' %}
+                                <span class="status-badge lxc">LXC</span>
+                                {% else %}
+                                <span class="status-badge vm">VM</span>
+                                {% endif %}
                             {% else %}
                             <span class="status-badge muted">Agent</span>
                             {% endif %}
@@ -82,7 +86,11 @@
                         <td><strong>{{ run.job_name }}</strong></td>
                         <td>
                             {% if run.run_type == 'hypervisor' %}
-                            {{ run.guest_name or 'VM ' + (run.guest_id|string) }}
+                                {% if run.guest_type == 'lxc' %}
+                                {{ run.guest_name or 'LXC ' + (run.guest_id|string) }}
+                                {% else %}
+                                {{ run.guest_name or 'VM ' + (run.guest_id|string) }}
+                                {% endif %}
                             {% else %}
                             {{ run.client_id or '-' }}
                             {% endif %}
@@ -369,14 +377,15 @@ async function showHypervisorLogs(runId, hypervisorId) {
 
         const data = await response.json();
 
-        document.getElementById('logsModalTitle').textContent = `VM Backup: ${data.guest_name || 'VM ' + data.guest_id}`;
+        const guestTypeLabel = data.guest_type === 'lxc' ? 'LXC' : 'VM';
+        document.getElementById('logsModalTitle').textContent = `${guestTypeLabel} Backup: ${data.guest_name || guestTypeLabel + ' ' + data.guest_id}`;
         document.getElementById('logsRunId').textContent = data.run_id;
         document.getElementById('logsStatus').innerHTML = getStatusBadge(data.status);
-        document.getElementById('logsAgent').textContent = data.guest_name || 'VM ' + data.guest_id;
+        document.getElementById('logsAgent').textContent = data.guest_name || guestTypeLabel + ' ' + data.guest_id;
         document.getElementById('logsStarted').textContent = formatDate(data.started_at);
         document.getElementById('logsFinished').textContent = formatDate(data.finished_at);
-        document.getElementById('logsFiles').textContent = '-';
-        document.getElementById('logsSize').textContent = '-';
+        document.getElementById('logsFiles').textContent = '1';  // vzdump creates 1 backup file per guest
+        document.getElementById('logsSize').textContent = data.backup_size ? formatBytes(data.backup_size) : '-';
 
         if (data.upid) {
             document.getElementById('logsSnapshotRow').style.display = 'flex';
@@ -397,11 +406,15 @@ async function showHypervisorLogs(runId, hypervisorId) {
 
         const outputEl = document.getElementById('logsOutput');
         let output = `Job: ${data.job_name}\n`;
-        output += `Guest: ${data.guest_name || 'VM ' + data.guest_id} (VMID ${data.guest_id})\n`;
+        output += `Guest: ${data.guest_name || guestTypeLabel + ' ' + data.guest_id} (VMID ${data.guest_id})\n`;
+        output += `Type: ${guestTypeLabel}\n`;
         output += `Status: ${data.status}\n`;
         output += `Exit Status: ${data.exit_status || '-'}\n`;
         if (data.duration_seconds) {
             output += `Duration: ${Math.floor(data.duration_seconds / 60)}m ${Math.floor(data.duration_seconds % 60)}s\n`;
+        }
+        if (data.backup_size) {
+            output += `Backup Size: ${formatBytes(data.backup_size)}\n`;
         }
         if (data.upid) {
             output += `\nProxmox Task ID: ${data.upid}\n`;
