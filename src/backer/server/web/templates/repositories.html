@@ -665,50 +665,63 @@ async function testRepo(repoId) {
 
                 if (task.status === 'completed') {
                     const result = task.result || {};
-                    alert(result.success ? 'Connection successful!' : 'Connection failed: ' + (result.message || 'Unknown error'));
-                    if (result.success) location.reload();
+                    if (result.success) {
+                        Toast.success('Connection successful!');
+                        setTimeout(() => location.reload(), 1000);
+                    } else {
+                        Toast.error('Connection failed: ' + (result.message || 'Unknown error'));
+                    }
                 } else if (task.status === 'failed') {
-                    alert('Connection test failed: ' + (task.error || 'Unknown error'));
+                    Toast.error('Connection test failed: ' + (task.error || 'Unknown error'));
                 } else if (attempts < 60) {
                     setTimeout(checkTask, 1000);
                 } else {
-                    alert('Connection test timed out');
+                    Toast.error('Connection test timed out');
                 }
             };
 
             setTimeout(checkTask, 500);
         } else {
-            alert(data.success ? 'Connection successful!' : 'Connection failed: ' + data.message);
-            if (data.success) location.reload();
+            if (data.success) {
+                Toast.success('Connection successful!');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                Toast.error('Connection failed: ' + data.message);
+            }
         }
     } catch (e) {
-        alert('Test failed: ' + e.message);
+        Toast.error('Test failed: ' + e.message);
     }
 }
 
 async function deleteRepo(repoId, repoName) {
-    if (!confirm(`Delete repository '${repoName}'?`)) return;
-
-    try {
-        const response = await fetch(`/api/v1/repositories/${repoId}`, { method: 'DELETE' });
-
-        if (response.ok) {
-            window.location.replace(window.location.pathname);
-        } else {
-            let errorMsg = `HTTP ${response.status}`;
+    showConfirmModal({
+        title: 'Delete Repository',
+        message: `Delete repository '${repoName}'? This cannot be undone.`,
+        confirmText: 'Delete',
+        onConfirm: async () => {
             try {
-                const data = await response.json();
-                errorMsg = data.detail || data.message || errorMsg;
-            } catch {
-                const text = await response.text();
-                if (text) errorMsg = text;
+                const response = await fetch(`/api/v1/repositories/${repoId}`, { method: 'DELETE' });
+
+                if (response.ok) {
+                    Toast.success('Repository deleted');
+                    setTimeout(() => window.location.replace(window.location.pathname), 1000);
+                } else {
+                    let errorMsg = `HTTP ${response.status}`;
+                    try {
+                        const data = await response.json();
+                        errorMsg = data.detail || data.message || errorMsg;
+                    } catch {
+                        const text = await response.text();
+                        if (text) errorMsg = text;
+                    }
+                    Toast.error('Failed to delete repository: ' + errorMsg);
+                }
+            } catch (e) {
+                Toast.error('Delete failed: ' + e.message);
             }
-            alert('Failed to delete repository: ' + errorMsg);
         }
-    } catch (e) {
-        alert('Delete failed: ' + e.message);
-        setTimeout(() => { window.location.replace(window.location.pathname); }, 500);
-    }
+    });
 }
 
 // Close modal on background click
@@ -860,13 +873,14 @@ async function importMetadata() {
 
         if (data.success) {
             const imported = data.imported || {};
-            alert(`Import complete!\n\nImported:\n- ${imported.agents || 0} agents\n- ${imported.jobs || 0} jobs\n- ${imported.runs || 0} backup runs`);
+            Toast.success(`Import complete! ${imported.agents || 0} agents, ${imported.jobs || 0} jobs, ${imported.runs || 0} runs`);
             hideScanModal();
+            setTimeout(() => location.reload(), 1500);
         } else {
-            alert('Import failed: ' + (data.error || 'Unknown error'));
+            Toast.error('Import failed: ' + (data.error || 'Unknown error'));
         }
     } catch (e) {
-        alert('Import failed: ' + e.message);
+        Toast.error('Import failed: ' + e.message);
     }
 
     btn.textContent = 'Import to Server';

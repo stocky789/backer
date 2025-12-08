@@ -435,6 +435,49 @@ def agent_register(server: str) -> None:
         raise SystemExit(1)
 
 
+@agent.command("configure")
+@click.option("--server", "-s", required=True, help="Server URL (e.g., http://backup-server:8420)")
+@click.option("--client-id", required=True, help="Client ID from server")
+@click.option("--client-secret", required=True, help="Client secret from server")
+def agent_configure(server: str, client_id: str, client_secret: str) -> None:
+    """Manually configure agent with server-provided credentials.
+
+    Use this when re-adding an agent that was previously registered, or when
+    credentials need to be reset. Get the credentials from the server web UI
+    by clicking "Reset" on the agent.
+
+    Example:
+        backer agent configure --server http://backup:8420 --client-id abc123 --client-secret xyz...
+    """
+    from backer.client.agent import BackerAgent
+
+    console.print(f"Configuring agent for server: {server}")
+    console.print(f"  Client ID: {client_id}")
+
+    try:
+        # Create agent and save the provided credentials
+        ag = BackerAgent(server_url=server)
+        ag.client_id = client_id
+        ag.client_secret = client_secret
+        ag._save_credentials(client_id, client_secret)
+
+        # Verify the credentials work by doing a heartbeat
+        console.print("Verifying connection...")
+        ag.heartbeat()
+
+        console.print("[green]✓ Configuration saved and verified[/green]")
+        console.print(f"  Config saved to: {ag.config_path}")
+        console.print()
+        console.print("[dim]Restart the agent service to apply changes:[/dim]")
+        console.print("  sudo systemctl restart backer-agent")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print()
+        console.print("[yellow]The credentials may be invalid.[/yellow]")
+        console.print("Try resetting credentials again from the server web UI.")
+        raise SystemExit(1)
+
+
 @agent.command("start")
 @click.option("--server", "-s", help="Server URL (uses saved config if not specified)")
 def agent_start(server: str | None) -> None:

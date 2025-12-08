@@ -147,7 +147,7 @@ Server Settings
             <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
                 These actions are destructive and cannot be undone.
             </p>
-            <button class="btn btn-danger" onclick="if(confirm('This will delete ALL backup history. Are you sure?')) alert('Not implemented yet');">
+            <button class="btn btn-danger" onclick="showConfirmModal({title: 'Clear All History', message: 'This will delete ALL backup history. Are you sure?', confirmText: 'Clear History', onConfirm: () => Toast.info('Not implemented yet')});">
                 Clear All History
             </button>
         </div>

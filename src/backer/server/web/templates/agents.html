@@ -83,7 +83,10 @@
                         <td class="text-muted">{{ agent.os_info or '-' }}</td>
                         <td class="text-muted">{{ agent.last_seen_ago }}</td>
                         <td>
-                            <button class="btn btn-danger btn-sm" onclick="removeAgent('{{ agent.id }}', '{{ agent.name }}')">Remove</button>
+                            <div style="display: flex; gap: 6px;">
+                                <button class="btn btn-secondary btn-sm" onclick="resetCredentials('{{ agent.id }}', '{{ agent.name }}')" title="Reset agent credentials">Reset</button>
+                                <button class="btn btn-danger btn-sm" onclick="removeAgent('{{ agent.id }}', '{{ agent.name }}')">Remove</button>
+                            </div>
                         </td>
                     </tr>
                     {% else %}
@@ -180,7 +183,148 @@ backer agent start</pre>
     </div>
 </div>
 
+<!-- Credentials Modal -->
+<div id="credentialsModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-header">
+            <span class="modal-title">
+                <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                Agent Credentials Reset
+            </span>
+            <button class="modal-close" onclick="closeCredentialsModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="credentialsLoading" class="loading-state">Generating new credentials...</div>
+            <div id="credentialsContent" style="display: none;">
+                <div class="credentials-alert">
+                    <svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <div>
+                        <strong>Important:</strong> Copy this command now. The credentials are only shown once.
+                    </div>
+                </div>
+
+                <div class="credentials-section">
+                    <div class="credentials-label">Agent</div>
+                    <div id="credentialsHostname" class="credentials-value">-</div>
+                </div>
+
+                <div class="credentials-section">
+                    <div class="credentials-label">Run this command on the agent machine:</div>
+                    <div class="credentials-command-wrapper">
+                        <pre id="credentialsCommand" class="credentials-command">-</pre>
+                        <button class="btn btn-sm btn-secondary" onclick="copyCredentialsCommand()" title="Copy to clipboard">
+                            <svg viewBox="0 0 24 24" style="width: 14px; height: 14px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="credentials-instructions">
+                    <div class="credentials-instruction-title">What to do:</div>
+                    <ol>
+                        <li>SSH into the agent machine or open a terminal</li>
+                        <li>Stop the agent service: <code>sudo systemctl stop backer-agent</code></li>
+                        <li>Run the command above to update credentials</li>
+                        <li>Start the agent service: <code>sudo systemctl start backer-agent</code></li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="copyCredentialsCommand(); closeCredentialsModal();">Copy & Close</button>
+            <button class="btn btn-secondary" onclick="closeCredentialsModal()">Close</button>
+        </div>
+    </div>
+</div>
+
 <style>
+.credentials-alert {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 12px 14px;
+    background: rgba(255, 185, 0, 0.1);
+    border: 1px solid rgba(255, 185, 0, 0.3);
+    border-radius: 6px;
+    margin-bottom: 20px;
+    font-size: 12px;
+}
+.credentials-alert svg {
+    width: 18px;
+    height: 18px;
+    stroke: var(--status-warning);
+    stroke-width: 2;
+    fill: none;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.credentials-section {
+    margin-bottom: 16px;
+}
+.credentials-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+.credentials-value {
+    font-size: 13px;
+    font-weight: 600;
+}
+.credentials-command-wrapper {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+.credentials-command {
+    flex: 1;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    margin: 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.credentials-instructions {
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    padding: 14px;
+    margin-top: 16px;
+}
+.credentials-instruction-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+.credentials-instructions ol {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.credentials-instructions li {
+    margin-bottom: 6px;
+}
+.credentials-instructions li:last-child {
+    margin-bottom: 0;
+}
+.credentials-instructions code {
+    background: var(--bg-panel);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+}
+.loading-state {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
 .setup-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -274,31 +418,118 @@ function filterAgents() {
 
 // Remove agent
 async function removeAgent(agentId, agentName) {
-    if (!confirm(`Remove agent '${agentName}'? It will need to re-register.`)) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/v1/clients/${agentId}`, {
-            method: 'DELETE'
-        });
-
-        if (response.ok) {
-            window.location.replace(window.location.pathname);
-        } else {
-            let errorMsg = `HTTP ${response.status}`;
+    showConfirmModal({
+        title: 'Remove Agent',
+        message: `Remove agent '${agentName}'? It will need to re-register to connect again.`,
+        confirmText: 'Remove',
+        onConfirm: async () => {
             try {
-                const data = await response.json();
-                errorMsg = data.detail || data.message || errorMsg;
-            } catch {
-                const text = await response.text();
-                if (text) errorMsg = text;
+                const response = await fetch(`/api/v1/clients/${agentId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    Toast.success('Agent removed successfully');
+                    setTimeout(() => window.location.replace(window.location.pathname), 1000);
+                } else {
+                    let errorMsg = `HTTP ${response.status}`;
+                    try {
+                        const data = await response.json();
+                        errorMsg = data.detail || data.message || errorMsg;
+                    } catch {
+                        const text = await response.text();
+                        if (text) errorMsg = text;
+                    }
+                    Toast.error('Failed to remove agent: ' + errorMsg);
+                }
+            } catch (e) {
+                Toast.error('Remove failed: ' + e.message);
             }
-            alert('Failed to remove agent: ' + errorMsg);
         }
-    } catch (e) {
-        alert('Remove failed: ' + e.message);
+    });
+}
+
+// Store current credentials command for copying
+let currentCredentialsCommand = '';
+
+// Reset agent credentials
+async function resetCredentials(agentId, agentName) {
+    showConfirmModal({
+        title: 'Reset Agent Credentials',
+        message: `Reset credentials for '${agentName}'? The agent will need to be reconfigured with the new credentials.`,
+        confirmText: 'Reset Credentials',
+        onConfirm: async () => {
+            // Show modal with loading state
+            document.getElementById('credentialsModal').style.display = 'flex';
+            document.getElementById('credentialsLoading').style.display = 'block';
+            document.getElementById('credentialsContent').style.display = 'none';
+
+            try {
+                const response = await fetch(`/api/v1/clients/${agentId}/reset-credentials`, {
+                    method: 'POST'
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+
+                    // Build the reconfigure command
+                    const serverUrl = window.location.origin;
+                    currentCredentialsCommand = `sudo backer agent configure --server ${serverUrl} --client-id ${data.client_id} --client-secret ${data.client_secret}`;
+
+                    // Update modal content
+                    document.getElementById('credentialsHostname').textContent = data.hostname;
+                    document.getElementById('credentialsCommand').textContent = currentCredentialsCommand;
+
+                    // Show content, hide loading
+                    document.getElementById('credentialsLoading').style.display = 'none';
+                    document.getElementById('credentialsContent').style.display = 'block';
+
+                    Toast.success('Credentials reset successfully');
+                } else {
+                    closeCredentialsModal();
+                    let errorMsg = `HTTP ${response.status}`;
+                    try {
+                        const data = await response.json();
+                        errorMsg = data.detail || data.message || errorMsg;
+                    } catch {
+                        const text = await response.text();
+                        if (text) errorMsg = text;
+                    }
+                    Toast.error('Failed to reset credentials: ' + errorMsg);
+                }
+            } catch (e) {
+                closeCredentialsModal();
+                Toast.error('Reset failed: ' + e.message);
+            }
+        }
+    });
+}
+
+function closeCredentialsModal() {
+    document.getElementById('credentialsModal').style.display = 'none';
+    currentCredentialsCommand = '';
+}
+
+function copyCredentialsCommand() {
+    if (currentCredentialsCommand) {
+        navigator.clipboard.writeText(currentCredentialsCommand).then(() => {
+            Toast.success('Command copied to clipboard');
+        }).catch(() => {
+            // Fallback for older browsers
+            const textarea = document.createElement('textarea');
+            textarea.value = currentCredentialsCommand;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            Toast.success('Command copied to clipboard');
+        });
     }
 }
+
+// Close modal on background click
+document.getElementById('credentialsModal')?.addEventListener('click', function(e) {
+    if (e.target === this) closeCredentialsModal();
+});
 </script>
 {% endblock %}

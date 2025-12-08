@@ -746,6 +746,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         return result
 
+    @app.post("/api/v1/clients/{client_id}/reset-credentials")
+    def reset_client_credentials(
+        client_id: str, storage: Storage = Depends(get_storage)
+    ) -> dict[str, Any]:
+        """Reset credentials for an existing agent.
+
+        Generates a new client_secret for the agent. The agent will need to
+        re-register using this new secret. Returns a one-time registration
+        token that can be used to re-register the agent.
+
+        This is useful when an agent's credentials become invalid (e.g., after
+        a reinstall where the old config was preserved but mismatched).
+        """
+        client = storage.get_client(client_id)
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        # Generate new credentials
+        client_secret = secrets.token_urlsafe(32)
+        secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
+        storage.update_client_secret(client_id, secret_hash)
+
+        logger.info(f"Reset credentials for client: {client_id} ({client.hostname})")
+
+        return {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "hostname": client.hostname,
+            "message": "Credentials reset. Use the command below to reconfigure the agent.",
+        }
+
     @app.post("/api/v1/commands/clear")
     def clear_pending_commands(
         storage: Storage = Depends(get_storage),

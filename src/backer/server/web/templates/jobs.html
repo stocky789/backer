@@ -406,8 +406,8 @@ async function runJob(jobName) {
 
         if (response.ok) {
             const data = await response.json();
-            alert(`Backup started!\nRun ID: ${data.run_id}\n${data.message}`);
-            location.reload();
+            Toast.success(`Backup started! Run ID: ${data.run_id}`);
+            setTimeout(() => location.reload(), 1500);
         } else {
             let errorMsg = 'Failed to start job';
             try {
@@ -417,10 +417,10 @@ async function runJob(jobName) {
                 const text = await response.text();
                 if (text) errorMsg = text;
             }
-            alert('Error: ' + errorMsg);
+            Toast.error(errorMsg);
         }
     } catch (e) {
-        alert('Error: ' + e.message);
+        Toast.error('Error: ' + e.message);
     }
 }
 
@@ -431,7 +431,8 @@ async function toggleJob(jobName) {
         });
 
         if (response.ok) {
-            location.reload();
+            Toast.success('Job status updated');
+            setTimeout(() => location.reload(), 500);
         } else {
             let errorMsg = 'Failed to toggle job';
             try {
@@ -441,10 +442,10 @@ async function toggleJob(jobName) {
                 const text = await response.text();
                 if (text) errorMsg = text;
             }
-            alert('Error: ' + errorMsg);
+            Toast.error(errorMsg);
         }
     } catch (e) {
-        alert('Error: ' + e.message);
+        Toast.error('Error: ' + e.message);
     }
 }
 
@@ -466,7 +467,7 @@ async function editJob(jobName) {
         onEditBackendChange();
         document.getElementById('editModal').style.display = 'flex';
     } catch (e) {
-        alert('Error loading job: ' + e.message);
+        Toast.error('Error loading job: ' + e.message);
     }
 }
 
@@ -652,8 +653,9 @@ async function confirmDeleteJob() {
             const data = await response.json();
             let message = 'Job deleted successfully.';
             if (data.message) message += ' ' + data.message;
-            alert(message);
-            location.reload();
+            Toast.success(message);
+            closeDeleteModal();
+            setTimeout(() => location.reload(), 1000);
         } else {
             let errorMsg = `HTTP ${response.status}`;
             try {

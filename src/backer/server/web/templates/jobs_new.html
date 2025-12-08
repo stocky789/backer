@@ -271,11 +271,20 @@ Creating New Backup Job
             <button class="modal-close" onclick="closeFileBrowser()">&times;</button>
         </div>
         <div class="modal-body">
+            <div class="file-browser-agent-info" id="fileBrowserAgentInfo">
+                <span class="file-browser-agent-badge">
+                    <svg viewBox="0 0 24 24" width="14" height="14"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    <span id="fileBrowserAgentName">No agent selected</span>
+                </span>
+            </div>
             <div class="file-browser-path" id="fileBrowserPath">
-                <span>/</span>
+                <span class="file-browser-path-segment" onclick="browsePath('')">Root</span>
             </div>
             <div class="file-browser-list" id="fileBrowserList">
-                <div class="loading-state">Select an agent first</div>
+                <div class="file-browser-empty">
+                    <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <span>Select an agent to browse its filesystem</span>
+                </div>
             </div>
         </div>
         <div class="modal-footer">
@@ -291,18 +300,37 @@ Creating New Backup Job
     font-size: 13px;
 }
 .form-section {
-    margin-bottom: 24px;
-    padding-bottom: 20px;
+    margin-bottom: 28px;
+    padding-bottom: 24px;
     border-bottom: 1px solid var(--border);
 }
 .form-section:last-of-type {
     border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
 }
 .form-section-title {
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 600;
-    margin-bottom: 14px;
-    color: var(--text);
+    margin-bottom: 16px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+.form-group {
+    margin-bottom: 16px;
+}
+.form-group:last-child {
+    margin-bottom: 0;
+}
+.form-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
 }
 .input-with-btn {
     display: flex;
@@ -310,6 +338,11 @@ Creating New Backup Job
 }
 .input-with-btn .form-input {
     flex: 1;
+}
+.form-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
 }
 .backup-method-cards {
     display: grid;
@@ -368,35 +401,64 @@ Creating New Backup Job
     padding: 2px 0;
     color: var(--text-muted);
 }
-.file-browser-path {
-    padding: 10px 12px;
-    background: var(--bg-tertiary);
-    border-radius: 4px;
+.file-browser-agent-info {
     margin-bottom: 12px;
+}
+.file-browser-agent-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-hover);
+    padding: 6px 12px;
+    border-radius: 4px;
     font-size: 12px;
+    color: var(--text-primary);
+}
+.file-browser-agent-badge svg {
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    fill: none;
+}
+.file-browser-path {
+    padding: 10px 14px;
+    background: var(--bg-hover);
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px;
 }
 .file-browser-path-segment {
     color: var(--accent);
     cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: background 0.15s;
 }
 .file-browser-path-segment:hover {
-    text-decoration: underline;
+    background: rgba(0, 120, 212, 0.1);
+}
+.file-browser-path-separator {
+    color: var(--text-muted);
+    margin: 0 2px;
 }
 .file-browser-list {
     border: 1px solid var(--border);
-    border-radius: 4px;
-    max-height: 300px;
+    border-radius: 6px;
+    max-height: 350px;
     overflow-y: auto;
-    background: var(--bg-secondary);
+    background: var(--bg-panel);
 }
 .file-browser-item {
-    padding: 10px 12px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: 13px;
     transition: background-color 0.15s;
 }
 .file-browser-item:last-child {
@@ -406,12 +468,86 @@ Creating New Backup Job
     background: var(--bg-hover);
 }
 .file-browser-item.selected {
-    background: rgba(0, 120, 212, 0.1);
+    background: var(--bg-selected);
 }
-.file-browser-icon {
-    width: 16px;
-    height: 16px;
-    opacity: 0.7;
+.file-browser-item-icon {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    flex-shrink: 0;
+}
+.file-browser-item-icon svg {
+    width: 18px;
+    height: 18px;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    fill: none;
+}
+.file-browser-item-icon.folder-icon {
+    color: #e8a93a;
+}
+.file-browser-item-icon.parent-icon {
+    color: var(--text-muted);
+}
+.file-browser-item-name {
+    flex: 1;
+    color: var(--text-primary);
+}
+.file-browser-empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+.file-browser-empty svg {
+    width: 40px;
+    height: 40px;
+    stroke: currentColor;
+    stroke-width: 1;
+    fill: none;
+    opacity: 0.5;
+}
+.file-browser-loading {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+}
+.file-browser-loading::before {
+    content: '';
+    display: block;
+    width: 24px;
+    height: 24px;
+    margin: 0 auto 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+.file-browser-error {
+    text-align: center;
+    padding: 24px 20px;
+    background: rgba(209, 52, 56, 0.08);
+    border: 1px solid rgba(209, 52, 56, 0.2);
+    border-radius: 6px;
+    color: var(--status-error);
+    font-size: 13px;
+}
+.file-browser-error svg {
+    width: 20px;
+    height: 20px;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+    margin-bottom: 8px;
+}
+.file-browser-error-actions {
+    margin-top: 12px;
 }
 .loading-state {
     text-align: center;
@@ -508,7 +644,14 @@ function onAgentChange() {
 
 function openFileBrowser() {
     const agentSelect = document.getElementById('agentSelect');
-    if (!agentSelect.value) { alert('Please select an agent first'); return; }
+    if (!agentSelect.value) {
+        Toast.warning('Please select an agent first');
+        return;
+    }
+
+    // Update the agent name in modal
+    const selectedOption = agentSelect.options[agentSelect.selectedIndex];
+    document.getElementById('fileBrowserAgentName').textContent = selectedOption.text;
 
     document.getElementById('fileBrowserModal').style.display = 'flex';
     currentBrowsePath = '';
@@ -527,7 +670,7 @@ function browsePath(path) {
     const clientId = agentSelect.value;
     const listEl = document.getElementById('fileBrowserList');
 
-    listEl.innerHTML = '<div class="loading-state">Loading...</div>';
+    listEl.innerHTML = '<div class="file-browser-loading">Connecting to agent...</div>';
     currentBrowsePath = path;
     updateBreadcrumb(path);
 
@@ -536,24 +679,45 @@ function browsePath(path) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: path })
     })
-    .then(r => r.json())
+    .then(r => {
+        if (!r.ok) throw new Error('Failed to connect to server');
+        return r.json();
+    })
     .then(data => {
         currentBrowseRequestId = data.request_id;
         startPolling();
     })
     .catch(err => {
-        listEl.innerHTML = `<div class="error-msg">Error: ${escapeHtml(err.message)}</div>`;
+        listEl.innerHTML = `
+            <div class="file-browser-error">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                <div>${escapeHtml(err.message)}</div>
+                <div class="file-browser-error-actions">
+                    <button class="btn btn-sm btn-secondary" onclick="browsePath('${escapeHtml(path)}')">Retry</button>
+                </div>
+            </div>`;
     });
 }
 
 function startPolling() {
     if (pollInterval) clearInterval(pollInterval);
     let attempts = 0;
+    const listEl = document.getElementById('fileBrowserList');
+
     pollInterval = setInterval(() => {
         attempts++;
-        if (attempts > 60) {
-            clearInterval(pollInterval); pollInterval = null;
-            document.getElementById('fileBrowserList').innerHTML = '<div class="error-msg">Request timed out. Agent may be offline.</div>';
+        if (attempts > 30) {  // 15 seconds timeout
+            clearInterval(pollInterval);
+            pollInterval = null;
+            listEl.innerHTML = `
+                <div class="file-browser-error">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <div>Request timed out</div>
+                    <div style="font-size: 12px; margin-top: 4px; opacity: 0.8;">The agent may be offline or not responding</div>
+                    <div class="file-browser-error-actions">
+                        <button class="btn btn-sm btn-secondary" onclick="browsePath('${escapeHtml(currentBrowsePath)}')">Retry</button>
+                    </div>
+                </div>`;
             return;
         }
 
@@ -561,13 +725,23 @@ function startPolling() {
         .then(r => r.json())
         .then(data => {
             if (data.status === 'completed') {
-                clearInterval(pollInterval); pollInterval = null;
+                clearInterval(pollInterval);
+                pollInterval = null;
                 renderFileList(data.entries, data.path);
             } else if (data.status === 'error') {
-                clearInterval(pollInterval); pollInterval = null;
-                document.getElementById('fileBrowserList').innerHTML = `<div class="error-msg">${escapeHtml(data.error || 'Unknown error')}</div>`;
+                clearInterval(pollInterval);
+                pollInterval = null;
+                listEl.innerHTML = `
+                    <div class="file-browser-error">
+                        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                        <div>${escapeHtml(data.error || 'Unknown error')}</div>
+                        <div class="file-browser-error-actions">
+                            <button class="btn btn-sm btn-secondary" onclick="browsePath('${escapeHtml(currentBrowsePath)}')">Retry</button>
+                        </div>
+                    </div>`;
             }
-        });
+        })
+        .catch(() => {});  // Ignore poll errors, will retry
     }, 500);
 }
 
@@ -575,6 +749,7 @@ function renderFileList(entries, path) {
     const listEl = document.getElementById('fileBrowserList');
     listEl.innerHTML = '';
 
+    // Add parent directory option if not at root
     if (path && path !== '/') {
         const parentPath = path.includes('\\')
             ? path.substring(0, path.lastIndexOf('\\')) || path.substring(0, 3)
@@ -583,14 +758,22 @@ function renderFileList(entries, path) {
 
         const parentItem = document.createElement('div');
         parentItem.className = 'file-browser-item';
-        parentItem.innerHTML = '<span class="file-browser-name">..</span>';
+        parentItem.innerHTML = `
+            <span class="file-browser-item-icon parent-icon">
+                <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+            </span>
+            <span class="file-browser-item-name">..</span>`;
         parentItem.onclick = () => browsePath(goBackPath);
         listEl.appendChild(parentItem);
     }
 
     const dirs = entries.filter(e => e.is_dir);
     if (dirs.length === 0 && !path) {
-        listEl.innerHTML = '<div class="loading-state">No directories found</div>';
+        listEl.innerHTML = `
+            <div class="file-browser-empty">
+                <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span>No directories found</span>
+            </div>`;
         return;
     }
 
@@ -598,7 +781,11 @@ function renderFileList(entries, path) {
         const item = document.createElement('div');
         item.className = 'file-browser-item';
         item.dataset.path = entry.path;
-        item.innerHTML = `<span class="file-browser-name">${escapeHtml(entry.name)}</span>`;
+        item.innerHTML = `
+            <span class="file-browser-item-icon folder-icon">
+                <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </span>
+            <span class="file-browser-item-name">${escapeHtml(entry.name)}</span>`;
         item.onclick = () => {
             document.querySelectorAll('.file-browser-item.selected').forEach(el => el.classList.remove('selected'));
             item.classList.add('selected');
@@ -632,8 +819,8 @@ function updateBreadcrumb(path) {
         const fullPath = currentPath;
 
         const sep = document.createElement('span');
-        sep.style.color = 'var(--text-muted)';
-        sep.textContent = ` ${separator} `;
+        sep.className = 'file-browser-path-separator';
+        sep.textContent = separator;
         pathEl.appendChild(sep);
 
         const seg = document.createElement('span');
@@ -647,6 +834,7 @@ function updateBreadcrumb(path) {
 function selectPath() {
     if (selectedBrowsePath) {
         document.getElementById('sourcePathInput').value = selectedBrowsePath;
+        Toast.success('Path selected: ' + selectedBrowsePath);
         closeFileBrowser();
     }
 }

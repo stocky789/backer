@@ -802,7 +802,7 @@ async function testNewHypervisor() {
         const result = await response.json();
 
         if (result.success) {
-            alert(`Connection successful!\n\nVersion: ${result.version || 'Unknown'}`);
+            Toast.success(`Connection successful! Version: ${result.version || 'Unknown'}`);
         } else {
             errorDiv.textContent = result.message || 'Connection failed';
             errorDiv.style.display = 'block';
@@ -1029,38 +1029,44 @@ async function testHypervisor(hvId) {
         const result = await response.json();
 
         if (result.success) {
-            alert(`Connection successful!\n\nVersion: ${result.version || 'Unknown'}`);
-            location.reload();
+            Toast.success(`Connection successful! Version: ${result.version || 'Unknown'}`);
+            setTimeout(() => location.reload(), 1000);
         } else {
-            alert('Connection failed: ' + (result.message || 'Unknown error'));
+            Toast.error('Connection failed: ' + (result.message || 'Unknown error'));
         }
     } catch (e) {
-        alert('Test failed: ' + e.message);
+        Toast.error('Test failed: ' + e.message);
     }
 }
 
 async function deleteHypervisor(hvId, hvName) {
-    if (!confirm(`Delete hypervisor '${hvName}'?\n\nThis will also delete all associated backup jobs.`)) return;
-
-    try {
-        const response = await fetch(`/api/v1/hypervisors/${hvId}`, { method: 'DELETE' });
-
-        if (response.ok) {
-            location.reload();
-        } else {
-            let errorMsg = `HTTP ${response.status}`;
+    showConfirmModal({
+        title: 'Delete Hypervisor',
+        message: `Delete hypervisor '${hvName}'? This will also delete all associated backup jobs.`,
+        confirmText: 'Delete',
+        onConfirm: async () => {
             try {
-                const data = await response.json();
-                errorMsg = data.detail || data.message || errorMsg;
-            } catch {
-                const text = await response.text();
-                if (text) errorMsg = text;
+                const response = await fetch(`/api/v1/hypervisors/${hvId}`, { method: 'DELETE' });
+
+                if (response.ok) {
+                    Toast.success('Hypervisor deleted');
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    let errorMsg = `HTTP ${response.status}`;
+                    try {
+                        const data = await response.json();
+                        errorMsg = data.detail || data.message || errorMsg;
+                    } catch {
+                        const text = await response.text();
+                        if (text) errorMsg = text;
+                    }
+                    Toast.error('Failed to delete: ' + errorMsg);
+                }
+            } catch (e) {
+                Toast.error('Delete failed: ' + e.message);
             }
-            alert('Failed to delete: ' + errorMsg);
         }
-    } catch (e) {
-        alert('Delete failed: ' + e.message);
-    }
+    });
 }
 
 // ========== Job Management ==========
@@ -1243,13 +1249,13 @@ async function runHypervisorJob(jobId) {
         const result = await response.json();
 
         if (response.ok) {
-            alert(`Backup started!\n\nRun ID: ${result.run_id}\n${result.message || ''}`);
-            location.reload();
+            Toast.success(`Backup started! Run ID: ${result.run_id}`);
+            setTimeout(() => location.reload(), 1500);
         } else {
-            alert('Failed to start backup: ' + (result.detail || 'Unknown error'));
+            Toast.error('Failed to start backup: ' + (result.detail || 'Unknown error'));
         }
     } catch (e) {
-        alert('Error: ' + e.message);
+        Toast.error('Error: ' + e.message);
     }
 }
 
@@ -1337,13 +1343,14 @@ async function toggleHypervisorJob(jobId) {
         const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}/toggle`, { method: 'PATCH' });
 
         if (response.ok) {
-            location.reload();
+            Toast.success('Job status updated');
+            setTimeout(() => location.reload(), 500);
         } else {
             const result = await response.json();
-            alert('Failed to toggle: ' + (result.detail || 'Unknown error'));
+            Toast.error('Failed to toggle: ' + (result.detail || 'Unknown error'));
         }
     } catch (e) {
-        alert('Error: ' + e.message);
+        Toast.error('Error: ' + e.message);
     }
 }
 
@@ -1366,12 +1373,13 @@ function deleteHypervisorJob(jobId, jobName) {
                 const result = await response.json();
 
                 if (response.ok) {
-                    location.reload();
+                    Toast.success('Job deleted');
+                    setTimeout(() => location.reload(), 1000);
                 } else {
-                    alert('Failed to delete: ' + (result.detail || result.message || `HTTP ${response.status}`));
+                    Toast.error('Failed to delete: ' + (result.detail || result.message || `HTTP ${response.status}`));
                 }
             } catch (e) {
-                alert('Delete failed: ' + e.message);
+                Toast.error('Delete failed: ' + e.message);
             }
         }
     });
@@ -1457,7 +1465,7 @@ async function submitRestore(event) {
             const result = await response.json();
 
             if (response.ok) {
-                alert(`Restore started!\n\nTask ID: ${result.task_id}\n\nThe backup repository will be temporarily mounted on Proxmox.`);
+                Toast.success(`Restore started! Task ID: ${result.task_id}`);
                 hideRestoreModal();
             } else {
                 errorDiv.textContent = result.detail || 'Failed to start restore';
@@ -1488,7 +1496,7 @@ async function submitRestore(event) {
             const result = await response.json();
 
             if (response.ok) {
-                alert(`Restore started!\n\nTask ID: ${result.upid || result.task_id}`);
+                Toast.success(`Restore started! Task ID: ${result.upid || result.task_id}`);
                 hideRestoreModal();
             } else {
                 errorDiv.textContent = result.detail || 'Failed to start restore';
