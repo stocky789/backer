@@ -6,7 +6,7 @@
 # Usage:
 #   ./uninstall-agent.sh
 #   or
-#   curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/scripts/uninstall-agent.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/uninstall-agent.sh | bash
 #
 
 set -e
