@@ -276,6 +276,20 @@ body {
     background: #cce5ff;
 }
 
+.ribbon-btn.active {
+    background: var(--accent-light);
+    border-color: var(--accent);
+}
+
+.ribbon-btn.active .ribbon-btn-icon {
+    color: var(--accent);
+}
+
+.ribbon-btn.active .ribbon-btn-label {
+    color: var(--accent);
+    font-weight: 600;
+}
+
 .ribbon-btn.disabled {
     opacity: 0.5;
     cursor: not-allowed;
