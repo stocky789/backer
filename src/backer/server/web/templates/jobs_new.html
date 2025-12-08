@@ -1,269 +1,270 @@
 {% extends "base.html" %}
-{% block title %}New Backup - Backer{% endblock %}
-{% block page_title %}Create Backup Job{% endblock %}
+{% block title %}New Backup Job - Backer{% endblock %}
+
+{% block status_left %}
+Creating New Backup Job
+{% endblock %}
 
 {% block content %}
-<div class="card" style="max-width: 700px;">
-    <div class="card-header">
-        <span class="card-title">Backup Configuration</span>
-    </div>
-    <div class="card-body">
-        {% set error = request.query_params.get('error') %}
-        {% if error %}
-        <div class="alert alert-error" style="margin-bottom: 20px;">
-            {% if error == 'invalid_repo' %}
-            <strong>Error:</strong> Invalid storage repository selected.
-            {% elif error == 'invalid_name' %}
-            <strong>Error:</strong> Job name cannot start with "restore:".
-            {% elif error == 'job_exists' %}
-            <strong>Error:</strong> A job with this name already exists.
-            {% else %}
-            <strong>Error:</strong> Failed to create job. Please try again.
-            {% endif %}
+<!-- Toolbar -->
+<div class="toolbar">
+    <span class="toolbar-title">Create Backup Job</span>
+    <div class="toolbar-spacer"></div>
+    <a href="/jobs" class="toolbar-btn">
+        <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        Back to Jobs
+    </a>
+</div>
+
+<div class="content-body">
+    <div class="card" style="max-width: 800px;">
+        <div class="card-header">
+            <span class="card-title">Backup Configuration</span>
         </div>
-        {% endif %}
-
-        <form action="/jobs/create" method="POST">
-            <div class="form-group">
-                <label class="form-label">
-                    Backup Name *
-                    <span class="tooltip-icon" data-tooltip="Choose a descriptive name that helps you identify this backup. Examples: 'daily-documents', 'weekly-photos', 'dev-projects'">?</span>
-                </label>
-                <input type="text" name="name" class="form-input" required
-                       placeholder="e.g., daily-documents" pattern="^(?!restore:).*$"
-                       title="Job name cannot start with 'restore:'">
-                <div class="form-hint">A friendly name for this backup job</div>
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">
-                    Agent *
-                    <span class="tooltip-icon" data-tooltip="Select the computer where your files are located. The agent software must be installed and connected on that computer.">?</span>
-                </label>
-                <select name="client_id" class="form-input" required id="agentSelect" onchange="onAgentChange()">
-                    <option value="">Select an agent...</option>
-                    {% for agent in agents %}
-                    <option value="{{ agent.id }}" data-os="{{ agent.os_info|default('', true) }}">{{ agent.name }} ({{ agent.hostname }})</option>
-                    {% endfor %}
-                </select>
-                <div class="form-hint">Which computer to backup</div>
-                {% if not agents %}
-                <div class="form-hint" style="color: var(--warning);">
-                    No agents registered. <a href="/agents" style="color: var(--accent);">Set up an agent first</a>
-                </div>
+        <div class="card-body">
+            {% set error = request.query_params.get('error') %}
+            {% if error %}
+            <div class="error-msg" style="margin-bottom: 16px;">
+                {% if error == 'invalid_repo' %}
+                Invalid storage repository selected.
+                {% elif error == 'invalid_name' %}
+                Job name cannot start with "restore:".
+                {% elif error == 'job_exists' %}
+                A job with this name already exists.
+                {% else %}
+                Failed to create job. Please try again.
                 {% endif %}
             </div>
+            {% endif %}
 
-            <div class="form-group">
-                <label class="form-label">
-                    Source Path *
-                    <span class="tooltip-icon" data-tooltip="The folder on the agent's computer that you want to back up. Use the Browse button to explore the agent's filesystem.">?</span>
-                </label>
-                <div class="input-with-btn">
-                    <input type="text" name="source_path" class="form-input" required id="sourcePathInput"
-                           placeholder="C:\Users\John\Documents or /home/john">
-                    <button type="button" class="btn btn-secondary" onclick="openFileBrowser()" id="browseBtn" disabled>
-                        Browse
-                    </button>
-                </div>
-                <div class="form-hint">Folder on the agent's computer to backup</div>
-            </div>
+            <form action="/jobs/create" method="POST">
+                <!-- Basic Settings -->
+                <div class="form-section">
+                    <div class="form-section-title">Basic Settings</div>
 
-            <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+                    <div class="form-group">
+                        <label class="form-label">Backup Name *</label>
+                        <input type="text" name="name" class="form-input" required
+                               placeholder="e.g., daily-documents" pattern="^(?!restore:).*$"
+                               title="Job name cannot start with 'restore:'">
+                        <div class="form-hint">A friendly name for this backup job</div>
+                    </div>
 
-            <div class="form-group">
-                <label class="form-label">
-                    Destination Repository *
-                    <span class="tooltip-icon" data-tooltip="Where your backups will be stored. This is typically a network share (SMB/NFS) or cloud storage. Configure repositories in the Storage section.">?</span>
-                </label>
-                <select name="repository_id" class="form-input" required id="repoSelect" onchange="onRepoChange()">
-                    <option value="">Select a storage repository...</option>
-                    {% for repo in repositories %}
-                    <option value="{{ repo.id }}"
-                            data-server="{{ repo.server }}"
-                            data-share="{{ repo.share }}"
-                            data-path="{{ repo.path }}">
-                        {{ repo.name }} ({{ repo.repo_type|upper }}: //{{ repo.server }}/{{ repo.share }})
-                    </option>
-                    {% endfor %}
-                </select>
-                <div class="form-hint">Where to store backups</div>
-                {% if not repositories %}
-                <div class="form-hint" style="color: var(--warning);">
-                    No repositories configured. <a href="/storage" style="color: var(--accent);">Add a storage repository first</a>
-                </div>
-                {% endif %}
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">
-                    Subfolder (optional)
-                    <span class="tooltip-icon" data-tooltip="Organize your backups by adding a subfolder path. Useful for keeping different machines or backup jobs separate within the same repository.">?</span>
-                </label>
-                <input type="text" name="dest_subfolder" class="form-input" id="destSubfolder"
-                       placeholder="backups/workstation-1">
-                <div class="form-hint">Additional path within the repository</div>
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">Full Destination Path</label>
-                <input type="text" class="form-input" id="fullDestPath" readonly
-                       style="background: var(--bg-primary); color: var(--text-muted);">
-            </div>
-
-            <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
-
-            <div class="form-group">
-                <label class="form-label">Backup Method</label>
-                <div class="backup-method-cards" id="backendCards">
-                    <label class="backup-method-card selected" data-value="kopia">
-                        <input type="radio" name="backend" value="kopia" checked style="display: none;">
-                        <div class="method-header">
-                            <span class="method-name">Kopia</span>
-                            <span class="method-badge recommended">Recommended</span>
+                    <div class="form-group">
+                        <label class="form-label">Agent *</label>
+                        <select name="client_id" class="form-input" required id="agentSelect" onchange="onAgentChange()">
+                            <option value="">Select an agent...</option>
+                            {% for agent in agents %}
+                            <option value="{{ agent.id }}" data-os="{{ agent.os_info|default('', true) }}">{{ agent.name }} ({{ agent.hostname }})</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-hint">Which computer to backup</div>
+                        {% if not agents %}
+                        <div class="form-hint" style="color: var(--warning);">
+                            No agents registered. <a href="/agents" style="color: var(--accent);">Set up an agent first</a>
                         </div>
-                        <div class="method-desc">Modern backup with encryption, compression & deduplication</div>
-                        <ul class="method-features">
-                            <li>✓ Encrypted & secure</li>
-                            <li>✓ Fast incremental backups</li>
-                            <li>✓ Point-in-time recovery</li>
-                            <li>✓ Best compression ratio</li>
-                        </ul>
-                    </label>
-                    <label class="backup-method-card" data-value="restic">
-                        <input type="radio" name="backend" value="restic" style="display: none;">
-                        <div class="method-header">
-                            <span class="method-name">Restic</span>
-                            <span class="method-badge">Established</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Source Path *</label>
+                        <div class="input-with-btn">
+                            <input type="text" name="source_path" class="form-input" required id="sourcePathInput"
+                                   placeholder="C:\Users\John\Documents or /home/john">
+                            <button type="button" class="btn btn-secondary" onclick="openFileBrowser()" id="browseBtn" disabled>
+                                Browse
+                            </button>
                         </div>
-                        <div class="method-desc">Battle-tested encrypted backup with deduplication</div>
-                        <ul class="method-features">
-                            <li>✓ Encrypted & secure</li>
-                            <li>✓ Snapshot-based versioning</li>
-                            <li>✓ Point-in-time recovery</li>
-                            <li>✓ Mature & well-tested</li>
-                        </ul>
-                    </label>
-                    <label class="backup-method-card" data-value="rclone">
-                        <input type="radio" name="backend" value="rclone" style="display: none;">
-                        <div class="method-header">
-                            <span class="method-name">Rclone</span>
-                            <span class="method-badge">Simple Sync</span>
+                        <div class="form-hint">Folder on the agent's computer to backup</div>
+                    </div>
+                </div>
+
+                <!-- Destination Settings -->
+                <div class="form-section">
+                    <div class="form-section-title">Destination</div>
+
+                    <div class="form-group">
+                        <label class="form-label">Destination Repository *</label>
+                        <select name="repository_id" class="form-input" required id="repoSelect" onchange="onRepoChange()">
+                            <option value="">Select a storage repository...</option>
+                            {% for repo in repositories %}
+                            <option value="{{ repo.id }}"
+                                    data-server="{{ repo.server }}"
+                                    data-share="{{ repo.share }}"
+                                    data-path="{{ repo.path }}">
+                                {{ repo.name }} ({{ repo.repo_type|upper }}: //{{ repo.server }}/{{ repo.share }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-hint">Where to store backups</div>
+                        {% if not repositories %}
+                        <div class="form-hint" style="color: var(--warning);">
+                            No repositories configured. <a href="/storage" style="color: var(--accent);">Add a storage repository first</a>
                         </div>
-                        <div class="method-desc">Fast file sync to network shares (no encryption)</div>
-                        <ul class="method-features">
-                            <li>✓ Very fast transfers</li>
-                            <li>✓ Simple mirror copy</li>
-                            <li>✗ No versioning</li>
-                            <li>✗ No encryption</li>
-                        </ul>
-                    </label>
-                </div>
-                <div class="form-hint" style="margin-top: 12px;">
-                    <strong>Kopia</strong> and <strong>Restic</strong> create versioned backups - you can restore files from any point in time.<br>
-                    <strong>Rclone</strong> mirrors files to the destination - overwrites previous backups (no history).
-                </div>
-            </div>
+                        {% endif %}
+                    </div>
 
-            <div class="form-group" id="resticPasswordGroup" style="display: none;">
-                <label class="form-label" id="repoPasswordLabel">Repository Password</label>
-                <input type="password" name="restic_password" class="form-input" id="resticPassword"
-                       placeholder="Leave empty to use default password">
-                <div class="form-hint">
-                    Password used to encrypt the repository. If left empty, a default password will be used.<br>
-                    <strong>Important:</strong> Remember this password - you'll need it to restore backups!
+                    <div class="form-group">
+                        <label class="form-label">Subfolder (optional)</label>
+                        <input type="text" name="dest_subfolder" class="form-input" id="destSubfolder"
+                               placeholder="backups/workstation-1">
+                        <div class="form-hint">Additional path within the repository</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Full Destination Path</label>
+                        <input type="text" class="form-input" id="fullDestPath" readonly
+                               style="background: var(--bg-tertiary); color: var(--text-muted);">
+                    </div>
                 </div>
-            </div>
 
-            <div class="form-group">
-                <label class="form-label">
-                    Exclude Patterns
-                    <span class="tooltip-icon" data-tooltip="Files and folders matching these patterns will be skipped during backup. Use wildcards like *.tmp for file types or exact folder names like node_modules.">?</span>
-                </label>
-                <input type="text" name="excludes" class="form-input"
-                       placeholder="*.tmp, .cache, node_modules, Thumbs.db">
-                <div class="form-hint">Files/folders to skip (comma-separated)</div>
-            </div>
+                <!-- Backup Method -->
+                <div class="form-section">
+                    <div class="form-section-title">Backup Method</div>
 
-            <div class="form-group">
-                <label class="form-label">
-                    Schedule
-                    <span class="tooltip-icon" data-tooltip="Set when backups should run automatically. Leave as 'Manual only' if you want to trigger backups yourself.">?</span>
-                </label>
-                <select name="schedule_preset" class="form-input" id="schedulePreset" onchange="onScheduleChange()">
-                    <option value="">Manual only (no automatic backups)</option>
-                    <option value="0 2 * * *">Daily at 2:00 AM</option>
-                    <option value="0 3 * * 0">Weekly on Sunday at 3:00 AM</option>
-                    <option value="0 1 * * 1-5">Weekdays at 1:00 AM</option>
-                    <option value="0 */6 * * *">Every 6 hours</option>
-                    <option value="custom">Custom (enter cron expression)</option>
-                </select>
-                <div class="form-hint">When to automatically run this backup</div>
-            </div>
+                    <div class="backup-method-cards" id="backendCards">
+                        <label class="backup-method-card selected" data-value="kopia">
+                            <input type="radio" name="backend" value="kopia" checked style="display: none;">
+                            <div class="method-header">
+                                <span class="method-name">Kopia</span>
+                                <span class="method-badge recommended">Recommended</span>
+                            </div>
+                            <div class="method-desc">Modern backup with encryption, compression & deduplication</div>
+                            <ul class="method-features">
+                                <li>Encrypted & secure</li>
+                                <li>Fast incremental backups</li>
+                                <li>Point-in-time recovery</li>
+                            </ul>
+                        </label>
+                        <label class="backup-method-card" data-value="restic">
+                            <input type="radio" name="backend" value="restic" style="display: none;">
+                            <div class="method-header">
+                                <span class="method-name">Restic</span>
+                                <span class="method-badge">Established</span>
+                            </div>
+                            <div class="method-desc">Battle-tested encrypted backup with deduplication</div>
+                            <ul class="method-features">
+                                <li>Encrypted & secure</li>
+                                <li>Snapshot-based versioning</li>
+                                <li>Mature & well-tested</li>
+                            </ul>
+                        </label>
+                        <label class="backup-method-card" data-value="rclone">
+                            <input type="radio" name="backend" value="rclone" style="display: none;">
+                            <div class="method-header">
+                                <span class="method-name">Rclone</span>
+                                <span class="method-badge">Simple Sync</span>
+                            </div>
+                            <div class="method-desc">Fast file sync to network shares (no encryption)</div>
+                            <ul class="method-features">
+                                <li>Very fast transfers</li>
+                                <li>Simple mirror copy</li>
+                                <li>No versioning</li>
+                            </ul>
+                        </label>
+                    </div>
 
-            <div class="form-group" id="customCronGroup" style="display: none;">
-                <label class="form-label">Custom Schedule (Cron)</label>
-                <input type="text" name="schedule_cron" class="form-input" id="scheduleInput"
-                       placeholder="0 2 * * *">
-                <div class="form-hint">
-                    Format: minute hour day month weekday<br>
-                    Example: "0 2 * * *" = 2:00 AM daily
+                    <div class="form-group" id="resticPasswordGroup" style="display: none; margin-top: 16px;">
+                        <label class="form-label" id="repoPasswordLabel">Repository Password</label>
+                        <input type="password" name="restic_password" class="form-input" id="resticPassword"
+                               placeholder="Leave empty to use default password">
+                        <div class="form-hint">
+                            Password used to encrypt the repository. If left empty, a default password will be used.
+                            <strong>Remember this password - you'll need it to restore backups!</strong>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Exclude Patterns</label>
+                        <input type="text" name="excludes" class="form-input"
+                               placeholder="*.tmp, .cache, node_modules, Thumbs.db">
+                        <div class="form-hint">Files/folders to skip (comma-separated)</div>
+                    </div>
                 </div>
-            </div>
 
-            <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+                <!-- Schedule Settings -->
+                <div class="form-section">
+                    <div class="form-section-title">Schedule</div>
 
-            <div class="form-group">
-                <label class="form-label">
-                    Retention Policy
-                    <span class="tooltip-icon" data-tooltip="Controls how many old backups to keep. Standard is recommended for most users - it keeps 7 days of daily backups plus 4 weekly snapshots.">?</span>
-                </label>
-                <select name="retention_preset" class="form-input" id="retentionPreset" onchange="onRetentionChange()">
-                    <option value="forever">Keep all backups (no automatic cleanup)</option>
-                    <option value="minimal">Minimal (keep last 3 backups)</option>
-                    <option value="standard" selected>Standard (7 daily + 4 weekly)</option>
-                    <option value="extended">Extended (14 daily + 8 weekly + 12 monthly)</option>
-                    <option value="custom">Custom settings</option>
-                </select>
-                <div class="form-hint">How long to keep old backup history records</div>
-            </div>
+                    <div class="form-group">
+                        <label class="form-label">Schedule</label>
+                        <select name="schedule_preset" class="form-input" id="schedulePreset" onchange="onScheduleChange()">
+                            <option value="">Manual only (no automatic backups)</option>
+                            <option value="0 2 * * *">Daily at 2:00 AM</option>
+                            <option value="0 3 * * 0">Weekly on Sunday at 3:00 AM</option>
+                            <option value="0 1 * * 1-5">Weekdays at 1:00 AM</option>
+                            <option value="0 */6 * * *">Every 6 hours</option>
+                            <option value="custom">Custom (enter cron expression)</option>
+                        </select>
+                        <div class="form-hint">When to automatically run this backup</div>
+                    </div>
 
-            <div id="customRetentionGroup" style="display: none;">
-                <div class="form-group">
-                    <label class="form-label">Keep Last N Backups</label>
-                    <input type="number" name="retention_keep_last" class="form-input" id="retentionKeepLast"
-                           placeholder="7" min="0">
+                    <div class="form-group" id="customCronGroup" style="display: none;">
+                        <label class="form-label">Custom Schedule (Cron)</label>
+                        <input type="text" name="schedule_cron" class="form-input" id="scheduleInput"
+                               placeholder="0 2 * * *">
+                        <div class="form-hint">Format: minute hour day month weekday (e.g., "0 2 * * *" = 2:00 AM daily)</div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">Keep Daily for N Days</label>
-                    <input type="number" name="retention_keep_daily" class="form-input" id="retentionKeepDaily"
-                           placeholder="7" min="0">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Keep Weekly for N Weeks</label>
-                    <input type="number" name="retention_keep_weekly" class="form-input" id="retentionKeepWeekly"
-                           placeholder="4" min="0">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Keep Monthly for N Months</label>
-                    <input type="number" name="retention_keep_monthly" class="form-input" id="retentionKeepMonthly"
-                           placeholder="12" min="0">
-                </div>
-            </div>
 
-            <div style="display: flex; gap: 10px; margin-top: 30px;">
-                <button type="submit" class="btn btn-primary">Create Backup Job</button>
-                <a href="/jobs" class="btn btn-secondary">Cancel</a>
-            </div>
-        </form>
+                <!-- Retention Settings -->
+                <div class="form-section">
+                    <div class="form-section-title">Retention Policy</div>
+
+                    <div class="form-group">
+                        <label class="form-label">Retention Policy</label>
+                        <select name="retention_preset" class="form-input" id="retentionPreset" onchange="onRetentionChange()">
+                            <option value="forever">Keep all backups (no automatic cleanup)</option>
+                            <option value="minimal">Minimal (keep last 3 backups)</option>
+                            <option value="standard" selected>Standard (7 daily + 4 weekly)</option>
+                            <option value="extended">Extended (14 daily + 8 weekly + 12 monthly)</option>
+                            <option value="custom">Custom settings</option>
+                        </select>
+                        <div class="form-hint">How long to keep old backup history records</div>
+                    </div>
+
+                    <div id="customRetentionGroup" style="display: none;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">Keep Last N Backups</label>
+                                <input type="number" name="retention_keep_last" class="form-input" id="retentionKeepLast"
+                                       placeholder="7" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Keep Daily for N Days</label>
+                                <input type="number" name="retention_keep_daily" class="form-input" id="retentionKeepDaily"
+                                       placeholder="7" min="0">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">Keep Weekly for N Weeks</label>
+                                <input type="number" name="retention_keep_weekly" class="form-input" id="retentionKeepWeekly"
+                                       placeholder="4" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Keep Monthly for N Months</label>
+                                <input type="number" name="retention_keep_monthly" class="form-input" id="retentionKeepMonthly"
+                                       placeholder="12" min="0">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer" style="border-top: none; padding-top: 0;">
+                    <button type="submit" class="btn btn-primary">Create Backup Job</button>
+                    <a href="/jobs" class="btn btn-secondary">Cancel</a>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 
 <!-- File Browser Modal -->
-<div class="modal-overlay file-browser-modal" id="fileBrowserModal">
-    <div class="modal">
+<div class="modal" id="fileBrowserModal" style="display: none;">
+    <div class="modal-content" style="max-width: 600px;">
         <div class="modal-header">
-            <span class="modal-title">Browse Agent Filesystem</span>
+            <h3>Browse Agent Filesystem</h3>
             <button class="modal-close" onclick="closeFileBrowser()">&times;</button>
         </div>
         <div class="modal-body">
@@ -271,20 +272,161 @@
                 <span>/</span>
             </div>
             <div class="file-browser-list" id="fileBrowserList">
-                <div class="file-browser-loading">Select an agent first</div>
+                <div class="loading-state">Select an agent first</div>
             </div>
         </div>
         <div class="modal-footer">
-            <button class="btn btn-secondary" onclick="closeFileBrowser()">Cancel</button>
             <button class="btn btn-primary" onclick="selectPath()" id="selectPathBtn" disabled>Select Folder</button>
+            <button class="btn btn-secondary" onclick="closeFileBrowser()">Cancel</button>
         </div>
     </div>
 </div>
 
-<script>
-function onRepoChange() {
-    updateDestPath();
+<style>
+.toolbar-title {
+    font-weight: 600;
+    font-size: 13px;
 }
+.form-section {
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+}
+.form-section:last-of-type {
+    border-bottom: none;
+}
+.form-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 14px;
+    color: var(--text);
+}
+.input-with-btn {
+    display: flex;
+    gap: 8px;
+}
+.input-with-btn .form-input {
+    flex: 1;
+}
+.backup-method-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+.backup-method-card {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    background: var(--bg-secondary);
+}
+.backup-method-card:hover {
+    border-color: var(--accent);
+}
+.backup-method-card.selected {
+    border-color: var(--accent);
+    background: rgba(0, 120, 212, 0.08);
+}
+.method-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.method-name {
+    font-weight: 600;
+    font-size: 13px;
+}
+.method-badge {
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+.method-badge.recommended {
+    background: var(--success);
+    color: white;
+}
+.method-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+.method-features {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 11px;
+}
+.method-features li {
+    padding: 2px 0;
+    color: var(--text-muted);
+}
+.file-browser-path {
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    margin-bottom: 12px;
+    font-size: 12px;
+}
+.file-browser-path-segment {
+    color: var(--accent);
+    cursor: pointer;
+}
+.file-browser-path-segment:hover {
+    text-decoration: underline;
+}
+.file-browser-list {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    max-height: 300px;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+}
+.file-browser-item {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background-color 0.15s;
+}
+.file-browser-item:last-child {
+    border-bottom: none;
+}
+.file-browser-item:hover {
+    background: var(--bg-hover);
+}
+.file-browser-item.selected {
+    background: rgba(0, 120, 212, 0.1);
+}
+.file-browser-icon {
+    width: 16px;
+    height: 16px;
+    opacity: 0.7;
+}
+.loading-state {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+@media (max-width: 700px) {
+    .backup-method-cards {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function onRepoChange() { updateDestPath(); }
 
 function updateDestPath() {
     const select = document.getElementById('repoSelect');
@@ -292,10 +434,7 @@ function updateDestPath() {
     const subfolder = document.getElementById('destSubfolder').value;
     const fullPath = document.getElementById('fullDestPath');
 
-    if (!option.value) {
-        fullPath.value = '';
-        return;
-    }
+    if (!option.value) { fullPath.value = ''; return; }
 
     const server = option.dataset.server;
     const share = option.dataset.share;
@@ -325,15 +464,9 @@ function onScheduleChange() {
 function onRetentionChange() {
     const preset = document.getElementById('retentionPreset');
     const customGroup = document.getElementById('customRetentionGroup');
-
-    if (preset.value === 'custom') {
-        customGroup.style.display = 'block';
-    } else {
-        customGroup.style.display = 'none';
-    }
+    customGroup.style.display = preset.value === 'custom' ? 'block' : 'none';
 }
 
-// Update path when subfolder changes
 document.getElementById('destSubfolder').addEventListener('input', updateDestPath);
 
 function onBackendChange() {
@@ -350,47 +483,31 @@ function onBackendChange() {
     }
 }
 
-// Setup backup method card selection
 document.querySelectorAll('.backup-method-card').forEach(card => {
     card.addEventListener('click', function() {
-        // Remove selected from all cards
         document.querySelectorAll('.backup-method-card').forEach(c => c.classList.remove('selected'));
-        // Add selected to clicked card
         this.classList.add('selected');
-        // Check the radio input
         this.querySelector('input[type="radio"]').checked = true;
-        // Trigger backend change handler
         onBackendChange();
     });
 });
 
-// File Browser state
+// File Browser
 let currentBrowsePath = '';
 let currentBrowseRequestId = null;
 let pollInterval = null;
 let selectedBrowsePath = '';
 
-// Helper to escape HTML to prevent XSS
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 function onAgentChange() {
     const agentSelect = document.getElementById('agentSelect');
-    const browseBtn = document.getElementById('browseBtn');
-    browseBtn.disabled = !agentSelect.value;
+    document.getElementById('browseBtn').disabled = !agentSelect.value;
 }
 
 function openFileBrowser() {
     const agentSelect = document.getElementById('agentSelect');
-    if (!agentSelect.value) {
-        alert('Please select an agent first');
-        return;
-    }
+    if (!agentSelect.value) { alert('Please select an agent first'); return; }
 
-    document.getElementById('fileBrowserModal').classList.add('active');
+    document.getElementById('fileBrowserModal').style.display = 'flex';
     currentBrowsePath = '';
     selectedBrowsePath = '';
     document.getElementById('selectPathBtn').disabled = true;
@@ -398,11 +515,8 @@ function openFileBrowser() {
 }
 
 function closeFileBrowser() {
-    document.getElementById('fileBrowserModal').classList.remove('active');
-    if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-    }
+    document.getElementById('fileBrowserModal').style.display = 'none';
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
 }
 
 function browsePath(path) {
@@ -410,11 +524,10 @@ function browsePath(path) {
     const clientId = agentSelect.value;
     const listEl = document.getElementById('fileBrowserList');
 
-    listEl.innerHTML = '<div class="file-browser-loading">Loading...</div>';
+    listEl.innerHTML = '<div class="loading-state">Loading...</div>';
     currentBrowsePath = path;
     updateBreadcrumb(path);
 
-    // Request browse from server
     fetch(`/api/v1/agents/${clientId}/browse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -423,48 +536,34 @@ function browsePath(path) {
     .then(r => r.json())
     .then(data => {
         currentBrowseRequestId = data.request_id;
-        // Poll for results
         startPolling();
     })
     .catch(err => {
-        listEl.innerHTML = `<div class="file-browser-error">Error: ${escapeHtml(err.message)}</div>`;
+        listEl.innerHTML = `<div class="error-msg">Error: ${escapeHtml(err.message)}</div>`;
     });
 }
 
 function startPolling() {
     if (pollInterval) clearInterval(pollInterval);
-
     let attempts = 0;
     pollInterval = setInterval(() => {
         attempts++;
-        if (attempts > 60) { // 30 second timeout (agent polls every 10s)
-            clearInterval(pollInterval);
-            pollInterval = null;
-            document.getElementById('fileBrowserList').innerHTML =
-                '<div class="file-browser-error">Request timed out. Agent may be offline.</div>';
+        if (attempts > 60) {
+            clearInterval(pollInterval); pollInterval = null;
+            document.getElementById('fileBrowserList').innerHTML = '<div class="error-msg">Request timed out. Agent may be offline.</div>';
             return;
         }
 
         fetch(`/api/v1/browse/${currentBrowseRequestId}`)
-        .then(r => {
-            if (!r.ok) throw new Error(`Server error: ${r.status}`);
-            return r.json();
-        })
+        .then(r => r.json())
         .then(data => {
             if (data.status === 'completed') {
-                clearInterval(pollInterval);
-                pollInterval = null;
+                clearInterval(pollInterval); pollInterval = null;
                 renderFileList(data.entries, data.path);
             } else if (data.status === 'error') {
-                clearInterval(pollInterval);
-                pollInterval = null;
-                document.getElementById('fileBrowserList').innerHTML =
-                    `<div class="file-browser-error">${escapeHtml(data.error || 'Unknown error')}</div>`;
+                clearInterval(pollInterval); pollInterval = null;
+                document.getElementById('fileBrowserList').innerHTML = `<div class="error-msg">${escapeHtml(data.error || 'Unknown error')}</div>`;
             }
-            // else still pending, continue polling
-        })
-        .catch(err => {
-            console.error('Poll error:', err);
         });
     }, 500);
 }
@@ -473,30 +572,22 @@ function renderFileList(entries, path) {
     const listEl = document.getElementById('fileBrowserList');
     listEl.innerHTML = '';
 
-    // Add parent directory option if not at root
     if (path && path !== '/') {
         const parentPath = path.includes('\\')
             ? path.substring(0, path.lastIndexOf('\\')) || path.substring(0, 3)
             : path.substring(0, path.lastIndexOf('/')) || '/';
-
-        // For Windows drives like C:\, go back to empty (show all drives)
         const goBackPath = (path.match(/^[A-Z]:\\?$/i)) ? '' : parentPath;
 
         const parentItem = document.createElement('div');
         parentItem.className = 'file-browser-item';
-        parentItem.innerHTML = `
-            <img src="/static/icons/folder.svg" class="file-browser-icon folder" alt="">
-            <span class="file-browser-name">..</span>
-        `;
+        parentItem.innerHTML = '<span class="file-browser-name">..</span>';
         parentItem.onclick = () => browsePath(goBackPath);
         listEl.appendChild(parentItem);
     }
 
-    // Filter to only show directories for backup source selection
     const dirs = entries.filter(e => e.is_dir);
-
     if (dirs.length === 0 && !path) {
-        listEl.innerHTML = '<div class="file-browser-error">No directories found</div>';
+        listEl.innerHTML = '<div class="loading-state">No directories found</div>';
         return;
     }
 
@@ -504,32 +595,14 @@ function renderFileList(entries, path) {
         const item = document.createElement('div');
         item.className = 'file-browser-item';
         item.dataset.path = entry.path;
-
-        const icon = document.createElement('img');
-        icon.src = '/static/icons/folder.svg';
-        icon.className = 'file-browser-icon folder';
-        icon.alt = '';
-
-        const name = document.createElement('span');
-        name.className = 'file-browser-name';
-        name.textContent = entry.name;
-
-        item.appendChild(icon);
-        item.appendChild(name);
-
-        // Single click to select, double click to open
-        item.onclick = (e) => {
-            document.querySelectorAll('.file-browser-item.selected')
-                .forEach(el => el.classList.remove('selected'));
+        item.innerHTML = `<span class="file-browser-name">${escapeHtml(entry.name)}</span>`;
+        item.onclick = () => {
+            document.querySelectorAll('.file-browser-item.selected').forEach(el => el.classList.remove('selected'));
             item.classList.add('selected');
             selectedBrowsePath = entry.path;
             document.getElementById('selectPathBtn').disabled = false;
         };
-
-        item.ondblclick = () => {
-            browsePath(entry.path);
-        };
-
+        item.ondblclick = () => browsePath(entry.path);
         listEl.appendChild(item);
     });
 }
@@ -538,7 +611,6 @@ function updateBreadcrumb(path) {
     const pathEl = document.getElementById('fileBrowserPath');
     pathEl.innerHTML = '';
 
-    // Root segment
     const rootSeg = document.createElement('span');
     rootSeg.className = 'file-browser-path-segment';
     rootSeg.textContent = 'Root';
@@ -552,21 +624,15 @@ function updateBreadcrumb(path) {
     let currentPath = '';
 
     parts.forEach((part, i) => {
-        if (separator === '\\' && i === 0) {
-            // Windows drive letter
-            currentPath = part + '\\';
-        } else {
-            currentPath += separator + part;
-        }
+        if (separator === '\\' && i === 0) currentPath = part + '\\';
+        else currentPath += separator + part;
         const fullPath = currentPath;
 
-        // Add separator
         const sep = document.createElement('span');
         sep.style.color = 'var(--text-muted)';
         sep.textContent = ` ${separator} `;
         pathEl.appendChild(sep);
 
-        // Add clickable path segment
         const seg = document.createElement('span');
         seg.className = 'file-browser-path-segment';
         seg.textContent = part;
@@ -581,6 +647,10 @@ function selectPath() {
         closeFileBrowser();
     }
 }
+
+document.getElementById('fileBrowserModal')?.addEventListener('click', function(e) {
+    if (e.target === this) closeFileBrowser();
+});
 
 // Initialize
 onAgentChange();

@@ -1,146 +1,156 @@
 {% extends "base.html" %}
 {% block title %}Settings - Backer{% endblock %}
-{% block page_title %}Settings{% endblock %}
+
+{% block status_left %}
+Server Settings
+{% endblock %}
 
 {% block content %}
-<div class="card" style="max-width: 700px;">
-    <div class="card-header">
-        <span class="card-title">Server Configuration</span>
-    </div>
-    <div class="card-body">
-        <div class="form-group">
-            <label class="form-label">Server Version</label>
-            <input type="text" class="form-input" value="{{ version }}" readonly
-                   style="background: var(--bg-primary); color: var(--text-muted);">
+<!-- Toolbar -->
+<div class="toolbar">
+    <span style="font-weight: 600; font-size: 13px;">Server Configuration</span>
+    <div class="toolbar-spacer"></div>
+</div>
+
+<div class="content-body">
+    <div class="card" style="max-width: 800px;">
+        <div class="card-header">
+            <span class="card-title">Server Information</span>
         </div>
-
-        <div class="form-group">
-            <label class="form-label">Data Directory</label>
-            <input type="text" class="form-input" value="{{ data_dir }}" readonly
-                   style="background: var(--bg-primary); color: var(--text-muted);">
-        </div>
-
-        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
-
-        <h3 style="margin-bottom: 15px;">Schedule Settings</h3>
-        <form method="POST" action="/settings/save">
-            <div class="form-group">
-                <label class="form-label">Server Timezone</label>
-                <select name="timezone" class="form-input" id="timezone-select">
-                    <option value="UTC" {% if timezone == 'UTC' %}selected{% endif %}>UTC</option>
-                    <optgroup label="Americas">
-                        <option value="America/New_York" {% if timezone == 'America/New_York' %}selected{% endif %}>Eastern Time (US & Canada)</option>
-                        <option value="America/Chicago" {% if timezone == 'America/Chicago' %}selected{% endif %}>Central Time (US & Canada)</option>
-                        <option value="America/Denver" {% if timezone == 'America/Denver' %}selected{% endif %}>Mountain Time (US & Canada)</option>
-                        <option value="America/Los_Angeles" {% if timezone == 'America/Los_Angeles' %}selected{% endif %}>Pacific Time (US & Canada)</option>
-                        <option value="America/Anchorage" {% if timezone == 'America/Anchorage' %}selected{% endif %}>Alaska</option>
-                        <option value="Pacific/Honolulu" {% if timezone == 'Pacific/Honolulu' %}selected{% endif %}>Hawaii</option>
-                        <option value="America/Toronto" {% if timezone == 'America/Toronto' %}selected{% endif %}>Toronto</option>
-                        <option value="America/Vancouver" {% if timezone == 'America/Vancouver' %}selected{% endif %}>Vancouver</option>
-                        <option value="America/Sao_Paulo" {% if timezone == 'America/Sao_Paulo' %}selected{% endif %}>Sao Paulo</option>
-                        <option value="America/Mexico_City" {% if timezone == 'America/Mexico_City' %}selected{% endif %}>Mexico City</option>
-                    </optgroup>
-                    <optgroup label="Europe">
-                        <option value="Europe/London" {% if timezone == 'Europe/London' %}selected{% endif %}>London</option>
-                        <option value="Europe/Paris" {% if timezone == 'Europe/Paris' %}selected{% endif %}>Paris</option>
-                        <option value="Europe/Berlin" {% if timezone == 'Europe/Berlin' %}selected{% endif %}>Berlin</option>
-                        <option value="Europe/Amsterdam" {% if timezone == 'Europe/Amsterdam' %}selected{% endif %}>Amsterdam</option>
-                        <option value="Europe/Moscow" {% if timezone == 'Europe/Moscow' %}selected{% endif %}>Moscow</option>
-                    </optgroup>
-                    <optgroup label="Asia/Pacific">
-                        <option value="Asia/Tokyo" {% if timezone == 'Asia/Tokyo' %}selected{% endif %}>Tokyo</option>
-                        <option value="Asia/Shanghai" {% if timezone == 'Asia/Shanghai' %}selected{% endif %}>Shanghai</option>
-                        <option value="Asia/Hong_Kong" {% if timezone == 'Asia/Hong_Kong' %}selected{% endif %}>Hong Kong</option>
-                        <option value="Asia/Singapore" {% if timezone == 'Asia/Singapore' %}selected{% endif %}>Singapore</option>
-                        <option value="Asia/Seoul" {% if timezone == 'Asia/Seoul' %}selected{% endif %}>Seoul</option>
-                        <option value="Asia/Dubai" {% if timezone == 'Asia/Dubai' %}selected{% endif %}>Dubai</option>
-                        <option value="Asia/Kolkata" {% if timezone == 'Asia/Kolkata' %}selected{% endif %}>Mumbai/Kolkata</option>
-                    </optgroup>
-                    <optgroup label="Australia/Oceania">
-                        <option value="Australia/Sydney" {% if timezone == 'Australia/Sydney' %}selected{% endif %}>Sydney</option>
-                        <option value="Australia/Melbourne" {% if timezone == 'Australia/Melbourne' %}selected{% endif %}>Melbourne</option>
-                        <option value="Australia/Brisbane" {% if timezone == 'Australia/Brisbane' %}selected{% endif %}>Brisbane</option>
-                        <option value="Australia/Perth" {% if timezone == 'Australia/Perth' %}selected{% endif %}>Perth</option>
-                        <option value="Australia/Adelaide" {% if timezone == 'Australia/Adelaide' %}selected{% endif %}>Adelaide</option>
-                        <option value="Pacific/Auckland" {% if timezone == 'Pacific/Auckland' %}selected{% endif %}>Auckland</option>
-                    </optgroup>
-                    <optgroup label="Africa">
-                        <option value="Africa/Johannesburg" {% if timezone == 'Africa/Johannesburg' %}selected{% endif %}>Johannesburg</option>
-                        <option value="Africa/Cairo" {% if timezone == 'Africa/Cairo' %}selected{% endif %}>Cairo</option>
-                        <option value="Africa/Lagos" {% if timezone == 'Africa/Lagos' %}selected{% endif %}>Lagos</option>
-                    </optgroup>
-                </select>
-                <small style="color: var(--text-muted); display: block; margin-top: 5px;">
-                    This timezone is used for scheduling backups. Scheduled jobs will run according to this timezone.
-                </small>
+        <div class="card-body">
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Server Version</label>
+                    <input type="text" class="form-input" value="{{ version }}" readonly
+                           style="background: var(--bg-tertiary); color: var(--text-muted);">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Data Directory</label>
+                    <input type="text" class="form-input" value="{{ data_dir }}" readonly
+                           style="background: var(--bg-tertiary); color: var(--text-muted);">
+                </div>
             </div>
-            <button type="submit" class="btn btn-primary">Save Settings</button>
-            {% if settings_saved %}
-            <span style="color: var(--success); margin-left: 10px;">Settings saved!</span>
-            {% endif %}
-        </form>
-
-        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
-
-        <h3 style="margin-bottom: 15px;">Supported Backup Backends</h3>
-        <div style="background: var(--bg-primary); padding: 15px; border-radius: 4px; margin-bottom: 20px;">
-            <table style="width: 100%; border-collapse: collapse;">
-                <tr>
-                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border);">
-                        <strong style="color: var(--success);">rclone</strong>
-                    </td>
-                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border); color: var(--text-muted);">
-                        Supported - Recommended for most use cases. Handles SMB, NFS, S3, and 50+ cloud providers.
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border);">
-                        <strong style="color: var(--success);">restic</strong>
-                    </td>
-                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border); color: var(--text-muted);">
-                        Supported - Best for encrypted, deduplicated backups with versioning.
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border);">
-                        <strong style="color: var(--success);">kopia</strong>
-                    </td>
-                    <td style="padding: 8px 0; border-bottom: 1px solid var(--border); color: var(--text-muted);">
-                        Supported - Modern backup with encryption, compression, and deduplication.
-                    </td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px 0;">
-                        <strong style="color: var(--text-muted);">rsync</strong>
-                    </td>
-                    <td style="padding: 8px 0; color: var(--warning);">
-                        Not supported - rsync backend exists but is not available for agent-based backups. Use rclone instead.
-                    </td>
-                </tr>
-            </table>
         </div>
-        <p style="color: var(--text-muted); font-size: 0.9em; margin-bottom: 20px;">
-            Backup tools (rclone, restic, kopia) are automatically downloaded to agents when they first connect.
-            No manual installation required.
-        </p>
+    </div>
 
-        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+    <div class="card mt-4" style="max-width: 800px;">
+        <div class="card-header">
+            <span class="card-title">Schedule Settings</span>
+        </div>
+        <div class="card-body">
+            <form method="POST" action="/settings/save">
+                <div class="form-group">
+                    <label class="form-label">Server Timezone</label>
+                    <select name="timezone" class="form-input" id="timezone-select">
+                        <option value="UTC" {% if timezone == 'UTC' %}selected{% endif %}>UTC</option>
+                        <optgroup label="Americas">
+                            <option value="America/New_York" {% if timezone == 'America/New_York' %}selected{% endif %}>Eastern Time (US & Canada)</option>
+                            <option value="America/Chicago" {% if timezone == 'America/Chicago' %}selected{% endif %}>Central Time (US & Canada)</option>
+                            <option value="America/Denver" {% if timezone == 'America/Denver' %}selected{% endif %}>Mountain Time (US & Canada)</option>
+                            <option value="America/Los_Angeles" {% if timezone == 'America/Los_Angeles' %}selected{% endif %}>Pacific Time (US & Canada)</option>
+                            <option value="America/Toronto" {% if timezone == 'America/Toronto' %}selected{% endif %}>Toronto</option>
+                            <option value="America/Vancouver" {% if timezone == 'America/Vancouver' %}selected{% endif %}>Vancouver</option>
+                        </optgroup>
+                        <optgroup label="Europe">
+                            <option value="Europe/London" {% if timezone == 'Europe/London' %}selected{% endif %}>London</option>
+                            <option value="Europe/Paris" {% if timezone == 'Europe/Paris' %}selected{% endif %}>Paris</option>
+                            <option value="Europe/Berlin" {% if timezone == 'Europe/Berlin' %}selected{% endif %}>Berlin</option>
+                            <option value="Europe/Amsterdam" {% if timezone == 'Europe/Amsterdam' %}selected{% endif %}>Amsterdam</option>
+                        </optgroup>
+                        <optgroup label="Asia/Pacific">
+                            <option value="Asia/Tokyo" {% if timezone == 'Asia/Tokyo' %}selected{% endif %}>Tokyo</option>
+                            <option value="Asia/Shanghai" {% if timezone == 'Asia/Shanghai' %}selected{% endif %}>Shanghai</option>
+                            <option value="Asia/Singapore" {% if timezone == 'Asia/Singapore' %}selected{% endif %}>Singapore</option>
+                            <option value="Asia/Dubai" {% if timezone == 'Asia/Dubai' %}selected{% endif %}>Dubai</option>
+                        </optgroup>
+                        <optgroup label="Australia/Oceania">
+                            <option value="Australia/Sydney" {% if timezone == 'Australia/Sydney' %}selected{% endif %}>Sydney</option>
+                            <option value="Australia/Melbourne" {% if timezone == 'Australia/Melbourne' %}selected{% endif %}>Melbourne</option>
+                            <option value="Australia/Brisbane" {% if timezone == 'Australia/Brisbane' %}selected{% endif %}>Brisbane</option>
+                            <option value="Australia/Perth" {% if timezone == 'Australia/Perth' %}selected{% endif %}>Perth</option>
+                            <option value="Pacific/Auckland" {% if timezone == 'Pacific/Auckland' %}selected{% endif %}>Auckland</option>
+                        </optgroup>
+                    </select>
+                    <div class="form-hint">This timezone is used for scheduling backups. Scheduled jobs will run according to this timezone.</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <button type="submit" class="btn btn-primary">Save Settings</button>
+                    {% if settings_saved %}
+                    <span style="color: var(--success); font-size: 12px;">Settings saved!</span>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+    </div>
 
-        <h3 style="margin-bottom: 15px;">Agent Registration</h3>
-        <p style="color: var(--text-muted); margin-bottom: 15px;">
-            To register a new agent, run the following command on the client machine:
-        </p>
-        <pre style="background: var(--bg-primary); padding: 15px; border-radius: 4px; overflow-x: auto;">backer-agent register --server {{ server_url }}</pre>
+    <div class="card mt-4" style="max-width: 800px;">
+        <div class="card-header">
+            <span class="card-title">Supported Backup Backends</span>
+        </div>
+        <div class="card-body">
+            <div class="data-grid-container">
+                <table class="data-grid">
+                    <thead>
+                        <tr>
+                            <th>Backend</th>
+                            <th>Status</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>rclone</strong></td>
+                            <td><span class="status-badge success">Supported</span></td>
+                            <td class="text-muted">Recommended for most use cases. Handles SMB, NFS, S3, and 50+ cloud providers.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>restic</strong></td>
+                            <td><span class="status-badge success">Supported</span></td>
+                            <td class="text-muted">Best for encrypted, deduplicated backups with versioning.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>kopia</strong></td>
+                            <td><span class="status-badge success">Supported</span></td>
+                            <td class="text-muted">Modern backup with encryption, compression, and deduplication.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>rsync</strong></td>
+                            <td><span class="status-badge muted">Not Available</span></td>
+                            <td class="text-muted">Not supported for agent-based backups. Use rclone instead.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="form-hint" style="margin-top: 12px;">
+                Backup tools (rclone, restic, kopia) are automatically downloaded to agents when they first connect.
+            </div>
+        </div>
+    </div>
 
-        <hr style="border: 0; border-top: 1px solid var(--border); margin: 25px 0;">
+    <div class="card mt-4" style="max-width: 800px;">
+        <div class="card-header">
+            <span class="card-title">Agent Registration</span>
+        </div>
+        <div class="card-body">
+            <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+                To register a new agent, run the following command on the client machine:
+            </p>
+            <pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; font-size: 11px; overflow-x: auto;">backer-agent register --server {{ server_url }}</pre>
+        </div>
+    </div>
 
-        <h3 style="margin-bottom: 15px;">Danger Zone</h3>
-        <p style="color: var(--text-muted); margin-bottom: 15px;">
-            These actions are destructive and cannot be undone.
-        </p>
-        <button class="btn btn-danger" onclick="if(confirm('This will delete ALL backup history. Are you sure?')) alert('Not implemented yet');">
-            Clear All History
-        </button>
+    <div class="card mt-4" style="max-width: 800px;">
+        <div class="card-header">
+            <span class="card-title">Danger Zone</span>
+        </div>
+        <div class="card-body">
+            <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+                These actions are destructive and cannot be undone.
+            </p>
+            <button class="btn btn-danger" onclick="if(confirm('This will delete ALL backup history. Are you sure?')) alert('Not implemented yet');">
+                Clear All History
+            </button>
+        </div>
     </div>
 </div>
 {% endblock %}

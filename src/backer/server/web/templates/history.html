@@ -1,93 +1,149 @@
 {% extends "base.html" %}
 {% block title %}History - Backer{% endblock %}
-{% block page_title %}Backup History{% endblock %}
 
-{% block actions %}
-<button class="btn btn-secondary" onclick="location.reload()">Refresh</button>
+{% block status_left %}
+{{ runs|length }} Backup Runs
 {% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="card-header">
-        <span class="card-title">Recent Backups</span>
-        <span class="card-hint" style="color: var(--text-muted); font-size: 12px;">Click a row to view logs</span>
+<!-- Toolbar -->
+<div class="toolbar">
+    <div class="search-box">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" placeholder="Search history..." id="searchInput" oninput="filterRuns()">
     </div>
-    {% if runs %}
-    <table>
-        <thead>
-            <tr>
-                <th>Type</th>
-                <th>Job</th>
-                <th>Target</th>
-                <th>Status</th>
-                <th>Started</th>
-                <th>Duration</th>
-                <th>Details</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for run in runs %}
-            <tr class="run-row" data-run-id="{{ run.run_id or '' }}" data-run-type="{{ run.run_type or 'agent' }}" data-hypervisor-id="{{ run.hypervisor_id or '' }}" style="cursor: pointer;">
-                <td>
-                    {% if run.run_type == 'hypervisor' %}
-                    <span class="badge badge-info" style="font-size: 10px;">VM</span>
-                    {% else %}
-                    <span class="badge badge-muted" style="font-size: 10px;">Agent</span>
-                    {% endif %}
-                </td>
-                <td><strong>{{ run.job_name }}</strong></td>
-                <td>
-                    {% if run.run_type == 'hypervisor' %}
-                    {{ run.guest_name or 'VM ' + (run.guest_id|string) }}
-                    {% else %}
-                    {{ run.client_id or '-' }}
-                    {% endif %}
-                </td>
-                <td>
-                    {% if run.status == 'success' %}
-                    <span class="badge badge-success">Success</span>
-                    {% elif run.status == 'failed' %}
-                    <span class="badge badge-error">Failed</span>
-                    {% elif run.status == 'running' %}
-                    <span class="badge badge-info">Running</span>
-                    {% elif run.status == 'skipped' %}
-                    <span class="badge badge-muted">Skipped</span>
-                    {% else %}
-                    <span class="badge badge-muted">{{ run.status }}</span>
-                    {% endif %}
-                </td>
-                <td>{{ run.started_at_formatted }}</td>
-                <td>{{ run.duration or '-' }}</td>
-                <td>
-                    {% if run.run_type == 'hypervisor' %}
-                    {{ run.exit_status or '-' }}
-                    {% else %}
-                    {{ run.files_transferred or '-' }} files / {{ run.bytes_formatted or '-' }}
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <div class="empty-state">
-        <h3>No Backup History</h3>
-        <p>Run a backup job to see history here</p>
+    <div class="toolbar-spacer"></div>
+    <button class="toolbar-btn" onclick="location.reload()">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Refresh
+    </button>
+</div>
+
+<div class="content-body">
+    <!-- Stats Row -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Total Runs</div>
+            <div class="stat-value">{{ runs|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Successful</div>
+            <div class="stat-value success">{{ runs|selectattr('status', 'equalto', 'success')|list|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Failed</div>
+            <div class="stat-value {% if runs|selectattr('status', 'equalto', 'failed')|list|length > 0 %}error{% endif %}">{{ runs|selectattr('status', 'equalto', 'failed')|list|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Running</div>
+            <div class="stat-value {% if runs|selectattr('status', 'equalto', 'running')|list|length > 0 %}info{% endif %}">{{ runs|selectattr('status', 'equalto', 'running')|list|length }}</div>
+        </div>
     </div>
-    {% endif %}
+
+    <!-- History Table -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Recent Backups</span>
+            <span class="text-muted" style="font-size: 11px;">Click a row to view logs</span>
+        </div>
+        <div class="data-grid-container" style="max-height: 500px;">
+            <table class="data-grid" id="historyTable">
+                <thead>
+                    <tr>
+                        <th style="width: 24px;"></th>
+                        <th>Type</th>
+                        <th>Job</th>
+                        <th>Target</th>
+                        <th>Status</th>
+                        <th>Started</th>
+                        <th>Duration</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in runs %}
+                    <tr class="run-row" data-run-id="{{ run.run_id or '' }}" data-run-type="{{ run.run_type or 'agent' }}" data-hypervisor-id="{{ run.hypervisor_id or '' }}" data-job="{{ run.job_name }}" style="cursor: pointer;">
+                        <td>
+                            <div class="row-icon">
+                                {% if run.run_type == 'hypervisor' %}
+                                <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/></svg>
+                                {% else %}
+                                <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td>
+                            {% if run.run_type == 'hypervisor' %}
+                            <span class="status-badge info">VM</span>
+                            {% else %}
+                            <span class="status-badge muted">Agent</span>
+                            {% endif %}
+                        </td>
+                        <td><strong>{{ run.job_name }}</strong></td>
+                        <td>
+                            {% if run.run_type == 'hypervisor' %}
+                            {{ run.guest_name or 'VM ' + (run.guest_id|string) }}
+                            {% else %}
+                            {{ run.client_id or '-' }}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if run.status == 'success' %}
+                            <span class="status-badge success">
+                                <svg class="status-icon" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                Success
+                            </span>
+                            {% elif run.status == 'failed' %}
+                            <span class="status-badge error">
+                                <svg class="status-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                Failed
+                            </span>
+                            {% elif run.status == 'running' %}
+                            <span class="status-badge running">
+                                <svg class="status-icon spinning" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>
+                                Running
+                            </span>
+                            {% elif run.status == 'skipped' %}
+                            <span class="status-badge muted">Skipped</span>
+                            {% else %}
+                            <span class="status-badge muted">{{ run.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-muted">{{ run.started_at_formatted }}</td>
+                        <td class="text-muted">{{ run.duration or '-' }}</td>
+                        <td class="text-muted">
+                            {% if run.run_type == 'hypervisor' %}
+                            {{ run.exit_status or '-' }}
+                            {% else %}
+                            {{ run.files_transferred or '-' }} files / {{ run.bytes_formatted or '-' }}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="8">
+                            <div class="empty-state">
+                                <p>No backup history</p>
+                                <p class="text-muted" style="font-size: 11px;">Run a backup job to see history here</p>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <!-- Job Logs Modal -->
-<div id="logsModal" class="modal-overlay">
-    <div class="modal logs-modal">
+<div id="logsModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 800px;">
         <div class="modal-header">
-            <span class="modal-title" id="logsModalTitle">Job Logs</span>
+            <h3 id="logsModalTitle">Job Logs</h3>
             <button class="modal-close" onclick="closeLogsModal()">&times;</button>
         </div>
         <div class="modal-body">
-            <div id="logsLoading" class="logs-loading">
-                <span class="loading">Loading logs...</span>
-            </div>
+            <div id="logsLoading" class="loading-state">Loading logs...</div>
             <div id="logsContent" style="display: none;">
                 <div class="logs-meta">
                     <div class="logs-meta-row">
@@ -135,85 +191,69 @@
                 </div>
             </div>
         </div>
-        <div class="modal-footer">
-            <button class="btn btn-secondary" onclick="closeLogsModal()">Close</button>
-        </div>
     </div>
 </div>
 
 <style>
-.logs-modal {
-    max-width: 800px;
-    width: 90%;
-}
-
-.logs-loading {
+.loading-state {
     text-align: center;
-    padding: 40px;
+    padding: 24px;
     color: var(--text-muted);
+    font-size: 12px;
 }
-
 .logs-meta {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 10px 24px;
-    padding: 18px;
-    background: var(--bg-page);
+    gap: 8px 20px;
+    padding: 14px;
+    background: var(--bg-tertiary);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    margin-bottom: 20px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    font-size: 12px;
 }
-
 .logs-meta-row {
     display: flex;
     align-items: center;
     gap: 8px;
 }
-
 .logs-meta-label {
     color: var(--text-muted);
-    font-size: 12px;
-    min-width: 70px;
+    font-size: 11px;
+    min-width: 60px;
     font-weight: 500;
 }
-
 .logs-section-title {
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 10px;
-    color: var(--text);
-}
-
-.logs-section-title.logs-section-error {
-    color: var(--error);
-}
-
-.logs-output {
-    background: var(--header-bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px;
     font-size: 12px;
-    line-height: 1.6;
-    max-height: 300px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.logs-section-title.logs-section-error {
+    color: var(--danger);
+}
+.logs-output {
+    background: #1e1e1e;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    font-size: 11px;
+    line-height: 1.5;
+    max-height: 250px;
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-word;
-    margin-bottom: 16px;
-    color: #e6edf3;
-    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+    margin-bottom: 12px;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', monospace;
 }
-
 .logs-errors {
-    border-color: var(--error);
+    border-color: var(--danger);
     background: rgba(239, 68, 68, 0.1);
 }
-
 .logs-empty {
     color: var(--text-muted);
     font-style: italic;
 }
-
 @media (max-width: 600px) {
     .logs-meta {
         grid-template-columns: 1fr;
@@ -224,12 +264,13 @@
 
 {% block scripts %}
 <script>
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+// Filter runs
+function filterRuns() {
+    const query = document.getElementById('searchInput').value.toLowerCase();
+    document.querySelectorAll('.run-row').forEach(row => {
+        const job = (row.dataset.job || '').toLowerCase();
+        row.style.display = job.includes(query) ? '' : 'none';
+    });
 }
 
 function formatDate(dateStr) {
@@ -238,17 +279,16 @@ function formatDate(dateStr) {
 }
 
 function getStatusBadge(status) {
-    const classes = {
-        'success': 'badge-success',
-        'failed': 'badge-error',
-        'running': 'badge-info',
-        'skipped': 'badge-muted'
+    const map = {
+        'success': '<span class="status-badge success">Success</span>',
+        'failed': '<span class="status-badge error">Failed</span>',
+        'running': '<span class="status-badge running">Running</span>',
+        'skipped': '<span class="status-badge muted">Skipped</span>'
     };
-    return `<span class="badge ${classes[status] || 'badge-muted'}">${status}</span>`;
+    return map[status] || `<span class="status-badge muted">${status}</span>`;
 }
 
 function stripAnsi(str) {
-    // Remove ANSI escape codes (colors, etc.)
     if (!str) return '';
     return String(str).replace(/\x1b\[[0-9;]*m/g, '');
 }
@@ -258,19 +298,16 @@ async function showJobLogs(runId) {
     const loading = document.getElementById('logsLoading');
     const content = document.getElementById('logsContent');
 
-    modal.classList.add('active');
+    modal.style.display = 'flex';
     loading.style.display = 'block';
     content.style.display = 'none';
 
     try {
         const response = await fetch(`/api/v1/runs/${encodeURIComponent(runId)}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch logs');
-        }
+        if (!response.ok) throw new Error('Failed to fetch logs');
 
         const data = await response.json();
 
-        // Update modal content
         document.getElementById('logsModalTitle').textContent = `Logs: ${data.job_name}`;
         document.getElementById('logsRunId').textContent = data.run_id;
         document.getElementById('logsStatus').innerHTML = getStatusBadge(data.status);
@@ -280,7 +317,6 @@ async function showJobLogs(runId) {
         document.getElementById('logsFiles').textContent = data.files_transferred || '0';
         document.getElementById('logsSize').textContent = formatBytes(data.bytes_transferred || 0);
 
-        // Snapshot
         if (data.snapshot_id) {
             document.getElementById('logsSnapshotRow').style.display = 'flex';
             document.getElementById('logsSnapshot').textContent = data.snapshot_id;
@@ -288,19 +324,16 @@ async function showJobLogs(runId) {
             document.getElementById('logsSnapshotRow').style.display = 'none';
         }
 
-        // Errors
         const errorsSection = document.getElementById('logsErrorsSection');
         const errorsEl = document.getElementById('logsErrors');
         if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
             errorsSection.style.display = 'block';
-            // Convert all error items to strings and strip ANSI codes
             const errorText = data.errors.map(e => stripAnsi(typeof e === 'string' ? e : JSON.stringify(e))).join('\n');
             errorsEl.textContent = errorText;
         } else {
             errorsSection.style.display = 'none';
         }
 
-        // Output
         const outputEl = document.getElementById('logsOutput');
         if (data.output && data.output.trim()) {
             outputEl.textContent = stripAnsi(data.output);
@@ -314,46 +347,25 @@ async function showJobLogs(runId) {
         content.style.display = 'block';
 
     } catch (error) {
-        loading.innerHTML = `<span style="color: var(--error);">Error loading logs: ${error.message}</span>`;
+        loading.innerHTML = `<span style="color: var(--danger);">Error loading logs: ${error.message}</span>`;
     }
 }
-
-function closeLogsModal() {
-    document.getElementById('logsModal').classList.remove('active');
-}
-
-// Close modal on escape key
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        closeLogsModal();
-    }
-});
-
-// Close modal on backdrop click
-document.getElementById('logsModal').addEventListener('click', (e) => {
-    if (e.target.classList.contains('modal-overlay')) {
-        closeLogsModal();
-    }
-});
 
 async function showHypervisorLogs(runId, hypervisorId) {
     const modal = document.getElementById('logsModal');
     const loading = document.getElementById('logsLoading');
     const content = document.getElementById('logsContent');
 
-    modal.classList.add('active');
+    modal.style.display = 'flex';
     loading.style.display = 'block';
     content.style.display = 'none';
 
     try {
         const response = await fetch(`/api/v1/hypervisor-runs/${encodeURIComponent(runId)}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch run details');
-        }
+        if (!response.ok) throw new Error('Failed to fetch run details');
 
         const data = await response.json();
 
-        // Update modal content for hypervisor run
         document.getElementById('logsModalTitle').textContent = `VM Backup: ${data.guest_name || 'VM ' + data.guest_id}`;
         document.getElementById('logsRunId').textContent = data.run_id;
         document.getElementById('logsStatus').innerHTML = getStatusBadge(data.status);
@@ -363,7 +375,6 @@ async function showHypervisorLogs(runId, hypervisorId) {
         document.getElementById('logsFiles').textContent = '-';
         document.getElementById('logsSize').textContent = '-';
 
-        // UPID as snapshot
         if (data.upid) {
             document.getElementById('logsSnapshotRow').style.display = 'flex';
             document.getElementById('logsSnapshot').textContent = data.upid;
@@ -371,7 +382,6 @@ async function showHypervisorLogs(runId, hypervisorId) {
             document.getElementById('logsSnapshotRow').style.display = 'none';
         }
 
-        // Errors
         const errorsSection = document.getElementById('logsErrorsSection');
         const errorsEl = document.getElementById('logsErrors');
         if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
@@ -382,7 +392,6 @@ async function showHypervisorLogs(runId, hypervisorId) {
             errorsSection.style.display = 'none';
         }
 
-        // Output - show exit status and duration
         const outputEl = document.getElementById('logsOutput');
         let output = `Job: ${data.job_name}\n`;
         output += `Guest: ${data.guest_name || 'VM ' + data.guest_id} (VMID ${data.guest_id})\n`;
@@ -401,11 +410,22 @@ async function showHypervisorLogs(runId, hypervisorId) {
         content.style.display = 'block';
 
     } catch (error) {
-        loading.innerHTML = `<span style="color: var(--error);">Error loading details: ${error.message}</span>`;
+        loading.innerHTML = `<span style="color: var(--danger);">Error loading details: ${error.message}</span>`;
     }
 }
 
-// Add click handlers to all run rows
+function closeLogsModal() {
+    document.getElementById('logsModal').style.display = 'none';
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLogsModal();
+});
+
+document.getElementById('logsModal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('logsModal')) closeLogsModal();
+});
+
 document.querySelectorAll('.run-row').forEach(row => {
     const runId = row.dataset.runId;
     const runType = row.dataset.runType;
@@ -420,7 +440,6 @@ document.querySelectorAll('.run-row').forEach(row => {
             }
         });
     } else {
-        // No run_id, make row not clickable
         row.style.cursor = 'default';
         row.style.opacity = '0.7';
     }

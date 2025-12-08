@@ -5,43 +5,199 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - Backer</title>
     <link rel="stylesheet" href="/static/style.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+        }
+        .login-card {
+            background: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+        .login-header {
+            background: linear-gradient(135deg, #0078d4 0%, #005a9e 100%);
+            padding: 32px 24px;
+            text-align: center;
+            color: white;
+        }
+        .login-logo {
+            width: 56px;
+            height: 56px;
+            margin-bottom: 12px;
+            filter: brightness(0) invert(1);
+        }
+        .login-header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            letter-spacing: -0.5px;
+        }
+        .login-header p {
+            font-size: 13px;
+            opacity: 0.9;
+        }
+        .login-body {
+            padding: 28px 24px;
+        }
+        .alert {
+            padding: 12px 14px;
+            border-radius: 4px;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+        .alert-error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid #ef4444;
+            color: #dc2626;
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 6px;
+        }
+        .form-input {
+            width: 100%;
+            padding: 10px 12px;
+            font-size: 13px;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            background: #ffffff;
+            color: #1f2937;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .form-input:focus {
+            outline: none;
+            border-color: #0078d4;
+            box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.15);
+        }
+        .form-input::placeholder {
+            color: #9ca3af;
+        }
+        .btn-login {
+            width: 100%;
+            padding: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+            background: linear-gradient(135deg, #0078d4 0%, #005a9e 100%);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.15s;
+        }
+        .btn-login:hover {
+            box-shadow: 0 4px 12px rgba(0, 120, 212, 0.4);
+        }
+        .btn-login:active {
+            transform: scale(0.98);
+        }
+        .login-footer {
+            padding: 16px 24px;
+            background: #f9fafb;
+            border-top: 1px solid #e5e7eb;
+            text-align: center;
+        }
+        .login-footer p {
+            font-size: 11px;
+            color: #6b7280;
+        }
+        .login-footer code {
+            background: #e5e7eb;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+        }
+
+        /* Dark mode */
+        @media (prefers-color-scheme: dark) {
+            .login-card {
+                background: #1e1e1e;
+            }
+            .form-label {
+                color: #e5e7eb;
+            }
+            .form-input {
+                background: #2d2d2d;
+                border-color: #404040;
+                color: #e5e7eb;
+            }
+            .form-input:focus {
+                border-color: #0078d4;
+            }
+            .login-footer {
+                background: #171717;
+                border-color: #333333;
+            }
+            .login-footer p {
+                color: #9ca3af;
+            }
+            .login-footer code {
+                background: #333333;
+            }
+        }
+    </style>
 </head>
-<body class="login-page">
+<body>
     <div class="login-container">
         <div class="login-card">
             <div class="login-header">
-                <img src="/static/logo.svg" alt="Backer" class="login-logo">
+                <svg class="login-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+                    <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+                </svg>
                 <h1>Backer</h1>
                 <p>Backup Management System</p>
             </div>
 
-            {% if error %}
-            <div class="alert alert-error">
-                {{ error }}
+            <div class="login-body">
+                {% if error %}
+                <div class="alert alert-error">
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <form method="POST" action="/login">
+                    <div class="form-group">
+                        <label class="form-label" for="username">Username</label>
+                        <input type="text" id="username" name="username" class="form-input"
+                               placeholder="Enter your username" required autofocus
+                               value="{{ username or '' }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="password">Password</label>
+                        <input type="password" id="password" name="password" class="form-input"
+                               placeholder="Enter your password" required>
+                    </div>
+
+                    <button type="submit" class="btn-login">Sign In</button>
+                </form>
             </div>
-            {% endif %}
-
-            <form method="POST" action="/login" class="login-form">
-                <div class="form-group">
-                    <label class="form-label" for="username">Username</label>
-                    <input type="text" id="username" name="username" class="form-input"
-                           placeholder="Enter your username" required autofocus
-                           value="{{ username or '' }}">
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="password">Password</label>
-                    <input type="password" id="password" name="password" class="form-input"
-                           placeholder="Enter your password" required>
-                </div>
-
-                <button type="submit" class="btn btn-primary btn-login">
-                    Sign In
-                </button>
-            </form>
 
             <div class="login-footer">
-                <p>Default credentials: admin / admin</p>
+                <p>Default credentials: <code>admin</code> / <code>admin</code></p>
             </div>
         </div>
     </div>

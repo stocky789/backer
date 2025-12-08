@@ -1,119 +1,172 @@
 {% extends "base.html" %}
-
 {% block title %}Profile - Backer{% endblock %}
-{% block page_title %}My Profile{% endblock %}
+
+{% block status_left %}
+My Profile
+{% endblock %}
 
 {% block content %}
-<div class="grid grid-2">
-    <div class="card">
-        <div class="card-header">
-            <h3 class="card-title">Profile Information</h3>
+<!-- Toolbar -->
+<div class="toolbar">
+    <span style="font-weight: 600; font-size: 13px;">My Profile</span>
+    <div class="toolbar-spacer"></div>
+</div>
+
+<div class="content-body">
+    <div class="profile-grid">
+        <!-- Profile Information -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Profile Information</span>
+            </div>
+            <div class="card-body">
+                {% if saved %}
+                <div class="success-msg" style="margin-bottom: 16px;">
+                    Profile updated successfully.
+                </div>
+                {% endif %}
+
+                {% if error %}
+                <div class="error-msg" style="margin-bottom: 16px;">
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <form method="POST" action="/profile">
+                    <input type="hidden" name="action" value="update_profile">
+
+                    <div class="form-group">
+                        <label class="form-label" for="username">Username</label>
+                        <input type="text" id="username" class="form-input" value="{{ user.username }}" disabled
+                               style="background: var(--bg-tertiary); color: var(--text-muted);">
+                        <div class="form-hint">Username cannot be changed</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="display_name">Display Name</label>
+                        <input type="text" id="display_name" name="display_name" class="form-input"
+                               value="{{ user.display_name }}" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="email">Email</label>
+                        <input type="email" id="email" name="email" class="form-input"
+                               value="{{ user.email or '' }}" placeholder="your@email.com">
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </form>
+            </div>
         </div>
-        <div class="card-body">
-            {% if saved %}
-            <div class="alert alert-success">
-                Profile updated successfully.
+
+        <!-- Change Password -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Change Password</span>
             </div>
-            {% endif %}
+            <div class="card-body">
+                {% if password_changed %}
+                <div class="success-msg" style="margin-bottom: 16px;">
+                    Password changed successfully.
+                </div>
+                {% endif %}
 
-            {% if error %}
-            <div class="alert alert-error">
-                {{ error }}
+                {% if password_error %}
+                <div class="error-msg" style="margin-bottom: 16px;">
+                    {{ password_error }}
+                </div>
+                {% endif %}
+
+                <form method="POST" action="/profile">
+                    <input type="hidden" name="action" value="change_password">
+
+                    <div class="form-group">
+                        <label class="form-label" for="current_password">Current Password</label>
+                        <input type="password" id="current_password" name="current_password" class="form-input" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="new_password">New Password</label>
+                        <input type="password" id="new_password" name="new_password" class="form-input"
+                               required minlength="4">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="confirm_password">Confirm New Password</label>
+                        <input type="password" id="confirm_password" name="confirm_password" class="form-input"
+                               required minlength="4">
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">Change Password</button>
+                </form>
             </div>
-            {% endif %}
-
-            <form method="POST" action="/profile">
-                <input type="hidden" name="action" value="update_profile">
-
-                <div class="form-group">
-                    <label class="form-label" for="username">Username</label>
-                    <input type="text" id="username" class="form-input" value="{{ user.username }}" disabled>
-                    <p class="form-hint">Username cannot be changed</p>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="display_name">Display Name</label>
-                    <input type="text" id="display_name" name="display_name" class="form-input"
-                           value="{{ user.display_name }}" required>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="email">Email</label>
-                    <input type="email" id="email" name="email" class="form-input"
-                           value="{{ user.email or '' }}" placeholder="your@email.com">
-                </div>
-
-                <button type="submit" class="btn btn-primary">
-                    Save Changes
-                </button>
-            </form>
         </div>
     </div>
 
-    <div class="card">
+    <!-- Account Information -->
+    <div class="card mt-4" style="max-width: 600px;">
         <div class="card-header">
-            <h3 class="card-title">Change Password</h3>
+            <span class="card-title">Account Information</span>
         </div>
         <div class="card-body">
-            {% if password_changed %}
-            <div class="alert alert-success">
-                Password changed successfully.
+            <div class="info-grid">
+                <div class="info-item">
+                    <span class="info-label">Role</span>
+                    <span class="info-value">{{ user.role | capitalize }}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Created</span>
+                    <span class="info-value">{{ user.created_at[:10] if user.created_at else 'N/A' }}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Last Login</span>
+                    <span class="info-value">{{ user.last_login[:19].replace('T', ' ') if user.last_login else 'N/A' }}</span>
+                </div>
             </div>
-            {% endif %}
-
-            {% if password_error %}
-            <div class="alert alert-error">
-                {{ password_error }}
-            </div>
-            {% endif %}
-
-            <form method="POST" action="/profile">
-                <input type="hidden" name="action" value="change_password">
-
-                <div class="form-group">
-                    <label class="form-label" for="current_password">Current Password</label>
-                    <input type="password" id="current_password" name="current_password" class="form-input" required>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="new_password">New Password</label>
-                    <input type="password" id="new_password" name="new_password" class="form-input"
-                           required minlength="4">
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="confirm_password">Confirm New Password</label>
-                    <input type="password" id="confirm_password" name="confirm_password" class="form-input"
-                           required minlength="4">
-                </div>
-
-                <button type="submit" class="btn btn-primary">
-                    Change Password
-                </button>
-            </form>
         </div>
     </div>
 </div>
 
-<div class="card">
-    <div class="card-header">
-        <h3 class="card-title">Account Information</h3>
-    </div>
-    <div class="card-body">
-        <div class="info-grid">
-            <div class="info-item">
-                <span class="info-label">Role</span>
-                <span class="info-value">{{ user.role | capitalize }}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Created</span>
-                <span class="info-value">{{ user.created_at[:10] if user.created_at else 'N/A' }}</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Last Login</span>
-                <span class="info-value">{{ user.last_login[:19].replace('T', ' ') if user.last_login else 'N/A' }}</span>
-            </div>
-        </div>
-    </div>
-</div>
+<style>
+.profile-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+}
+.success-msg {
+    background: rgba(34, 197, 94, 0.1);
+    border: 1px solid var(--success);
+    border-radius: 4px;
+    padding: 12px;
+    font-size: 12px;
+    color: var(--success);
+}
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+}
+.info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.info-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+.info-value {
+    font-size: 13px;
+    font-weight: 500;
+}
+@media (max-width: 800px) {
+    .profile-grid {
+        grid-template-columns: 1fr;
+    }
+    .info-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+</style>
 {% endblock %}

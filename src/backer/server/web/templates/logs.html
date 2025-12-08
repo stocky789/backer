@@ -1,75 +1,146 @@
 {% extends "base.html" %}
 {% block title %}Server Logs - Backer{% endblock %}
-{% block page_title %}Server Logs{% endblock %}
 
-{% block actions %}
-<button class="btn btn-secondary" onclick="copyLogs()" title="Copy visible logs to clipboard">
-    Copy Logs
-</button>
-<button class="btn btn-primary" onclick="refreshLogs()" id="refreshBtn">
-    Refresh
-</button>
+{% block status_left %}
+Server Logs
 {% endblock %}
 
 {% block content %}
-<div class="logs-container">
-    <!-- Controls -->
-    <div class="card logs-controls">
-        <div class="logs-toolbar">
-            <div class="logs-toolbar-left">
-                <div class="form-group" style="margin: 0; min-width: 200px;">
-                    <select id="logFile" class="form-input" onchange="loadLogs()">
-                        <option value="">Loading log files...</option>
-                    </select>
-                </div>
-
-                <div class="form-group" style="margin: 0; min-width: 120px;">
-                    <select id="logLevel" class="form-input" onchange="loadLogs()">
-                        <option value="">All Levels</option>
-                        <option value="DEBUG">DEBUG</option>
-                        <option value="INFO">INFO</option>
-                        <option value="WARNING">WARNING</option>
-                        <option value="ERROR">ERROR</option>
-                    </select>
-                </div>
-
-                <div class="form-group" style="margin: 0; flex: 1; min-width: 200px;">
-                    <input type="text" id="logSearch" class="form-input" placeholder="Search logs..."
-                           onkeyup="debounceSearch()">
-                </div>
-            </div>
-
-            <div class="logs-toolbar-right">
-                <label class="logs-checkbox">
-                    <input type="checkbox" id="autoScroll" checked>
-                    Auto-scroll
-                </label>
-                <label class="logs-checkbox">
-                    <input type="checkbox" id="liveMode" onchange="toggleLiveMode()">
-                    Live tail
-                </label>
-                <div class="logs-line-count">
-                    <span id="lineCount">0</span> lines
-                </div>
-            </div>
-        </div>
+<!-- Toolbar -->
+<div class="toolbar">
+    <div class="search-box" style="max-width: 200px;">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" placeholder="Search logs..." id="logSearch" oninput="debounceSearch()">
     </div>
+    <div style="display: flex; gap: 8px; align-items: center;">
+        <select id="logFile" class="form-input" style="width: auto; min-width: 160px;" onchange="loadLogs()">
+            <option value="">Loading...</option>
+        </select>
+        <select id="logLevel" class="form-input" style="width: auto;" onchange="loadLogs()">
+            <option value="">All Levels</option>
+            <option value="DEBUG">DEBUG</option>
+            <option value="INFO">INFO</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+        </select>
+    </div>
+    <div class="toolbar-spacer"></div>
+    <label class="toolbar-checkbox">
+        <input type="checkbox" id="autoScroll" checked>
+        <span>Auto-scroll</span>
+    </label>
+    <label class="toolbar-checkbox">
+        <input type="checkbox" id="liveMode" onchange="toggleLiveMode()">
+        <span>Live tail</span>
+    </label>
+    <button class="toolbar-btn" onclick="copyLogs()">
+        <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy
+    </button>
+    <button class="toolbar-btn" onclick="refreshLogs()" id="refreshBtn">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Refresh
+    </button>
+</div>
 
-    <!-- Log Output -->
-    <div class="card logs-output-card">
+<div class="content-body" style="display: flex; flex-direction: column; height: calc(100% - 50px);">
+    <div class="card" style="flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+        <div class="card-header">
+            <span class="card-title">Log Output</span>
+            <span class="text-muted" style="font-size: 11px;"><span id="lineCount">0</span> lines</span>
+        </div>
         <div id="logsOutput" class="logs-output">
-            <div class="logs-loading">Loading logs...</div>
+            <div class="loading-state">Loading logs...</div>
         </div>
     </div>
 
-    <!-- Pagination -->
     <div class="logs-pagination" id="logsPagination" style="display: none;">
-        <button class="btn btn-secondary" id="loadMoreBtn" onclick="loadMoreLogs()">
+        <button class="btn btn-secondary btn-sm" id="loadMoreBtn" onclick="loadMoreLogs()">
             Load More (older logs)
         </button>
-        <span id="paginationInfo" class="pagination-info"></span>
+        <span id="paginationInfo" class="text-muted" style="font-size: 11px;"></span>
     </div>
 </div>
+
+<style>
+.toolbar-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.toolbar-checkbox input {
+    margin: 0;
+}
+.logs-output {
+    flex: 1;
+    overflow-y: auto;
+    background: #1e1e1e;
+    padding: 12px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #d4d4d4;
+}
+.loading-state {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-muted);
+}
+.logs-entries {
+    display: flex;
+    flex-direction: column;
+}
+.log-entry {
+    padding: 2px 0;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.log-entry.log-entry-new {
+    animation: logFlash 1s ease-out;
+}
+@keyframes logFlash {
+    0% { background: rgba(0, 120, 212, 0.3); }
+    100% { background: transparent; }
+}
+.log-timestamp {
+    color: #6a9955;
+    flex-shrink: 0;
+}
+.log-level {
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 60px;
+}
+.level-debug { color: #808080; }
+.level-info { color: #4ec9b0; }
+.level-warning { color: #dcdcaa; }
+.level-error { color: #f14c4c; }
+.log-logger {
+    color: #569cd6;
+    flex-shrink: 0;
+}
+.log-message {
+    color: #d4d4d4;
+    word-break: break-word;
+}
+.logs-pagination {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+}
+.logs-empty, .logs-error {
+    text-align: center;
+    padding: 24px;
+}
+.logs-error {
+    color: var(--danger);
+}
+</style>
 {% endblock %}
 
 {% block scripts %}
@@ -80,22 +151,18 @@ let searchTimeout = null;
 let eventSource = null;
 let allEntries = [];
 
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', async () => {
-    await loadLogFiles();
-});
+document.addEventListener('DOMContentLoaded', async () => { await loadLogFiles(); });
 
 async function loadLogFiles() {
     try {
         const response = await fetch('/api/v1/logs');
         const files = await response.json();
-
         const select = document.getElementById('logFile');
         select.innerHTML = '';
 
         if (files.length === 0) {
             select.innerHTML = '<option value="">No log files found</option>';
-            document.getElementById('logsOutput').innerHTML = '<div class="logs-empty">No log files available. Start the server to generate logs.</div>';
+            document.getElementById('logsOutput').innerHTML = '<div class="logs-empty">No log files available.</div>';
             return;
         }
 
@@ -107,7 +174,6 @@ async function loadLogFiles() {
             select.appendChild(option);
         }
 
-        // Load first (most recent) log file
         currentFile = files[0].name;
         await loadLogs();
     } catch (e) {
@@ -118,13 +184,12 @@ async function loadLogFiles() {
 async function loadLogs(append = false) {
     const filename = document.getElementById('logFile').value;
     if (!filename) return;
-
     currentFile = filename;
 
     if (!append) {
         currentOffset = 0;
         allEntries = [];
-        document.getElementById('logsOutput').innerHTML = '<div class="logs-loading">Loading logs...</div>';
+        document.getElementById('logsOutput').innerHTML = '<div class="loading-state">Loading logs...</div>';
     }
 
     const level = document.getElementById('logLevel').value;
@@ -137,21 +202,13 @@ async function loadLogs(append = false) {
     try {
         const response = await fetch(url);
         const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Failed to load logs');
 
-        if (!response.ok) {
-            throw new Error(data.detail || 'Failed to load logs');
-        }
-
-        if (append) {
-            // Append older entries at the end
-            allEntries = [...allEntries, ...data.entries];
-        } else {
-            allEntries = data.entries;
-        }
+        if (append) allEntries = [...allEntries, ...data.entries];
+        else allEntries = data.entries;
 
         renderLogs(allEntries);
         updatePagination(data);
-
     } catch (e) {
         if (!append) {
             document.getElementById('logsOutput').innerHTML = `<div class="logs-error">Failed to load logs: ${escapeHtml(e.message)}</div>`;
@@ -161,7 +218,6 @@ async function loadLogs(append = false) {
 
 function renderLogs(entries) {
     const output = document.getElementById('logsOutput');
-
     if (entries.length === 0) {
         output.innerHTML = '<div class="logs-empty">No log entries found matching your filters.</div>';
         document.getElementById('lineCount').textContent = '0';
@@ -174,25 +230,13 @@ function renderLogs(entries) {
         const timestamp = entry.timestamp ? `<span class="log-timestamp">${escapeHtml(entry.timestamp)}</span>` : '';
         const level = entry.level ? `<span class="log-level ${levelClass}">${escapeHtml(entry.level)}</span>` : '';
         const logger = entry.logger ? `<span class="log-logger">${escapeHtml(entry.logger)}</span>` : '';
-
-        html += `
-            <div class="log-entry ${levelClass}">
-                ${timestamp}
-                ${level}
-                ${logger}
-                <span class="log-message">${escapeHtml(entry.message)}</span>
-            </div>
-        `;
+        html += `<div class="log-entry ${levelClass}">${timestamp}${level}${logger}<span class="log-message">${escapeHtml(entry.message)}</span></div>`;
     }
     html += '</div>';
-
     output.innerHTML = html;
     document.getElementById('lineCount').textContent = entries.length.toString();
 
-    // Auto-scroll to top (newest) if enabled
-    if (document.getElementById('autoScroll').checked) {
-        output.scrollTop = 0;
-    }
+    if (document.getElementById('autoScroll').checked) output.scrollTop = 0;
 }
 
 function getLevelClass(level) {
@@ -200,8 +244,7 @@ function getLevelClass(level) {
         case 'DEBUG': return 'level-debug';
         case 'INFO': return 'level-info';
         case 'WARNING': return 'level-warning';
-        case 'ERROR': return 'level-error';
-        case 'CRITICAL': return 'level-error';
+        case 'ERROR': case 'CRITICAL': return 'level-error';
         default: return '';
     }
 }
@@ -209,7 +252,6 @@ function getLevelClass(level) {
 function updatePagination(data) {
     const pagination = document.getElementById('logsPagination');
     const info = document.getElementById('paginationInfo');
-
     if (data.filtered_lines > allEntries.length) {
         pagination.style.display = 'flex';
         info.textContent = `Showing ${allEntries.length} of ${data.filtered_lines} lines`;
@@ -223,10 +265,7 @@ async function loadMoreLogs() {
     await loadLogs(true);
 }
 
-function refreshLogs() {
-    loadLogs(false);
-}
-
+function refreshLogs() { loadLogs(false); }
 function debounceSearch() {
     if (searchTimeout) clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => loadLogs(false), 300);
@@ -234,48 +273,25 @@ function debounceSearch() {
 
 function toggleLiveMode() {
     const liveMode = document.getElementById('liveMode').checked;
-
-    if (liveMode) {
-        startLiveMode();
-    } else {
-        stopLiveMode();
-    }
+    if (liveMode) startLiveMode();
+    else stopLiveMode();
 }
 
 function startLiveMode() {
-    if (eventSource) {
-        eventSource.close();
-    }
-
+    if (eventSource) eventSource.close();
     const filename = document.getElementById('logFile').value;
     if (!filename) return;
 
-    // First load existing logs
     loadLogs(false).then(() => {
-        // Then start streaming
         eventSource = new EventSource(`/api/v1/logs/stream/${encodeURIComponent(filename)}`);
-
         eventSource.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                if (data.line) {
-                    appendLogLine(data.line);
-                } else if (data.error) {
-                    console.error('Stream error:', data.error);
-                }
-            } catch (e) {
-                console.error('Failed to parse SSE data:', e);
-            }
+                if (data.line) appendLogLine(data.line);
+            } catch (e) {}
         };
-
-        eventSource.onerror = (e) => {
-            console.error('EventSource error:', e);
-            // Reconnect after a delay
-            setTimeout(() => {
-                if (document.getElementById('liveMode').checked) {
-                    startLiveMode();
-                }
-            }, 3000);
+        eventSource.onerror = () => {
+            setTimeout(() => { if (document.getElementById('liveMode').checked) startLiveMode(); }, 3000);
         };
     });
 
@@ -286,11 +302,7 @@ function startLiveMode() {
 }
 
 function stopLiveMode() {
-    if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-    }
-
+    if (eventSource) { eventSource.close(); eventSource = null; }
     document.getElementById('refreshBtn').disabled = false;
     document.getElementById('logFile').disabled = false;
     document.getElementById('logLevel').disabled = false;
@@ -298,41 +310,19 @@ function stopLiveMode() {
 }
 
 function appendLogLine(line) {
-    // Parse the line
     const logPattern = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+) - (\w+) - (.*)$/;
     const match = line.match(logPattern);
+    let entry = match ? { timestamp: match[1], logger: match[2].trim(), level: match[3], message: match[4] }
+                      : { timestamp: '', logger: '', level: '', message: line };
 
-    let entry;
-    if (match) {
-        entry = {
-            timestamp: match[1],
-            logger: match[2].trim(),
-            level: match[3],
-            message: match[4],
-        };
-    } else {
-        entry = {
-            timestamp: '',
-            logger: '',
-            level: '',
-            message: line,
-        };
-    }
-
-    // Check if it matches current filters
     const levelFilter = document.getElementById('logLevel').value;
     const searchFilter = document.getElementById('logSearch').value.toLowerCase();
-
     if (levelFilter && entry.level !== levelFilter) return;
     if (searchFilter && !line.toLowerCase().includes(searchFilter)) return;
 
-    // Add to beginning of entries (newest first)
     allEntries.unshift(entry);
-
-    // Re-render
     renderLogs(allEntries);
 
-    // Flash effect for new entry
     const firstEntry = document.querySelector('.log-entry');
     if (firstEntry) {
         firstEntry.classList.add('log-entry-new');
@@ -342,30 +332,14 @@ function appendLogLine(line) {
 
 function copyLogs() {
     const text = allEntries.map(e => e.raw || e.message).join('\n');
-
     navigator.clipboard.writeText(text).then(() => {
-        // Show brief confirmation
         const btn = document.querySelector('[onclick="copyLogs()"]');
-        const originalText = btn.textContent;
-        btn.textContent = 'Copied!';
-        setTimeout(() => btn.textContent = originalText, 2000);
-    }).catch(e => {
-        alert('Failed to copy: ' + e.message);
+        const original = btn.innerHTML;
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
+        setTimeout(() => btn.innerHTML = original, 2000);
     });
 }
 
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-// Cleanup on page unload
-window.addEventListener('beforeunload', () => {
-    if (eventSource) {
-        eventSource.close();
-    }
-});
+window.addEventListener('beforeunload', () => { if (eventSource) eventSource.close(); });
 </script>
 {% endblock %}

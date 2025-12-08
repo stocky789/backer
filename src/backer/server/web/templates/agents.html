@@ -1,134 +1,278 @@
 {% extends "base.html" %}
 {% block title %}Agents - Backer{% endblock %}
-{% block page_title %}Agents{% endblock %}
 
-{% block actions %}
-<button class="btn btn-secondary" onclick="location.reload()">Refresh</button>
+{% block status_left %}
+{{ agents|length }} Agents | {{ agents|selectattr('status', 'equalto', 'online')|list|length }} Online
 {% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="card-header">
-        <span class="card-title">Registered Agents ({{ agents|length }})</span>
+<!-- Toolbar -->
+<div class="toolbar">
+    <div class="search-box">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" placeholder="Search agents..." id="searchInput" oninput="filterAgents()">
     </div>
-    {% if agents %}
-    <table>
-        <thead>
-            <tr>
-                <th>Hostname</th>
-                <th>ID</th>
-                <th>Status</th>
-                <th>IP Address</th>
-                <th>OS</th>
-                <th>Last Seen</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for agent in agents %}
-            <tr>
-                <td><strong>{{ agent.name }}</strong></td>
-                <td><code>{{ agent.id }}</code></td>
-                <td>
-                    {% if agent.status == 'online' %}
-                    <span class="badge badge-success">Online</span>
+    <div class="toolbar-spacer"></div>
+    <button class="toolbar-btn" onclick="location.reload()">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Refresh
+    </button>
+</div>
+
+<div class="content-body">
+    <!-- Stats Row -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Total Agents</div>
+            <div class="stat-value">{{ agents|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Online</div>
+            <div class="stat-value success">{{ agents|selectattr('status', 'equalto', 'online')|list|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Offline</div>
+            <div class="stat-value {% if agents|rejectattr('status', 'equalto', 'online')|list|length > 0 %}warning{% endif %}">{{ agents|rejectattr('status', 'equalto', 'online')|list|length }}</div>
+        </div>
+    </div>
+
+    <!-- Agents Table -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Registered Agents</span>
+            <span class="text-muted" style="font-size: 11px;">{{ agents|length }} total</span>
+        </div>
+        <div class="data-grid-container" style="max-height: 350px;">
+            <table class="data-grid" id="agentsTable">
+                <thead>
+                    <tr>
+                        <th style="width: 24px;"></th>
+                        <th>Hostname</th>
+                        <th>Agent ID</th>
+                        <th>Status</th>
+                        <th>IP Address</th>
+                        <th>Operating System</th>
+                        <th>Last Seen</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for agent in agents %}
+                    <tr class="agent-row" data-name="{{ agent.name }}" data-id="{{ agent.id }}">
+                        <td>
+                            <div class="row-icon">
+                                <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                            </div>
+                        </td>
+                        <td><strong>{{ agent.name }}</strong></td>
+                        <td><code style="font-size: 10px; color: var(--text-muted);">{{ agent.id }}</code></td>
+                        <td>
+                            {% if agent.status == 'online' %}
+                            <span class="status-badge success">
+                                <svg class="status-icon" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                Online
+                            </span>
+                            {% else %}
+                            <span class="status-badge muted">
+                                <svg class="status-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                                Offline
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td>{{ agent.ip_address or '-' }}</td>
+                        <td class="text-muted">{{ agent.os_info or '-' }}</td>
+                        <td class="text-muted">{{ agent.last_seen_ago }}</td>
+                        <td>
+                            <button class="btn btn-danger btn-sm" onclick="removeAgent('{{ agent.id }}', '{{ agent.name }}')">Remove</button>
+                        </td>
+                    </tr>
                     {% else %}
-                    <span class="badge badge-muted">Offline</span>
-                    {% endif %}
-                </td>
-                <td>{{ agent.ip_address or '-' }}</td>
-                <td style="color: var(--text-muted)">{{ agent.os_info or '-' }}</td>
-                <td style="color: var(--text-muted)">{{ agent.last_seen_ago }}</td>
-                <td>
-                    <button class="btn btn-danger btn-sm"
-                            onclick="removeAgent('{{ agent.id }}', '{{ agent.name }}')">
-                        Remove
-                    </button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <div class="empty-state">
-        <h3>No Agents Registered</h3>
-        <p>Install the Backer agent on machines you want to backup</p>
+                    <tr>
+                        <td colspan="8">
+                            <div class="empty-state">
+                                <p>No agents registered</p>
+                                <p class="text-muted" style="font-size: 11px;">Install the Backer agent on machines you want to backup</p>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
-    {% endif %}
-</div>
 
-<!-- Windows Setup Instructions -->
-<div class="card">
-    <div class="card-header">
-        <span class="card-title">Windows Agent Setup</span>
-    </div>
-    <div class="card-body">
-        <p style="margin-bottom: 20px; color: var(--text-muted);">
-            Install the Backer agent on Windows machines to enable backups:
-        </p>
+    <!-- Setup Instructions Row -->
+    <div class="setup-row">
+        <!-- Windows Setup -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px;"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    Windows Agent
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="setup-step">
+                    <div class="setup-step-num">1</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Download the Installer</div>
+                        <a href="https://github.com/stocky789/backer/releases/latest" target="_blank" class="btn btn-primary btn-sm" style="margin-top: 8px;">
+                            <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Download backer-agent-setup.exe
+                        </a>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">2</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Run the Installer</div>
+                        <div class="setup-step-desc">Double-click the downloaded file and follow the installation wizard.</div>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">3</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Enter Server Address</div>
+                        <pre id="serverUrl" class="setup-code">Loading...</pre>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">4</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Click Connect</div>
+                        <div class="setup-step-desc">The agent will register and appear in the list above.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-        <h4 style="margin-bottom: 10px;">1. Download the Installer</h4>
-        <p style="margin-bottom: 15px;">
-            <a href="https://github.com/stocky789/backer/releases/latest"
-               target="_blank"
-               class="btn btn-primary"
-               style="display: inline-flex; align-items: center; gap: 8px;">
-                Download backer-agent-setup.exe
-            </a>
-        </p>
-
-        <h4 style="margin-top: 20px; margin-bottom: 10px;">2. Run the Installer</h4>
-        <p style="color: var(--text-muted); margin-bottom: 15px;">
-            Double-click the downloaded file and follow the installation wizard.
-        </p>
-
-        <h4 style="margin-top: 20px; margin-bottom: 10px;">3. Connect to this Server</h4>
-        <p style="color: var(--text-muted); margin-bottom: 10px;">
-            When the Backer Agent opens, enter this server address:
-        </p>
-        <pre id="serverUrl" style="font-size: 14px; padding: 12px;">Loading...</pre>
-        <script>
-            // Get the actual server URL from the browser
-            document.getElementById('serverUrl').textContent = window.location.origin;
-        </script>
-
-        <h4 style="margin-top: 20px; margin-bottom: 10px;">4. Click Connect</h4>
-        <p style="color: var(--text-muted);">
-            The agent will register with this server and appear in the list above.
-        </p>
-    </div>
-</div>
-
-<!-- Linux Setup Instructions -->
-<div class="card">
-    <div class="card-header">
-        <span class="card-title">Linux Agent Setup</span>
-    </div>
-    <div class="card-body">
-        <p style="margin-bottom: 20px; color: var(--text-muted);">
-            Install the Backer agent on Linux machines:
-        </p>
-
-        <h4 style="margin-bottom: 10px;">Quick Install</h4>
-        <pre>curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash</pre>
-
-        <h4 style="margin-top: 20px; margin-bottom: 10px;">Or Manual Install</h4>
-        <pre id="linuxManualInstall">pip install backer
+        <!-- Linux Setup -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                    Linux Agent
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="setup-step">
+                    <div class="setup-step-num">1</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Quick Install (Recommended)</div>
+                        <pre class="setup-code">curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash</pre>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">2</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Or Manual Install</div>
+                        <pre id="linuxManualInstall" class="setup-code">pip install backer
 backer agent register --server [loading...]
 backer agent start</pre>
-        <script>
-            // Update Linux manual install command with actual server URL
-            document.getElementById('linuxManualInstall').textContent = 
-                `pip install backer\nbacker agent register --server ${window.location.origin}\nbacker agent start`;
-        </script>
-
-        <p style="margin-top: 20px; color: var(--text-muted);">
-            The agent will appear in the list above once registered and running.
-        </p>
+                    </div>
+                </div>
+                <div class="setup-note">
+                    <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; margin-right: 6px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                    The agent will appear in the list above once registered and running.
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
+<style>
+.setup-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 16px;
+}
+.setup-step {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+.setup-step:last-child {
+    margin-bottom: 0;
+}
+.setup-step-num {
+    width: 22px;
+    height: 22px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+.setup-step-content {
+    flex: 1;
+    min-width: 0;
+}
+.setup-step-title {
+    font-weight: 600;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+.setup-step-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.setup-code {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    margin-top: 6px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.setup-note {
+    display: flex;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 10px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    margin-top: 12px;
+}
+.setup-note svg {
+    stroke: var(--accent);
+}
+@media (max-width: 900px) {
+    .setup-row {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
 <script>
+// Update server URL displays
+document.getElementById('serverUrl').textContent = window.location.origin;
+document.getElementById('linuxManualInstall').textContent =
+    `pip install backer\nbacker agent register --server ${window.location.origin}\nbacker agent start`;
+
+// Filter agents table
+function filterAgents() {
+    const query = document.getElementById('searchInput').value.toLowerCase();
+    const rows = document.querySelectorAll('.agent-row');
+    rows.forEach(row => {
+        const name = row.dataset.name.toLowerCase();
+        const id = row.dataset.id.toLowerCase();
+        row.style.display = (name.includes(query) || id.includes(query)) ? '' : 'none';
+    });
+}
+
+// Remove agent
 async function removeAgent(agentId, agentName) {
     if (!confirm(`Remove agent '${agentName}'? It will need to re-register.`)) {
         return;
@@ -147,7 +291,6 @@ async function removeAgent(agentId, agentName) {
                 const data = await response.json();
                 errorMsg = data.detail || data.message || errorMsg;
             } catch {
-                // Response wasn't JSON, try text
                 const text = await response.text();
                 if (text) errorMsg = text;
             }

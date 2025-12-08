@@ -1,73 +1,127 @@
 {% extends "base.html" %}
 {% block title %}Storage Repositories - Backer{% endblock %}
-{% block page_title %}Storage Repositories{% endblock %}
 
-{% block actions %}
-<button class="btn btn-primary" onclick="showAddModal()">+ Add Repository</button>
+{% block status_left %}
+{{ repositories|length }} Repositories
 {% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="card-header">
-        <span class="card-title">Configured Repositories ({{ repositories|length }})</span>
+<!-- Toolbar -->
+<div class="toolbar">
+    <div class="search-box">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" placeholder="Search repositories..." id="searchInput" oninput="filterRepos()">
     </div>
-    {% if repositories %}
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Server</th>
-                <th>Share/Export</th>
-                <th>Path</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for repo in repositories %}
-            <tr>
-                <td><strong>{{ repo.name }}</strong></td>
-                <td>
-                    {% if repo.repo_type == 'smb' %}
-                    <span class="badge badge-info">SMB</span>
-                    {% elif repo.repo_type == 'nfs' %}
-                    <span class="badge badge-info">NFS</span>
-                    {% else %}
-                    <span class="badge badge-muted">{{ repo.repo_type }}</span>
-                    {% endif %}
-                </td>
-                <td>{{ repo.server or '-' }}</td>
-                <td><code>{{ repo.share or '-' }}</code></td>
-                <td><code>{{ repo.path or '/' }}</code></td>
-                <td>
-                    {% if repo.status == 'connected' %}
-                    <span class="badge badge-success">Connected</span>
-                    {% elif repo.status == 'error' %}
-                    <span class="badge badge-error">Error</span>
-                    {% else %}
-                    <span class="badge badge-muted">{{ repo.status or 'Unknown' }}</span>
-                    {% endif %}
-                </td>
-                <td>
-                    <button class="btn btn-secondary btn-sm" onclick="testRepo('{{ repo.id }}')">Test</button>
-                    <button class="btn btn-secondary btn-sm" onclick="scanRepo('{{ repo.id }}', '{{ repo.name }}')">Scan</button>
-                    <button class="btn btn-danger btn-sm"
-                            onclick="deleteRepo('{{ repo.id }}', '{{ repo.name }}')">
-                        Delete
-                    </button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <div class="empty-state">
-        <h3>No Storage Repositories</h3>
-        <p>Add a storage repository to define where backups will be stored</p>
-        <button class="btn btn-primary" onclick="showAddModal()">Add Repository</button>
+    <div class="toolbar-spacer"></div>
+    <button class="toolbar-btn" onclick="showAddModal()">
+        <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add Repository
+    </button>
+    <button class="toolbar-btn" onclick="location.reload()">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Refresh
+    </button>
+</div>
+
+<div class="content-body">
+    <!-- Stats Row -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Total Repositories</div>
+            <div class="stat-value">{{ repositories|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">SMB Shares</div>
+            <div class="stat-value">{{ repositories|selectattr('repo_type', 'equalto', 'smb')|list|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">NFS Exports</div>
+            <div class="stat-value">{{ repositories|selectattr('repo_type', 'equalto', 'nfs')|list|length }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Connected</div>
+            <div class="stat-value success">{{ repositories|selectattr('status', 'equalto', 'connected')|list|length }}</div>
+        </div>
     </div>
-    {% endif %}
+
+    <!-- Repositories Table -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Configured Repositories</span>
+            <span class="text-muted" style="font-size: 11px;">{{ repositories|length }} total</span>
+        </div>
+        <div class="data-grid-container" style="max-height: 450px;">
+            <table class="data-grid" id="reposTable">
+                <thead>
+                    <tr>
+                        <th style="width: 24px;"></th>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Server</th>
+                        <th>Share/Export</th>
+                        <th>Path</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for repo in repositories %}
+                    <tr class="repo-row" data-name="{{ repo.name }}" data-server="{{ repo.server }}">
+                        <td>
+                            <div class="row-icon">
+                                <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                            </div>
+                        </td>
+                        <td><strong>{{ repo.name }}</strong></td>
+                        <td>
+                            {% if repo.repo_type == 'smb' %}
+                            <span class="status-badge info">SMB</span>
+                            {% elif repo.repo_type == 'nfs' %}
+                            <span class="status-badge info">NFS</span>
+                            {% else %}
+                            <span class="status-badge muted">{{ repo.repo_type }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ repo.server or '-' }}</td>
+                        <td><code style="font-size: 10px;">{{ repo.share or '-' }}</code></td>
+                        <td><code style="font-size: 10px;">{{ repo.path or '/' }}</code></td>
+                        <td>
+                            {% if repo.status == 'connected' %}
+                            <span class="status-badge success">
+                                <svg class="status-icon" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                Connected
+                            </span>
+                            {% elif repo.status == 'error' %}
+                            <span class="status-badge error">
+                                <svg class="status-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                Error
+                            </span>
+                            {% else %}
+                            <span class="status-badge muted">{{ repo.status or 'Unknown' }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="btn-group">
+                                <button class="btn btn-secondary btn-sm" onclick="testRepo('{{ repo.id }}')">Test</button>
+                                <button class="btn btn-secondary btn-sm" onclick="scanRepo('{{ repo.id }}', '{{ repo.name }}')">Scan</button>
+                                <button class="btn btn-danger btn-sm" onclick="deleteRepo('{{ repo.id }}', '{{ repo.name }}')">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="8">
+                            <div class="empty-state">
+                                <p>No storage repositories configured</p>
+                                <button class="btn btn-primary btn-sm" onclick="showAddModal()">Add Repository</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <!-- Add Repository Modal -->
@@ -75,7 +129,7 @@
     <div class="modal-content" style="max-width: 700px;">
         <div class="modal-header">
             <h3>Add Storage Repository</h3>
-            <button class="btn btn-secondary btn-sm" onclick="hideAddModal()">&times;</button>
+            <button class="modal-close" onclick="hideAddModal()">&times;</button>
         </div>
         <div class="modal-body">
             <!-- Step 1: Connection -->
@@ -109,18 +163,21 @@
                     </div>
                 </div>
 
-                <button class="btn btn-primary" onclick="discoverShares()">
-                    <span id="discoverBtn">Connect & Browse Shares</span>
-                </button>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="discoverShares()">
+                        <span id="discoverBtn">Connect & Browse Shares</span>
+                    </button>
+                    <button class="btn btn-secondary" onclick="hideAddModal()">Cancel</button>
+                </div>
                 <div id="discoverError" class="error-msg" style="display: none; margin-top: 10px;"></div>
             </div>
 
             <!-- Step 2: Share Selection -->
             <div id="step2" style="display: none;">
-                <div class="breadcrumb" style="margin-bottom: 15px;">
-                    <span onclick="backToStep1()" style="cursor: pointer; color: var(--accent);">Connection</span>
-                    <span style="margin: 0 8px;">/</span>
-                    <span id="serverDisplay"></span>
+                <div class="wizard-breadcrumb">
+                    <span onclick="backToStep1()">Connection</span>
+                    <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+                    <span id="serverDisplay" class="active"></span>
                 </div>
 
                 <div class="form-group">
@@ -131,24 +188,25 @@
 
             <!-- Step 3: Directory Browser -->
             <div id="step3" style="display: none;">
-                <div class="breadcrumb" style="margin-bottom: 15px;">
-                    <span onclick="backToStep1()" style="cursor: pointer; color: var(--accent);">Connection</span>
-                    <span style="margin: 0 8px;">/</span>
-                    <span onclick="backToStep2()" style="cursor: pointer; color: var(--accent);" id="shareDisplay"></span>
-                    <span style="margin: 0 8px;">/</span>
-                    <span id="pathDisplay">/</span>
+                <div class="wizard-breadcrumb">
+                    <span onclick="backToStep1()">Connection</span>
+                    <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+                    <span onclick="backToStep2()" id="shareDisplay"></span>
+                    <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+                    <span id="pathDisplay" class="active">/</span>
                 </div>
 
-                <div class="browser-toolbar" style="margin-bottom: 10px;">
+                <div class="browser-toolbar">
                     <button class="btn btn-secondary btn-sm" onclick="navigateUp()" id="upBtn">
-                        &uarr; Up
+                        <svg viewBox="0 0 24 24" style="width: 12px; height: 12px;"><polyline points="18 15 12 9 6 15"/></svg>
+                        Up
                     </button>
-                    <span id="currentPath" style="margin-left: 10px; color: var(--text-muted);"></span>
+                    <span id="currentPath"></span>
                 </div>
 
-                <div id="directoryList" class="browser-list" style="max-height: 300px; overflow-y: auto;"></div>
+                <div id="directoryList" class="browser-list" style="max-height: 250px; overflow-y: auto;"></div>
 
-                <div class="form-group" style="margin-top: 20px;">
+                <div class="form-group" style="margin-top: 16px;">
                     <label class="form-label">Repository Name</label>
                     <input type="text" id="repoName" class="form-input" placeholder="My NAS Backups">
                     <div class="form-hint">A friendly name for this repository</div>
@@ -159,89 +217,201 @@
                     <input type="text" id="selectedPath" class="form-input" readonly>
                 </div>
 
-                <button class="btn btn-primary" onclick="saveRepository()">Save Repository</button>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" onclick="saveRepository()">Save Repository</button>
+                    <button class="btn btn-secondary" onclick="hideAddModal()">Cancel</button>
+                </div>
                 <div id="saveError" class="error-msg" style="display: none; margin-top: 10px;"></div>
             </div>
         </div>
     </div>
 </div>
 
+<!-- Scan Results Modal -->
+<div id="scanModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 800px;">
+        <div class="modal-header">
+            <h3>Repository Scan: <span id="scanRepoName"></span></h3>
+            <button class="modal-close" onclick="hideScanModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="scanResults"></div>
+            <div id="scanActions" style="display: none; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border);">
+                <p style="margin-bottom: 10px; font-size: 12px;">Import discovered jobs and run history into this server's database:</p>
+                <button id="importBtn" class="btn btn-primary btn-sm" onclick="importMetadata()">Import to Server</button>
+                <span class="text-muted" style="margin-left: 10px; font-size: 11px;">This will import job configurations and backup history</span>
+            </div>
+        </div>
+    </div>
+</div>
+
 <style>
-.browser-list {
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-card);
+/* Wizard Breadcrumb */
+.wizard-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.wizard-breadcrumb span {
+    cursor: pointer;
+    transition: color 0.15s;
+}
+.wizard-breadcrumb span:hover:not(.active) {
+    color: var(--accent);
+}
+.wizard-breadcrumb span.active {
+    color: var(--text);
+    cursor: default;
+}
+.wizard-breadcrumb svg {
+    width: 12px;
+    height: 12px;
+    stroke: var(--text-muted);
+    fill: none;
+    stroke-width: 2;
 }
 
+/* Browser List */
+.browser-list {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-secondary);
+}
 .browser-item {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border-light);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 12px;
-    transition: background-color 0.15s ease;
+    gap: 10px;
+    font-size: 12px;
+    transition: background-color 0.15s;
 }
-
 .browser-item:last-child {
     border-bottom: none;
 }
-
 .browser-item:hover {
     background: var(--bg-hover);
 }
-
-.browser-item.selected {
-    background: rgba(50, 130, 240, 0.1);
-    border-color: var(--accent);
-}
-
 .browser-item .icon {
-    width: 20px;
-    height: 20px;
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
     opacity: 0.7;
 }
-
 .browser-item .name {
     flex: 1;
-    color: var(--text);
     font-weight: 500;
 }
-
 .browser-item .meta {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+/* Browser Toolbar */
+.browser-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* Loading State */
+.loading-state {
+    text-align: center;
+    padding: 20px;
     color: var(--text-muted);
     font-size: 12px;
 }
 
-.breadcrumb {
-    font-size: 13px;
-    color: var(--text-muted);
+/* Scan Styles */
+.scan-section {
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
 }
-
-.browser-toolbar {
+.scan-section:last-child {
+    border-bottom: none;
+}
+.scan-section h4 {
+    margin: 0 0 10px 0;
+    font-size: 12px;
+    font-weight: 600;
+}
+.scan-stats {
     display: flex;
-    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
 }
-
-.loading {
+.scan-stat-item {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    padding: 12px 16px;
+    border-radius: 4px;
     text-align: center;
-    padding: 24px;
+    min-width: 80px;
+}
+.scan-stat-value {
+    display: block;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+}
+.scan-stat-label {
+    display: block;
+    font-size: 10px;
     color: var(--text-muted);
+    margin-top: 4px;
+    text-transform: uppercase;
+}
+.scan-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+.scan-table th,
+.scan-table td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+.scan-table th {
+    background: var(--bg-tertiary);
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+.scan-table tr:last-child td {
+    border-bottom: none;
+}
+.scan-table tr:hover {
+    background: var(--bg-hover);
 }
 </style>
+{% endblock %}
 
+{% block scripts %}
 <script>
 let currentServer = '';
 let currentShare = '';
 let currentPath = '';
 let currentType = 'smb';
+let currentScanRepoId = null;
 
-// Escape HTML to prevent XSS
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+// Filter repositories
+function filterRepos() {
+    const query = document.getElementById('searchInput').value.toLowerCase();
+    document.querySelectorAll('.repo-row').forEach(row => {
+        const name = row.dataset.name.toLowerCase();
+        const server = (row.dataset.server || '').toLowerCase();
+        row.style.display = (name.includes(query) || server.includes(query)) ? '' : 'none';
+    });
 }
 
 function showAddModal() {
@@ -269,8 +439,7 @@ function resetWizard() {
 
 function onTypeChange() {
     currentType = document.getElementById('repoType').value;
-    const creds = document.getElementById('smbCredentials');
-    creds.style.display = currentType === 'smb' ? 'block' : 'none';
+    document.getElementById('smbCredentials').style.display = currentType === 'smb' ? 'block' : 'none';
 }
 
 function backToStep1() {
@@ -332,13 +501,13 @@ function showSharesList(shares) {
     const list = document.getElementById('sharesList');
 
     if (shares.length === 0) {
-        list.innerHTML = '<div class="loading">No shares found</div>';
+        list.innerHTML = '<div class="loading-state">No shares found</div>';
         return;
     }
 
     list.innerHTML = shares.map(share => `
         <div class="browser-item" onclick="selectShare('${escapeHtml(share.name)}')">
-            <img src="/static/icons/folder.svg" class="icon" alt="">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             <span class="name">${escapeHtml(share.name)}</span>
             <span class="meta">${escapeHtml(share.comment || share.type)}</span>
         </div>
@@ -351,11 +520,9 @@ function selectShare(shareName) {
     document.getElementById('step2').style.display = 'none';
     document.getElementById('step3').style.display = 'block';
     document.getElementById('shareDisplay').textContent = shareName;
-    // For NFS, shareName is a path like /mnt/tank/Backups - use just the last component
-    // Also sanitize any remaining special chars that would fail validation
+
     let friendlyName = shareName;
     if (currentType === 'nfs' && shareName.includes('/')) {
-        // Get the last non-empty path component
         const parts = shareName.split('/').filter(p => p);
         friendlyName = parts.length > 0 ? parts[parts.length - 1] : shareName;
     }
@@ -368,7 +535,7 @@ async function browseDirectory(path) {
     updatePathDisplay();
 
     const list = document.getElementById('directoryList');
-    list.innerHTML = '<div class="loading">Loading...</div>';
+    list.innerHTML = '<div class="loading-state">Loading...</div>';
 
     try {
         const response = await fetch('/api/v1/repositories/browse', {
@@ -390,35 +557,32 @@ async function browseDirectory(path) {
         if (data.success) {
             showDirectoryList(data.entries);
         } else {
-            list.innerHTML = `<div class="error-msg">${data.error}</div>`;
+            list.innerHTML = `<div class="error-msg">${escapeHtml(data.error)}</div>`;
         }
     } catch (e) {
-        list.innerHTML = `<div class="error-msg">Failed to browse: ${e.message}</div>`;
+        list.innerHTML = `<div class="error-msg">Failed to browse: ${escapeHtml(e.message)}</div>`;
     }
 }
 
 function showDirectoryList(entries) {
     const list = document.getElementById('directoryList');
-
-    // Filter to only directories
     const dirs = entries.filter(e => e.is_dir);
 
     if (dirs.length === 0) {
-        list.innerHTML = '<div class="loading">No subdirectories (you can use this folder)</div>';
+        list.innerHTML = '<div class="loading-state">No subdirectories (you can use this folder)</div>';
         return;
     }
 
     list.innerHTML = dirs.map(entry => `
         <div class="browser-item" onclick="navigateTo('${escapeHtml(entry.name)}')">
-            <img src="/static/icons/folder.svg" class="icon" alt="">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             <span class="name">${escapeHtml(entry.name)}</span>
         </div>
     `).join('');
 }
 
 function navigateTo(name) {
-    const newPath = currentPath ? currentPath + '/' + name : name;
-    browseDirectory(newPath);
+    browseDirectory(currentPath ? currentPath + '/' + name : name);
 }
 
 function navigateUp() {
@@ -433,7 +597,6 @@ function updatePathDisplay() {
     document.getElementById('currentPath').textContent = currentPath || '(root)';
     document.getElementById('upBtn').disabled = !currentPath;
 
-    // Update selected path
     let fullPath = `//${currentServer}/${currentShare}`;
     if (currentPath) fullPath += '/' + currentPath;
     document.getElementById('selectedPath').value = fullPath;
@@ -482,17 +645,12 @@ function showError(elementId, message) {
 
 async function testRepo(repoId) {
     try {
-        // Start the test (returns immediately with task_id)
-        const response = await fetch(`/api/v1/repositories/${repoId}/test`, {
-            method: 'POST'
-        });
+        const response = await fetch(`/api/v1/repositories/${repoId}/test`, { method: 'POST' });
         const data = await response.json();
 
         if (data.task_id) {
-            // Poll for task completion
             const taskId = data.task_id;
             let attempts = 0;
-            const maxAttempts = 60; // 60 seconds max
 
             const checkTask = async () => {
                 attempts++;
@@ -505,18 +663,15 @@ async function testRepo(repoId) {
                     if (result.success) location.reload();
                 } else if (task.status === 'failed') {
                     alert('Connection test failed: ' + (task.error || 'Unknown error'));
-                } else if (attempts < maxAttempts) {
-                    // Still running, check again in 1 second
+                } else if (attempts < 60) {
                     setTimeout(checkTask, 1000);
                 } else {
                     alert('Connection test timed out');
                 }
             };
 
-            // Start polling
             setTimeout(checkTask, 500);
         } else {
-            // Legacy response format (shouldn't happen)
             alert(data.success ? 'Connection successful!' : 'Connection failed: ' + data.message);
             if (data.success) location.reload();
         }
@@ -526,24 +681,12 @@ async function testRepo(repoId) {
 }
 
 async function deleteRepo(repoId, repoName) {
-    if (!confirm(`Delete repository '${repoName}'?`)) {
-        return;
-    }
-
-    // Show loading state
-    console.log('[DELETE] Starting delete for', repoId);
-    const startTime = Date.now();
+    if (!confirm(`Delete repository '${repoName}'?`)) return;
 
     try {
-        const response = await fetch(`/api/v1/repositories/${repoId}`, {
-            method: 'DELETE'
-        });
-
-        console.log('[DELETE] Response received in', Date.now() - startTime, 'ms, status:', response.status);
+        const response = await fetch(`/api/v1/repositories/${repoId}`, { method: 'DELETE' });
 
         if (response.ok) {
-            console.log('[DELETE] Success, reloading page...');
-            // Use replace instead of reload to avoid caching issues
             window.location.replace(window.location.pathname);
         } else {
             let errorMsg = `HTTP ${response.status}`;
@@ -557,12 +700,8 @@ async function deleteRepo(repoId, repoName) {
             alert('Failed to delete repository: ' + errorMsg);
         }
     } catch (e) {
-        console.error('[DELETE] Error after', Date.now() - startTime, 'ms:', e);
         alert('Delete failed: ' + e.message);
-        // Still try to reload in case it succeeded
-        setTimeout(() => {
-            window.location.replace(window.location.pathname);
-        }, 500);
+        setTimeout(() => { window.location.replace(window.location.pathname); }, 500);
     }
 }
 
@@ -572,8 +711,6 @@ document.getElementById('addModal')?.addEventListener('click', function(e) {
 });
 
 // ============ Repository Scanning ============
-
-let currentScanRepoId = null;
 
 function showScanModal() {
     document.getElementById('scanModal').style.display = 'flex';
@@ -586,22 +723,17 @@ function hideScanModal() {
 async function scanRepo(repoId, repoName) {
     currentScanRepoId = repoId;
     document.getElementById('scanRepoName').textContent = repoName;
-    document.getElementById('scanResults').innerHTML = '<div class="loading">Starting repository scan...</div>';
+    document.getElementById('scanResults').innerHTML = '<div class="loading-state">Starting repository scan...</div>';
     document.getElementById('scanActions').style.display = 'none';
     showScanModal();
 
     try {
-        // Start the scan (returns immediately with task_id)
-        const response = await fetch(`/api/v1/repositories/${repoId}/scan`, {
-            method: 'POST'
-        });
+        const response = await fetch(`/api/v1/repositories/${repoId}/scan`, { method: 'POST' });
         const data = await response.json();
 
         if (data.task_id) {
-            // Poll for task completion
             const taskId = data.task_id;
             let attempts = 0;
-            const maxAttempts = 120; // 2 minutes max
 
             const checkTask = async () => {
                 attempts++;
@@ -609,9 +741,8 @@ async function scanRepo(repoId, repoName) {
                     const taskResponse = await fetch(`/api/v1/tasks/${taskId}`);
                     const task = await taskResponse.json();
 
-                    // Update progress message
                     if (task.message) {
-                        document.getElementById('scanResults').innerHTML = `<div class="loading">${escapeHtml(task.message)}</div>`;
+                        document.getElementById('scanResults').innerHTML = `<div class="loading-state">${escapeHtml(task.message)}</div>`;
                     }
 
                     if (task.status === 'completed') {
@@ -619,53 +750,28 @@ async function scanRepo(repoId, repoName) {
                         if (result.success) {
                             displayScanResults(result);
                         } else {
-                            document.getElementById('scanResults').innerHTML = `
-                                <div class="error-msg">
-                                    <strong>Scan failed:</strong> ${escapeHtml(result.error || 'Unknown error')}
-                                </div>
-                            `;
+                            document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(result.error || 'Unknown error')}</div>`;
                         }
                     } else if (task.status === 'failed') {
-                        document.getElementById('scanResults').innerHTML = `
-                            <div class="error-msg">
-                                <strong>Scan failed:</strong> ${escapeHtml(task.error || 'Unknown error')}
-                            </div>
-                        `;
-                    } else if (attempts < maxAttempts) {
-                        // Still running, check again in 1 second
+                        document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(task.error || 'Unknown error')}</div>`;
+                    } else if (attempts < 120) {
                         setTimeout(checkTask, 1000);
                     } else {
-                        document.getElementById('scanResults').innerHTML = `
-                            <div class="error-msg">
-                                <strong>Scan timed out</strong>
-                            </div>
-                        `;
+                        document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan timed out</div>`;
                     }
                 } catch (pollError) {
-                    if (attempts < maxAttempts) {
-                        setTimeout(checkTask, 1000);
-                    }
+                    if (attempts < 120) setTimeout(checkTask, 1000);
                 }
             };
 
-            // Start polling
             setTimeout(checkTask, 500);
         } else if (data.success) {
-            // Legacy response format (shouldn't happen)
             displayScanResults(data);
         } else {
-            document.getElementById('scanResults').innerHTML = `
-                <div class="error-msg">
-                    <strong>Scan failed:</strong> ${escapeHtml(data.error || 'Unknown error')}
-                </div>
-            `;
+            document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(data.error || 'Unknown error')}</div>`;
         }
     } catch (e) {
-        document.getElementById('scanResults').innerHTML = `
-            <div class="error-msg">
-                <strong>Scan failed:</strong> ${escapeHtml(e.message)}
-            </div>
-        `;
+        document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(e.message)}</div>`;
     }
 }
 
@@ -675,17 +781,13 @@ function displayScanResults(data) {
 
     if (!data.initialized) {
         let diagnosticHtml = '';
-        if (data.scan_path) {
-            diagnosticHtml += `<p style="color: var(--text-muted); font-size: 12px;">Searched: <code>${escapeHtml(data.scan_path)}</code></p>`;
-        }
-        if (data.scan_note) {
-            diagnosticHtml += `<p style="color: var(--text-muted); font-size: 12px;">Note: ${escapeHtml(data.scan_note)}</p>`;
-        }
+        if (data.scan_path) diagnosticHtml += `<p class="text-muted" style="font-size: 11px;">Searched: <code>${escapeHtml(data.scan_path)}</code></p>`;
+        if (data.scan_note) diagnosticHtml += `<p class="text-muted" style="font-size: 11px;">Note: ${escapeHtml(data.scan_note)}</p>`;
         resultsDiv.innerHTML = `
             <div class="scan-section">
                 <h4>No Backer Metadata Found</h4>
-                <p>This repository does not have Backer metadata. Backups will start being tracked after the first backup completes.</p>
-                <p style="color: var(--text-muted);">Path: <code>${escapeHtml(data.path)}</code></p>
+                <p style="font-size: 12px;">This repository does not have Backer metadata. Backups will start being tracked after the first backup completes.</p>
+                <p class="text-muted" style="font-size: 11px;">Path: <code>${escapeHtml(data.path)}</code></p>
                 ${diagnosticHtml}
             </div>
         `;
@@ -696,113 +798,44 @@ function displayScanResults(data) {
         <div class="scan-section">
             <h4>Repository Summary</h4>
             <div class="scan-stats">
-                <div class="stat-item">
-                    <span class="stat-value">${summary.agent_count || 0}</span>
-                    <span class="stat-label">Agents</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-value">${summary.job_count || 0}</span>
-                    <span class="stat-label">Jobs</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-value">${summary.total_runs || 0}</span>
-                    <span class="stat-label">Backup Runs</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-value">${summary.snapshot_count || 0}</span>
-                    <span class="stat-label">Snapshots</span>
-                </div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.agent_count || 0}</span><span class="scan-stat-label">Agents</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.job_count || 0}</span><span class="scan-stat-label">Jobs</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.total_runs || 0}</span><span class="scan-stat-label">Runs</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.snapshot_count || 0}</span><span class="scan-stat-label">Snapshots</span></div>
             </div>
-            <p style="color: var(--text-muted); margin-top: 10px;">Path: <code>${escapeHtml(data.path)}</code></p>
+            <p class="text-muted" style="margin-top: 10px; font-size: 11px;">Path: <code>${escapeHtml(data.path)}</code></p>
         </div>
     `;
 
-    // Show agents
     if (data.agents && data.agents.length > 0) {
-        html += `
-            <div class="scan-section">
-                <h4>Discovered Agents (${data.agents.length})</h4>
-                <table class="scan-table">
-                    <thead>
-                        <tr>
-                            <th>Agent ID</th>
-                            <th>Hostname</th>
-                            <th>First Seen</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        `;
+        html += `<div class="scan-section"><h4>Discovered Agents (${data.agents.length})</h4>
+            <table class="scan-table"><thead><tr><th>Agent ID</th><th>Hostname</th><th>First Seen</th></tr></thead><tbody>`;
         for (const agent of data.agents) {
-            html += `
-                <tr>
-                    <td><code>${escapeHtml(agent.agent_id || '-')}</code></td>
-                    <td>${escapeHtml(agent.hostname || '-')}</td>
-                    <td>${escapeHtml(agent.first_seen ? agent.first_seen.split('T')[0] : '-')}</td>
-                </tr>
-            `;
+            html += `<tr><td><code>${escapeHtml(agent.agent_id || '-')}</code></td><td>${escapeHtml(agent.hostname || '-')}</td><td>${escapeHtml(agent.first_seen ? agent.first_seen.split('T')[0] : '-')}</td></tr>`;
         }
         html += '</tbody></table></div>';
     }
 
-    // Show jobs
     if (data.jobs && data.jobs.length > 0) {
-        html += `
-            <div class="scan-section">
-                <h4>Discovered Jobs (${data.jobs.length})</h4>
-                <table class="scan-table">
-                    <thead>
-                        <tr>
-                            <th>Job Name</th>
-                            <th>Run Count</th>
-                            <th>Last Updated</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        `;
+        html += `<div class="scan-section"><h4>Discovered Jobs (${data.jobs.length})</h4>
+            <table class="scan-table"><thead><tr><th>Job Name</th><th>Run Count</th><th>Last Updated</th></tr></thead><tbody>`;
         for (const job of data.jobs) {
-            html += `
-                <tr>
-                    <td><strong>${escapeHtml(job.job_name || '-')}</strong></td>
-                    <td>${job.run_count || 0}</td>
-                    <td>${escapeHtml(job.updated_at ? job.updated_at.split('T')[0] : '-')}</td>
-                </tr>
-            `;
+            html += `<tr><td><strong>${escapeHtml(job.job_name || '-')}</strong></td><td>${job.run_count || 0}</td><td>${escapeHtml(job.updated_at ? job.updated_at.split('T')[0] : '-')}</td></tr>`;
         }
         html += '</tbody></table></div>';
     }
 
-    // Show recent snapshots
     if (data.snapshots && data.snapshots.length > 0) {
-        html += `
-            <div class="scan-section">
-                <h4>Recent Snapshots (${data.snapshots.length})</h4>
-                <table class="scan-table">
-                    <thead>
-                        <tr>
-                            <th>Snapshot ID</th>
-                            <th>Hostname</th>
-                            <th>Time</th>
-                            <th>Paths</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        `;
+        html += `<div class="scan-section"><h4>Recent Snapshots (${data.snapshots.length})</h4>
+            <table class="scan-table"><thead><tr><th>Snapshot ID</th><th>Hostname</th><th>Time</th><th>Paths</th></tr></thead><tbody>`;
         for (const snap of data.snapshots.slice(0, 10)) {
-            html += `
-                <tr>
-                    <td><code>${escapeHtml(snap.short_id || snap.snapshot_id?.slice(0, 8) || '-')}</code></td>
-                    <td>${escapeHtml(snap.hostname || '-')}</td>
-                    <td>${escapeHtml(snap.time ? snap.time.split('T')[0] : '-')}</td>
-                    <td><code>${escapeHtml((snap.paths || []).join(', ') || '-')}</code></td>
-                </tr>
-            `;
+            html += `<tr><td><code>${escapeHtml(snap.short_id || snap.snapshot_id?.slice(0, 8) || '-')}</code></td><td>${escapeHtml(snap.hostname || '-')}</td><td>${escapeHtml(snap.time ? snap.time.split('T')[0] : '-')}</td><td><code>${escapeHtml((snap.paths || []).join(', ') || '-')}</code></td></tr>`;
         }
         html += '</tbody></table></div>';
     }
 
     resultsDiv.innerHTML = html;
 
-    // Show import button if there's data to import
     if (summary.job_count > 0 || summary.agent_count > 0) {
         document.getElementById('scanActions').style.display = 'block';
     }
@@ -816,9 +849,7 @@ async function importMetadata() {
     btn.disabled = true;
 
     try {
-        const response = await fetch(`/api/v1/repositories/${currentScanRepoId}/import`, {
-            method: 'POST'
-        });
+        const response = await fetch(`/api/v1/repositories/${currentScanRepoId}/import`, { method: 'POST' });
         const data = await response.json();
 
         if (data.success) {
@@ -836,106 +867,8 @@ async function importMetadata() {
     btn.disabled = false;
 }
 
-// Close scan modal on background click
 document.getElementById('scanModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideScanModal();
 });
 </script>
-
-<!-- Scan Results Modal -->
-<div id="scanModal" class="modal" style="display: none;">
-    <div class="modal-content" style="max-width: 800px;">
-        <div class="modal-header">
-            <h3>Repository Scan: <span id="scanRepoName"></span></h3>
-            <button class="btn btn-secondary btn-sm" onclick="hideScanModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div id="scanResults"></div>
-            <div id="scanActions" style="display: none; margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);">
-                <p style="margin-bottom: 10px;">Import discovered jobs and run history into this server's database:</p>
-                <button id="importBtn" class="btn btn-primary" onclick="importMetadata()">Import to Server</button>
-                <span style="color: var(--text-muted); margin-left: 10px;">This will import job configurations and backup history</span>
-            </div>
-        </div>
-    </div>
-</div>
-
-<style>
-.scan-section {
-    margin-bottom: 20px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-light);
-}
-
-.scan-section:last-child {
-    border-bottom: none;
-}
-
-.scan-section h4 {
-    margin: 0 0 12px 0;
-    color: var(--text);
-    font-size: 14px;
-    font-weight: 600;
-}
-
-.scan-stats {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-}
-
-.stat-item {
-    background: var(--bg-page);
-    border: 1px solid var(--border);
-    padding: 16px 20px;
-    border-radius: var(--radius);
-    text-align: center;
-    min-width: 100px;
-}
-
-.stat-value {
-    display: block;
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--accent);
-}
-
-.stat-label {
-    display: block;
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.scan-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-}
-
-.scan-table th,
-.scan-table td {
-    padding: 10px 14px;
-    text-align: left;
-    border-bottom: 1px solid var(--border-light);
-}
-
-.scan-table th {
-    background: var(--bg-page);
-    font-weight: 600;
-    font-size: 11px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-}
-
-.scan-table tr:last-child td {
-    border-bottom: none;
-}
-
-.scan-table tr:hover {
-    background: var(--bg-hover);
-}
-</style>
 {% endblock %}
