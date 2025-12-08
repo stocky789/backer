@@ -3113,7 +3113,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     return 0
 
                 count = 0
-                task.update_progress(message=f"Scanning {path}...")
+                task.message = f"Scanning {path}..."
 
                 # List contents
                 success, entries = smb_list_files(server, share, path, username, password, domain)
@@ -3136,7 +3136,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         count += delete_path_recursive(entry_path, depth + 1)
 
                         # Then delete the empty directory
-                        task.update_progress(message=f"Removing directory {entry_path}...")
+                        task.message = f"Removing directory {entry_path}..."
                         rc, _, err = run_smb_command(f'rmdir "{entry_path}"')
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
                             count += 1
@@ -3144,7 +3144,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             errors.append(f"rmdir {entry_path}: {err.strip()[:100]}")
                     else:
                         # It's a file, delete it
-                        task.update_progress(message=f"Deleting {entry_path}...")
+                        task.message = f"Deleting {entry_path}..."
                         rc, _, err = run_smb_command(f'del "{entry_path}"')
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
                             count += 1
@@ -3194,7 +3194,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 nfs_export = share or repo.get("path", "")
                 nfs_source = f"{server}:{nfs_export}"
 
-                task.update_progress(message=f"Mounting NFS share {nfs_source}...")
+                task.message = f"Mounting NFS share {nfs_source}..."
 
                 # Mount the NFS share with read-write access
                 mount_cmd = [
@@ -3227,7 +3227,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         "message": "Path does not exist, nothing to wipe",
                     }
 
-                task.update_progress(message="Scanning directory contents...")
+                task.message = "Scanning directory contents..."
 
                 # Count items first for progress reporting
                 def count_items(path: Path) -> int:
@@ -3256,11 +3256,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         for item in list(path.iterdir()):
                             processed += 1
                             if total_items > 0:
-                                progress = int((processed / total_items) * 80) + 10
-                                task.update_progress(
-                                    progress=min(progress, 90),
-                                    message=f"Deleting {item.name}..."
-                                )
+                                task.progress = min(int((processed / total_items) * 80) + 10, 90)
+                                task.message = f"Deleting {item.name}..."
 
                             try:
                                 if item.is_symlink():
@@ -3325,7 +3322,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             finally:
                 # Unmount
                 if mounted and mount_point:
-                    task.update_progress(message="Unmounting NFS share...")
+                    task.message = "Unmounting NFS share..."
                     try:
                         subprocess.run(
                             ["sudo", "-n", "umount", mount_point],
@@ -3348,7 +3345,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         pass
 
         def run_wipe(task: Task) -> dict[str, Any]:
-            task.update_progress(message="Wiping repository contents...")
+            task.message = "Wiping repository contents..."
 
             if repo_type == "smb":
                 return wipe_smb_recursive(task)

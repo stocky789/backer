@@ -355,20 +355,31 @@ class ResticBackend(BackendBase):
                 errors = [line for line in result.stderr.split("\n") if line.strip()]
 
             # Parse restore stats from output
-            # Format: "Summary: Restored 6 / 4 files/dirs (66 B / 66 B) in 0:00"
             files_restored = 0
             bytes_restored = 0
             output = result.stdout + result.stderr
 
-            # Pattern: "Restored 6 / 4 files/dirs (66 B / 66 B)"
-            restore_pattern = r'Restored\s+(\d+)\s*/\s*\d+\s+files/dirs\s+\((\d+(?:\.\d+)?)\s*(\w*)\s*/'
-            summary_match = re.search(restore_pattern, output)
-            if summary_match:
-                files_restored = int(summary_match.group(1))
-                size_val = float(summary_match.group(2))
-                size_unit = summary_match.group(3).upper() if summary_match.group(3) else 'B'
+            # Try newer format first: "Restored 3 files, 1 directories and 0 symbolic links (113 B)."
+            new_pattern = r'Restored\s+(\d+)\s+files?,\s*(\d+)\s+director(?:y|ies).*?\((\d+(?:\.\d+)?)\s*(\w*)\)'
+            new_match = re.search(new_pattern, output)
+            if new_match:
+                files_restored = int(new_match.group(1)) + int(new_match.group(2))  # files + directories
+                size_val = float(new_match.group(3))
+                size_unit = new_match.group(4).upper() if new_match.group(4) else 'B'
+            else:
+                # Try older format: "Restored 6 / 4 files/dirs (66 B / 66 B)"
+                old_pattern = r'Restored\s+(\d+)\s*/\s*\d+\s+files/dirs\s+\((\d+(?:\.\d+)?)\s*(\w*)\s*/'
+                old_match = re.search(old_pattern, output)
+                if old_match:
+                    files_restored = int(old_match.group(1))
+                    size_val = float(old_match.group(2))
+                    size_unit = old_match.group(3).upper() if old_match.group(3) else 'B'
+                else:
+                    size_val = 0
+                    size_unit = 'B'
 
-                # Convert to bytes
+            # Convert to bytes
+            if size_val > 0:
                 if 'KIB' in size_unit or 'KB' in size_unit:
                     bytes_restored = int(size_val * 1024)
                 elif 'MIB' in size_unit or 'MB' in size_unit:
