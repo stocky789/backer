@@ -486,7 +486,7 @@
     // Update global status bar counts
     function updateGlobalCounts() {
         // Fetch agents count
-        fetch('/api/v1/agents')
+        fetch('/api/v1/clients')
             .then(r => r.json())
             .then(agents => {
                 const countEl = document.querySelector('#globalAgentCount .count');
