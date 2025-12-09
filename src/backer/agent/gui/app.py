@@ -165,14 +165,27 @@ class BackerAgentApp:
         )
         help_label.pack(anchor=tk.W, pady=(0, 10))
 
-        # Connect button - prominently placed
+        # Connection buttons frame
+        conn_btn_frame = ttk.Frame(url_frame)
+        conn_btn_frame.pack(pady=(5, 0))
+
+        # Connect button
         self.connect_btn = ttk.Button(
-            url_frame,
+            conn_btn_frame,
             text="Connect",
             command=self.connect_to_server,
-            width=20
+            width=15
         )
-        self.connect_btn.pack(pady=(5, 0))
+        self.connect_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        # Disconnect button (initially hidden)
+        self.disconnect_btn = ttk.Button(
+            conn_btn_frame,
+            text="Disconnect",
+            command=self.disconnect_from_server,
+            width=15
+        )
+        # Don't pack yet - will be shown after connection
 
         # Status frame
         status_frame = ttk.LabelFrame(main_frame, text="Status", padding="15")
@@ -336,6 +349,7 @@ class BackerAgentApp:
         self.status_label.config(foreground='green')
         self.agent_name_var.set(f"Registered as: {agent_name}")
         self.connect_btn.config(state=tk.NORMAL, text="Reconnect")
+        self.disconnect_btn.pack(side=tk.LEFT)  # Show disconnect button
         self.start_btn.config(state=tk.NORMAL)
         msg = (
             f"Successfully connected to server!\n\n"
@@ -349,8 +363,61 @@ class BackerAgentApp:
         self.status_var.set("Connection failed")
         self.status_label.config(foreground='red')
         self.agent_name_var.set("")
-        self.connect_btn.config(state=tk.NORMAL)
+        self.connect_btn.config(state=tk.NORMAL, text="Connect")
+        self.disconnect_btn.pack_forget()  # Hide disconnect button
         messagebox.showerror("Connection Failed", f"Could not connect to server:\n\n{error}")
+
+    def disconnect_from_server(self):
+        """Disconnect from the Backer server and clear saved config."""
+        # Stop agent if running
+        if self.service is not None:
+            if not messagebox.askyesno(
+                "Confirm Disconnect",
+                "The agent is currently running.\n\n"
+                "Disconnecting will stop the agent and clear the server configuration.\n\n"
+                "Continue?"
+            ):
+                return
+            # Stop the service
+            self.service.stop()
+            self.service = None
+            self.start_btn.config(text="Start Agent", state=tk.DISABLED)
+        else:
+            if not messagebox.askyesno(
+                "Confirm Disconnect",
+                "This will clear the saved server configuration.\n\n"
+                "Continue?"
+            ):
+                return
+
+        # Clear config
+        self.config.pop('server_url', None)
+        self.config.pop('client_id', None)
+        self.config.pop('client_secret', None)
+        self.config.pop('hostname', None)
+        self.save_config()
+
+        # Reset UI
+        self.server_url_var.set('')
+        self.server_entry.delete(0, tk.END)
+        self.server_entry.insert(0, 'http://192.168.1.100:8420')
+        self.server_entry.config(foreground='gray')
+        self.status_var.set("Not connected")
+        self.status_label.config(foreground='black')
+        self.agent_name_var.set("")
+        self.connect_btn.config(text="Connect", state=tk.NORMAL)
+        self.disconnect_btn.pack_forget()  # Hide disconnect button
+        self.start_btn.config(state=tk.DISABLED)
+
+        # Stop tray icon if running
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+                self.tray_icon = None
+            except Exception:
+                pass
+
+        messagebox.showinfo("Disconnected", "Successfully disconnected from server.")
 
     def check_connection(self):
         """Check if already connected to server."""
@@ -386,6 +453,7 @@ class BackerAgentApp:
         self.status_label.config(foreground='green')
         self.agent_name_var.set(f"Registered as: {hostname}")
         self.connect_btn.config(text="Reconnect")
+        self.disconnect_btn.pack(side=tk.LEFT)  # Show disconnect button
         self.start_btn.config(state=tk.NORMAL)
 
     def _check_failed(self):
