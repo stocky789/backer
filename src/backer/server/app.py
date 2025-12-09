@@ -688,11 +688,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         client_name = client.name or client_id
 
+        # Find all jobs associated with this agent
+        all_jobs = storage.list_jobs()
+        agent_jobs = [job for job in all_jobs if job.get("client_id") == client_id]
+
         # Delete client from database immediately
         if not storage.delete_client(client_id):
             raise HTTPException(status_code=404, detail="Client not found")
 
-        result: dict[str, Any] = {"status": "deleted"}
+        # Delete all jobs associated with this agent
+        jobs_deleted = 0
+        for job in agent_jobs:
+            job_name = job.get("name")
+            if job_name and storage.delete_job(job_name):
+                jobs_deleted += 1
+                logger.info(f"[DELETE AGENT] Deleted associated job: {job_name}")
+
+        result: dict[str, Any] = {
+            "status": "deleted",
+            "jobs_deleted": jobs_deleted
+        }
 
         # Schedule metadata cleanup as a background task
         if delete_metadata:
@@ -1040,7 +1055,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 domain = repo_info["domain"]
 
                 # Job subfolder path (where all backup data lives)
-                job_subfolder_path = f"{subpath}/{job_subfolder}" if subpath else job_subfolder
+                # CRITICAL: Must match backup creation path structure: {base}/Agents/{job_subfolder}
+                job_subfolder_path = f"{subpath}/Agents/{job_subfolder}" if subpath else f"Agents/{job_subfolder}"
 
                 # Metadata path within the job subfolder
                 metadata_job_path = f"{job_subfolder_path}/.backer/jobs/{job_name}"

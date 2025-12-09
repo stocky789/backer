@@ -340,7 +340,8 @@ async function updateRunningJobs() {
         const list = document.getElementById('runningJobsList');
         const count = document.getElementById('runningCount');
 
-        const jobs = data.jobs || [];
+        // API returns a list directly, not an object with "jobs" key
+        const jobs = Array.isArray(data) ? data : (data.jobs || []);
         if (jobs.length === 0) {
             panel.style.display = 'none';
             return;

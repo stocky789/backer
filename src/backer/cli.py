@@ -791,10 +791,25 @@ def agent_progress(server: str | None, refresh: int) -> None:
             response = httpx.get(f"{server_url}/api/v1/running", timeout=10)
             response.raise_for_status()
             data = response.json()
-            return data if isinstance(data, list) else data.get("jobs", [])
+
+            # Handle different response formats
+            if data is None:
+                return []
+            elif isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                jobs = data.get("jobs")
+                if jobs is None:
+                    return []
+                return jobs if isinstance(jobs, list) else []
+            else:
+                return []
         except httpx.ConnectError:
             return []
-        except Exception:
+        except Exception as e:
+            # Don't hide errors in development
+            import traceback
+            console.print(f"[dim]Debug: {traceback.format_exc()}[/dim]")
             return []
 
     def format_bytes(bytes_val: int) -> str:
