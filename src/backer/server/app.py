@@ -169,7 +169,10 @@ def _build_backup_command_payload(
     if backend in ("restic", "kopia"):
         if "password" not in payload["backend_options"]:
             # Check for password in job's backend_options
+            # Note: UI stores this as "restic_password" for both restic and kopia
             job_password = job.get("backend_options", {}).get("password")
+            if not job_password:
+                job_password = job.get("backend_options", {}).get("restic_password")
             if job_password:
                 payload["backend_options"]["password"] = job_password
 
