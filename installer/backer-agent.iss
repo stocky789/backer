@@ -50,7 +50,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "startupicon"; Description: "Start Backer Agent when Windows starts"; GroupDescription: "Startup options:"; Flags: checkedonce
+Name: "startupicon"; Description: "Start Backer Agent when Windows starts"; GroupDescription: "Startup options:"
 
 [Files]
 ; Main executable
