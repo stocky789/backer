@@ -37,6 +37,10 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Close running instances before installing
+CloseApplications=force
+CloseApplicationsFilter=backer-agent.exe
+RestartApplications=no
 ; Application icon
 SetupIconFile=..\assets\backer.ico
 UninstallDisplayIcon={app}\backer.ico
@@ -87,9 +91,15 @@ Root: HKLM; Subkey: "SOFTWARE\Backer"; ValueType: string; ValueName: "Version"; 
 // Custom code for additional setup logic
 
 function InitializeSetup(): Boolean;
+var
+  ResultCode: Integer;
 begin
+  // Kill any running backer-agent.exe processes before install
+  // This ensures the old PyInstaller temp files are released
+  Exec('taskkill', '/F /IM backer-agent.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Wait a moment for process cleanup
+  Sleep(1000);
   Result := True;
-  // Add any pre-install checks here
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
