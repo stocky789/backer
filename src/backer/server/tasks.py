@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -38,16 +38,28 @@ class Task:
     message: str = ""
     result: Any = None
     error: str | None = None
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for API response."""
+        """Convert to dictionary for API response.
+
+        Timestamps are returned in ISO format with UTC timezone ('Z' suffix)
+        so JavaScript can correctly calculate relative times.
+        """
         # Don't include result if it's a function (before task runs)
         result_value = None
         if self.result is not None and not callable(self.result):
             result_value = self.result
+
+        def to_iso_utc(dt: datetime | None) -> str | None:
+            if dt is None:
+                return None
+            # Ensure UTC and format with 'Z' suffix
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
         return {
             "id": self.id,
@@ -58,9 +70,9 @@ class Task:
             "message": self.message,
             "result": result_value,
             "error": self.error,
-            "created_at": self.created_at.isoformat(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "created_at": to_iso_utc(self.created_at),
+            "started_at": to_iso_utc(self.started_at),
+            "finished_at": to_iso_utc(self.finished_at),
         }
 
 
@@ -189,7 +201,7 @@ class TaskManager:
     def _run_task(self, task: Task) -> None:
         """Execute a single task."""
         task.status = TaskStatus.RUNNING
-        task.started_at = datetime.now()
+        task.started_at = datetime.now(timezone.utc)
         task.message = "Starting..."
 
         logger.info(f"[TASKS] Running task {task.id}: {task.description}")
@@ -216,7 +228,7 @@ class TaskManager:
             logger.error(f"[TASKS] Task {task.id} failed: {e}")
 
         finally:
-            task.finished_at = datetime.now()
+            task.finished_at = datetime.now(timezone.utc)
 
     def submit_with_func(
         self,
