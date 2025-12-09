@@ -326,6 +326,21 @@ class AgentService:
             else:
                 raise
 
+    def _redact_sensitive_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Redact sensitive data (passwords, secrets) from a dict for logging."""
+        sensitive_keys = {'password', 'secret', 'client_secret', 'smb_password',
+                          'restic_password', 'kopia_password', 'KOPIA_PASSWORD',
+                          'RESTIC_PASSWORD'}
+        redacted = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                redacted[key] = self._redact_sensitive_data(value)
+            elif any(s in key.lower() for s in ['password', 'secret']):
+                redacted[key] = '***REDACTED***'
+            else:
+                redacted[key] = value
+        return redacted
+
     def _process_command(self, command: dict[str, Any]):
         """Process a command from the server."""
         cmd_id = command.get('id')
@@ -333,7 +348,9 @@ class AgentService:
         payload = command.get('payload', {})
 
         logger.info(f"[COMMAND] Processing command {cmd_id}: {cmd_type}")
-        logger.debug(f"[COMMAND] Full payload: {json.dumps(payload, indent=2)}")
+        # Redact sensitive data before logging
+        safe_payload = self._redact_sensitive_data(payload)
+        logger.debug(f"[COMMAND] Full payload: {json.dumps(safe_payload, indent=2)}")
 
         try:
             if cmd_type == 'backup':
@@ -404,11 +421,21 @@ class AgentService:
                 result = self._run_restic_backup(
                     source_path, destination_path, excludes, dry_run, run_id,
                     backend_options=backend_options,
+                    smb_server=smb_server,
+                    smb_share=smb_share,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
                 )
             elif backend == 'kopia':
                 result = self._run_kopia_backup(
                     source_path, destination_path, excludes, dry_run, run_id,
                     backend_options=backend_options,
+                    smb_server=smb_server,
+                    smb_share=smb_share,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
                 )
             else:
                 raise ValueError(f"Unknown backend: {backend}")
@@ -608,6 +635,86 @@ class AgentService:
                 return path.replace('/', '\\')
         return path
 
+    def _connect_windows_smb(
+        self,
+        server: str,
+        share: str,
+        username: str | None = None,
+        password: str | None = None,
+        domain: str | None = None,
+    ) -> bool:
+        """Connect to an SMB share on Windows using net use.
+
+        This establishes credentials for accessing the share so that
+        tools like kopia can access UNC paths without authentication errors.
+
+        Returns True if connection successful or already connected.
+        """
+        if sys.platform != 'win32':
+            return True  # Not needed on Linux (we mount instead)
+
+        unc_path = f"\\\\{server}\\{share}"
+        logger.info(f"[SMB] Connecting to {unc_path}")
+
+        # First, try to disconnect any existing connection (ignore errors)
+        subprocess.run(
+            ['net', 'use', unc_path, '/delete', '/y'],
+            capture_output=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        # Build net use command
+        cmd = ['net', 'use', unc_path]
+
+        if password:
+            cmd.append(password)
+
+        if username:
+            if domain:
+                cmd.extend([f'/user:{domain}\\{username}'])
+            else:
+                cmd.extend([f'/user:{username}'])
+
+        cmd.append('/persistent:no')
+
+        # Log command without password
+        safe_cmd = cmd.copy()
+        if password and password in safe_cmd:
+            safe_cmd[safe_cmd.index(password)] = '***'
+        logger.debug(f"[SMB] Running: {' '.join(safe_cmd)}")
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[SMB] Successfully connected to {unc_path}")
+            return True
+        else:
+            # Check if already connected (error 1219)
+            if '1219' in result.stderr or 'already' in result.stderr.lower():
+                logger.info(f"[SMB] Already connected to {unc_path}")
+                return True
+            logger.error(f"[SMB] Failed to connect: {result.stderr}")
+            return False
+
+    def _disconnect_windows_smb(self, server: str, share: str) -> None:
+        """Disconnect from an SMB share on Windows."""
+        if sys.platform != 'win32':
+            return
+
+        unc_path = f"\\\\{server}\\{share}"
+        logger.debug(f"[SMB] Disconnecting from {unc_path}")
+
+        subprocess.run(
+            ['net', 'use', unc_path, '/delete', '/y'],
+            capture_output=True,
+            creationflags=get_subprocess_flags(),
+        )
+
     def _run_rclone_sync(
         self,
         source: str,
@@ -740,6 +847,11 @@ class AgentService:
         dry_run: bool,
         run_id: str,
         backend_options: dict[str, Any] | None = None,
+        smb_server: str | None = None,
+        smb_share: str | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> dict[str, Any]:
         """Run restic backup command."""
         logger.info("[RESTIC] Setting up restic backup")
@@ -750,6 +862,17 @@ class AgentService:
 
         logger.debug(f"[RESTIC] Source: {source}")
         logger.debug(f"[RESTIC] Repository: {dest}")
+
+        # On Windows, connect to SMB share with credentials if provided
+        if sys.platform == 'win32' and smb_server and smb_share:
+            if not self._connect_windows_smb(smb_server, smb_share, smb_username, smb_password, smb_domain):
+                return {
+                    'success': False,
+                    'output': 'Failed to connect to SMB share',
+                    'bytes': 0,
+                    'files': 0,
+                    'error': f'Failed to connect to \\\\{smb_server}\\{smb_share}',
+                }
 
         try:
             restic = self._get_tool_path('restic')
@@ -763,9 +886,12 @@ class AgentService:
         # Set up environment with password
         # Priority: backend_options > env var > default
         env = os.environ.copy()
-        if 'restic_password' in backend_options:
-            env['RESTIC_PASSWORD'] = backend_options['restic_password']
+        if 'password' in backend_options:
+            env['RESTIC_PASSWORD'] = backend_options['password']
             logger.info("[RESTIC] Using password from job configuration")
+        elif 'restic_password' in backend_options:
+            env['RESTIC_PASSWORD'] = backend_options['restic_password']
+            logger.info("[RESTIC] Using restic_password from job configuration")
         elif 'RESTIC_PASSWORD' not in env:
             env['RESTIC_PASSWORD'] = 'backer-default-password'
             logger.info("[RESTIC] Using default repository password")
@@ -1111,6 +1237,11 @@ class AgentService:
         dry_run: bool,
         run_id: str,
         backend_options: dict[str, Any] | None = None,
+        smb_server: str | None = None,
+        smb_share: str | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> dict[str, Any]:
         """Run kopia backup command."""
         logger.info("[KOPIA] Setting up kopia backup")
@@ -1121,6 +1252,17 @@ class AgentService:
 
         logger.debug(f"[KOPIA] Source: {source}")
         logger.debug(f"[KOPIA] Repository: {dest}")
+
+        # On Windows, connect to SMB share with credentials if provided
+        if sys.platform == 'win32' and smb_server and smb_share:
+            if not self._connect_windows_smb(smb_server, smb_share, smb_username, smb_password, smb_domain):
+                return {
+                    'success': False,
+                    'output': 'Failed to connect to SMB share',
+                    'bytes': 0,
+                    'files': 0,
+                    'error': f'Failed to connect to \\\\{smb_server}\\{smb_share}',
+                }
 
         try:
             kopia = self._get_tool_path('kopia')
