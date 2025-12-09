@@ -147,6 +147,21 @@ class UnraidAPI:
         if not verify_ssl:
             self._ssl_context.check_hostname = False
             self._ssl_context.verify_mode = ssl.CERT_NONE
+        self._shares_supported = True
+
+    @property
+    def supports_shares(self) -> bool:
+        return self._shares_supported
+
+    def _mark_shares_unsupported(self, reason: str) -> None:
+        if self._shares_supported:
+            self._shares_supported = False
+            logger.warning(
+                "Unraid GraphQL API does not expose 'shares' (reason: %s). "
+                "Share backups and storage listings will be disabled. "
+                "Upgrade to Unraid 7.2+ or install the Unraid Connect plugin to enable this feature.",
+                reason,
+            )
 
     def _make_request(self, query: str, variables: dict[str, Any] | None = None) -> Any:
         """Make a GraphQL request to the Unraid API.
@@ -415,7 +430,11 @@ class UnraidAPI:
             return sorted(shares, key=lambda s: s.name.lower())
 
         except UnraidAPIError as e:
-            logger.warning(f"Failed to list shares: {e}")
+            message = "; ".join(e.errors) if e.errors else str(e)
+            if "Cannot query field \"shares\"" in message:
+                self._mark_shares_unsupported(message)
+            else:
+                logger.warning(f"Failed to list shares: {e}")
             return []
 
     def get_array_status(self) -> dict[str, Any]:
@@ -969,6 +988,13 @@ class UnraidBackupManager:
         }
 
         try:
+            if not self.api.supports_shares:
+                result["errors"].append(
+                    "Share backups are unavailable because the Unraid API does not expose shares. "
+                    "Upgrade Unraid or install the Unraid Connect plugin to enable this feature."
+                )
+                return result
+
             # Verify share exists
             shares = self.api.list_shares()
             share = next((s for s in shares if s.name == share_name), None)
@@ -1066,21 +1092,22 @@ class UnraidBackupManager:
         except Exception as e:
             logger.warning(f"Failed to list containers: {e}")
 
-        # Add shares
-        try:
-            shares = self.api.list_shares()
-            for share in shares:
-                guests.append({
-                    "vmid": f"share_{share.name}",
-                    "name": share.name,
-                    "type": "share",
-                    "status": "available",
-                    "node": "unraid",
-                    "guest_type": UnraidGuestType.SHARE.value,
-                    "path": f"/mnt/user/{share.name}",
-                })
-        except Exception as e:
-            logger.warning(f"Failed to list shares: {e}")
+        # Add shares if supported
+        if self.api.supports_shares:
+            try:
+                shares = self.api.list_shares()
+                for share in shares:
+                    guests.append({
+                        "vmid": f"share_{share.name}",
+                        "name": share.name,
+                        "type": "share",
+                        "status": "available",
+                        "node": "unraid",
+                        "guest_type": UnraidGuestType.SHARE.value,
+                        "path": f"/mnt/user/{share.name}",
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to list shares: {e}")
 
         # Add flash/USB config as a special "guest"
         guests.append({

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import secrets
+import socket
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -343,12 +344,34 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         repo_share = repository.get("share", "")
         repo_path = repository.get("path", "")
 
+        repo_config = repository.get("config") or {}
+
+        def hosts_match(host_a: str | None, host_b: str | None) -> bool:
+            if not host_a or not host_b:
+                return False
+            ha = host_a.strip().lower()
+            hb = host_b.strip().lower()
+            if not ha or not hb:
+                return False
+            if ha == hb:
+                return True
+            try:
+                return socket.gethostbyname(ha) == socket.gethostbyname(hb)
+            except Exception:
+                return False
+
         # Check if the repository is an Unraid local share
-        # (server matches hypervisor host or is the Unraid server itself)
-        is_local_share = (
-            repo_server.lower() == hypervisor["host"].lower() or
-            repo_server.lower() in ("localhost", "127.0.0.1", "tower", "tower.local")
-        )
+        # (explicit flag or host matches the Unraid server itself)
+        is_local_share = bool(repo_config.get("unraid_local_share"))
+        if not is_local_share:
+            if not repo_server:
+                is_local_share = True
+            else:
+                normalized = repo_server.strip().lower()
+                is_local_share = (
+                    hosts_match(repo_server, hypervisor["host"]) or
+                    normalized in ("localhost", "127.0.0.1", "tower", "tower.local")
+                )
 
         mount_point = None
         if is_local_share:
@@ -368,18 +391,32 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 return
 
             # Mount the share based on type
+            credentials_file = None
+
             if repo_type == "smb":
                 repo_password = _storage.get_repository_password(repository_id)
                 repo_username = repository.get("username", "guest")
                 repo_domain = repository.get("domain", "")
 
-                # Build mount command
-                mount_opts = f"username={repo_username}"
-                if repo_password:
-                    mount_opts += f",password={repo_password}"
+                # Build a credential file on the Unraid host to avoid exposing secrets via process args
+                credentials_file = f"/tmp/backer_smb_{repository_id[:8]}"
+                cred_lines = [
+                    f"username={repo_username or ''}",
+                    f"password={repo_password or ''}",
+                ]
                 if repo_domain:
-                    mount_opts += f",domain={repo_domain}"
+                    cred_lines.append(f"domain={repo_domain}")
 
+                cred_content = "\n".join(cred_lines) + "\n"
+                rc, _, stderr = backup_manager._run_ssh_command(
+                    f"cat <<'EOF' > '{credentials_file}'\n{cred_content}EOF"
+                )
+                if rc != 0:
+                    logger.error(f"Failed to create SMB credentials file: {stderr}")
+                    return
+                backup_manager._run_ssh_command(f"chmod 600 '{credentials_file}'")
+
+                mount_opts = f"credentials={credentials_file}"
                 mount_cmd = f"mount -t cifs '//{repo_server}/{repo_share}' '{mount_point}' -o {mount_opts}"
 
             elif repo_type == "nfs":
@@ -393,9 +430,13 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 logger.error(f"Failed to mount repository on Unraid: {stderr}")
                 # Clean up mount point
                 backup_manager._run_ssh_command(f"rmdir '{mount_point}'")
+                if credentials_file:
+                    backup_manager._run_ssh_command(f"rm -f '{credentials_file}'")
                 return
 
             logger.info(f"Mounted {repo_type.upper()} share at {mount_point}")
+            if credentials_file:
+                backup_manager._run_ssh_command(f"rm -f '{credentials_file}'")
 
             if repo_path:
                 backup_base_path = f"{mount_point}/{repo_path}/Hypervisors/{hypervisor['name']}"
@@ -439,6 +480,23 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 guest_type=guest_type,
                 status="running",
             )
+
+            if guest_type == "share" and not api.supports_shares:
+                warning = "Unraid API does not expose shares; skip share backup"
+                logger.warning(warning)
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=str(guest_id),
+                    guest_name=guest_name,
+                    guest_type=guest_type,
+                    status="failed",
+                    finished_at=tz.get_now(),
+                    errors=[warning],
+                )
+                continue
 
             try:
                 # Determine backup path based on guest type
@@ -4286,21 +4344,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "avail": capacity.get("free", 0),
                 })
 
-                # Add shares as storage locations
-                shares = api.list_shares()
-                for share in shares:
+                # Add shares as storage locations when supported by the API
+                if api.supports_shares:
+                    shares = api.list_shares()
+                    if api.supports_shares:
+                        for share in shares:
+                            storages.append({
+                                "storage": f"share:{share.name}",
+                                "type": "share",
+                                "node": "unraid",
+                                "content": "backup",
+                                "path": f"/mnt/user/{share.name}",
+                                "active": True,
+                                "enabled": True,
+                                "shared": True,
+                                "total": share.total_bytes,
+                                "used": share.used_bytes,
+                                "avail": share.free_bytes,
+                            })
+                if not api.supports_shares:
                     storages.append({
-                        "storage": f"share:{share.name}",
-                        "type": "share",
+                        "storage": "shares-unavailable",
+                        "type": "info",
                         "node": "unraid",
-                        "content": "backup",
-                        "path": f"/mnt/user/{share.name}",
-                        "active": True,
-                        "enabled": True,
+                        "content": "Shares unavailable",
+                        "path": "",
+                        "active": False,
+                        "enabled": False,
                         "shared": True,
-                        "total": share.total_bytes,
-                        "used": share.used_bytes,
-                        "avail": share.free_bytes,
+                        "total": 0,
+                        "used": 0,
+                        "avail": 0,
                     })
 
                 return storages
