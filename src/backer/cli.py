@@ -745,6 +745,173 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     console.print("[green]Agent uninstalled successfully.[/green]")
 
 
+@agent.command("progress")
+@click.option("--server", "-s", help="Server URL (uses saved config if not specified)")
+@click.option("--refresh", "-r", default=1, help="Refresh interval in seconds (default: 1)")
+def agent_progress(server: str | None, refresh: int) -> None:
+    """Show live progress of running backup jobs.
+
+    Displays a live-updating progress bar for any backups currently running
+    on this or other agents. Updates every second by default.
+
+    Examples:
+        backer agent progress              # Show progress using saved config
+        backer agent progress -s http://backup:8420  # Specify server
+        backer agent progress -r 2         # Refresh every 2 seconds
+    """
+    import sys
+    import time
+    from datetime import datetime
+
+    import httpx
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+    from rich.table import Table
+
+    from backer.client.agent import BackerAgent
+
+    # Get server URL from config or parameter
+    if server:
+        server_url = server
+    else:
+        try:
+            ag = BackerAgent.from_config()
+            server_url = ag.server_url
+        except FileNotFoundError:
+            console.print("[red]Error:[/red] No agent config found.")
+            console.print("Run 'backer agent register' first or specify --server")
+            raise SystemExit(1)
+
+    console.print(f"[dim]Connecting to {server_url}...[/dim]")
+
+    def fetch_running_jobs() -> list[dict]:
+        """Fetch currently running backup jobs from server."""
+        try:
+            response = httpx.get(f"{server_url}/api/v1/running", timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, list) else data.get("jobs", [])
+        except httpx.ConnectError:
+            return []
+        except Exception:
+            return []
+
+    def format_bytes(bytes_val: int) -> str:
+        """Format bytes to human readable."""
+        if not bytes_val or bytes_val == 0:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        i = 0
+        while bytes_val >= 1024 and i < len(units) - 1:
+            bytes_val /= 1024
+            i += 1
+        return f"{bytes_val:.1f} {units[i]}"
+
+    def format_duration(started_at: str | None) -> str:
+        """Calculate duration since start time."""
+        if not started_at:
+            return "Unknown"
+        try:
+            start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            now = datetime.now(start.tzinfo) if start.tzinfo else datetime.now()
+            diff = int((now - start).total_seconds())
+            if diff < 60:
+                return f"{diff}s"
+            elif diff < 3600:
+                return f"{diff // 60}m {diff % 60}s"
+            else:
+                return f"{diff // 3600}h {(diff % 3600) // 60}m"
+        except Exception:
+            return "Unknown"
+
+    def create_display(jobs: list[dict]) -> Panel:
+        """Create the display panel showing all running jobs."""
+        if not jobs:
+            return Panel(
+                "[dim]No backup jobs currently running[/dim]\n\n"
+                "[yellow]Tip:[/yellow] Start a backup from the web UI or run:\n"
+                "  [cyan]backer job run <job-name>[/cyan]",
+                title="[bold]Backup Progress[/bold]",
+                border_style="blue"
+            )
+
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("Content", style="white")
+
+        for job in jobs:
+            job_name = job.get("job_name", "Unknown Job")
+            progress_pct = job.get("progress_percent", 0) or job.get("progress", 0) or 0
+            current_file = job.get("current_file", job.get("message", "Processing..."))
+            bytes_done = job.get("bytes_processed", 0) or job.get("bytes_done", 0) or 0
+            bytes_total = job.get("bytes_total", 0) or 0
+            files_done = job.get("files_processed", 0) or job.get("files_done", 0) or 0
+            started_at = job.get("started_at")
+            status = job.get("status", "running")
+
+            # Truncate long file paths
+            if len(current_file) > 60:
+                current_file = "..." + current_file[-57:]
+
+            # Build progress bar
+            progress_bar = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold]{task.description}"),
+                BarColumn(bar_width=30),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            )
+            progress_bar.add_task("", completed=progress_pct, total=100)
+
+            # Build info lines
+            info_lines = []
+            info_lines.append(f"[bold cyan]{job_name}[/bold cyan]")
+            info_lines.append(progress_bar)
+            info_lines.append(f"[dim]{current_file}[/dim]")
+
+            stats_parts = []
+            if bytes_total > 0:
+                stats_parts.append(f"{format_bytes(bytes_done)} / {format_bytes(bytes_total)}")
+            elif bytes_done > 0:
+                stats_parts.append(f"{format_bytes(bytes_done)}")
+
+            if files_done > 0:
+                stats_parts.append(f"{files_done:,} files")
+
+            duration = format_duration(started_at)
+            if duration != "Unknown":
+                stats_parts.append(f"elapsed: {duration}")
+
+            if stats_parts:
+                info_lines.append(f"[dim]{' • '.join(stats_parts)}[/dim]")
+
+            # Add to table
+            for line in info_lines:
+                table.add_row(line)
+
+            # Add spacing between jobs
+            table.add_row("")
+
+        return Panel(
+            table,
+            title=f"[bold]Backup Progress[/bold] ([green]{len(jobs)}[/green] running)",
+            border_style="green"
+        )
+
+    # Live display loop
+    try:
+        with Live(create_display([]), refresh_per_second=1, console=console) as live:
+            while True:
+                jobs = fetch_running_jobs()
+                live.update(create_display(jobs))
+                time.sleep(refresh)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+        sys.exit(0)
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+
 @agent.command("logs")
 @click.option("-f", "--follow", is_flag=True, help="Follow log output (tail -f style)")
 @click.option("-n", "--lines", default=50, help="Number of lines to show (default: 50)")
