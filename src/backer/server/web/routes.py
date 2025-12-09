@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from backer import __version__
 from backer.server import timezone as tz
 from backer.server.storage import Storage
 from backer.server.web.auth import (
@@ -24,6 +25,9 @@ router = APIRouter()
 # Templates directory
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+# Add version to global template context so it's available in base.html
+templates.env.globals["backer_version"] = __version__
 
 
 def get_storage(request: Request) -> Storage:
