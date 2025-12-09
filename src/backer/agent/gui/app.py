@@ -52,6 +52,10 @@ def create_tray_icon_image():
     return img
 
 
+# GitHub repository URL
+GITHUB_REPO_URL = "https://github.com/stocky789/backer"
+
+
 class BackerAgentApp:
     """Main Backer Agent GUI Application."""
 
@@ -80,6 +84,9 @@ class BackerAgentApp:
         self.tray_icon = None
         self._tray_thread = None
 
+        # Setup menu bar first
+        self.setup_menu()
+
         # Setup UI
         self.setup_ui()
 
@@ -98,6 +105,24 @@ class BackerAgentApp:
         x = (self.root.winfo_screenwidth() // 2) - (width // 2)
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+    def setup_menu(self):
+        """Setup the menu bar."""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # Main menu
+        main_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Menu", menu=main_menu)
+
+        main_menu.add_command(label="Connect", command=self.connect_to_server)
+        main_menu.add_command(label="Disconnect", command=self.disconnect_from_server)
+        main_menu.add_separator()
+        main_menu.add_command(label="Update", command=self.check_for_updates)
+        main_menu.add_separator()
+        main_menu.add_command(label="Help", command=self.open_help)
+        main_menu.add_separator()
+        main_menu.add_command(label="Exit", command=self.on_exit)
 
     def load_config(self) -> dict:
         """Load configuration from file."""
@@ -654,6 +679,151 @@ class BackerAgentApp:
             )
         else:
             messagebox.showinfo("Log Files", f"Log folder: {LOG_DIR}")
+
+    def open_help(self):
+        """Open the GitHub repository in a web browser."""
+        import webbrowser
+        webbrowser.open(GITHUB_REPO_URL)
+
+    def check_for_updates(self):
+        """Check for updates and offer to install them."""
+        # Check if agent is running
+        if self.service is not None:
+            if not messagebox.askyesno(
+                "Update",
+                "The agent is currently running.\n\n"
+                "Updating will stop the agent and restart it after the update.\n\n"
+                "Continue?"
+            ):
+                return
+
+        # Confirm update
+        if not messagebox.askyesno(
+            "Update Backer Agent",
+            "This will download and install the latest version of Backer Agent from GitHub.\n\n"
+            "The application will restart after the update.\n\n"
+            "Continue?"
+        ):
+            return
+
+        # Show progress
+        self.status_var.set("Updating...")
+        self.status_label.config(foreground='blue')
+        self.agent_name_var.set("Downloading latest version...")
+
+        # Run update in background thread
+        thread = threading.Thread(target=self._do_update, daemon=True)
+        thread.start()
+
+    def _do_update(self):
+        """Perform the update in a background thread."""
+        try:
+            import subprocess
+            import urllib.request
+
+            # Stop the service if running
+            if self.service is not None:
+                self.root.after(0, lambda: self.agent_name_var.set("Stopping agent..."))
+                self.service.stop()
+                self.service = None
+
+            self.root.after(0, lambda: self.agent_name_var.set("Downloading update..."))
+
+            if sys.platform == 'win32':
+                # Windows: Download the latest installer and run it
+                installer_url = f"{GITHUB_REPO_URL}/releases/latest/download/backer-agent-setup.exe"
+                installer_path = CONFIG_DIR / "backer-agent-setup.exe"
+
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+                # Download the installer
+                logging.info(f"Downloading installer from {installer_url}")
+                urllib.request.urlretrieve(installer_url, str(installer_path))
+
+                if not installer_path.exists():
+                    raise Exception("Failed to download installer")
+
+                logging.info(f"Installer downloaded to {installer_path}")
+                self.root.after(0, lambda: self.agent_name_var.set("Running installer..."))
+
+                # Run the installer silently and exit this app
+                # The /S flag runs it silently, installer will replace files and restart
+                subprocess.Popen(
+                    [str(installer_path), '/S'],
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+
+                # Give installer time to start
+                import time
+                time.sleep(1)
+
+                # Exit this instance - installer will handle the rest
+                self.root.after(0, self._exit_for_update)
+
+            else:
+                # Linux: Use pip to upgrade
+                self.root.after(0, lambda: self.agent_name_var.set("Upgrading via pip..."))
+
+                result = subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install', '--upgrade',
+                     f'git+{GITHUB_REPO_URL}.git@main'],
+                    capture_output=True,
+                    text=True
+                )
+
+                if result.returncode != 0:
+                    raise Exception(f"pip upgrade failed: {result.stderr}")
+
+                logging.info("Update installed successfully")
+                self.root.after(0, self._update_success)
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                error_msg = "No release found. The installer may not be available yet."
+            else:
+                error_msg = f"Download failed: HTTP {e.code}"
+            logging.error(error_msg)
+            self.root.after(0, lambda m=error_msg: self._update_failed(m))
+        except Exception as e:
+            error_msg = str(e)
+            logging.error(f"Update failed: {error_msg}")
+            self.root.after(0, lambda m=error_msg: self._update_failed(m))
+
+    def _exit_for_update(self):
+        """Exit the application for update (Windows installer will restart)."""
+        # Stop tray icon
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+
+        self.root.quit()
+        sys.exit(0)
+
+    def _update_success(self):
+        """Handle successful update."""
+        self.status_var.set("Update complete")
+        self.status_label.config(foreground='green')
+        self.agent_name_var.set("")
+
+        messagebox.showinfo(
+            "Update Complete",
+            "Backer Agent has been updated successfully!\n\n"
+            "Please restart the application to use the new version."
+        )
+
+    def _update_failed(self, error: str):
+        """Handle failed update."""
+        self.status_var.set("Update failed")
+        self.status_label.config(foreground='red')
+        self.agent_name_var.set("")
+
+        messagebox.showerror(
+            "Update Failed",
+            f"Failed to update Backer Agent:\n\n{error}\n\n"
+            f"You can manually download the latest version from:\n{GITHUB_REPO_URL}/releases"
+        )
 
     def on_window_close(self):
         """Handle window close button - minimize to tray if agent is running."""

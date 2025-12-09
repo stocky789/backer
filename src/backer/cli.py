@@ -1086,6 +1086,121 @@ def agent_progress(server: str | None, refresh: int) -> None:
         raise SystemExit(1)
 
 
+@agent.command("update")
+@click.option("--dev", is_flag=True, help="Update to the latest dev branch instead of release")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def agent_update(dev: bool, yes: bool) -> None:
+    """Update the Backer agent to the latest version.
+
+    Downloads and installs the latest release from GitHub.
+
+    Examples:
+        sudo backer agent update           # Update to latest stable release
+        sudo backer agent update --dev     # Update to latest dev branch
+    """
+    import os
+    import subprocess
+    import sys
+
+    from backer.client.windows_service import is_windows
+
+    if is_windows():
+        console.print("[yellow]On Windows, please use the GUI to update:[/yellow]")
+        console.print("  Menu > Update")
+        console.print()
+        console.print("Or download the latest installer from:")
+        console.print("  https://github.com/stocky789/backer/releases/latest")
+        raise SystemExit(0)
+
+    # Check if running as root (needed for system-wide install)
+    need_sudo = os.geteuid() != 0
+
+    # Determine source
+    if dev:
+        source_desc = "dev branch (latest)"
+        pip_spec = "git+https://github.com/stocky789/backer.git@dev"
+    else:
+        source_desc = "latest stable release"
+        pip_spec = "git+https://github.com/stocky789/backer.git@main"
+
+    console.print("[bold]Backer Agent Update[/bold]\n")
+    console.print(f"Current version: {__version__}")
+    console.print(f"Updating to: {source_desc}")
+    console.print()
+
+    if need_sudo:
+        console.print("[yellow]Note:[/yellow] This may require sudo for system-wide install.")
+        console.print()
+
+    if not yes:
+        if not click.confirm("Continue with update?"):
+            console.print("Aborted.")
+            raise SystemExit(0)
+
+    # Check if installed via install-agent.sh (in /opt/backer)
+    venv_pip = Path("/opt/backer/venv/bin/pip")
+    system_service = Path("/etc/systemd/system/backer-agent.service")
+
+    if venv_pip.exists():
+        # Installed via install-agent.sh
+        console.print("\n[bold]1. Stopping service...[/bold]")
+        if system_service.exists():
+            subprocess.run(["systemctl", "stop", "backer-agent"], capture_output=True)
+            console.print("   [green]✓[/green] Service stopped")
+
+        console.print("\n[bold]2. Updating package...[/bold]")
+        try:
+            cmd = [str(venv_pip), "install", "--upgrade", pip_spec]
+            if need_sudo:
+                cmd = ["sudo"] + cmd
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                console.print(f"   [red]✗[/red] Failed: {result.stderr}")
+                raise SystemExit(1)
+            console.print("   [green]✓[/green] Package updated")
+        except Exception as e:
+            console.print(f"   [red]✗[/red] Failed: {e}")
+            raise SystemExit(1)
+
+        # Get new version
+        try:
+            result = subprocess.run(
+                [str(venv_pip.parent / "python"), "-c", "from backer import __version__; print(__version__)"],
+                capture_output=True, text=True
+            )
+            new_version = result.stdout.strip()
+        except Exception:
+            new_version = "unknown"
+
+        console.print("\n[bold]3. Restarting service...[/bold]")
+        if system_service.exists():
+            subprocess.run(["systemctl", "start", "backer-agent"], capture_output=True)
+            console.print("   [green]✓[/green] Service started")
+
+        console.print(f"\n[bold green]✓ Update complete![/bold green]")
+        console.print(f"  Previous version: {__version__}")
+        console.print(f"  New version: {new_version}")
+
+    else:
+        # Installed via pip directly
+        console.print("\n[bold]Updating via pip...[/bold]")
+        try:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", pip_spec]
+            if need_sudo:
+                cmd = ["sudo"] + cmd
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                console.print(f"[red]✗[/red] Failed: {result.stderr}")
+                raise SystemExit(1)
+            console.print("[green]✓[/green] Package updated")
+            console.print()
+            console.print("[bold green]✓ Update complete![/bold green]")
+            console.print("Restart the agent to use the new version.")
+        except Exception as e:
+            console.print(f"[red]✗[/red] Failed: {e}")
+            raise SystemExit(1)
+
+
 @agent.command("logs")
 @click.option("-f", "--follow", is_flag=True, help="Follow log output (tail -f style)")
 @click.option("-n", "--lines", default=50, help="Number of lines to show (default: 50)")
