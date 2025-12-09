@@ -1004,14 +1004,40 @@ class BackerAgent:
         """
         source_path = job.get("source_path", "")
 
-        # Check for NFS path (server:/export format)
+        # Check if NFS credentials were passed (job linked to NFS repository)
+        # This takes priority over parsing source_path as NFS, because the server
+        # provides the actual NFS export separately from the subpath
+        nfs_server = job.get("nfs_server")
+        nfs_export = job.get("nfs_export")
+        if nfs_server and nfs_export:
+            # Server provided NFS export - mount the export and calculate subpath
+            # source_path will be like: server:/export/path/Agents/jobname
+            # nfs_export is the actual mountable export: /export/path
+            # We need to extract the subpath after the export
+            print(f"[RESTORE] Using NFS repository: {nfs_server}:{nfs_export}")
+
+            # Calculate subpath: everything in source_path after the export
+            subpath = ""
+            if self._is_nfs_path(source_path):
+                # Parse the full source to get the path portion
+                _, full_path, _ = self._parse_nfs_path(source_path)
+                # Remove the export prefix to get subpath
+                if full_path.startswith(nfs_export):
+                    subpath = full_path[len(nfs_export):].lstrip("/")
+                else:
+                    # Export doesn't match - maybe path format differs, use full path as subpath
+                    subpath = full_path.lstrip("/")
+
+            ctx = self._nfs_mount_context(server=nfs_server, export_path=nfs_export)
+            mount_path = ctx.__enter__()
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            print(f"[RESTORE] Using mounted path: {full_path}")
+            return full_path, ctx
+
+        # Check for NFS path (server:/export format) without explicit credentials
         if self._is_nfs_path(source_path):
-            nfs_path = source_path
-            # Also check if nfs_server/nfs_export are provided explicitly
-            if job.get("nfs_server") and job.get("nfs_export"):
-                nfs_path = f"{job['nfs_server']}:{job['nfs_export']}"
-            print(f"[RESTORE] Detected NFS source path: {nfs_path}")
-            return self._prepare_nfs_source(job, backend_name, nfs_path)
+            print(f"[RESTORE] Detected NFS source path: {source_path}")
+            return self._prepare_nfs_source(job, backend_name, source_path)
 
         # Check for SMB path (//server/share or \\server\share format)
         if self._is_smb_path(source_path):
@@ -1083,15 +1109,20 @@ class BackerAgent:
         backend_name: str,
         source_path: str,
     ) -> tuple[str, Any]:
-        """Prepare NFS source path for restore."""
-        server, export_path, _ = self._parse_nfs_path(source_path)
+        """Prepare NFS source path for restore.
+
+        Note: This is called when nfs_server/nfs_export were NOT provided explicitly.
+        It parses the full NFS path and extracts server, export, and subpath.
+        """
+        server, export_path, subpath = self._parse_nfs_path(source_path)
 
         # All backends need mounted path for NFS
-        print(f"[RESTORE] Mounting NFS export for {backend_name} backend")
+        print(f"[RESTORE] Mounting NFS export {server}:{export_path} for {backend_name} backend")
         ctx = self._nfs_mount_context(server=server, export_path=export_path)
         mount_path = ctx.__enter__()
-        print(f"[RESTORE] Using mounted path: {mount_path}")
-        return str(mount_path), ctx
+        full_path = str(mount_path / subpath) if subpath else str(mount_path)
+        print(f"[RESTORE] Using mounted path: {full_path}")
+        return full_path, ctx
 
     def execute_restore(
         self,
