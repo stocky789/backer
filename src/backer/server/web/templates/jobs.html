@@ -800,9 +800,15 @@ async function confirmDeleteJob() {
 
     errorDiv.style.display = 'none';
 
-    // CRITICAL: Pause all live updates during deletion to prevent race conditions
+    // CRITICAL: Stop ALL polling/updating systems during deletion
     if (window.LiveUpdate) {
         window.LiveUpdate.pause();
+    }
+
+    // Stop activity polling
+    if (window.activityPollInterval) {
+        clearInterval(window.activityPollInterval);
+        window.activityPollInterval = null;
     }
 
     try {
@@ -811,23 +817,48 @@ async function confirmDeleteJob() {
 
         if (response.ok) {
             const data = await response.json();
-            let message = 'Job deleted successfully.';
-            if (data.message) message += ' ' + data.message;
 
-            // Show success toast
-            if (window.Toast) {
-                Toast.success(message);
+            // CRITICAL: If there's a task_id, wait for it to complete before redirecting
+            if (data.task_id) {
+                // Show progress message
+                hideDeleteModal();
+                if (window.Toast) {
+                    Toast.info('Deleting job data...', 0); // 0 = don't auto-dismiss
+                }
+
+                // Poll for task completion (max 30 seconds)
+                let attempts = 0;
+                const maxAttempts = 60; // 30 seconds at 500ms intervals
+
+                while (attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+
+                    try {
+                        const taskResp = await fetch(`/api/v1/tasks/${data.task_id}`);
+                        if (taskResp.ok) {
+                            const taskData = await taskResp.json();
+                            if (taskData.status === 'completed' || taskData.status === 'failed') {
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        // Task might be deleted already, that's ok
+                        break;
+                    }
+
+                    attempts++;
+                }
             }
 
-            // Close modal
-            hideDeleteModal();
-
-            // Force redirect instead of location.reload() to prevent browser state corruption
+            // Now safe to redirect - all background tasks completed
             window.location.href = '/jobs';
         } else {
-            // Resume live updates on error
+            // Resume polling on error
             if (window.LiveUpdate) {
                 window.LiveUpdate.resume();
+            }
+            if (typeof startActivityPolling === 'function') {
+                startActivityPolling();
             }
 
             let errorMsg = `HTTP ${response.status}`;
@@ -842,9 +873,12 @@ async function confirmDeleteJob() {
             errorDiv.style.display = 'block';
         }
     } catch (e) {
-        // Resume live updates on error
+        // Resume polling on error
         if (window.LiveUpdate) {
             window.LiveUpdate.resume();
+        }
+        if (typeof startActivityPolling === 'function') {
+            startActivityPolling();
         }
 
         errorDiv.textContent = e.message;
