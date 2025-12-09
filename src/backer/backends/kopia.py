@@ -44,8 +44,18 @@ class KopiaBackend(BackendBase):
         self._env = os.environ.copy()
 
         # Set repository password from config if provided
-        if "password" in self.config:
-            self._env["KOPIA_PASSWORD"] = self.config["password"]
+        # Check multiple keys for compatibility (UI uses restic_password for both backends)
+        password = (
+            self.config.get("password")
+            or self.config.get("restic_password")
+            or self.config.get("kopia_password")
+        )
+        if password:
+            self._env["KOPIA_PASSWORD"] = password
+        elif "KOPIA_PASSWORD" not in self._env:
+            # Use default password if none provided - allows auto-initialization
+            self._env["KOPIA_PASSWORD"] = "backer-default-password"
+            logger.debug("[KOPIA] Using default repository password")
 
         # Kopia config directory - use separate config per repo to avoid conflicts
         if "config_file" in self.config:

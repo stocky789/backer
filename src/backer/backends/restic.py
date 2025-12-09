@@ -43,10 +43,19 @@ class ResticBackend(BackendBase):
         self._env = os.environ.copy()
 
         # Set repository password from config if provided
-        if "password" in self.config:
-            self._env["RESTIC_PASSWORD"] = self.config["password"]
+        # Check multiple keys for compatibility (UI uses restic_password)
+        password = (
+            self.config.get("password")
+            or self.config.get("restic_password")
+        )
+        if password:
+            self._env["RESTIC_PASSWORD"] = password
         elif "password_file" in self.config:
             self._env["RESTIC_PASSWORD_FILE"] = self.config["password_file"]
+        elif "RESTIC_PASSWORD" not in self._env:
+            # Use default password if none provided - allows auto-initialization
+            self._env["RESTIC_PASSWORD"] = "backer-default-password"
+            logger.debug("[RESTIC] Using default repository password")
 
     def _get_binary(self, auto_install: bool = True) -> Path:
         """Get path to restic binary, downloading if necessary."""
