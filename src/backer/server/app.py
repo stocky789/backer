@@ -244,18 +244,10 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
     """Internal function to trigger a hypervisor backup job (used by scheduler).
 
     This runs the backup synchronously in a background thread.
-    Backups are stored to the configured Backer repository by auto-configuring
+    For Proxmox: Backups are stored to the configured Backer repository by auto-configuring
     it as Proxmox storage (like Veeam does).
+    For Unraid: Backups are performed via SSH to the Unraid server.
     """
-    from backer.hypervisors.proxmox import (
-        ProxmoxAPI,
-        ProxmoxAPIError,
-        ProxmoxAuthMethod,
-        ProxmoxBackupManager,
-        ProxmoxBackupMode,
-        ProxmoxCompression,
-    )
-
     if _storage is None:
         logger.error("Storage not initialized")
         return
@@ -270,9 +262,278 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         logger.error(f"Hypervisor not found for job: {job_id}")
         return
 
-    if hypervisor["hypervisor_type"] != "proxmox":
-        logger.error(f"Unsupported hypervisor type: {hypervisor['hypervisor_type']}")
+    hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
+
+    if hypervisor_type == "unraid":
+        _trigger_unraid_backup_job(job_id, job, hypervisor)
+    elif hypervisor_type == "proxmox":
+        _trigger_proxmox_backup_job(job_id, job, hypervisor)
+    else:
+        logger.error(f"Unsupported hypervisor type: {hypervisor_type}")
+
+
+def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None:
+    """Trigger an Unraid backup job."""
+    from backer.hypervisors.unraid import UnraidAPI, UnraidBackupManager
+
+    # Get repository for backup destination
+    repository_id = job.get("repository_id")
+    if not repository_id:
+        logger.error(f"No repository configured for job: {job_id}")
         return
+
+    repository = _storage.get_repository(repository_id)
+    if not repository:
+        logger.error(f"Repository not found: {repository_id}")
+        return
+
+    # Validate repository type (must be SMB or NFS)
+    repo_type = repository.get("repo_type", "").lower()
+    if repo_type not in ("smb", "nfs"):
+        logger.error(
+            f"Repository type '{repo_type}' is not supported for Unraid backups. "
+            "Use an SMB or NFS repository."
+        )
+        return
+
+    # Get credentials
+    token_secret = _storage.get_hypervisor_token_secret(hypervisor["id"])
+    hv_password = _storage.get_hypervisor_password(hypervisor["id"])
+
+    # Unraid uses API key authentication (stored as token_secret)
+    api_key = token_secret or hv_password
+    if not api_key:
+        logger.error("No API key configured for Unraid hypervisor")
+        return
+
+    run_id = tz.get_now().strftime("%Y%m%d_%H%M%S_%f")
+    mount_point = None
+    backup_manager = None
+
+    try:
+        port = hypervisor.get("port", 443)
+        api = UnraidAPI(
+            host=hypervisor["host"],
+            api_key=api_key,
+            port=port,
+            use_https=port in (443, 8443),
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        # Get SSH credentials
+        ssh_user = hypervisor.get("ssh_user", "root")
+        ssh_port = hypervisor.get("ssh_port", 22)
+        ssh_key_path = hypervisor.get("ssh_key_path")
+        ssh_password = hv_password if hypervisor.get("ssh_use_api_password", True) else None
+
+        backup_manager = UnraidBackupManager(
+            api=api,
+            ssh_host=hypervisor["host"],
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            ssh_key_path=ssh_key_path,
+            ssh_password=ssh_password,
+        )
+
+        # Build backup path on the repository
+        # The repository could be:
+        # 1. An Unraid share (server = unraid host, share = local share name)
+        # 2. An external SMB/NFS share that needs to be mounted on Unraid
+        repo_server = repository.get("server", "")
+        repo_share = repository.get("share", "")
+        repo_path = repository.get("path", "")
+
+        # Check if the repository is an Unraid local share
+        # (server matches hypervisor host or is the Unraid server itself)
+        is_local_share = (
+            repo_server.lower() == hypervisor["host"].lower() or
+            repo_server.lower() in ("localhost", "127.0.0.1", "tower", "tower.local")
+        )
+
+        mount_point = None
+        if is_local_share:
+            # Local Unraid share - path is /mnt/user/{share}/{path}
+            if repo_path:
+                backup_base_path = f"/mnt/user/{repo_share}/{repo_path}/Hypervisors/{hypervisor['name']}"
+            else:
+                backup_base_path = f"/mnt/user/{repo_share}/Hypervisors/{hypervisor['name']}"
+        else:
+            # External SMB/NFS share - need to mount on Unraid
+            mount_point = f"/mnt/backer_repo_{repository['id'][:8]}"
+
+            # Create mount point directory
+            rc, _, stderr = backup_manager._run_ssh_command(f"mkdir -p '{mount_point}'")
+            if rc != 0:
+                logger.error(f"Failed to create mount point: {stderr}")
+                return
+
+            # Mount the share based on type
+            if repo_type == "smb":
+                repo_password = _storage.get_repository_password(repository_id)
+                repo_username = repository.get("username", "guest")
+                repo_domain = repository.get("domain", "")
+
+                # Build mount command
+                mount_opts = f"username={repo_username}"
+                if repo_password:
+                    mount_opts += f",password={repo_password}"
+                if repo_domain:
+                    mount_opts += f",domain={repo_domain}"
+
+                mount_cmd = f"mount -t cifs '//{repo_server}/{repo_share}' '{mount_point}' -o {mount_opts}"
+
+            elif repo_type == "nfs":
+                mount_cmd = f"mount -t nfs '{repo_server}:{repo_share}' '{mount_point}'"
+            else:
+                logger.error(f"Unsupported repository type for Unraid: {repo_type}")
+                return
+
+            rc, _, stderr = backup_manager._run_ssh_command(mount_cmd, timeout=60)
+            if rc != 0:
+                logger.error(f"Failed to mount repository on Unraid: {stderr}")
+                # Clean up mount point
+                backup_manager._run_ssh_command(f"rmdir '{mount_point}'")
+                return
+
+            logger.info(f"Mounted {repo_type.upper()} share at {mount_point}")
+
+            if repo_path:
+                backup_base_path = f"{mount_point}/{repo_path}/Hypervisors/{hypervisor['name']}"
+            else:
+                backup_base_path = f"{mount_point}/Hypervisors/{hypervisor['name']}"
+
+        # Get guest IDs from job
+        guest_ids = job.get("guest_ids", [])
+
+        if not guest_ids:
+            # Backup all guests
+            all_guests = backup_manager.list_all_guests()
+            guest_ids = [g["vmid"] for g in all_guests]
+
+        # Build guest info map
+        all_guests = backup_manager.list_all_guests()
+        guest_map = {g["vmid"]: g for g in all_guests}
+
+        logger.info(
+            f"Starting Unraid backup job '{job['name']}' to repository "
+            f"'{repository['name']}' ({len(guest_ids)} items)"
+        )
+
+        for guest_id in guest_ids:
+            guest = guest_map.get(guest_id)
+            if not guest:
+                # Try to find by name if not found by ID
+                guest = next((g for g in all_guests if g["name"] == guest_id), None)
+
+            guest_name = guest["name"] if guest else str(guest_id)
+            guest_type = guest.get("guest_type", "vm") if guest else "vm"
+
+            # Save run as running
+            _storage.save_hypervisor_run(
+                run_id=run_id,
+                job_id=job_id,
+                job_name=job["name"],
+                hypervisor_id=hypervisor["id"],
+                guest_id=str(guest_id),
+                guest_name=guest_name,
+                guest_type=guest_type,
+                status="running",
+            )
+
+            try:
+                # Determine backup path based on guest type
+                type_folder = {
+                    "vm": "vms",
+                    "docker": "containers",
+                    "share": "shares",
+                    "flash": "flash",
+                }.get(guest_type, "other")
+                backup_path = f"{backup_base_path}/{type_folder}"
+
+                # Run the backup
+                result = backup_manager.run_backup(
+                    guest_type=guest_type,
+                    guest_id=guest_name,  # Use name for Unraid operations
+                    backup_path=backup_path,
+                    options=job.get("backup_options", {}),
+                )
+
+                backup_size = result.get("bytes_transferred", 0)
+                backup_filename = result.get("backup_file") or result.get("backup_dir")
+
+                # Update run record
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=str(guest_id),
+                    guest_name=guest_name,
+                    guest_type=guest_type,
+                    status="success" if result.get("success") else "failed",
+                    finished_at=tz.get_now(),
+                    duration_seconds=result.get("duration_seconds"),
+                    backup_size=backup_size,
+                    backup_filename=backup_filename,
+                    errors=result.get("errors"),
+                )
+
+                if result.get("success"):
+                    logger.info(
+                        f"Backup succeeded for {guest_type} '{guest_name}' "
+                        f"({backup_size / 1024 / 1024:.1f} MB)"
+                    )
+                else:
+                    logger.warning(f"Backup failed for {guest_type} '{guest_name}': {result.get('errors')}")
+
+            except Exception as e:
+                logger.exception(f"Backup failed for {guest_type} '{guest_name}': {e}")
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=str(guest_id),
+                    guest_name=guest_name,
+                    guest_type=guest_type,
+                    status="failed",
+                    finished_at=tz.get_now(),
+                    errors=[str(e)],
+                )
+
+        # Cleanup: unmount external share if we mounted it
+        if mount_point:
+            logger.info(f"Unmounting {mount_point}")
+            rc, _, stderr = backup_manager._run_ssh_command(f"umount '{mount_point}'", timeout=60)
+            if rc != 0:
+                logger.warning(f"Failed to unmount {mount_point}: {stderr}")
+            else:
+                # Remove mount point directory
+                backup_manager._run_ssh_command(f"rmdir '{mount_point}'")
+
+        logger.info(f"Unraid backup job '{job.get('name')}' completed")
+
+    except Exception as e:
+        logger.exception(f"Unraid backup job {job_id} failed: {e}")
+        # Cleanup on failure: try to unmount if we mounted
+        if mount_point and backup_manager:
+            try:
+                backup_manager._run_ssh_command(f"umount '{mount_point}'", timeout=60)
+                backup_manager._run_ssh_command(f"rmdir '{mount_point}'")
+            except Exception:
+                pass  # Best effort cleanup
+
+
+def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> None:
+    """Trigger a Proxmox backup job."""
+    from backer.hypervisors.proxmox import (
+        ProxmoxAPI,
+        ProxmoxAPIError,
+        ProxmoxAuthMethod,
+        ProxmoxBackupManager,
+        ProxmoxBackupMode,
+        ProxmoxCompression,
+    )
 
     # Get repository for backup destination
     repository_id = job.get("repository_id")
@@ -3556,6 +3817,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         This is used to validate credentials before creating a hypervisor.
         """
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+        from backer.hypervisors.unraid import UnraidAPI
 
         body = await request.json()
 
@@ -3572,30 +3834,58 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not host:
             return {"success": False, "message": "Host is required"}
 
-        if hypervisor_type != "proxmox":
+        if hypervisor_type not in ("proxmox", "unraid"):
             return {"success": False, "message": f"Unsupported hypervisor type: {hypervisor_type}"}
 
         try:
-            pve_auth = ProxmoxAuthMethod.TOKEN if auth_method == "token" else ProxmoxAuthMethod.PASSWORD
+            if hypervisor_type == "unraid":
+                # Unraid uses API key authentication
+                # The API key is passed as token_secret for consistency with the form
+                api_key = token_secret or password
+                if not api_key:
+                    return {"success": False, "message": "API key is required for Unraid"}
 
-            api = ProxmoxAPI(
-                host=host,
-                port=port,
-                auth_method=pve_auth,
-                username=username,
-                token_id=token_id,
-                token_secret=token_secret,
-                password=password,
-                verify_ssl=verify_ssl,
-            )
+                # Default port for Unraid is 443 (HTTPS)
+                if port == 8006:  # User didn't change from Proxmox default
+                    port = 443
 
-            success, message = api.test_connection()
+                api = UnraidAPI(
+                    host=host,
+                    api_key=api_key,
+                    port=port,
+                    use_https=port == 443 or port == 8443,
+                    verify_ssl=verify_ssl,
+                )
 
-            return {
-                "success": success,
-                "message": message,
-                "version": api.version if success else None,
-            }
+                success, message = api.test_connection()
+
+                return {
+                    "success": success,
+                    "message": message,
+                    "version": api.version if success else None,
+                }
+            else:
+                # Proxmox
+                pve_auth = ProxmoxAuthMethod.TOKEN if auth_method == "token" else ProxmoxAuthMethod.PASSWORD
+
+                api = ProxmoxAPI(
+                    host=host,
+                    port=port,
+                    auth_method=pve_auth,
+                    username=username,
+                    token_id=token_id,
+                    token_secret=token_secret,
+                    password=password,
+                    verify_ssl=verify_ssl,
+                )
+
+                success, message = api.test_connection()
+
+                return {
+                    "success": success,
+                    "message": message,
+                    "version": api.version if success else None,
+                }
 
         except Exception as e:
             logger.exception("Failed to test hypervisor connection")
@@ -3739,32 +4029,53 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Test connection to a hypervisor."""
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+        from backer.hypervisors.unraid import UnraidAPI
 
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        if hypervisor["hypervisor_type"] != "proxmox":
-            raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported currently")
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
 
         # Get credentials
         token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
         password = storage.get_hypervisor_password(hypervisor_id)
 
-        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+        if hypervisor_type == "unraid":
+            # Unraid uses API key authentication (stored as token_secret)
+            api_key = token_secret or password
+            if not api_key:
+                return {"success": False, "message": "API key not configured", "hypervisor_id": hypervisor_id}
 
-        api = ProxmoxAPI(
-            host=hypervisor["host"],
-            port=hypervisor["port"],
-            token_id=hypervisor.get("token_id"),
-            token_secret=token_secret,
-            username=hypervisor.get("username"),
-            password=password,
-            auth_method=auth_method,
-            verify_ssl=hypervisor.get("verify_ssl", False),
-        )
+            port = hypervisor.get("port", 443)
+            api = UnraidAPI(
+                host=hypervisor["host"],
+                api_key=api_key,
+                port=port,
+                use_https=port in (443, 8443),
+                verify_ssl=hypervisor.get("verify_ssl", False),
+            )
 
-        success, message = api.test_connection()
+            success, message = api.test_connection()
+
+        elif hypervisor_type == "proxmox":
+            auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+            api = ProxmoxAPI(
+                host=hypervisor["host"],
+                port=hypervisor.get("port", 8006),
+                token_id=hypervisor.get("token_id"),
+                token_secret=token_secret,
+                username=hypervisor.get("username"),
+                password=password,
+                auth_method=auth_method,
+                verify_ssl=hypervisor.get("verify_ssl", False),
+            )
+
+            success, message = api.test_connection()
+
+        else:
+            return {"success": False, "message": f"Unsupported hypervisor type: {hypervisor_type}", "hypervisor_id": hypervisor_id}
 
         # Update hypervisor status
         if success:
@@ -3790,51 +4101,83 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """List VMs and containers on a hypervisor."""
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+        from backer.hypervisors.unraid import UnraidAPI, UnraidBackupManager
 
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        if hypervisor["hypervisor_type"] != "proxmox":
-            raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported currently")
-
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
         token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
         password = storage.get_hypervisor_password(hypervisor_id)
 
-        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
-
-        api = ProxmoxAPI(
-            host=hypervisor["host"],
-            port=hypervisor["port"],
-            token_id=hypervisor.get("token_id"),
-            token_secret=token_secret,
-            username=hypervisor.get("username"),
-            password=password,
-            auth_method=auth_method,
-            verify_ssl=hypervisor.get("verify_ssl", False),
-        )
-
         try:
-            # Authenticate if using password-based auth
-            if auth_method == ProxmoxAuthMethod.PASSWORD:
-                api.authenticate()
+            if hypervisor_type == "unraid":
+                # Unraid uses API key authentication (stored as token_secret)
+                api_key = token_secret or password
+                if not api_key:
+                    raise HTTPException(status_code=400, detail="API key not configured")
 
-            guests = api.list_guests(node)
-            return [
-                {
-                    "vmid": g.vmid,
-                    "name": g.name,
-                    "node": g.node,
-                    "type": g.guest_type.value,
-                    "status": g.status,
-                    "cpus": g.cpus,
-                    "maxmem_gb": round(g.maxmem_gb, 2),
-                    "maxdisk_gb": round(g.maxdisk_gb, 2),
-                    "template": g.template,
-                    "tags": g.tags,
-                }
-                for g in guests
-            ]
+                port = hypervisor.get("port", 443)
+                api = UnraidAPI(
+                    host=hypervisor["host"],
+                    api_key=api_key,
+                    port=port,
+                    use_https=port in (443, 8443),
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                )
+
+                # Create backup manager to get unified guest list
+                backup_manager = UnraidBackupManager(
+                    api=api,
+                    ssh_host=hypervisor["host"],
+                    ssh_user=hypervisor.get("ssh_user", "root"),
+                    ssh_port=hypervisor.get("ssh_port", 22),
+                    ssh_key_path=hypervisor.get("ssh_key_path"),
+                    ssh_password=password if hypervisor.get("ssh_use_api_password") else None,
+                )
+
+                return backup_manager.list_all_guests()
+
+            elif hypervisor_type == "proxmox":
+                auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+                api = ProxmoxAPI(
+                    host=hypervisor["host"],
+                    port=hypervisor.get("port", 8006),
+                    token_id=hypervisor.get("token_id"),
+                    token_secret=token_secret,
+                    username=hypervisor.get("username"),
+                    password=password,
+                    auth_method=auth_method,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                )
+
+                # Authenticate if using password-based auth
+                if auth_method == ProxmoxAuthMethod.PASSWORD:
+                    api.authenticate()
+
+                guests = api.list_guests(node)
+                return [
+                    {
+                        "vmid": g.vmid,
+                        "name": g.name,
+                        "node": g.node,
+                        "type": g.guest_type.value,
+                        "status": g.status,
+                        "cpus": g.cpus,
+                        "maxmem_gb": round(g.maxmem_gb, 2),
+                        "maxdisk_gb": round(g.maxdisk_gb, 2),
+                        "template": g.template,
+                        "tags": g.tags,
+                    }
+                    for g in guests
+                ]
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported hypervisor type: {hypervisor_type}")
+
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception(f"Failed to list guests for hypervisor {hypervisor_id}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -3897,49 +4240,111 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """List backup-capable storages on a hypervisor."""
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
+        from backer.hypervisors.unraid import UnraidAPI
 
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
         token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
         password = storage.get_hypervisor_password(hypervisor_id)
 
-        auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
-
-        api = ProxmoxAPI(
-            host=hypervisor["host"],
-            port=hypervisor["port"],
-            token_id=hypervisor.get("token_id"),
-            token_secret=token_secret,
-            username=hypervisor.get("username"),
-            password=password,
-            auth_method=auth_method,
-            verify_ssl=hypervisor.get("verify_ssl", False),
-        )
-
         try:
-            # Authenticate if using password-based auth
-            if auth_method == ProxmoxAuthMethod.PASSWORD:
-                api.authenticate()
+            if hypervisor_type == "unraid":
+                # Unraid uses API key authentication (stored as token_secret)
+                api_key = token_secret or password
+                if not api_key:
+                    raise HTTPException(status_code=400, detail="API key not configured")
 
-            storages = api.list_storages(node)
-            return [
-                {
-                    "storage": s.storage,
-                    "type": s.type,
-                    "node": s.node,
-                    "content": s.content,
-                    "path": s.path,
-                    "active": s.active,
-                    "enabled": s.enabled,
-                    "shared": s.shared,
-                    "total": s.total,
-                    "used": s.used,
-                    "avail": s.avail,
-                }
-                for s in storages
-            ]
+                port = hypervisor.get("port", 443)
+                api = UnraidAPI(
+                    host=hypervisor["host"],
+                    api_key=api_key,
+                    port=port,
+                    use_https=port in (443, 8443),
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                )
+
+                # Get array status as "storage" info
+                array_status = api.get_array_status()
+                storages = []
+
+                # Add array as main storage
+                capacity = array_status.get("capacity", {}).get("disks", {})
+                storages.append({
+                    "storage": "array",
+                    "type": "array",
+                    "node": "unraid",
+                    "content": "images,backup",
+                    "path": "/mnt/user",
+                    "active": array_status.get("state") == "STARTED",
+                    "enabled": True,
+                    "shared": True,
+                    "total": capacity.get("total", 0),
+                    "used": capacity.get("used", 0),
+                    "avail": capacity.get("free", 0),
+                })
+
+                # Add shares as storage locations
+                shares = api.list_shares()
+                for share in shares:
+                    storages.append({
+                        "storage": f"share:{share.name}",
+                        "type": "share",
+                        "node": "unraid",
+                        "content": "backup",
+                        "path": f"/mnt/user/{share.name}",
+                        "active": True,
+                        "enabled": True,
+                        "shared": True,
+                        "total": share.total_bytes,
+                        "used": share.used_bytes,
+                        "avail": share.free_bytes,
+                    })
+
+                return storages
+
+            elif hypervisor_type == "proxmox":
+                auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+
+                api = ProxmoxAPI(
+                    host=hypervisor["host"],
+                    port=hypervisor.get("port", 8006),
+                    token_id=hypervisor.get("token_id"),
+                    token_secret=token_secret,
+                    username=hypervisor.get("username"),
+                    password=password,
+                    auth_method=auth_method,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                )
+
+                # Authenticate if using password-based auth
+                if auth_method == ProxmoxAuthMethod.PASSWORD:
+                    api.authenticate()
+
+                storages = api.list_storages(node)
+                return [
+                    {
+                        "storage": s.storage,
+                        "type": s.type,
+                        "node": s.node,
+                        "content": s.content,
+                        "path": s.path,
+                        "active": s.active,
+                        "enabled": s.enabled,
+                        "shared": s.shared,
+                        "total": s.total,
+                        "used": s.used,
+                        "avail": s.avail,
+                    }
+                    for s in storages
+                ]
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported hypervisor type: {hypervisor_type}")
+
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception(f"Failed to list storages for hypervisor {hypervisor_id}")
             raise HTTPException(status_code=500, detail=str(e))

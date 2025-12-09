@@ -762,6 +762,21 @@ body.dark-theme .data-grid tr:hover td {
     background: rgba(255, 140, 0, 0.1);
 }
 
+.status-badge.docker {
+    color: #0db7ed;
+    background: rgba(13, 183, 237, 0.1);
+}
+
+.status-badge.share {
+    color: #9c27b0;
+    background: rgba(156, 39, 176, 0.1);
+}
+
+.status-badge.flash {
+    color: #ff5722;
+    background: rgba(255, 87, 34, 0.1);
+}
+
 .status-badge.info {
     color: var(--accent);
     background: rgba(0, 120, 212, 0.1);

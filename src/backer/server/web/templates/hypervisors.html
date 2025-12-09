@@ -232,6 +232,7 @@
                     <label class="form-label">Hypervisor Type</label>
                     <select id="hvType" class="form-input" onchange="onHypervisorTypeChange()">
                         <option value="proxmox">Proxmox VE</option>
+                        <option value="unraid">Unraid</option>
                     </select>
                     <div class="form-hint">Select the hypervisor platform</div>
                 </div>
@@ -239,7 +240,7 @@
                 <div class="form-group">
                     <label class="form-label">Name</label>
                     <input type="text" id="hvName" class="form-input" placeholder="My Proxmox Server" required>
-                    <div class="form-hint">A friendly name for this hypervisor</div>
+                    <div class="form-hint" id="hvNameHint">A friendly name for this hypervisor</div>
                 </div>
 
                 <div class="form-row">
@@ -253,42 +254,54 @@
                     </div>
                 </div>
 
-                <div class="form-group">
-                    <label class="form-label">Authentication Method</label>
-                    <select id="hvAuthMethod" class="form-input" onchange="onAuthMethodChange()">
-                        <option value="token">API Token (Recommended)</option>
-                        <option value="password">Username & Password</option>
-                    </select>
+                <!-- Proxmox Authentication Section -->
+                <div id="proxmoxAuthSection">
+                    <div class="form-group">
+                        <label class="form-label">Authentication Method</label>
+                        <select id="hvAuthMethod" class="form-input" onchange="onAuthMethodChange()">
+                            <option value="token">API Token (Recommended)</option>
+                            <option value="password">Username & Password</option>
+                        </select>
+                    </div>
+
+                    <!-- Token Authentication -->
+                    <div id="tokenAuth">
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" id="hvTokenUser" class="form-input" placeholder="root@pam">
+                            <div class="form-hint">User who owns the API token (e.g., root@pam or backup@pve)</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Token ID</label>
+                            <input type="text" id="hvTokenId" class="form-input" placeholder="backer">
+                            <div class="form-hint">Name of the API token (without the user prefix)</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Token Secret</label>
+                            <input type="password" id="hvTokenSecret" class="form-input" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                            <div class="form-hint">The UUID token secret</div>
+                        </div>
+                    </div>
+
+                    <!-- Password Authentication (Proxmox) -->
+                    <div id="passwordAuth" style="display: none;">
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" id="hvUsername" class="form-input" placeholder="root@pam">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" id="hvPassword" class="form-input">
+                        </div>
+                    </div>
                 </div>
 
-                <!-- Token Authentication -->
-                <div id="tokenAuth">
+                <!-- Unraid API Key Authentication -->
+                <div id="unraidAuth" style="display: none;">
                     <div class="form-group">
-                        <label class="form-label">Username</label>
-                        <input type="text" id="hvTokenUser" class="form-input" placeholder="root@pam">
-                        <div class="form-hint">User who owns the API token (e.g., root@pam or backup@pve)</div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Token ID</label>
-                        <input type="text" id="hvTokenId" class="form-input" placeholder="backer">
-                        <div class="form-hint">Name of the API token (without the user prefix)</div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Token Secret</label>
-                        <input type="password" id="hvTokenSecret" class="form-input" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-                        <div class="form-hint">The UUID token secret</div>
-                    </div>
-                </div>
-
-                <!-- Password Authentication -->
-                <div id="passwordAuth" style="display: none;">
-                    <div class="form-group">
-                        <label class="form-label">Username</label>
-                        <input type="text" id="hvUsername" class="form-input" placeholder="root@pam">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Password</label>
-                        <input type="password" id="hvPassword" class="form-input">
+                        <label class="form-label">API Key</label>
+                        <input type="password" id="hvUnraidApiKey" class="form-input" placeholder="Your Unraid API key">
+                        <div class="form-hint">Generate an API key in Unraid: Settings → Management Access → API Keys</div>
                     </div>
                 </div>
 
@@ -297,7 +310,7 @@
                         <input type="checkbox" id="hvVerifySSL">
                         <span>Verify SSL Certificate</span>
                     </label>
-                    <div class="form-hint">Uncheck for self-signed certificates (common in Proxmox)</div>
+                    <div class="form-hint" id="hvSslHint">Uncheck for self-signed certificates (common in Proxmox/Unraid)</div>
                 </div>
 
                 <!-- SSH Settings for Incremental Backups -->
@@ -755,14 +768,53 @@ function showAddHypervisorModal() {
     document.getElementById('addHypervisorModal').style.display = 'flex';
     document.getElementById('addHypervisorForm').reset();
     document.getElementById('addHypervisorError').style.display = 'none';
-    onAuthMethodChange();
+    editingHypervisorId = null;
+    // Reset modal title
+    document.querySelector('#addHypervisorModal .modal-title').innerHTML = `
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg>
+        Add Hypervisor
+    `;
+    document.querySelector('#addHypervisorForm button[type="submit"]').textContent = 'Add Hypervisor';
+    onHypervisorTypeChange();
 }
 
 function hideAddHypervisorModal() {
     document.getElementById('addHypervisorModal').style.display = 'none';
 }
 
-function onHypervisorTypeChange() {}
+function onHypervisorTypeChange() {
+    const hvType = document.getElementById('hvType').value;
+    const isUnraid = hvType === 'unraid';
+    const isProxmox = hvType === 'proxmox';
+
+    // Show/hide auth sections
+    document.getElementById('proxmoxAuthSection').style.display = isProxmox ? 'block' : 'none';
+    document.getElementById('unraidAuth').style.display = isUnraid ? 'block' : 'none';
+
+    // Update port default
+    const portInput = document.getElementById('hvPort');
+    if (isUnraid && (portInput.value === '8006' || portInput.value === '')) {
+        portInput.value = '443';
+    } else if (isProxmox && (portInput.value === '443' || portInput.value === '')) {
+        portInput.value = '8006';
+    }
+
+    // Update placeholder and hints
+    const nameInput = document.getElementById('hvName');
+    const hostInput = document.getElementById('hvHost');
+    if (isUnraid) {
+        nameInput.placeholder = 'My Unraid Server';
+        hostInput.placeholder = '192.168.1.100 or tower.local';
+    } else {
+        nameInput.placeholder = 'My Proxmox Server';
+        hostInput.placeholder = '192.168.1.100 or pve.local';
+    }
+
+    // If Proxmox, also update auth method visibility
+    if (isProxmox) {
+        onAuthMethodChange();
+    }
+}
 
 function onAuthMethodChange() {
     const method = document.getElementById('hvAuthMethod').value;
@@ -771,13 +823,15 @@ function onAuthMethodChange() {
 }
 
 function getHypervisorFormData() {
+    const hvType = document.getElementById('hvType').value;
     const authMethod = document.getElementById('hvAuthMethod').value;
+    const isUnraid = hvType === 'unraid';
+
     const data = {
         name: document.getElementById('hvName').value,
-        hypervisor_type: document.getElementById('hvType').value,
+        hypervisor_type: hvType,
         host: document.getElementById('hvHost').value,
-        port: parseInt(document.getElementById('hvPort').value) || 8006,
-        auth_method: authMethod,
+        port: parseInt(document.getElementById('hvPort').value) || (isUnraid ? 443 : 8006),
         verify_ssl: document.getElementById('hvVerifySSL').checked,
         ssh_user: document.getElementById('hvSshUser').value || 'root',
         ssh_port: parseInt(document.getElementById('hvSshPort').value) || 22,
@@ -785,13 +839,22 @@ function getHypervisorFormData() {
         ssh_use_api_password: document.getElementById('hvSshUseApiPassword').checked,
     };
 
-    if (authMethod === 'token') {
-        data.username = document.getElementById('hvTokenUser').value;
-        data.token_id = document.getElementById('hvTokenId').value;
-        data.token_secret = document.getElementById('hvTokenSecret').value;
+    if (isUnraid) {
+        // Unraid uses API key authentication
+        // We store it as token_secret for consistency with backend
+        data.auth_method = 'token';
+        data.token_secret = document.getElementById('hvUnraidApiKey').value;
     } else {
-        data.username = document.getElementById('hvUsername').value;
-        data.password = document.getElementById('hvPassword').value;
+        // Proxmox authentication
+        data.auth_method = authMethod;
+        if (authMethod === 'token') {
+            data.username = document.getElementById('hvTokenUser').value;
+            data.token_id = document.getElementById('hvTokenId').value;
+            data.token_secret = document.getElementById('hvTokenSecret').value;
+        } else {
+            data.username = document.getElementById('hvUsername').value;
+            data.password = document.getElementById('hvPassword').value;
+        }
     }
 
     return data;
@@ -877,25 +940,33 @@ async function editHypervisor(hvId) {
         document.getElementById('hvType').value = hv.hypervisor_type || 'proxmox';
         document.getElementById('hvName').value = hv.name || '';
         document.getElementById('hvHost').value = hv.host || '';
-        document.getElementById('hvPort').value = hv.port || 8006;
+        document.getElementById('hvPort').value = hv.port || (hv.hypervisor_type === 'unraid' ? 443 : 8006);
         document.getElementById('hvVerifySSL').checked = hv.verify_ssl || false;
         document.getElementById('hvSshUser').value = hv.ssh_user || 'root';
         document.getElementById('hvSshPort').value = hv.ssh_port || 22;
         document.getElementById('hvSshKeyPath').value = hv.ssh_key_path || '';
         document.getElementById('hvSshUseApiPassword').checked = hv.ssh_use_api_password !== false;
 
-        // Set auth method
-        if (hv.token_id) {
-            document.getElementById('hvAuthMethod').value = 'token';
-            document.getElementById('hvTokenUser').value = hv.username || '';
-            document.getElementById('hvTokenId').value = hv.token_id || '';
-            document.getElementById('hvTokenSecret').value = ''; // Don't show existing secret
+        // Handle type-specific auth
+        if (hv.hypervisor_type === 'unraid') {
+            // Unraid uses API key - clear the field (don't show existing key)
+            document.getElementById('hvUnraidApiKey').value = '';
         } else {
-            document.getElementById('hvAuthMethod').value = 'password';
-            document.getElementById('hvUsername').value = hv.username || '';
-            document.getElementById('hvPassword').value = ''; // Don't show existing password
+            // Proxmox auth
+            if (hv.token_id) {
+                document.getElementById('hvAuthMethod').value = 'token';
+                document.getElementById('hvTokenUser').value = hv.username || '';
+                document.getElementById('hvTokenId').value = hv.token_id || '';
+                document.getElementById('hvTokenSecret').value = ''; // Don't show existing secret
+            } else {
+                document.getElementById('hvAuthMethod').value = 'password';
+                document.getElementById('hvUsername').value = hv.username || '';
+                document.getElementById('hvPassword').value = ''; // Don't show existing password
+            }
         }
-        onAuthMethodChange();
+
+        // Update UI based on hypervisor type
+        onHypervisorTypeChange();
     } catch (e) {
         document.getElementById('addHypervisorError').textContent = 'Failed to load hypervisor: ' + e.message;
         document.getElementById('addHypervisorError').style.display = 'block';
@@ -1013,17 +1084,53 @@ async function loadGuests(hvId) {
         }
 
         let html = `<table class="modal-data-table"><thead><tr>
-            <th>VMID</th><th>Name</th><th>Type</th><th>Status</th><th>Node</th><th>CPU</th><th>Memory</th>
+            <th>ID</th><th>Name</th><th>Type</th><th>Status</th><th>Node</th><th>CPU</th><th>Memory</th>
         </tr></thead><tbody>`;
 
         for (const guest of guests) {
-            const typeBadgeClass = guest.type === 'qemu' ? 'vm' : 'lxc';
-            const typeLabel = guest.type === 'qemu' ? 'VM' : 'LXC';
-            const statusClass = guest.status === 'running' ? 'status-running' : 'status-stopped';
+            // Handle both Proxmox and Unraid guest types
+            const guestType = guest.guest_type || guest.type;
+            let typeLabel, typeBadgeClass;
+
+            switch (guestType) {
+                case 'qemu':
+                    typeLabel = 'VM';
+                    typeBadgeClass = 'vm';
+                    break;
+                case 'lxc':
+                    typeLabel = 'LXC';
+                    typeBadgeClass = 'lxc';
+                    break;
+                case 'vm':
+                    typeLabel = 'VM';
+                    typeBadgeClass = 'vm';
+                    break;
+                case 'docker':
+                    typeLabel = 'Docker';
+                    typeBadgeClass = 'docker';
+                    break;
+                case 'share':
+                    typeLabel = 'Share';
+                    typeBadgeClass = 'share';
+                    break;
+                case 'flash':
+                    typeLabel = 'Flash';
+                    typeBadgeClass = 'flash';
+                    break;
+                default:
+                    typeLabel = guestType?.toUpperCase() || 'Unknown';
+                    typeBadgeClass = 'vm';
+            }
+
+            const statusClass = (guest.status === 'running' || guest.status === 'available') ? 'status-running' : 'status-stopped';
             const memGB = guest.maxmem_gb || 0;
 
+            // For Unraid, show short vmid or hide if it's a generated ID
+            const vmidDisplay = guest.vmid.toString().startsWith('share_') || guest.vmid === 'flash_config'
+                ? '-' : guest.vmid;
+
             html += `<tr>
-                <td><strong>${guest.vmid}</strong></td>
+                <td><strong>${escapeHtml(vmidDisplay.toString())}</strong></td>
                 <td>${escapeHtml(guest.name)}</td>
                 <td><span class="status-badge ${typeBadgeClass}">${typeLabel}</span></td>
                 <td><span class="${statusClass}">${guest.status}</span></td>
@@ -1243,13 +1350,48 @@ async function onJobHypervisorChange() {
         } else {
             let html = '';
             for (const guest of guests) {
-                const typeLabel = guest.type === 'qemu' ? 'VM' : 'LXC';
-                const typeBadgeClass = guest.type === 'qemu' ? 'vm' : 'lxc';
+                // Handle both Proxmox and Unraid guest types
+                const guestType = guest.guest_type || guest.type;
+                let typeLabel, typeBadgeClass;
+
+                switch (guestType) {
+                    case 'qemu':
+                        typeLabel = 'VM';
+                        typeBadgeClass = 'vm';
+                        break;
+                    case 'lxc':
+                        typeLabel = 'LXC';
+                        typeBadgeClass = 'lxc';
+                        break;
+                    case 'vm':
+                        typeLabel = 'VM';
+                        typeBadgeClass = 'vm';
+                        break;
+                    case 'docker':
+                        typeLabel = 'Docker';
+                        typeBadgeClass = 'docker';
+                        break;
+                    case 'share':
+                        typeLabel = 'Share';
+                        typeBadgeClass = 'share';
+                        break;
+                    case 'flash':
+                        typeLabel = 'Flash';
+                        typeBadgeClass = 'flash';
+                        break;
+                    default:
+                        typeLabel = guestType?.toUpperCase() || 'Unknown';
+                        typeBadgeClass = 'vm';
+                }
+
+                // For Unraid, use vmid as-is (can be string like "share_appdata")
+                const vmidDisplay = guest.vmid.toString().startsWith('share_') ? '' : `(${guest.vmid})`;
+
                 html += `<label class="guest-item">
-                    <input type="checkbox" name="guests" value="${guest.vmid}">
+                    <input type="checkbox" name="guests" value="${escapeHtml(guest.vmid)}">
                     <span class="guest-name">${escapeHtml(guest.name)}</span>
-                    <span class="status-badge ${typeBadgeClass}">${typeLabel} (${guest.vmid})</span>
-                    <span class="guest-status ${guest.status === 'running' ? 'status-running' : 'status-stopped'}">${guest.status}</span>
+                    <span class="status-badge ${typeBadgeClass}">${typeLabel} ${vmidDisplay}</span>
+                    <span class="guest-status ${guest.status === 'running' || guest.status === 'available' ? 'status-running' : 'status-stopped'}">${guest.status}</span>
                 </label>`;
             }
             guestsContainer.innerHTML = html;
@@ -1267,7 +1409,11 @@ async function submitJob(event) {
 
     const selectedGuests = [];
     document.querySelectorAll('#jobGuestsList input[name="guests"]:checked').forEach(cb => {
-        selectedGuests.push(parseInt(cb.value));
+        // For Unraid, vmid can be a string (e.g., "share_appdata", "flash_config")
+        // For Proxmox, vmid is a number
+        const val = cb.value;
+        const numVal = parseInt(val);
+        selectedGuests.push(isNaN(numVal) ? val : numVal);
     });
 
     const data = {
