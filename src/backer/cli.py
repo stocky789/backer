@@ -290,7 +290,6 @@ def server_update(dev: bool, version: str | None, yes: bool) -> None:
     import os
     import subprocess
     import sys
-    import urllib.request
 
     if sys.platform == "win32":
         console.print("[red]Error:[/red] Server update is only supported on Linux")
@@ -365,7 +364,7 @@ def server_update(dev: bool, version: str | None, yes: bool) -> None:
     # Find the venv pip
     venv_pip = Path("/opt/backer/venv/bin/pip")
     if not venv_pip.exists():
-        console.print(f"   [red]Error:[/red] Virtual environment not found at /opt/backer/venv")
+        console.print("   [red]Error:[/red] Virtual environment not found at /opt/backer/venv")
         console.print("   Is Backer installed via the install script?")
         raise SystemExit(1)
 
@@ -417,7 +416,7 @@ def server_update(dev: bool, version: str | None, yes: bool) -> None:
     except Exception:
         pass
 
-    console.print(f"\n[bold green]✓ Update complete![/bold green]")
+    console.print("\n[bold green]✓ Update complete![/bold green]")
     console.print(f"  Previous version: {__version__}")
     console.print(f"  New version: {new_version}")
     console.print()
@@ -1177,7 +1176,7 @@ def agent_update(dev: bool, yes: bool) -> None:
             subprocess.run(["systemctl", "start", "backer-agent"], capture_output=True)
             console.print("   [green]✓[/green] Service started")
 
-        console.print(f"\n[bold green]✓ Update complete![/bold green]")
+        console.print("\n[bold green]✓ Update complete![/bold green]")
         console.print(f"  Previous version: {__version__}")
         console.print(f"  New version: {new_version}")
 
