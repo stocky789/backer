@@ -328,9 +328,6 @@ class AgentService:
 
     def _redact_sensitive_data(self, data: dict[str, Any]) -> dict[str, Any]:
         """Redact sensitive data (passwords, secrets) from a dict for logging."""
-        sensitive_keys = {'password', 'secret', 'client_secret', 'smb_password',
-                          'restic_password', 'kopia_password', 'KOPIA_PASSWORD',
-                          'RESTIC_PASSWORD'}
         redacted = {}
         for key, value in data.items():
             if isinstance(value, dict):
