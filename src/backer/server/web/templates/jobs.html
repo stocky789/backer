@@ -800,71 +800,15 @@ async function confirmDeleteJob() {
 
     errorDiv.style.display = 'none';
 
-    // CRITICAL: Stop ALL polling/updating systems during deletion
-    if (window.LiveUpdate) {
-        window.LiveUpdate.pause();
-    }
-
-    // Stop activity polling
-    if (window.activityPollInterval) {
-        clearInterval(window.activityPollInterval);
-        window.activityPollInterval = null;
-    }
-
     try {
         const url = `/api/v1/jobs/${encodeURIComponent(jobName)}?delete_snapshots=${deleteSnapshots}`;
         const response = await fetch(url, { method: 'DELETE' });
 
         if (response.ok) {
-            const data = await response.json();
-
-            // CRITICAL: If there's a cleanup_task_id, wait for it to complete before redirecting
-            const taskId = data.cleanup_task_id || data.task_id;
-            if (taskId) {
-                // Show progress message
-                hideDeleteModal();
-                if (window.Toast) {
-                    Toast.info('Deleting job data...', 0); // 0 = don't auto-dismiss
-                }
-
-                // Poll for task completion (max 30 seconds)
-                let attempts = 0;
-                const maxAttempts = 60; // 30 seconds at 500ms intervals
-
-                while (attempts < maxAttempts) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-
-                    try {
-                        const taskResp = await fetch(`/api/v1/tasks/${taskId}`);
-                        if (taskResp.ok) {
-                            const taskData = await taskResp.json();
-                            if (taskData.status === 'completed' || taskData.status === 'failed') {
-                                break;
-                            }
-                        } else if (taskResp.status === 404) {
-                            // Task completed and was cleaned up
-                            break;
-                        }
-                    } catch (e) {
-                        // Task might be deleted already, that's ok
-                        break;
-                    }
-
-                    attempts++;
-                }
-            }
-
-            // Now safe to redirect - all background tasks completed
-            window.location.href = '/jobs';
+            // Job deleted from DB - any cleanup happens in background task
+            // Don't wait for it, just redirect immediately
+            window.location.replace('/jobs');
         } else {
-            // Resume polling on error
-            if (window.LiveUpdate) {
-                window.LiveUpdate.resume();
-            }
-            if (typeof startActivityPolling === 'function') {
-                startActivityPolling();
-            }
-
             let errorMsg = `HTTP ${response.status}`;
             try {
                 const data = await response.json();
@@ -877,14 +821,6 @@ async function confirmDeleteJob() {
             errorDiv.style.display = 'block';
         }
     } catch (e) {
-        // Resume polling on error
-        if (window.LiveUpdate) {
-            window.LiveUpdate.resume();
-        }
-        if (typeof startActivityPolling === 'function') {
-            startActivityPolling();
-        }
-
         errorDiv.textContent = e.message;
         errorDiv.style.display = 'block';
     }

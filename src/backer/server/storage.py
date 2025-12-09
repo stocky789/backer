@@ -441,8 +441,21 @@ class Storage:
             return [{"name": row["name"], **json.loads(row["config"])} for row in rows]
 
     def delete_job(self, name: str) -> bool:
-        """Delete a job."""
+        """Delete a job and all associated records.
+
+        This cleans up:
+        - The job configuration from the jobs table
+        - All job_progress records (running/pending jobs)
+        - All job_runs history records
+        """
         with self._connect() as conn:
+            # Delete associated progress records first (prevents orphaned running jobs)
+            conn.execute("DELETE FROM job_progress WHERE job_name = ?", (name,))
+
+            # Delete job run history
+            conn.execute("DELETE FROM job_runs WHERE job_name = ?", (name,))
+
+            # Delete the job itself
             cursor = conn.execute("DELETE FROM jobs WHERE name = ?", (name,))
             return cursor.rowcount > 0
 

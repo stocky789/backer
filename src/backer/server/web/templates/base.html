@@ -327,12 +327,17 @@
     }
 
     function refreshActivityList() {
+        // Skip if navigating away (prevents errors during page transitions)
+        if (window._isNavigatingAway) return;
+
         // Fetch both background tasks AND running agent backup jobs
         Promise.all([
-            fetch('/api/v1/tasks?active_only=true').then(r => r.json()),
-            fetch('/api/v1/running').then(r => r.json())
+            fetch('/api/v1/tasks?active_only=true').then(r => r.ok ? r.json() : []),
+            fetch('/api/v1/running').then(r => r.ok ? r.json() : [])
         ])
             .then(([tasks, runningJobs]) => {
+                // Skip DOM updates if navigating away
+                if (window._isNavigatingAway) return;
                 const list = document.getElementById('activityList');
                 const badge = document.getElementById('activityBadge');
                 const btn = document.querySelector('.activity-btn');
@@ -409,6 +414,8 @@
 
     // Poll for activity updates
     function startActivityPolling() {
+        // Don't start if navigating away
+        if (window._isNavigatingAway) return;
         refreshActivityList();
         activityPollInterval = setInterval(refreshActivityList, 2000);
     }
@@ -439,12 +446,14 @@
         start(intervalMs = 3000) {
             if (this.interval) return;
             this.interval = setInterval(() => {
-                if (!this.paused && !document.hidden) {
+                if (!this.paused && !document.hidden && !window._isNavigatingAway) {
                     this.tick();
                 }
             }, intervalMs);
-            // Also run immediately
-            this.tick();
+            // Also run immediately (unless navigating away)
+            if (!window._isNavigatingAway) {
+                this.tick();
+            }
         },
 
         // Run all registered callbacks
