@@ -327,14 +327,44 @@
     }
 
     function refreshActivityList() {
-        fetch('/api/v1/tasks?active_only=true')
-            .then(r => r.json())
-            .then(tasks => {
+        // Fetch both background tasks AND running agent backup jobs
+        Promise.all([
+            fetch('/api/v1/tasks?active_only=true').then(r => r.json()),
+            fetch('/api/v1/running').then(r => r.json())
+        ])
+            .then(([tasks, runningJobs]) => {
                 const list = document.getElementById('activityList');
                 const badge = document.getElementById('activityBadge');
                 const btn = document.querySelector('.activity-btn');
 
-                if (tasks.length === 0) {
+                // Combine both arrays
+                const allActivities = [];
+
+                // Add background tasks
+                tasks.forEach(task => {
+                    allActivities.push({
+                        type: 'task',
+                        name: task.name || task.task_type,
+                        description: task.description || '',
+                        status: task.status,
+                        progress: task.progress || 0,
+                        started_at: task.started_at
+                    });
+                });
+
+                // Add running agent backup jobs
+                runningJobs.forEach(job => {
+                    allActivities.push({
+                        type: 'backup',
+                        name: job.job_name,
+                        description: job.message || job.current_file || 'Backup in progress',
+                        status: job.status,
+                        progress: job.progress_percent || 0,
+                        started_at: job.started_at
+                    });
+                });
+
+                if (allActivities.length === 0) {
                     list.innerHTML = `
                         <div class="activity-empty">
                             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -343,14 +373,14 @@
                     badge.style.display = 'none';
                     btn.classList.remove('has-activity');
                 } else {
-                    badge.textContent = tasks.length;
+                    badge.textContent = allActivities.length;
                     badge.style.display = 'flex';
                     btn.classList.add('has-activity');
 
                     let html = '';
-                    tasks.forEach(task => {
-                        const progress = task.progress || 0;
-                        const statusIcon = task.status === 'running'
+                    allActivities.forEach(activity => {
+                        const progress = activity.progress || 0;
+                        const statusIcon = activity.status === 'running'
                             ? '<svg class="spinning" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>'
                             : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
 
@@ -358,16 +388,16 @@
                             <div class="activity-item">
                                 <div class="activity-item-header">
                                     <span class="activity-item-icon">${statusIcon}</span>
-                                    <span class="activity-item-title">${escapeHtml(task.name || task.task_type)}</span>
-                                    <span class="activity-item-status status-${task.status}">${task.status}</span>
+                                    <span class="activity-item-title">${escapeHtml(activity.name)}</span>
+                                    <span class="activity-item-status status-${activity.status}">${activity.status}</span>
                                 </div>
-                                <div class="activity-item-detail">${escapeHtml(task.description || '')}</div>
+                                <div class="activity-item-detail">${escapeHtml(activity.description)}</div>
                                 <div class="activity-progress-bar">
                                     <div class="activity-progress-fill" style="width: ${progress}%"></div>
                                 </div>
                                 <div class="activity-item-meta">
                                     <span>${progress}%</span>
-                                    <span>${timeAgo(task.started_at)}</span>
+                                    <span>${timeAgo(activity.started_at)}</span>
                                 </div>
                             </div>`;
                     });

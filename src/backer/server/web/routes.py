@@ -485,7 +485,7 @@ async def history_page(request: Request):
                         duration = f"{diff:.0f}s"
                     else:
                         duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, TypeError):
                     pass
 
             all_runs.append({
@@ -519,7 +519,7 @@ async def history_page(request: Request):
                         duration = f"{diff:.0f}s"
                     else:
                         duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, TypeError):
                     pass
 
             all_runs.append({

@@ -809,7 +809,7 @@ async function confirmDeleteJob() {
             let message = 'Job deleted successfully.';
             if (data.message) message += ' ' + data.message;
             Toast.success(message);
-            closeDeleteModal();
+            hideDeleteModal();
             setTimeout(() => location.reload(), 1000);
         } else {
             let errorMsg = `HTTP ${response.status}`;

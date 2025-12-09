@@ -1406,7 +1406,12 @@ class BackerAgent:
             self._http_client = None
 
     def _handle_signal(self, signum: int, frame: object) -> None:
-        """Handle shutdown signals."""
-        print(f"\nReceived signal {signum}")
+        """Handle shutdown signals gracefully.
+
+        Sets running flag to false to allow current operations to complete
+        before exiting. This ensures backup results are reported to the server.
+        """
+        print(f"\nReceived signal {signum}, initiating graceful shutdown...")
         self._running = False
-        sys.exit(0)
+        # Don't call sys.exit(0) immediately - let the main loop exit naturally
+        # This allows any in-progress backup reporting to complete
