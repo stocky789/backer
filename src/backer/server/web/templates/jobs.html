@@ -818,8 +818,9 @@ async function confirmDeleteJob() {
         if (response.ok) {
             const data = await response.json();
 
-            // CRITICAL: If there's a task_id, wait for it to complete before redirecting
-            if (data.task_id) {
+            // CRITICAL: If there's a cleanup_task_id, wait for it to complete before redirecting
+            const taskId = data.cleanup_task_id || data.task_id;
+            if (taskId) {
                 // Show progress message
                 hideDeleteModal();
                 if (window.Toast) {
@@ -834,12 +835,15 @@ async function confirmDeleteJob() {
                     await new Promise(resolve => setTimeout(resolve, 500));
 
                     try {
-                        const taskResp = await fetch(`/api/v1/tasks/${data.task_id}`);
+                        const taskResp = await fetch(`/api/v1/tasks/${taskId}`);
                         if (taskResp.ok) {
                             const taskData = await taskResp.json();
                             if (taskData.status === 'completed' || taskData.status === 'failed') {
                                 break;
                             }
+                        } else if (taskResp.status === 404) {
+                            // Task completed and was cleaned up
+                            break;
                         }
                     } catch (e) {
                         // Task might be deleted already, that's ok

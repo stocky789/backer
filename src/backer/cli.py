@@ -857,14 +857,14 @@ def agent_progress(server: str | None, refresh: int) -> None:
         for job in jobs:
             job_name = job.get("job_name", "Unknown Job")
             progress_pct = job.get("progress_percent", 0) or job.get("progress", 0) or 0
-            current_file = job.get("current_file", job.get("message", "Processing..."))
+            current_file = job.get("current_file") or job.get("message") or "Processing..."
             bytes_done = job.get("bytes_processed", 0) or job.get("bytes_done", 0) or 0
             bytes_total = job.get("bytes_total", 0) or 0
             files_done = job.get("files_processed", 0) or job.get("files_done", 0) or 0
             started_at = job.get("started_at")
 
             # Truncate long file paths
-            if len(current_file) > 60:
+            if current_file and len(current_file) > 60:
                 current_file = "..." + current_file[-57:]
 
             # Build progress bar
