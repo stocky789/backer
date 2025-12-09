@@ -668,18 +668,40 @@ class BackerAgent:
         if self._is_smb_path(dest_path):
             return self._prepare_smb_destination(job, backend_name, dest_path)
 
-        # Handle NFS paths
-        if self._is_nfs_path(dest_path):
-            return self._prepare_nfs_destination(job, backend_name, dest_path)
-
         # Check if NFS credentials were passed (job linked to NFS repository)
+        # This takes priority over parsing dest_path as NFS, because the server
+        # provides the actual NFS export separately from the subpath
         nfs_server = job.get("nfs_server")
         nfs_export = job.get("nfs_export")
         if nfs_server and nfs_export:
-            # Build NFS path from repository info
-            nfs_path = f"{nfs_server}:{nfs_export}"
-            print(f"[NFS] Using NFS repository: {nfs_path}")
-            return self._prepare_nfs_destination(job, backend_name, nfs_path)
+            # Server provided NFS export - mount the export and calculate subpath
+            # dest_path will be like: server:/export/path/Agents/jobname
+            # nfs_export is the actual mountable export: /export/path
+            # We need to extract the subpath after the export
+            print(f"[NFS] Using NFS repository: {nfs_server}:{nfs_export}")
+            
+            # Calculate subpath: everything in dest_path after the export
+            # dest_path format: "server:/export/subpath" or just "/local/path"
+            subpath = ""
+            if self._is_nfs_path(dest_path):
+                # Parse the full destination to get the path portion
+                _, full_path, _ = self._parse_nfs_path(dest_path)
+                # Remove the export prefix to get subpath
+                if full_path.startswith(nfs_export):
+                    subpath = full_path[len(nfs_export):].lstrip("/")
+                else:
+                    # Export doesn't match - maybe path format differs, use full path as subpath
+                    subpath = full_path.lstrip("/")
+            
+            ctx = self._nfs_mount_context(server=nfs_server, export_path=nfs_export)
+            mount_path = ctx.__enter__()
+            full_path = str(mount_path / subpath) if subpath else str(mount_path)
+            print(f"[NFS] Using mounted path: {full_path}")
+            return full_path, ctx
+
+        # Handle NFS paths (without server-provided credentials)
+        if self._is_nfs_path(dest_path):
+            return self._prepare_nfs_destination(job, backend_name, dest_path)
 
         # Local path, use as-is
         return dest_path, None
