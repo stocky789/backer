@@ -161,17 +161,38 @@
                 <div class="setup-step">
                     <div class="setup-step-num">1</div>
                     <div class="setup-step-content">
-                        <div class="setup-step-title">Quick Install (Recommended)</div>
+                        <div class="setup-step-title">Run the Install Script</div>
                         <pre class="setup-code">curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash</pre>
                     </div>
                 </div>
                 <div class="setup-step">
                     <div class="setup-step-num">2</div>
                     <div class="setup-step-content">
-                        <div class="setup-step-title">Or Manual Install</div>
-                        <pre id="linuxManualInstall" class="setup-code">pip install backer
-backer agent register --server [loading...]
-backer agent start</pre>
+                        <div class="setup-step-title">Register with Server</div>
+                        <pre id="linuxRegisterCmd" class="setup-code">sudo backer agent register --server [loading...]</pre>
+                    </div>
+                </div>
+                <div class="setup-note">
+                    <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; margin-right: 6px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                    The agent will appear in the list above once registered and running.
+                </div>
+            </div>
+        </div>
+
+        <!-- Docker Setup -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px;"><path d="M22 12.5c-.5-.3-1.5-.5-2.5-.4-.2-1.2-1-2.2-2-2.8l-.4-.3-.3.4c-.4.6-.6 1.3-.6 2 0 .5.1 1.1.4 1.6-.6.3-1.5.5-2.8.5H2c-.2 1.5.1 3.4 1 4.8 1 1.5 2.5 2.3 4.5 2.5 2.7.2 5.5-.3 7.8-1.8 1.8-1.2 3.2-3 4-5.2.4 0 1.3 0 2-.8.3-.3.5-.9.6-1.2l.1-.3z"/><rect x="6" y="10" width="2" height="2"/><rect x="9" y="10" width="2" height="2"/><rect x="12" y="10" width="2" height="2"/><rect x="9" y="7" width="2" height="2"/><rect x="12" y="7" width="2" height="2"/><rect x="15" y="10" width="2" height="2"/><rect x="12" y="4" width="2" height="2"/></svg>
+                    Docker Agent
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="setup-step">
+                    <div class="setup-step-num">1</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Run the Container</div>
+                        <pre id="dockerRunCmd" class="setup-code">docker run -d --name backer-agent \<br>  -v /:/host:ro \<br>  -e BACKER_SERVER=[loading...] \<br>  ghcr.io/stocky789/backer:latest agent</pre>
                     </div>
                 </div>
                 <div class="setup-note">
@@ -327,7 +348,7 @@ backer agent start</pre>
 }
 .setup-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: 16px;
     margin-top: 16px;
 }
@@ -390,7 +411,12 @@ backer agent start</pre>
 .setup-note svg {
     stroke: var(--accent);
 }
-@media (max-width: 900px) {
+@media (max-width: 1200px) {
+    .setup-row {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+@media (max-width: 800px) {
     .setup-row {
         grid-template-columns: 1fr;
     }
@@ -401,9 +427,10 @@ backer agent start</pre>
 {% block scripts %}
 <script>
 // Update server URL displays
-document.getElementById('serverUrl').textContent = window.location.origin;
-document.getElementById('linuxManualInstall').textContent =
-    `pip install backer\nbacker agent register --server ${window.location.origin}\nbacker agent start`;
+const serverUrl = window.location.origin;
+document.getElementById('serverUrl').textContent = serverUrl;
+document.getElementById('linuxRegisterCmd').textContent = `sudo backer agent register --server ${serverUrl}`;
+document.getElementById('dockerRunCmd').innerHTML = `docker run -d --name backer-agent \\<br>  -v /:/host:ro \\<br>  -e BACKER_SERVER=${serverUrl} \\<br>  ghcr.io/stocky789/backer:latest agent`;
 
 // Filter agents table
 function filterAgents() {
