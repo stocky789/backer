@@ -679,7 +679,7 @@ class BackerAgent:
             # nfs_export is the actual mountable export: /export/path
             # We need to extract the subpath after the export
             print(f"[NFS] Using NFS repository: {nfs_server}:{nfs_export}")
-            
+
             # Calculate subpath: everything in dest_path after the export
             # dest_path format: "server:/export/subpath" or just "/local/path"
             subpath = ""
@@ -692,7 +692,7 @@ class BackerAgent:
                 else:
                     # Export doesn't match - maybe path format differs, use full path as subpath
                     subpath = full_path.lstrip("/")
-            
+
             ctx = self._nfs_mount_context(server=nfs_server, export_path=nfs_export)
             mount_path = ctx.__enter__()
             full_path = str(mount_path / subpath) if subpath else str(mount_path)
