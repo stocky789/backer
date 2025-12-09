@@ -1134,9 +1134,12 @@ class AgentService:
         # Set up environment with password
         # Priority: backend_options > env var > default
         env = os.environ.copy()
-        if 'kopia_password' in backend_options:
-            env['KOPIA_PASSWORD'] = backend_options['kopia_password']
+        if 'password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['password']
             logger.info("[KOPIA] Using password from job configuration")
+        elif 'kopia_password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['kopia_password']
+            logger.info("[KOPIA] Using kopia_password from job configuration")
         elif 'restic_password' in backend_options:
             # Allow using restic_password for compatibility
             env['KOPIA_PASSWORD'] = backend_options['restic_password']
@@ -1277,9 +1280,12 @@ class AgentService:
 
         # Set up environment with password
         env = os.environ.copy()
-        if 'kopia_password' in backend_options:
-            env['KOPIA_PASSWORD'] = backend_options['kopia_password']
+        if 'password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['password']
             logger.info("[KOPIA] Using password from job configuration")
+        elif 'kopia_password' in backend_options:
+            env['KOPIA_PASSWORD'] = backend_options['kopia_password']
+            logger.info("[KOPIA] Using kopia_password from job configuration")
         elif 'restic_password' in backend_options:
             env['KOPIA_PASSWORD'] = backend_options['restic_password']
             logger.info("[KOPIA] Using restic_password from job configuration")
