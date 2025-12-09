@@ -1042,6 +1042,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 from pathlib import Path as PathLib
 
                 from backer.server.repositories import (
+                    nfs_delete_directory,
                     smb_delete_directory,
                 )
 
@@ -1097,7 +1098,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         task.progress = 90
 
                     elif repo_type == "local" or repo_info.get("mount_point"):
-                        # Direct filesystem access
+                        # Direct filesystem access (local or pre-mounted)
                         if repo_info.get("mount_point"):
                             base_path = PathLib(repo_info["mount_point"])
                         else:
@@ -1106,40 +1107,84 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         if subpath:
                             base_path = base_path / subpath
 
+                        # Job data is at: {base}/Agents/{job_subfolder}/
+                        agents_job_path = base_path / "Agents" / job_subfolder
+
                         if delete_snapshots:
-                            # Delete entire job subfolder
-                            job_folder_path = base_path / job_subfolder
-                            if job_folder_path.exists():
-                                shutil.rmtree(job_folder_path)
+                            # Delete entire job subfolder (all backup data + metadata)
+                            task.message = f"Deleting job subfolder '{job_subfolder}'..."
+                            if agents_job_path.exists():
+                                shutil.rmtree(agents_job_path)
                                 subfolder_deleted = True
                                 job_deleted = True
-                                logger.info(f"Deleted entire job subfolder: {job_folder_path}")
+                                logger.info(f"[LOCAL DELETE] Deleted entire job subfolder: {agents_job_path}")
+                            else:
+                                logger.info(f"[LOCAL DELETE] Job subfolder does not exist: {agents_job_path}")
+                                job_deleted = True  # Already gone
                         else:
-                            # Only delete metadata
-                            job_metadata_path = base_path / job_subfolder / ".backer" / "jobs" / job_name
+                            # Only delete job metadata, keep backup data
+                            job_metadata_path = agents_job_path / ".backer" / "jobs" / job_name
                             if job_metadata_path.exists():
                                 shutil.rmtree(job_metadata_path)
                                 job_deleted = True
+                                logger.info(f"[LOCAL DELETE] Deleted job metadata: {job_metadata_path}")
 
                         task.progress = 90
 
-                    # NFS - similar to local if mounted
-                    elif repo_type == "nfs" and repo_info.get("mount_point"):
-                        base_path = PathLib(repo_info["mount_point"])
-                        if subpath:
-                            base_path = base_path / subpath
+                    # NFS - use mount_point if available, otherwise temp mount
+                    elif repo_type == "nfs":
+                        if repo_info.get("mount_point"):
+                            # NFS already mounted - use filesystem directly
+                            base_path = PathLib(repo_info["mount_point"])
+                            if subpath:
+                                base_path = base_path / subpath
 
-                        if delete_snapshots:
-                            job_folder_path = base_path / job_subfolder
-                            if job_folder_path.exists():
-                                shutil.rmtree(job_folder_path)
-                                subfolder_deleted = True
-                                job_deleted = True
+                            # Job data is at: {base}/Agents/{job_subfolder}/
+                            agents_job_path = base_path / "Agents" / job_subfolder
+
+                            if delete_snapshots:
+                                task.message = f"Deleting job subfolder '{job_subfolder}'..."
+                                if agents_job_path.exists():
+                                    shutil.rmtree(agents_job_path)
+                                    subfolder_deleted = True
+                                    job_deleted = True
+                                    logger.info(f"[NFS DELETE] Deleted entire job subfolder: {agents_job_path}")
+                                else:
+                                    logger.info(f"[NFS DELETE] Job subfolder does not exist: {agents_job_path}")
+                                    job_deleted = True
+                            else:
+                                job_metadata_path = agents_job_path / ".backer" / "jobs" / job_name
+                                if job_metadata_path.exists():
+                                    shutil.rmtree(job_metadata_path)
+                                    job_deleted = True
+                                    logger.info(f"[NFS DELETE] Deleted job metadata: {job_metadata_path}")
+
+                            task.progress = 90
                         else:
-                            job_metadata_path = base_path / job_subfolder / ".backer" / "jobs" / job_name
-                            if job_metadata_path.exists():
-                                shutil.rmtree(job_metadata_path)
-                                job_deleted = True
+                            # NFS not mounted - use nfs_delete_directory to temp mount
+                            if delete_snapshots:
+                                task.message = f"Deleting job subfolder '{job_subfolder}' from NFS..."
+                                success, msg = nfs_delete_directory(
+                                    server, share, job_subfolder_path
+                                )
+                                if success:
+                                    subfolder_deleted = True
+                                    job_deleted = True
+                                    logger.info(f"Deleted entire job subfolder from NFS: {job_subfolder_path}")
+                                elif "no such file" not in msg.lower() and "not found" not in msg.lower():
+                                    errors.append(f"Job subfolder: {msg}")
+                            else:
+                                # Only delete job metadata
+                                success, msg = nfs_delete_directory(
+                                    server, share, metadata_job_path
+                                )
+                                if success:
+                                    job_deleted = True
+                                    logger.info(f"Deleted job metadata from NFS: {metadata_job_path}")
+                                elif "no such file" not in msg.lower() and "not found" not in msg.lower():
+                                    errors.append(f"Job metadata: {msg}")
+
+                        task.progress = 90
 
                 except Exception as e:
                     errors.append(str(e))

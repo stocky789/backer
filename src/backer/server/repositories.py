@@ -674,6 +674,87 @@ def smb_delete_file(
             return False, str(e)
 
 
+def nfs_delete_directory(
+    server: str,
+    export: str,
+    remote_path: str,
+) -> tuple[bool, str]:
+    """Recursively delete a directory on an NFS export.
+
+    Temporarily mounts the NFS export, deletes the directory, then unmounts.
+
+    Args:
+        server: NFS server hostname/IP
+        export: NFS export path (e.g., /mnt/tank/backups)
+        remote_path: Path to directory within export to delete (MUST be non-empty)
+
+    Returns:
+        Tuple of (success, message)
+    """
+    import shutil
+
+    # SAFETY: Refuse to delete export root - remote_path must be specified
+    remote_path = remote_path.strip("/")
+    if not remote_path:
+        logger.error("[NFS DELETE] Refusing to delete export root - remote_path is empty")
+        return False, "Cannot delete export root - path must be specified"
+
+    logger.info(f"[NFS DELETE] Deleting {server}:{export}/{remote_path}")
+
+    mount_point = Path(tempfile.mkdtemp(prefix="backer_nfs_del_"))
+
+    try:
+        # Mount the NFS export
+        nfs_opts = "soft,timeo=50,retrans=2"
+        mount_cmd = ["mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{export}", str(mount_point)]
+        result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+
+        # If mount fails, try with sudo
+        if result.returncode != 0:
+            mount_cmd = [
+                "sudo", "-n", "mount", "-t", "nfs",
+                "-o", nfs_opts, f"{server}:{export}", str(mount_point)
+            ]
+            result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode != 0:
+            return False, f"Failed to mount NFS: {result.stderr.strip()}"
+
+        # Build full path to delete
+        target_path = mount_point / remote_path
+
+        if not target_path.exists():
+            logger.info(f"[NFS DELETE] Path does not exist (already deleted): {remote_path}")
+            return True, "Directory does not exist (already deleted)"
+
+        # Delete the directory recursively
+        try:
+            shutil.rmtree(target_path)
+            logger.info(f"[NFS DELETE] Successfully deleted: {server}:{export}/{remote_path}")
+            return True, "Directory deleted successfully"
+        except Exception as e:
+            logger.error(f"[NFS DELETE] Failed to delete {remote_path}: {e}")
+            return False, f"Failed to delete: {e}"
+
+    except subprocess.TimeoutExpired:
+        return False, "Mount timed out"
+    except Exception as e:
+        return False, str(e)
+
+    finally:
+        # Always try to unmount
+        try:
+            result = subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=10)
+            if result.returncode != 0:
+                subprocess.run(["sudo", "-n", "umount", str(mount_point)], capture_output=True, timeout=10)
+        except Exception:
+            pass
+        try:
+            mount_point.rmdir()
+        except Exception:
+            pass
+
+
 def smb_delete_directory(
     server: str,
     share: str,
@@ -684,10 +765,12 @@ def smb_delete_directory(
 ) -> tuple[bool, str]:
     """Recursively delete a directory on an SMB share.
 
+    Performs a depth-first recursive deletion of all files and subdirectories.
+
     Args:
         server: SMB server hostname/IP
         share: Share name
-        remote_path: Path to directory within share
+        remote_path: Path to directory within share (MUST be non-empty)
         username: Optional username
         password: Optional password
         domain: Optional domain
@@ -695,15 +778,22 @@ def smb_delete_directory(
     Returns:
         Tuple of (success, message)
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
     remote_path = remote_path.replace("\\", "/").strip("/")
 
-    def run_smb_command(commands: str) -> tuple[int, str, str]:
+    # SAFETY: Refuse to delete share root - remote_path must be specified
+    if not remote_path:
+        logger.error("[SMB DELETE] Refusing to delete share root - remote_path is empty")
+        return False, "Cannot delete share root - path must be specified"
+
+    logger.info(f"[SMB DELETE] Deleting //{server}/{share}/{remote_path}")
+
+    deleted_count = 0
+    errors: list[str] = []
+
+    def run_smb_command(commands: str, timeout: int = 30) -> tuple[int, str, str]:
         """Run smbclient with given commands."""
         with smb_auth_file(username, password, domain) as auth_path:
-            cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
+            cmd = ["smbclient", f"//{server}/{share}", "-t", "10"]
 
             if auth_path:
                 cmd.extend(["-A", auth_path])
@@ -713,82 +803,78 @@ def smb_delete_directory(
             cmd.extend(["-c", commands])
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)  # 10 second total
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
                 return result.returncode, result.stdout, result.stderr
             except subprocess.TimeoutExpired:
                 return -1, "", "Command timed out"
             except Exception as e:
                 return -1, "", str(e)
 
+    def delete_recursive(path: str) -> None:
+        """Recursively delete a directory and its contents."""
+        nonlocal deleted_count, errors
+
+        # List directory contents
+        success, entries = smb_list_files(server, share, path, username, password, domain)
+        if not success:
+            # Directory might not exist or be empty
+            return
+
+        # Parse entries - smb_list_files returns dict with filenames
+        # We need to check if each is a file or directory
+        for entry_name in entries:
+            if entry_name in (".", ".."):
+                continue
+
+            entry_path = f"{path}/{entry_name}"
+
+            # Try to list it as a directory - if it succeeds, it's a directory
+            is_dir_success, _ = smb_list_files(server, share, entry_path, username, password, domain)
+
+            if is_dir_success:
+                # It's a directory - recurse first
+                delete_recursive(entry_path)
+                # Then delete the empty directory
+                rc, _, err = run_smb_command(f'rmdir "{entry_path}"')
+                if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
+                    deleted_count += 1
+                    logger.debug(f"[SMB DELETE] Deleted directory: {entry_path}")
+                elif "NT_STATUS_DIRECTORY_NOT_EMPTY" not in err:
+                    errors.append(f"rmdir {entry_path}: {err.strip()[:50]}")
+            else:
+                # It's a file - delete it
+                rc, _, err = run_smb_command(f'del "{entry_path}"')
+                if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
+                    deleted_count += 1
+                    logger.debug(f"[SMB DELETE] Deleted file: {entry_path}")
+                else:
+                    errors.append(f"del {entry_path}: {err.strip()[:50]}")
+
     try:
         # First, check if directory exists
         exists, check_ok = smb_file_exists(server, share, remote_path, username, password, domain)
         if check_ok and not exists:
+            logger.info(f"[SMB DELETE] Path does not exist (already deleted): {remote_path}")
             return True, "Directory does not exist (already deleted)"
 
-        # For backer job metadata, we know the structure:
-        # {job_name}/config.json
-        # {job_name}/runs/*.json
-        # So we can delete in the right order
+        # Recursively delete contents
+        delete_recursive(remote_path)
 
-        deleted_files = []
-        errors = []
-
-        # Delete files in runs/ subdirectory
-        runs_path = f"{remote_path}/runs"
-        success, files = smb_list_files(server, share, runs_path, username, password, domain)
-        if success and files:
-            for f in files:
-                rc, stdout, err = run_smb_command(f'del "{runs_path}/{f}"')
-                if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
-                    deleted_files.append(f"{runs_path}/{f}")
-                else:
-                    errors.append(f"del {runs_path}/{f}: {err.strip()}")
-                    logger.warning(f"SMB delete failed: del {runs_path}/{f}: {err.strip()}")
-
-        # Delete runs directory
-        rc, stdout, err = run_smb_command(f'rmdir "{runs_path}"')
+        # Delete the target directory itself
+        rc, _, err = run_smb_command(f'rmdir "{remote_path}"')
         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
-            deleted_files.append(runs_path)
+            deleted_count += 1
+            logger.info(f"[SMB DELETE] Successfully deleted: //{server}/{share}/{remote_path} ({deleted_count} items)")
+            return True, f"Deleted {deleted_count} items"
         elif "NT_STATUS_DIRECTORY_NOT_EMPTY" in err:
-            errors.append(f"rmdir {runs_path}: directory not empty")
-            logger.warning("SMB delete: runs dir not empty")
+            # Some files couldn't be deleted
+            logger.warning(f"[SMB DELETE] Directory not empty after recursive delete: {remote_path}")
+            if errors:
+                return False, f"Deletion incomplete ({deleted_count} deleted): {'; '.join(errors[:3])}"
+            return False, f"Directory not empty after recursive delete ({deleted_count} items deleted)"
         else:
-            errors.append(f"rmdir {runs_path}: {err.strip()}")
-
-        # Delete config.json
-        rc, stdout, err = run_smb_command(f'del "{remote_path}/config.json"')
-        if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
-            deleted_files.append(f"{remote_path}/config.json")
-        else:
-            errors.append(f"del config.json: {err.strip()}")
-            logger.warning(f"SMB delete failed: del config.json: {err.strip()}")
-
-        # Delete the job directory itself
-        rc, stdout, err = run_smb_command(f'rmdir "{remote_path}"')
-        if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
-            deleted_files.append(remote_path)
-        elif "NT_STATUS_DIRECTORY_NOT_EMPTY" in err:
-            errors.append(f"rmdir {remote_path}: directory not empty")
-            logger.warning("SMB delete: job dir not empty - may have extra files")
-        else:
-            errors.append(f"rmdir {remote_path}: {err.strip()}")
-            logger.warning(f"SMB delete failed: rmdir {remote_path}: {err.strip()}")
-
-        # Verify deletion
-        exists, check_ok = smb_file_exists(server, share, remote_path, username, password, domain)
-        if check_ok and not exists:
-            return True, f"Deleted {len(deleted_files)} items"
-        elif not check_ok:
-            # Can't verify - assume success if we deleted the main files
-            if f"{remote_path}/config.json" in deleted_files:
-                return True, f"Deleted {len(deleted_files)} items (verification unavailable)"
-            else:
-                return False, "Could not verify deletion and config.json not confirmed deleted"
-        elif errors:
-            return False, f"Deletion incomplete: {'; '.join(errors[:3])}"
-        else:
-            return False, "Directory still exists after deletion attempt"
+            logger.error(f"[SMB DELETE] Failed to delete directory: {err.strip()}")
+            return False, f"Failed to delete directory: {err.strip()}"
 
     except subprocess.TimeoutExpired:
         return False, "Command timed out"
