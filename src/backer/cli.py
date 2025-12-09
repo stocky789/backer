@@ -272,6 +272,158 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
         raise SystemExit(1)
 
 
+@server.command("update")
+@click.option("--dev", is_flag=True, help="Update to the latest dev branch instead of release")
+@click.option("--version", "-v", help="Update to a specific version (e.g., 0.4.0)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def server_update(dev: bool, version: str | None, yes: bool) -> None:
+    """Update the Backer server to the latest version.
+
+    Downloads and installs the latest release from GitHub, preserving all
+    configuration and backup data.
+
+    Examples:
+        sudo backer server update           # Update to latest stable release
+        sudo backer server update --dev     # Update to latest dev branch
+        sudo backer server update -v 0.5.0  # Update to specific version
+    """
+    import os
+    import subprocess
+    import sys
+    import urllib.request
+
+    if sys.platform == "win32":
+        console.print("[red]Error:[/red] Server update is only supported on Linux")
+        raise SystemExit(1)
+
+    # Check if running as root
+    if os.geteuid() != 0:
+        console.print("[red]Error:[/red] Server update requires root privileges")
+        console.print("Run with: sudo backer server update")
+        raise SystemExit(1)
+
+    # Determine what we're updating to
+    if version:
+        target = f"v{version}" if not version.startswith("v") else version
+        source_desc = f"version {target}"
+        pip_spec = f"git+https://github.com/stocky789/backer.git@{target}"
+    elif dev:
+        target = "dev"
+        source_desc = "dev branch (latest)"
+        pip_spec = "git+https://github.com/stocky789/backer.git@dev"
+    else:
+        target = "latest"
+        source_desc = "latest stable release"
+        pip_spec = "git+https://github.com/stocky789/backer.git@main"
+
+    console.print("[bold]Backer Server Update[/bold]\n")
+    console.print(f"Current version: {__version__}")
+    console.print(f"Updating to: {source_desc}")
+    console.print()
+    console.print("[dim]This will:[/dim]")
+    console.print("  • Stop the backer service")
+    console.print("  • Update the Python package")
+    console.print("  • Restart the backer service")
+    console.print("  • [green]Preserve all data in /var/lib/backer[/green]")
+    console.print()
+
+    if not yes:
+        if not click.confirm("Continue with update?"):
+            console.print("Aborted.")
+            raise SystemExit(0)
+
+    def run_cmd(cmd: list[str], check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
+        """Run a command with error handling."""
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=capture,
+                text=True,
+                check=check,
+            )
+            return result
+        except subprocess.CalledProcessError as e:
+            if capture:
+                console.print(f"[red]Command failed:[/red] {' '.join(cmd)}")
+                if e.stdout:
+                    console.print(f"[dim]{e.stdout}[/dim]")
+                if e.stderr:
+                    console.print(f"[red]{e.stderr}[/red]")
+            raise
+
+    # Step 1: Stop service
+    console.print("\n[bold]1. Stopping service...[/bold]")
+    try:
+        run_cmd(["systemctl", "stop", "backer"], check=False)
+        console.print("   [green]✓[/green] Service stopped")
+    except Exception:
+        console.print("   [dim]Service not running or not found[/dim]")
+
+    # Step 2: Update the package
+    console.print("\n[bold]2. Updating package...[/bold]")
+
+    # Find the venv pip
+    venv_pip = Path("/opt/backer/venv/bin/pip")
+    if not venv_pip.exists():
+        console.print(f"   [red]Error:[/red] Virtual environment not found at /opt/backer/venv")
+        console.print("   Is Backer installed via the install script?")
+        raise SystemExit(1)
+
+    try:
+        console.print(f"   Installing from {source_desc}...")
+        result = run_cmd(
+            [str(venv_pip), "install", "--upgrade", pip_spec],
+            capture=True,
+        )
+        console.print("   [green]✓[/green] Package updated")
+    except subprocess.CalledProcessError:
+        console.print("   [red]✗[/red] Failed to update package")
+        # Try to restart service anyway
+        run_cmd(["systemctl", "start", "backer"], check=False)
+        raise SystemExit(1)
+
+    # Step 3: Get new version
+    try:
+        result = run_cmd(
+            [str(venv_pip.parent / "python"), "-c", "from backer import __version__; print(__version__)"],
+            capture=True,
+        )
+        new_version = result.stdout.strip()
+    except Exception:
+        new_version = "unknown"
+
+    # Step 4: Restart service
+    console.print("\n[bold]3. Restarting service...[/bold]")
+    try:
+        run_cmd(["systemctl", "start", "backer"])
+        console.print("   [green]✓[/green] Service started")
+    except subprocess.CalledProcessError:
+        console.print("   [red]✗[/red] Failed to start service")
+        console.print("   Check logs with: journalctl -u backer -n 50")
+        raise SystemExit(1)
+
+    # Step 5: Verify service is running
+    console.print("\n[bold]4. Verifying...[/bold]")
+    import time
+    time.sleep(2)  # Give service time to start
+
+    try:
+        result = run_cmd(["systemctl", "is-active", "backer"], check=False, capture=True)
+        if result.returncode == 0:
+            console.print("   [green]✓[/green] Service is running")
+        else:
+            console.print("   [yellow]![/yellow] Service may not be running properly")
+            console.print("   Check logs with: journalctl -u backer -n 50")
+    except Exception:
+        pass
+
+    console.print(f"\n[bold green]✓ Update complete![/bold green]")
+    console.print(f"  Previous version: {__version__}")
+    console.print(f"  New version: {new_version}")
+    console.print()
+    console.print("[dim]Your data in /var/lib/backer has been preserved.[/dim]")
+
+
 @server.command("uninstall")
 @click.option("--keep-data", is_flag=True, help="Keep backup data in /var/lib/backer")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
