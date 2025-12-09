@@ -1858,11 +1858,39 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {"id": repo_id, "name": name, "status": "created"}
 
     @app.delete("/api/v1/repositories/{repo_id}")
-    def delete_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, str]:
-        """Delete a repository."""
+    def delete_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
+        """Delete a repository and all jobs that use it."""
+        # First, find and delete all jobs that use this repository
+        jobs = storage.list_jobs()
+        deleted_jobs = []
+        for job in jobs:
+            if job.get("repository_id") == repo_id:
+                job_name = job.get("name")
+                if job_name:
+                    storage.delete_job(job_name)
+                    deleted_jobs.append(job_name)
+                    logger.info(f"[DELETE REPO] Deleted associated job: {job_name}")
+
+        # Also delete any hypervisor jobs that use this repository
+        hv_jobs = storage.list_hypervisor_jobs()
+        deleted_hv_jobs = []
+        for hv_job in hv_jobs:
+            if hv_job.get("repository_id") == repo_id:
+                hv_job_id = hv_job.get("id")
+                if hv_job_id:
+                    storage.delete_hypervisor_job(hv_job_id)
+                    deleted_hv_jobs.append(hv_job.get("name", hv_job_id))
+                    logger.info(f"[DELETE REPO] Deleted associated hypervisor job: {hv_job.get('name', hv_job_id)}")
+
+        # Now delete the repository itself
         if not storage.delete_repository(repo_id):
             raise HTTPException(status_code=404, detail="Repository not found")
-        return {"status": "deleted"}
+
+        return {
+            "status": "deleted",
+            "deleted_jobs": deleted_jobs,
+            "deleted_hypervisor_jobs": deleted_hv_jobs,
+        }
 
     @app.post("/api/v1/repositories/{repo_id}/test")
     def test_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:

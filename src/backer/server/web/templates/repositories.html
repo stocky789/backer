@@ -701,7 +701,7 @@ async function testRepo(repoId) {
 async function deleteRepo(repoId, repoName) {
     showConfirmModal({
         title: 'Delete Repository',
-        message: `Delete repository '${repoName}'? This cannot be undone.`,
+        message: `Delete repository '${repoName}'? This will also delete all jobs that use this repository. This cannot be undone.`,
         confirmText: 'Delete',
         onConfirm: async () => {
             try {
@@ -709,7 +709,7 @@ async function deleteRepo(repoId, repoName) {
 
                 if (response.ok) {
                     // Redirect immediately - don't wait
-                    window.location.replace('/repositories');
+                    window.location.replace('/storage');
                 } else {
                     let errorMsg = `HTTP ${response.status}`;
                     try {
