@@ -708,8 +708,8 @@ async function deleteRepo(repoId, repoName) {
                 const response = await fetch(`/api/v1/repositories/${repoId}`, { method: 'DELETE' });
 
                 if (response.ok) {
-                    Toast.success('Repository deleted');
-                    setTimeout(() => window.location.replace(window.location.pathname), 1000);
+                    // Redirect immediately - don't wait
+                    window.location.replace('/repositories');
                 } else {
                     let errorMsg = `HTTP ${response.status}`;
                     try {

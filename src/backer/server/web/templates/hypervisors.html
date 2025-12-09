@@ -1153,8 +1153,8 @@ async function deleteHypervisor(hvId, hvName) {
                 const response = await fetch(`/api/v1/hypervisors/${hvId}`, { method: 'DELETE' });
 
                 if (response.ok) {
-                    Toast.success('Hypervisor deleted');
-                    setTimeout(() => location.reload(), 1000);
+                    // Redirect immediately - don't wait
+                    window.location.replace('/hypervisors');
                 } else {
                     let errorMsg = `HTTP ${response.status}`;
                     try {
@@ -1479,8 +1479,8 @@ function deleteHypervisorJob(jobId, jobName) {
                 const result = await response.json();
 
                 if (response.ok) {
-                    Toast.success('Job deleted');
-                    setTimeout(() => location.reload(), 1000);
+                    // Redirect immediately - don't wait
+                    window.location.replace('/hypervisors');
                 } else {
                     Toast.error('Failed to delete: ' + (result.detail || result.message || `HTTP ${response.status}`));
                 }

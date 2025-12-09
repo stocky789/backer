@@ -429,8 +429,8 @@ async function removeAgent(agentId, agentName) {
                 });
 
                 if (response.ok) {
-                    Toast.success('Agent removed successfully');
-                    setTimeout(() => window.location.replace(window.location.pathname), 1000);
+                    // Redirect immediately - don't wait
+                    window.location.replace('/agents');
                 } else {
                     let errorMsg = `HTTP ${response.status}`;
                     try {
