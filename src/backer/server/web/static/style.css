@@ -268,12 +268,12 @@ body {
 }
 
 .ribbon-btn.primary {
-    background: var(--accent-light);
+    background: transparent;
     border-color: var(--accent);
 }
 
 .ribbon-btn.primary:hover {
-    background: #cce5ff;
+    background: var(--accent-light);
 }
 
 .ribbon-btn.active {
