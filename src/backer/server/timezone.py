@@ -149,7 +149,7 @@ class TimezoneFormatter(logging.Formatter):
 
     converter = None  # Disable default converter
 
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:  # noqa: N802
         """Format the time using the configured timezone."""
         # Get time from record and convert to configured timezone
         ct = datetime.fromtimestamp(record.created, tz=ZoneInfo("UTC"))

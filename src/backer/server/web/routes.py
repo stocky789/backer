@@ -488,10 +488,13 @@ async def history_page(request: Request):
                 except (ValueError, AttributeError, TypeError):
                     pass
 
+            formatted_time = (
+                started[:19].replace("T", " ") if started and len(started) >= 19 else (started if started else "-")
+            )
             all_runs.append({
                 **run,
                 "run_type": "agent",
-                "started_at_formatted": started[:19].replace("T", " ") if started and len(started) >= 19 else (started if started else "-"),
+                "started_at_formatted": formatted_time,
                 "started_at_ago": time_ago(started),
                 "duration": duration,
                 "bytes_formatted": format_bytes(run.get("bytes_transferred", 0)),
@@ -522,10 +525,13 @@ async def history_page(request: Request):
                 except (ValueError, AttributeError, TypeError):
                     pass
 
+            formatted_time = (
+                started[:19].replace("T", " ") if started and len(started) >= 19 else (started if started else "-")
+            )
             all_runs.append({
                 **run,
                 "run_type": "hypervisor",
-                "started_at_formatted": started[:19].replace("T", " ") if started and len(started) >= 19 else (started if started else "-"),
+                "started_at_formatted": formatted_time,
                 "started_at_ago": time_ago(started),
                 "duration": duration,
                 "bytes_formatted": "-",  # Hypervisor runs don't track bytes the same way

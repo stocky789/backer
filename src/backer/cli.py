@@ -806,7 +806,7 @@ def agent_progress(server: str | None, refresh: int) -> None:
                 return []
         except httpx.ConnectError:
             return []
-        except Exception as e:
+        except Exception:
             # Don't hide errors in development
             import traceback
             console.print(f"[dim]Debug: {traceback.format_exc()}[/dim]")
@@ -862,7 +862,6 @@ def agent_progress(server: str | None, refresh: int) -> None:
             bytes_total = job.get("bytes_total", 0) or 0
             files_done = job.get("files_processed", 0) or job.get("files_done", 0) or 0
             started_at = job.get("started_at")
-            status = job.get("status", "running")
 
             # Truncate long file paths
             if len(current_file) > 60:

@@ -800,6 +800,11 @@ async function confirmDeleteJob() {
 
     errorDiv.style.display = 'none';
 
+    // CRITICAL: Pause all live updates during deletion to prevent race conditions
+    if (window.LiveUpdate) {
+        window.LiveUpdate.pause();
+    }
+
     try {
         const url = `/api/v1/jobs/${encodeURIComponent(jobName)}?delete_snapshots=${deleteSnapshots}`;
         const response = await fetch(url, { method: 'DELETE' });
@@ -808,10 +813,23 @@ async function confirmDeleteJob() {
             const data = await response.json();
             let message = 'Job deleted successfully.';
             if (data.message) message += ' ' + data.message;
-            Toast.success(message);
+
+            // Show success toast
+            if (window.Toast) {
+                Toast.success(message);
+            }
+
+            // Close modal
             hideDeleteModal();
-            setTimeout(() => location.reload(), 1000);
+
+            // Force redirect instead of location.reload() to prevent browser state corruption
+            window.location.href = '/jobs';
         } else {
+            // Resume live updates on error
+            if (window.LiveUpdate) {
+                window.LiveUpdate.resume();
+            }
+
             let errorMsg = `HTTP ${response.status}`;
             try {
                 const data = await response.json();
@@ -824,6 +842,11 @@ async function confirmDeleteJob() {
             errorDiv.style.display = 'block';
         }
     } catch (e) {
+        // Resume live updates on error
+        if (window.LiveUpdate) {
+            window.LiveUpdate.resume();
+        }
+
         errorDiv.textContent = e.message;
         errorDiv.style.display = 'block';
     }
