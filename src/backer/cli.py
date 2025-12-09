@@ -35,7 +35,8 @@ def main(ctx: click.Context, config: Path | None) -> None:
 
 @main.command()
 @click.option("--force", "-f", is_flag=True, help="Force reinstall even if already installed")
-def setup(force: bool) -> None:
+@click.option("--quiet", "-q", is_flag=True, help="Suppress output (for scripted installs)")
+def setup(force: bool, quiet: bool) -> None:
     """Download and install backup tools (rclone, restic).
 
     This automatically downloads the required backup tools so you don't
@@ -45,8 +46,9 @@ def setup(force: bool) -> None:
 
     manager = get_tool_manager()
 
-    console.print("[bold]Backer Setup[/bold]")
-    console.print(f"Tools directory: {manager.tools_dir}\n")
+    if not quiet:
+        console.print("[bold]Backer Setup[/bold]")
+        console.print(f"Tools directory: {manager.tools_dir}\n")
 
     tools = ["rclone", "restic"]
 
@@ -54,21 +56,27 @@ def setup(force: bool) -> None:
         existing = manager.get_tool_path(tool)
 
         if existing and not force:
-            version = manager.get_version(tool)
-            console.print(f"[green]✓[/green] {tool} already installed: {version}")
-            console.print(f"  Path: {existing}")
-        else:
-            console.print(f"[yellow]→[/yellow] Downloading {tool}...")
-            try:
-                path = manager.download(tool, progress_callback=lambda msg: console.print(f"  {msg}"))
+            if not quiet:
                 version = manager.get_version(tool)
-                console.print(f"[green]✓[/green] {tool} installed: {version}")
-                console.print(f"  Path: {path}")
+                console.print(f"[green]✓[/green] {tool} already installed: {version}")
+                console.print(f"  Path: {existing}")
+        else:
+            if not quiet:
+                console.print(f"[yellow]→[/yellow] Downloading {tool}...")
+            try:
+                progress_cb = None if quiet else lambda msg: console.print(f"  {msg}")
+                path = manager.download(tool, progress_callback=progress_cb)
+                if not quiet:
+                    version = manager.get_version(tool)
+                    console.print(f"[green]✓[/green] {tool} installed: {version}")
+                    console.print(f"  Path: {path}")
             except Exception as e:
-                console.print(f"[red]✗[/red] Failed to install {tool}: {e}")
+                if not quiet:
+                    console.print(f"[red]✗[/red] Failed to install {tool}: {e}")
 
-    console.print("\n[bold]Setup complete![/bold]")
-    console.print("Run 'backer tools' to see installed tools.")
+    if not quiet:
+        console.print("\n[bold]Setup complete![/bold]")
+        console.print("Run 'backer tools' to see installed tools.")
 
 
 @main.command()

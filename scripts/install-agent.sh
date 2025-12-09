@@ -80,56 +80,59 @@ setup_packages() {
         error "Cannot detect Linux distribution"
     fi
 
+    step "Installing system dependencies..."
+
+    # Suppress all package manager output for cleaner install
     case "$DISTRO_ID" in
         debian|ubuntu|linuxmint|pop)
-            apt-get update -qq
-            apt-get install -y -qq python3 python3-pip python3-venv curl ca-certificates cifs-utils nfs-common sshpass smbclient
+            apt-get update -qq >/dev/null 2>&1
+            apt-get install -y -qq python3 python3-pip python3-venv curl ca-certificates cifs-utils nfs-common sshpass smbclient >/dev/null 2>&1
             ;;
         fedora)
-            dnf install -y -q python3 python3-pip python3-virtualenv curl ca-certificates cifs-utils nfs-utils sshpass samba-client
+            dnf install -y -q python3 python3-pip python3-virtualenv curl ca-certificates cifs-utils nfs-utils sshpass samba-client >/dev/null 2>&1
             ;;
         rhel|centos|rocky|almalinux)
             # Enable EPEL for sshpass
             if command -v dnf &>/dev/null; then
-                dnf install -y -q epel-release 2>/dev/null || true
-                dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils sshpass samba-client
+                dnf install -y -q epel-release >/dev/null 2>&1 || true
+                dnf install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils sshpass samba-client >/dev/null 2>&1
             else
-                yum install -y -q epel-release 2>/dev/null || true
-                yum install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils sshpass samba-client
+                yum install -y -q epel-release >/dev/null 2>&1 || true
+                yum install -y -q python3 python3-pip curl ca-certificates cifs-utils nfs-utils sshpass samba-client >/dev/null 2>&1
             fi
             ;;
         arch|manjaro|endeavouros|garuda|cachyos)
             # Arch uses 'python' not 'python3', and 'python-pip' not 'python3-pip'
-            pacman -Sy --noconfirm --needed python python-pip curl ca-certificates cifs-utils nfs-utils sshpass smbclient
+            pacman -Sy --noconfirm --needed python python-pip curl ca-certificates cifs-utils nfs-utils sshpass smbclient >/dev/null 2>&1
             ;;
         opensuse*|sles)
-            # Note: python3-virtualenv may not be in default repos, but we use python3 -m venv
-            zypper install -y python3 python3-pip curl ca-certificates cifs-utils nfs-client sshpass samba-client > /dev/null 2>&1 || true
+            zypper install -y python3 python3-pip curl ca-certificates cifs-utils nfs-client sshpass samba-client >/dev/null 2>&1 || true
             ;;
         *)
             warn "Unknown distro: $DISTRO_ID - assuming python3 is available"
             warn "You may need to manually install: cifs-utils nfs-common sshpass smbclient"
             ;;
     esac
+    success "System dependencies installed"
 }
 
 # Install backer
 install_backer() {
-    step "Creating directories..."
     mkdir -p "$INSTALL_DIR"
     mkdir -p "$CONFIG_DIR"
 
     step "Setting up Python environment..."
-    python3 -m venv "$INSTALL_DIR/venv"
+    python3 -m venv "$INSTALL_DIR/venv" 2>/dev/null
     source "$INSTALL_DIR/venv/bin/activate"
-    pip install --upgrade pip wheel setuptools -q
+    pip install --upgrade pip wheel setuptools -q >/dev/null 2>&1
+    success "Python environment ready"
 
-    step "Installing backer from GitHub (branch: $GIT_BRANCH)..."
+    step "Installing Backer (this may take a moment)..."
     if [[ "$BACKER_VERSION" == "latest" ]]; then
-        pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git@$GIT_BRANCH" || \
+        pip install --no-cache-dir --force-reinstall -q "backer[client] @ git+https://github.com/stocky789/backer.git@$GIT_BRANCH" >/dev/null 2>&1 || \
             error "Failed to install backer from branch $GIT_BRANCH"
     else
-        pip install --no-cache-dir --force-reinstall "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" || \
+        pip install --no-cache-dir --force-reinstall -q "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" >/dev/null 2>&1 || \
             error "Failed to install backer version $BACKER_VERSION"
     fi
 
@@ -138,23 +141,25 @@ install_backer() {
     # Symlink for easy access
     ln -sf "$INSTALL_DIR/venv/bin/backer" /usr/local/bin/backer
 
-    success "Backer installed to $INSTALL_DIR"
+    success "Backer installed"
 }
 
 # Install backup tools (rclone, restic, kopia)
 install_tools() {
     step "Downloading backup tools (rclone, restic, kopia)..."
 
-    # Run backer setup to download the tools
+    # Run backer setup to download the tools (suppress most output)
     # The tools are installed to ~/.local/share/backer/tools/ for root user
-    "$INSTALL_DIR/venv/bin/backer" setup || warn "Some tools may not have installed correctly"
+    "$INSTALL_DIR/venv/bin/backer" setup --quiet 2>/dev/null || \
+        "$INSTALL_DIR/venv/bin/backer" setup 2>/dev/null || \
+        warn "Some tools may not have installed correctly"
 
-    success "Backup tools installed"
+    success "Backup tools ready"
 }
 
 # Create systemd service
 create_service() {
-    step "Creating systemd service..."
+    step "Configuring systemd service..."
 
     cat > /etc/systemd/system/backer-agent.service << 'EOF'
 [Unit]
@@ -182,8 +187,8 @@ Environment="XDG_DATA_HOME=/root/.local/share"
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    success "Service created"
+    systemctl daemon-reload >/dev/null 2>&1
+    success "Service configured"
 }
 
 # Run setup wizard
