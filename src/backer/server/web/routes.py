@@ -465,74 +465,82 @@ async def history_page(request: Request):
     """Backup history page."""
     storage = get_storage(request)
 
-    # Get all runs (backups and restores) directly from the database
-    # This is more efficient and includes restore jobs which have different job_names
-    runs = storage.get_all_job_runs(limit=100)
-    all_runs = []
+    try:
+        # Get all runs (backups and restores) directly from the database
+        # This is more efficient and includes restore jobs which have different job_names
+        runs = storage.get_all_job_runs(limit=100)
+        all_runs = []
 
-    for run in runs:
-        started = run.get("started_at")
-        finished = run.get("finished_at")
+        for run in runs:
+            started = run.get("started_at")
+            finished = run.get("finished_at")
 
-        duration = None
-        if started and finished:
-            try:
-                start_dt = datetime.fromisoformat(started)
-                end_dt = datetime.fromisoformat(finished)
-                diff = (end_dt - start_dt).total_seconds()
+            duration = None
+            if started and finished:
+                try:
+                    start_dt = datetime.fromisoformat(started)
+                    end_dt = datetime.fromisoformat(finished)
+                    diff = (end_dt - start_dt).total_seconds()
+                    if diff < 60:
+                        duration = f"{diff:.0f}s"
+                    else:
+                        duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
+                except (ValueError, AttributeError):
+                    pass
+
+            all_runs.append({
+                **run,
+                "run_type": "agent",
+                "started_at_formatted": started[:19].replace("T", " ") if started and len(started) >= 19 else (started if started else "-"),
+                "started_at_ago": time_ago(started),
+                "duration": duration,
+                "bytes_formatted": format_bytes(run.get("bytes_transferred", 0)),
+            })
+
+        # Also get hypervisor runs
+        hv_runs = storage.get_hypervisor_runs(limit=100)
+        for run in hv_runs:
+            started = run.get("started_at")
+            finished = run.get("finished_at")
+
+            duration = None
+            if run.get("duration_seconds"):
+                diff = run["duration_seconds"]
                 if diff < 60:
                     duration = f"{diff:.0f}s"
                 else:
                     duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
-            except ValueError:
-                pass
+            elif started and finished:
+                try:
+                    start_dt = datetime.fromisoformat(started)
+                    end_dt = datetime.fromisoformat(finished)
+                    diff = (end_dt - start_dt).total_seconds()
+                    if diff < 60:
+                        duration = f"{diff:.0f}s"
+                    else:
+                        duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
+                except (ValueError, AttributeError):
+                    pass
 
-        all_runs.append({
-            **run,
-            "run_type": "agent",
-            "started_at_formatted": started[:19].replace("T", " ") if started else "-",
-            "started_at_ago": time_ago(started),
-            "duration": duration,
-            "bytes_formatted": format_bytes(run.get("bytes_transferred", 0)),
-        })
+            all_runs.append({
+                **run,
+                "run_type": "hypervisor",
+                "started_at_formatted": started[:19].replace("T", " ") if started and len(started) >= 19 else (started if started else "-"),
+                "started_at_ago": time_ago(started),
+                "duration": duration,
+                "bytes_formatted": "-",  # Hypervisor runs don't track bytes the same way
+            })
 
-    # Also get hypervisor runs
-    hv_runs = storage.get_hypervisor_runs(limit=100)
-    for run in hv_runs:
-        started = run.get("started_at")
-        finished = run.get("finished_at")
+        # Sort all runs by started_at descending
+        all_runs.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+        all_runs = all_runs[:100]  # Limit to 100 total
 
-        duration = None
-        if run.get("duration_seconds"):
-            diff = run["duration_seconds"]
-            if diff < 60:
-                duration = f"{diff:.0f}s"
-            else:
-                duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
-        elif started and finished:
-            try:
-                start_dt = datetime.fromisoformat(started)
-                end_dt = datetime.fromisoformat(finished)
-                diff = (end_dt - start_dt).total_seconds()
-                if diff < 60:
-                    duration = f"{diff:.0f}s"
-                else:
-                    duration = f"{diff // 60:.0f}m {diff % 60:.0f}s"
-            except ValueError:
-                pass
-
-        all_runs.append({
-            **run,
-            "run_type": "hypervisor",
-            "started_at_formatted": started[:19].replace("T", " ") if started else "-",
-            "started_at_ago": time_ago(started),
-            "duration": duration,
-            "bytes_formatted": "-",  # Hypervisor runs don't track bytes the same way
-        })
-
-    # Sort all runs by started_at descending
-    all_runs.sort(key=lambda r: r.get("started_at") or "", reverse=True)
-    all_runs = all_runs[:100]  # Limit to 100 total
+    except Exception as e:
+        # Log the error and return empty history
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error loading history page: {e}", exc_info=True)
+        all_runs = []
 
     return templates.TemplateResponse("history.html", {
         "request": request,

@@ -211,39 +211,11 @@ def run_wizard() -> bool:
     console.print("[dim]The agent needs to connect to a Backer server to receive backup jobs.[/dim]")
     console.print()
 
-    # Try auto-discovery
-    console.print("Searching for Backer servers on your network...")
-    discovered = discover_servers()
-
-    server_url = None
-
-    if discovered:
-        console.print()
-        console.print(f"[green]Found {len(discovered)} server(s):[/green]")
-        for i, url in enumerate(discovered, 1):
-            console.print(f"  {i}. {url}")
-        console.print()
-
-        if len(discovered) == 1:
-            if Confirm.ask(f"Connect to {discovered[0]}?", default=True):
-                server_url = discovered[0]
-        else:
-            choice = Prompt.ask(
-                "Select a server (number) or enter a different URL",
-                default="1"
-            )
-            if choice.isdigit() and 1 <= int(choice) <= len(discovered):
-                server_url = discovered[int(choice) - 1]
-            else:
-                server_url = choice
-
-    if not server_url:
-        console.print()
-        console.print("[dim]No servers found automatically.[/dim]")
-        server_url = Prompt.ask(
-            "Enter your Backer server URL",
-            default="http://localhost:8420"
-        )
+    # Directly prompt for server URL (skip auto-discovery)
+    server_url = Prompt.ask(
+        "Enter your Backer server URL",
+        default="http://localhost:8420"
+    )
 
     # Normalize URL
     if not server_url.startswith("http"):

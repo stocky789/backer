@@ -127,6 +127,15 @@ if [[ -d "$CONFIG_DIR" ]]; then
     success "Configuration removed: $CONFIG_DIR"
 fi
 
+# Remove data directory (tools, cache, etc.) to prevent auth issues on reinstall
+# This is critical - leftover data can cause 401 errors after reinstall
+DATA_DIR="/root/.local/share/backer"
+if [[ -d "$DATA_DIR" ]]; then
+    info "Removing data directory..."
+    rm -rf "$DATA_DIR"
+    success "Data directory removed: $DATA_DIR"
+fi
+
 echo ""
 success "Backer Agent has been uninstalled."
 echo ""
