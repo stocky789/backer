@@ -4806,13 +4806,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     return 0
 
                 count = 0
-                task.message = f"Scanning {path}..."
+                display_path = path if path else "(root)"
+                task.message = f"Scanning {display_path}..."
 
                 # List contents using SMBBrowser.list_directory to get is_dir attribute
                 success, entries = SMBBrowser.list_directory(server, share, path, username, password, domain)
                 if not success:
-                    # Path might not exist or be inaccessible
+                    # Log the error - path might not exist or be inaccessible
+                    error_msg = entries if isinstance(entries, str) else "Unknown error"
+                    logger.warning(f"Failed to list directory '{display_path}': {error_msg}")
+                    if depth == 0:
+                        errors.append(f"Failed to list root directory: {error_msg}")
                     return 0
+
+                logger.info(f"Found {len(entries)} entries in '{display_path}'")
 
                 # Process each entry - entries are DirectoryEntry objects with is_dir attribute
                 for entry in entries:
@@ -4829,8 +4836,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         task.message = f"Removing directory {entry_path}..."
                         rc, _, err = run_smb_command(f'rmdir "{entry_path}"')
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
+                            logger.info(f"Deleted directory: {entry_path}")
                             count += 1
-                        elif "NT_STATUS_DIRECTORY_NOT_EMPTY" not in err:
+                        elif "NT_STATUS_DIRECTORY_NOT_EMPTY" in err:
+                            # Directory not empty - try to re-scan and delete remaining items
+                            logger.warning(f"Directory not empty, re-scanning: {entry_path}")
+                            count += delete_path_recursive(entry_path, depth + 1)
+                            # Try again to delete the directory
+                            rc2, _, err2 = run_smb_command(f'rmdir "{entry_path}"')
+                            if rc2 == 0 or "NT_STATUS_NO_SUCH_FILE" in err2 or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err2:
+                                logger.info(f"Deleted directory on retry: {entry_path}")
+                                count += 1
+                            else:
+                                errors.append(f"rmdir {entry_path}: still not empty after retry")
+                        else:
                             errors.append(f"rmdir {entry_path}: {err.strip()[:100]}")
                     else:
                         # It's a file, delete it
@@ -4846,6 +4865,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             try:
                 # Start from the repository's subpath
                 base_path = subpath.strip("/") if subpath else ""
+                logger.info(f"Starting SMB wipe for repo {repo_id}: server={server}, share={share}, base_path='{base_path}'")
                 deleted_items = delete_path_recursive(base_path)
 
                 if errors:
