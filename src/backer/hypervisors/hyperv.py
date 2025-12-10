@@ -3,18 +3,28 @@
 This module provides integration with Microsoft Hyper-V for backing up:
 - Virtual machines via Export-VM or checkpoints
 - Supports live exports for running VMs (if guest services enabled)
-- Uses WinRM + PowerShell for remote management
+- Uses WinRM + PowerShell for remote management via pywinrm
 
-Authentication is done via WinRM using NTLM or Basic authentication.
+Authentication is done via WinRM using NTLM, Basic, or Kerberos authentication.
+No additional software required on the Windows host - just WinRM (enabled by default).
 """
 
 import json
 import logging
 import re
-import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+try:
+    import winrm
+    from winrm.protocol import Protocol
+
+    WINRM_AVAILABLE = True
+except ImportError:
+    WINRM_AVAILABLE = False
+    winrm = None  # type: ignore
+    Protocol = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -187,16 +197,17 @@ class HyperVAPI:
         script: str,
         timeout: int | None = None,
     ) -> tuple[int, str, str]:
-        """Execute a PowerShell command via WinRM using winrs/PowerShell remoting.
+        """Execute a PowerShell command via WinRM using pywinrm.
 
-        We use subprocess with PowerShell remoting (Invoke-Command) for simplicity
-        and to avoid requiring pywinrm library.
+        Uses the pywinrm library to connect to Windows via WinRM protocol.
+        This is the native Windows remote management protocol - no additional
+        software needed on the Windows host (WinRM is built into Windows).
 
         Supports:
         - Local accounts: username
         - Domain accounts (NetBIOS): DOMAIN\\username
         - Domain accounts (UPN): username@domain.com
-        - Kerberos (when configured)
+        - NTLM, Basic, and Kerberos authentication
 
         Args:
             script: PowerShell script to execute
@@ -205,170 +216,77 @@ class HyperVAPI:
         Returns:
             Tuple of (return_code, stdout, stderr)
         """
-        effective_timeout = timeout or self.timeout
-        full_username = self._get_full_username()
-
-        logger.debug(f"Executing PowerShell on {self.host} as {full_username}")
-
-        # Escape the script for embedding in a command
-        # Need to handle both single quotes and double quotes
-        escaped_script = script.replace("'", "''").replace('"', '`"')
-
-        # Build the remote PowerShell invocation
-        # Use -Authentication flag for Kerberos when appropriate
-        auth_param = ""
-        if self.auth_method == HyperVAuthMethod.KERBEROS:
-            auth_param = "-Authentication Kerberos"
-            logger.debug("Using Kerberos authentication")
-        elif self.auth_method == HyperVAuthMethod.BASIC:
-            auth_param = "-Authentication Basic"
-            logger.debug("Using Basic authentication")
-        else:
-            # Default to Negotiate which will use NTLM or Kerberos as appropriate
-            auth_param = "-Authentication Negotiate"
-            logger.debug("Using Negotiate authentication (NTLM/Kerberos)")
-
-        # Escape password for PowerShell (handle special chars)
-        escaped_password = self.password.replace("'", "''")
-
-        ps_command = f"""
-$ErrorActionPreference = 'Stop'
-$securePassword = ConvertTo-SecureString '{escaped_password}' -AsPlainText -Force
-$credential = New-Object System.Management.Automation.PSCredential('{full_username}', $securePassword)
-try {{
-    $session = New-PSSession -ComputerName '{self.host}' -Credential $credential {auth_param} -ErrorAction Stop
-    try {{
-        Invoke-Command -Session $session -ScriptBlock {{ {escaped_script} }} -ErrorAction Stop
-    }} finally {{
-        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
-    }}
-}} catch {{
-    Write-Error $_.Exception.Message
-    exit 1
-}}
-"""
-
-        try:
-            # Execute via local PowerShell (requires PowerShell on the backer server)
-            # This is the simplest approach that doesn't require additional libraries
-            logger.debug(f"Attempting PowerShell execution via pwsh")
-            result = subprocess.run(
-                ["pwsh", "-NoProfile", "-NonInteractive", "-Command", ps_command],
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-            )
-            if result.returncode != 0:
-                logger.debug(f"pwsh execution returned code {result.returncode}: {result.stderr[:200]}")
-            return result.returncode, result.stdout, result.stderr
-        except FileNotFoundError:
-            # pwsh not found, try powershell.exe (Windows) or provide helpful error
-            logger.debug("pwsh not found, trying powershell.exe")
-            try:
-                result = subprocess.run(
-                    [
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        ps_command,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=effective_timeout,
-                )
-                return result.returncode, result.stdout, result.stderr
-            except FileNotFoundError:
-                # Fall back to SSH if available (for Windows SSH Server)
-                logger.info("PowerShell not available, falling back to SSH")
-                return self._run_via_ssh(script, effective_timeout)
-        except subprocess.TimeoutExpired:
-            logger.error(f"PowerShell command timed out after {effective_timeout}s")
-            return 1, "", f"Command timed out after {effective_timeout} seconds"
-        except Exception as e:
-            logger.exception(f"PowerShell execution failed: {e}")
-            return 1, "", f"Failed to execute PowerShell command: {e}"
-
-    def _run_via_ssh(
-        self, script: str, timeout: int
-    ) -> tuple[int, str, str]:
-        """Execute PowerShell via SSH (Windows OpenSSH Server).
-
-        This is a fallback method when PowerShell remoting isn't available
-        from the backer server (e.g., running on Linux without pwsh).
-
-        For domain accounts, Windows SSH typically accepts:
-        - DOMAIN\\username (needs to be DOMAIN+username for some SSH configs)
-        - username@domain.com (UPN format - most compatible)
-
-        Args:
-            script: PowerShell script to execute
-            timeout: Command timeout
-
-        Returns:
-            Tuple of (return_code, stdout, stderr)
-        """
-        # Build SSH username - for Windows SSH, domain accounts work best with UPN
-        ssh_username = self._get_full_username()
-
-        # If using DOMAIN\username, try converting to domain+username for SSH compatibility
-        # Some Windows SSH configs require this format
-        if "\\" in ssh_username and "@" not in ssh_username:
-            # Keep the backslash format, but log the alternative
-            logger.debug(
-                f"Using domain format {ssh_username} - if this fails, "
-                "try configuring username as user@domain.com (UPN format)"
-            )
-
-        ssh_target = f"{ssh_username}@{self.host}"
-        logger.info(f"Attempting SSH connection to {self.host} as {ssh_username}")
-
-        # Escape the script for SSH
-        escaped_script = script.replace("'", "'\\''")
-
-        try:
-            # Try with sshpass for password authentication
-            result = subprocess.run(
-                [
-                    "sshpass",
-                    "-p",
-                    self.password,
-                    "ssh",
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    "-o",
-                    f"ConnectTimeout={min(timeout, 30)}",
-                    ssh_target,
-                    f"powershell.exe -NoProfile -NonInteractive -Command \"{escaped_script}\"",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            if result.returncode != 0:
-                logger.debug(f"SSH execution returned code {result.returncode}: {result.stderr[:200]}")
-            else:
-                logger.debug("SSH execution succeeded")
-            return result.returncode, result.stdout, result.stderr
-        except FileNotFoundError:
-            logger.error(
-                "Neither PowerShell remoting nor SSH is available. "
-                "Install pwsh (PowerShell Core) on the backer server, or enable SSH on the Hyper-V host."
-            )
+        if not WINRM_AVAILABLE:
             return (
                 1,
                 "",
-                "Neither PowerShell remoting nor SSH is available. "
-                "Install pwsh (PowerShell Core) on the backer server, or enable SSH on the Hyper-V host.",
+                "pywinrm library not installed. Install with: pip install pywinrm",
             )
-        except subprocess.TimeoutExpired:
-            logger.error(f"SSH command timed out after {timeout}s")
-            return 1, "", f"SSH command timed out after {timeout} seconds"
+
+        effective_timeout = timeout or self.timeout
+        full_username = self._get_full_username()
+
+        logger.debug(f"Executing PowerShell on {self.host} as {full_username} via WinRM")
+
+        # Map auth method to pywinrm transport
+        if self.auth_method == HyperVAuthMethod.BASIC:
+            transport = "basic"
+        elif self.auth_method == HyperVAuthMethod.KERBEROS:
+            transport = "kerberos"
+        else:
+            # NTLM is the default and most compatible
+            transport = "ntlm"
+
+        logger.debug(f"Using WinRM transport: {transport}")
+
+        try:
+            # Create WinRM session
+            session = winrm.Session(
+                target=self.winrm_url,
+                auth=(full_username, self.password),
+                transport=transport,
+                server_cert_validation="ignore" if not self.verify_ssl else "validate",
+                operation_timeout_sec=effective_timeout,
+                read_timeout_sec=effective_timeout + 10,
+            )
+
+            # Run the PowerShell script
+            result = session.run_ps(script)
+
+            # pywinrm returns status_code, std_out (bytes), std_err (bytes)
+            stdout = result.std_out.decode("utf-8", errors="replace") if result.std_out else ""
+            stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+
+            if result.status_code != 0:
+                logger.debug(f"WinRM execution returned code {result.status_code}: {stderr[:200]}")
+            else:
+                logger.debug("WinRM execution succeeded")
+
+            return result.status_code, stdout, stderr
+
         except Exception as e:
-            logger.exception(f"SSH execution failed: {e}")
-            return 1, "", f"SSH execution failed: {e}"
+            error_msg = str(e)
+
+            # Provide helpful error messages for common issues
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                logger.error(f"WinRM authentication failed for {self.host}: {error_msg}")
+                return 1, "", f"Authentication failed. Check username/password. Error: {error_msg}"
+
+            if "connection" in error_msg.lower() or "refused" in error_msg.lower():
+                logger.error(f"WinRM connection to {self.host} failed: {error_msg}")
+                return (
+                    1,
+                    "",
+                    f"Connection failed. Ensure WinRM is enabled on the Hyper-V host. "
+                    f"Run 'Enable-PSRemoting -Force' on the Windows host. Error: {error_msg}",
+                )
+
+            if "timeout" in error_msg.lower():
+                logger.error(f"WinRM command timed out after {effective_timeout}s")
+                return 1, "", f"Command timed out after {effective_timeout} seconds"
+
+            logger.exception(f"WinRM execution failed: {e}")
+            return 1, "", f"WinRM execution failed: {error_msg}"
 
     def test_connection(self) -> tuple[bool, str]:
         """Test connection to Hyper-V server.

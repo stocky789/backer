@@ -324,8 +324,8 @@
                         <div class="form-hint">Windows domain name if using domain authentication</div>
                     </div>
                     <div class="form-hint hyperv-note">
-                        <strong>Note:</strong> Hyper-V backups require SMB storage repositories. The Backer server connects via WinRM/PowerShell or SSH.
-                        Ensure WinRM is enabled on the Hyper-V host or enable OpenSSH Server.
+                        <strong>Note:</strong> Hyper-V backups require SMB storage repositories. Backer connects via WinRM (native Windows remote management).
+                        Run <code>Enable-PSRemoting -Force</code> on the Hyper-V host if WinRM isn't already enabled.
                     </div>
                 </div>
 
