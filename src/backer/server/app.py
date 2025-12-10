@@ -2056,7 +2056,11 @@ def _delete_smb_folder_recursive(
             server, share, folder_path, username, password, domain
         )
         if not success:
+            error_msg = entries if isinstance(entries, str) else "Unknown error"
+            logger.warning(f"[RETENTION] Cannot list folder {folder_path}: {error_msg}")
             return False
+
+        logger.debug(f"[RETENTION] Found {len(entries)} entries in {folder_path}")
 
         # Delete contents first (files and subdirectories)
         for entry in entries:
@@ -2067,11 +2071,15 @@ def _delete_smb_folder_recursive(
 
             if entry.is_dir:
                 # Recursively delete subdirectory
-                _delete_smb_folder_recursive(
+                logger.debug(f"[RETENTION] Recursing into subdirectory: {entry_path}")
+                sub_deleted = _delete_smb_folder_recursive(
                     server, share, entry_path, auth_opts, username, password, domain
                 )
+                if not sub_deleted:
+                    logger.warning(f"[RETENTION] Failed to delete subdirectory: {entry_path}")
             else:
                 # Delete file
+                logger.debug(f"[RETENTION] Deleting file: {entry_path}")
                 del_cmd = [
                     "smbclient",
                     f"//{server}/{share}",
@@ -2079,9 +2087,12 @@ def _delete_smb_folder_recursive(
                     "-c",
                     f'del "{entry_path}"',
                 ]
-                subprocess.run(del_cmd, capture_output=True, timeout=30)
+                result = subprocess.run(del_cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode != 0:
+                    logger.warning(f"[RETENTION] Failed to delete file {entry_path}: {result.stderr}")
 
         # Now delete the empty folder
+        logger.debug(f"[RETENTION] Removing directory: {folder_path}")
         rmdir_cmd = [
             "smbclient",
             f"//{server}/{share}",
@@ -2089,11 +2100,29 @@ def _delete_smb_folder_recursive(
             "-c",
             f'rmdir "{folder_path}"',
         ]
-        result = subprocess.run(rmdir_cmd, capture_output=True, timeout=30)
-        return result.returncode == 0
+        result = subprocess.run(rmdir_cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            # Check if directory is not empty
+            if "NT_STATUS_DIRECTORY_NOT_EMPTY" in stderr:
+                logger.warning(f"[RETENTION] Directory not empty after deletion attempt: {folder_path}")
+                # Re-list to see what's left
+                success2, entries2 = SMBBrowser.list_directory(
+                    server, share, folder_path, username, password, domain
+                )
+                if success2:
+                    remaining = [e.name for e in entries2 if e.name not in [".", ".."]]
+                    logger.warning(f"[RETENTION] Remaining items: {remaining[:10]}")
+            else:
+                logger.warning(f"[RETENTION] rmdir failed for {folder_path}: {stderr}")
+            return False
+
+        logger.debug(f"[RETENTION] Successfully deleted: {folder_path}")
+        return True
 
     except Exception as e:
-        logger.debug(f"Error deleting SMB folder {folder_path}: {e}")
+        logger.warning(f"[RETENTION] Error deleting SMB folder {folder_path}: {e}")
         return False
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
