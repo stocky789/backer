@@ -13,8 +13,7 @@ import logging
 import ssl
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -36,7 +35,7 @@ class UnraidVM:
     name: str
     state: str  # running, shutoff, paused
     autostart: bool = False
-    
+
     @property
     def is_running(self) -> bool:
         """Check if VM is running."""
@@ -52,7 +51,7 @@ class UnraidContainer:
     state: str  # running, exited, paused
     status: str  # e.g., "Up 2 hours"
     autostart: bool = False
-    
+
     @property
     def is_running(self) -> bool:
         """Check if container is running."""
@@ -627,9 +626,9 @@ class UnraidBackupManager:
             Dict with backup result info
         """
         import time
-        from datetime import datetime
+        from datetime import datetime as dt
 
-        started_at = datetime.now()
+        started_at = dt.now()
         result = {
             "success": False,
             "vm_name": vm_name,
@@ -800,9 +799,9 @@ class UnraidBackupManager:
         Returns:
             Dict with backup result info
         """
-        from datetime import datetime
+        from datetime import datetime as dt
 
-        started_at = datetime.now()
+        started_at = dt.now()
         result = {
             "success": False,
             "container_name": container_name,
@@ -841,8 +840,7 @@ class UnraidBackupManager:
             if progress_callback:
                 progress_callback({"status": "backing_up", "container": container_name})
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            container_appdata = f"{appdata_path}/{container_name}"
+            timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
             backup_file = f"{backup_path}/{container_name}_{timestamp}.tar.gz"
 
             # Create backup directory
@@ -905,9 +903,9 @@ class UnraidBackupManager:
         Returns:
             Dict with backup result info
         """
-        from datetime import datetime
+        from datetime import datetime as dt
 
-        started_at = datetime.now()
+        started_at = dt.now()
         result = {
             "success": False,
             "backup_path": backup_path,
@@ -976,9 +974,9 @@ class UnraidBackupManager:
         Returns:
             Dict with backup result info
         """
-        from datetime import datetime
+        from datetime import datetime as dt
 
-        started_at = datetime.now()
+        started_at = dt.now()
         result = {
             "success": False,
             "share_name": share_name,

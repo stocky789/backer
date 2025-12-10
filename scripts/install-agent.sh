@@ -34,10 +34,11 @@ UNINSTALL=false
 
 # Print functions
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-success() { echo -e "${GREEN}[OK]${NC} $1"; }
+success() { echo -e "${GREEN}[✓]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-step() { echo -e "${CYAN}==>${NC} $1"; }
+error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+step() { echo -ne "${CYAN}[...]${NC} $1"; }
+step_done() { echo -e "\r${GREEN}[✓]${NC} $1"; }
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -113,7 +114,7 @@ setup_packages() {
             warn "You may need to manually install: cifs-utils nfs-common sshpass smbclient"
             ;;
     esac
-    success "System dependencies installed"
+    step_done "System dependencies installed"
 }
 
 # Install backer
@@ -125,7 +126,7 @@ install_backer() {
     python3 -m venv "$INSTALL_DIR/venv" 2>/dev/null
     source "$INSTALL_DIR/venv/bin/activate"
     pip install --upgrade pip wheel setuptools -q >/dev/null 2>&1
-    success "Python environment ready"
+    step_done "Python environment ready"
 
     step "Installing Backer (this may take a moment)..."
     if [[ "$BACKER_VERSION" == "latest" ]]; then
@@ -141,7 +142,7 @@ install_backer() {
     # Symlink for easy access
     ln -sf "$INSTALL_DIR/venv/bin/backer" /usr/local/bin/backer
 
-    success "Backer installed"
+    step_done "Backer installed"
 }
 
 # Install backup tools (rclone, restic, kopia)
@@ -154,14 +155,14 @@ install_tools() {
         "$INSTALL_DIR/venv/bin/backer" setup 2>/dev/null || \
         warn "Some tools may not have installed correctly"
 
-    success "Backup tools ready"
+    step_done "Backup tools ready"
 }
 
 # Create systemd service
 create_service() {
     step "Configuring systemd service..."
 
-    cat > /etc/systemd/system/backer-agent.service << 'EOF'
+    cat > /etc/systemd/system/backer-agent.service 2>/dev/null << 'EOF'
 [Unit]
 Description=Backer Backup Agent
 After=network-online.target
@@ -188,7 +189,7 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload >/dev/null 2>&1
-    success "Service configured"
+    step_done "Service configured"
 }
 
 # Run setup wizard
@@ -212,9 +213,9 @@ run_wizard() {
     # Start service if config exists
     if [[ -f "$CONFIG_DIR/agent.yaml" ]]; then
         step "Starting agent service..."
-        systemctl enable backer-agent
-        systemctl start backer-agent
-        success "Agent is running!"
+        systemctl enable backer-agent >/dev/null 2>&1
+        systemctl start backer-agent >/dev/null 2>&1
+        step_done "Agent is running!"
     fi
 }
 

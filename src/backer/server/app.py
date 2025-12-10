@@ -4117,7 +4117,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             success, message = api.test_connection()
 
         elif hypervisor_type == "proxmox":
-            auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+            auth_method = (
+                ProxmoxAuthMethod.TOKEN
+                if hypervisor["auth_method"] == "token"
+                else ProxmoxAuthMethod.PASSWORD
+            )
 
             api = ProxmoxAPI(
                 host=hypervisor["host"],
@@ -4133,7 +4137,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             success, message = api.test_connection()
 
         else:
-            return {"success": False, "message": f"Unsupported hypervisor type: {hypervisor_type}", "hypervisor_id": hypervisor_id}
+            return {
+                "success": False,
+                "message": f"Unsupported hypervisor type: {hypervisor_type}",
+                "hypervisor_id": hypervisor_id,
+            }
 
         # Update hypervisor status
         if success:
@@ -4198,7 +4206,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return backup_manager.list_all_guests()
 
             elif hypervisor_type == "proxmox":
-                auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+                auth_method = (
+                    ProxmoxAuthMethod.TOKEN
+                    if hypervisor["auth_method"] == "token"
+                    else ProxmoxAuthMethod.PASSWORD
+                )
 
                 api = ProxmoxAPI(
                     host=hypervisor["host"],
@@ -4380,7 +4392,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return storages
 
             elif hypervisor_type == "proxmox":
-                auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
+                auth_method = (
+                    ProxmoxAuthMethod.TOKEN
+                    if hypervisor["auth_method"] == "token"
+                    else ProxmoxAuthMethod.PASSWORD
+                )
 
                 api = ProxmoxAPI(
                     host=hypervisor["host"],
