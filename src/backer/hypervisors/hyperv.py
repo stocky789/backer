@@ -863,7 +863,7 @@ $smbUser = '{full_username}'
 $smbPass = '{safe_password}'
 
 # Create a local temp directory for export
-$tempBase = 'C:\Backer\temp'
+$tempBase = 'C:\\Backer\\temp'
 if (-not (Test-Path $tempBase)) {{
     New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
 }}
