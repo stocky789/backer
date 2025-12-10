@@ -291,12 +291,13 @@ class HyperVAPI:
     def _run_powershell_large(
         self, script: str, timeout: int | None = None
     ) -> tuple[int, str, str]:
-        """Execute a large PowerShell script by writing it to a temp file first.
+        """Execute a large PowerShell script using environment variables.
 
-        This avoids command line length limits for complex scripts by:
-        1. Writing the script to a temp file on the Windows host in chunks
-        2. Executing the temp file
-        3. Cleaning up the temp file
+        This avoids command line length limits by passing the script via
+        environment variables when opening the WinRM shell, then executing
+        it with Invoke-Expression.
+
+        Based on workaround from: https://github.com/diyan/pywinrm/issues/184
 
         Args:
             script: PowerShell script to execute
@@ -305,46 +306,63 @@ class HyperVAPI:
         Returns:
             Tuple of (return_code, stdout, stderr)
         """
-        import base64
-        import uuid
+        from base64 import b64encode
 
-        # Generate a unique temp file path
-        script_id = str(uuid.uuid4()).replace("-", "")[:12]
-        temp_script_path = f"$env:TEMP\\backer_script_{script_id}.ps1"
+        if not WINRM_AVAILABLE:
+            return 1, "", "pywinrm library not installed"
 
-        # Encode script as base64 (UTF-8 this time, not UTF-16)
-        script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+        effective_timeout = timeout or self.timeout
+        full_username = self._get_full_username()
 
-        # Split base64 into chunks to avoid command line limits
-        # pywinrm's run_ps() base64-encodes again, so we need small chunks (~2KB)
-        # to stay under the ~8KB WinRM command limit after double-encoding
-        chunk_size = 2000
-        chunks = [script_b64[i : i + chunk_size] for i in range(0, len(script_b64), chunk_size)]
+        # Map auth method to pywinrm transport
+        if self.auth_method == HyperVAuthMethod.BASIC:
+            transport = "basic"
+        elif self.auth_method == HyperVAuthMethod.KERBEROS:
+            transport = "kerberos"
+        else:
+            transport = "ntlm"
 
-        logger.debug(f"Splitting script into {len(chunks)} chunks for WinRM transfer")
-
-        # First, create the file and write first chunk
-        rc, stdout, stderr = self._run_powershell(
-            f"[IO.File]::WriteAllText('{temp_script_path}','{chunks[0]}');'OK'"
-        )
-        if rc != 0 or "OK" not in stdout:
-            return rc, stdout, stderr or "Failed to create temp script file"
-
-        # Append remaining chunks
-        for i, chunk in enumerate(chunks[1:], 1):
-            rc, stdout, stderr = self._run_powershell(
-                f"[IO.File]::AppendAllText('{temp_script_path}','{chunk}');'OK'"
+        try:
+            # Use Protocol directly to access open_shell with env_vars
+            protocol = winrm.Protocol(
+                endpoint=self.winrm_url,
+                transport=transport,
+                username=full_username,
+                password=self.password,
+                server_cert_validation="ignore" if not self.verify_ssl else "validate",
+                operation_timeout_sec=effective_timeout,
+                read_timeout_sec=effective_timeout + 10,
             )
-            if rc != 0 or "OK" not in stdout:
-                self._run_powershell(f"Remove-Item '{temp_script_path}' -Force -EA SilentlyContinue")
-                return rc, stdout, stderr or f"Failed to write chunk {i}"
 
-        # Now decode and execute the script
-        exec_cmd = f"""$f='{temp_script_path}'
-try{{$b=[Convert]::FromBase64String([IO.File]::ReadAllText($f))
-[IO.File]::WriteAllBytes($f,$b)
-&$f}}finally{{Remove-Item $f -Force -EA SilentlyContinue}}"""
-        return self._run_powershell(exec_cmd, timeout=timeout)
+            # Small command that loads and executes the script from env var
+            loader_cmd = ". ([ScriptBlock]::Create($Env:BACKER_SCRIPT))"
+            encoded_cmd = b64encode(loader_cmd.encode("utf_16_le")).decode("ascii")
+
+            # Open shell with script in environment variable
+            shell_id = protocol.open_shell(env_vars={"BACKER_SCRIPT": script})
+
+            try:
+                # Run the loader command
+                command_id = protocol.run_command(
+                    shell_id, f"powershell -EncodedCommand {encoded_cmd}"
+                )
+                stdout_bytes, stderr_bytes, return_code = protocol.get_command_output(
+                    shell_id, command_id
+                )
+                protocol.cleanup_command(shell_id, command_id)
+
+                stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+                stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+
+                return return_code, stdout, stderr
+
+            finally:
+                protocol.close_shell(shell_id)
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.exception(f"WinRM large script execution failed: {e}")
+            return 1, "", f"WinRM execution failed: {error_msg}"
 
     def test_connection(self) -> tuple[bool, str]:
         """Test connection to Hyper-V server.
