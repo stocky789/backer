@@ -465,16 +465,17 @@
                     <div class="form-hint">Backer repository for backups (SMB or NFS)</div>
                 </div>
 
-                <div class="form-row">
+                <div class="form-row" id="jobModeRow">
                     <div class="form-group" style="flex: 1;">
                         <label class="form-label">Backup Mode</label>
                         <select id="jobMode" class="form-input">
+                            <!-- Options populated by JavaScript based on hypervisor type -->
                             <option value="snapshot">Snapshot</option>
                             <option value="suspend">Suspend</option>
                             <option value="stop">Stop</option>
                         </select>
                     </div>
-                    <div class="form-group" style="flex: 1;">
+                    <div class="form-group" style="flex: 1;" id="jobCompressionGroup">
                         <label class="form-label">Compression</label>
                         <select id="jobCompression" class="form-input">
                             <option value="zstd">ZSTD</option>
@@ -778,6 +779,13 @@
 let currentHypervisorId = null;
 let editingJobId = null;
 let currentJobId = null;
+
+// Map hypervisor IDs to their types for job form logic
+const hypervisorTypes = {
+    {% for hv in hypervisors %}
+    '{{ hv.id }}': '{{ hv.hypervisor_type }}',
+    {% endfor %}
+};
 
 // Filter tables
 function filterTables() {
@@ -1392,6 +1400,29 @@ async function onJobHypervisorChange() {
         return;
     }
 
+    // Update form fields based on hypervisor type
+    const hvType = hypervisorTypes[hvId] || 'proxmox';
+    const jobModeSelect = document.getElementById('jobMode');
+    const compressionGroup = document.getElementById('jobCompressionGroup');
+
+    if (hvType === 'hyperv') {
+        // Hyper-V: different backup modes, no compression
+        jobModeSelect.innerHTML = `
+            <option value="online">Online (VSS)</option>
+            <option value="offline">Offline (Shutdown)</option>
+            <option value="checkpoint">Checkpoint</option>
+        `;
+        compressionGroup.style.display = 'none';
+    } else {
+        // Proxmox/Unraid: standard options
+        jobModeSelect.innerHTML = `
+            <option value="snapshot">Snapshot</option>
+            <option value="suspend">Suspend</option>
+            <option value="stop">Stop</option>
+        `;
+        compressionGroup.style.display = '';
+    }
+
     const guestsContainer = document.getElementById('jobGuestsList');
     guestsContainer.innerHTML = '<div class="loading-state">Loading guests...</div>';
 
@@ -1529,18 +1560,20 @@ async function editHypervisorJob(jobId) {
 
         document.getElementById('jobName').value = job.name;
         document.getElementById('jobHypervisor').value = job.hypervisor_id;
-        document.getElementById('jobMode').value = job.backup_mode || job.mode || 'snapshot';
-        document.getElementById('jobCompression').value = job.compression || job.compress || 'zstd';
         document.getElementById('jobSchedule').value = job.schedule_cron || '';
         document.getElementById('jobEnabled').checked = job.enabled;
         document.getElementById('jobRepository').value = job.repository_id || '';
         document.getElementById('jobCopiesToKeep').value = job.copies_to_keep || 0;
+        document.getElementById('jobCompression').value = job.compression || job.compress || 'zstd';
 
         if (job.copies_to_keep && job.copies_to_keep > 0) {
             document.getElementById('storageDetails').open = true;
         }
 
+        // Update form based on hypervisor type first, then set the mode
         await onJobHypervisorChange();
+        // Set mode after options are populated
+        document.getElementById('jobMode').value = job.backup_mode || job.mode || 'snapshot';
 
         setTimeout(() => {
             const vmids = job.guest_ids || job.vmids || [];
