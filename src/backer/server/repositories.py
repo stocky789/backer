@@ -197,7 +197,8 @@ class SMBBrowser:
             else:
                 cmd.append("-N")
 
-            cmd.extend(["-c", f"ls {smb_path}"])
+            # Quote the path to handle spaces in directory names like "Virtual Machines"
+            cmd.extend(["-c", f'ls "{smb_path}"'])
 
             try:
                 result = subprocess.run(
