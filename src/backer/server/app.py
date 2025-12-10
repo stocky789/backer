@@ -462,10 +462,23 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
             f"'{repository['name']}' ({len(guest_ids)} items)"
         )
 
+        # Start job progress tracking for activity panel
+        _storage.start_job_progress(
+            run_id=run_id,
+            job_name=job["name"],
+        )
+        _storage.update_job_progress(
+            run_id=run_id,
+            status="running",
+            message=f"Starting backup of {len(guest_ids)} item(s)",
+            total_files=len(guest_ids),
+            files_processed=0,
+        )
+
         # Collect results for metadata writing
         backup_results = []
 
-        for guest_id in guest_ids:
+        for idx, guest_id in enumerate(guest_ids):
             guest = guest_map.get(guest_id)
             if not guest:
                 # Try to find by name if not found by ID
@@ -473,6 +486,17 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
 
             guest_name = guest["name"] if guest else str(guest_id)
             guest_type = guest.get("guest_type", "vm") if guest else "vm"
+
+            # Update job progress for activity panel
+            progress_pct = int((idx / len(guest_ids)) * 100)
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="running",
+                progress_percent=progress_pct,
+                message=f"Backing up {guest_type}: {guest_name}",
+                current_file=guest_name,
+                files_processed=idx,
+            )
 
             # Save run as running
             _storage.save_hypervisor_run(
@@ -596,6 +620,19 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 # Remove mount point directory
                 backup_manager._run_ssh_command(f"rmdir '{mount_point}'")
 
+        # Finish job progress tracking
+        success_count = sum(1 for r in backup_results if r.get("success"))
+        fail_count = len(backup_results) - success_count
+        final_status = "completed" if fail_count == 0 else "failed" if success_count == 0 else "completed"
+        _storage.update_job_progress(
+            run_id=run_id,
+            status=final_status,
+            progress_percent=100,
+            message=f"Completed: {success_count} succeeded, {fail_count} failed",
+            files_processed=len(guest_ids),
+        )
+        _storage.finish_job_progress(run_id, final_status)
+
         logger.info(f"Unraid backup job '{job.get('name')}' completed")
 
         # Write metadata to repository
@@ -619,6 +656,16 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
 
     except Exception as e:
         logger.exception(f"Unraid backup job {job_id} failed: {e}")
+        # Mark job progress as failed
+        try:
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="failed",
+                message=f"Job failed: {e}",
+            )
+            _storage.finish_job_progress(run_id, "failed")
+        except Exception:
+            pass  # Best effort
         # Cleanup on failure: try to unmount if we mounted
         if mount_point and backup_manager:
             try:
@@ -752,10 +799,34 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
             f"'{repository['name']}' (Proxmox storage: {proxmox_storage_id})"
         )
 
-        for vmid in guest_ids:
+        # Start job progress tracking for activity panel
+        _storage.start_job_progress(
+            run_id=run_id,
+            job_name=job["name"],
+        )
+        _storage.update_job_progress(
+            run_id=run_id,
+            status="running",
+            message=f"Starting backup of {len(guest_ids)} guest(s)",
+            total_files=len(guest_ids),
+            files_processed=0,
+        )
+
+        for idx, vmid in enumerate(guest_ids):
             guest = guest_map.get(vmid)
             guest_name = guest.name if guest else f"VM {vmid}"
             guest_type = guest.guest_type.value if guest else "qemu"
+
+            # Update job progress for activity panel
+            progress_pct = int((idx / len(guest_ids)) * 100)
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="running",
+                progress_percent=progress_pct,
+                message=f"Backing up {guest_type}: {guest_name} (VMID {vmid})",
+                current_file=guest_name,
+                files_processed=idx,
+            )
 
             # Save run as running
             _storage.save_hypervisor_run(
@@ -835,10 +906,30 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
             if deleted:
                 logger.info(f"Removed temporary Proxmox storage '{proxmox_storage_id}'")
 
+        # Finish job progress tracking
+        _storage.update_job_progress(
+            run_id=run_id,
+            status="completed",
+            progress_percent=100,
+            message=f"Completed backup of {len(guest_ids)} guest(s)",
+            files_processed=len(guest_ids),
+        )
+        _storage.finish_job_progress(run_id, "completed")
+
         logger.info(f"Scheduled hypervisor job '{job.get('name')}' completed")
 
     except Exception as e:
         logger.exception(f"Hypervisor job {job_id} failed: {e}")
+        # Mark job progress as failed
+        try:
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="failed",
+                message=f"Job failed: {e}",
+            )
+            _storage.finish_job_progress(run_id, "failed")
+        except Exception:
+            pass  # Best effort
         # Release storage reference even on failure
         if proxmox_storage_id:
             try:
@@ -928,12 +1019,40 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         # Get backup mode
         backup_mode = job.get("backup_mode", "online")
 
+        # Get SMB credentials for authentication (required for WinRM double-hop)
+        smb_username = repository.get("username", "")
+        smb_password = repository.get("password", "")
+
+        # Start job progress tracking for activity panel
+        _storage.start_job_progress(
+            run_id=run_id,
+            job_name=job["name"],
+        )
+        _storage.update_job_progress(
+            run_id=run_id,
+            status="running",
+            message=f"Starting backup of {len(guest_ids)} VM(s)",
+            total_files=len(guest_ids),
+            files_processed=0,
+        )
+
         # Collect results for metadata writing
         backup_results = []
 
-        for vmid in guest_ids:
+        for idx, vmid in enumerate(guest_ids):
             guest = guest_map.get(vmid)
             guest_name = guest.get("name", f"VM {vmid}") if guest else f"VM {vmid}"
+
+            # Update job progress for activity panel
+            progress_pct = int((idx / len(guest_ids)) * 100)
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="running",
+                progress_percent=progress_pct,
+                message=f"Backing up VM: {guest_name}",
+                current_file=guest_name,
+                files_processed=idx,
+            )
 
             # Save run as running
             _storage.save_hypervisor_run(
@@ -952,6 +1071,8 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     vm_name=guest_name,
                     backup_path=backup_base_path,
                     backup_mode=backup_mode,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
                 )
 
                 backup_size = result.get("size_bytes", 0)
@@ -1019,6 +1140,19 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     "errors": [str(e)],
                 })
 
+        # Finish job progress tracking
+        success_count = sum(1 for r in backup_results if r.get("success"))
+        fail_count = len(backup_results) - success_count
+        final_status = "completed" if fail_count == 0 else "failed" if success_count == 0 else "completed"
+        _storage.update_job_progress(
+            run_id=run_id,
+            status=final_status,
+            progress_percent=100,
+            message=f"Completed: {success_count} succeeded, {fail_count} failed",
+            files_processed=len(guest_ids),
+        )
+        _storage.finish_job_progress(run_id, final_status)
+
         logger.info(f"Hyper-V backup job '{job.get('name')}' completed")
 
         # Write metadata to repository
@@ -1042,6 +1176,16 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
 
     except Exception as e:
         logger.exception(f"Hyper-V job {job_id} failed: {e}")
+        # Mark job progress as failed
+        try:
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="failed",
+                message=f"Job failed: {e}",
+            )
+            _storage.finish_job_progress(run_id, "failed")
+        except Exception:
+            pass  # Best effort cleanup
 
 
 # ============================================================================

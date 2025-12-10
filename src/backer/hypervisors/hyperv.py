@@ -797,6 +797,8 @@ exit 1
         export_path: str,
         capture_live_state: str | None = None,
         timeout: int = 3600,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
     ) -> tuple[bool, str]:
         """Export a VM to a path.
 
@@ -816,6 +818,8 @@ exit 1
                 - 'CaptureDataConsistentState': Use Production Checkpoint technology
                 - 'CaptureCrashConsistentState': No memory state handling
             timeout: Export timeout in seconds
+            smb_username: Optional SMB username for network path authentication
+            smb_password: Optional SMB password for network path authentication
 
         Returns:
             Tuple of (success, message/error)
@@ -826,7 +830,44 @@ exit 1
             export_cmd += f" -CaptureLiveState {capture_live_state}"
         export_cmd += " -ErrorAction Stop"
 
+        # Build SMB authentication block if credentials provided
+        # This is needed for the "double-hop" problem with WinRM
+        smb_auth_block = ""
+        smb_cleanup_block = ""
+        if smb_username and smb_password and export_path.startswith("\\\\"):
+            # Extract server and share from UNC path (\\server\share\path)
+            unc_parts = export_path.lstrip("\\").split("\\")
+            if len(unc_parts) >= 2:
+                smb_server = unc_parts[0]
+                smb_share = unc_parts[1]
+                smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                # Escape single quotes in password
+                safe_password = smb_password.replace("'", "''")
+                smb_auth_block = f"""
+# Authenticate to SMB share (required for WinRM double-hop)
+$smbUser = '{smb_username}'
+$smbPass = ConvertTo-SecureString '{safe_password}' -AsPlainText -Force
+$smbCred = New-Object System.Management.Automation.PSCredential($smbUser, $smbPass)
+try {{
+    # Remove any existing connection first
+    net use '{smb_unc}' /delete 2>$null | Out-Null
+    # Connect with credentials
+    $netResult = net use '{smb_unc}' /user:$smbUser '{safe_password}' 2>&1
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Failed to connect to SMB share: $netResult"
+    }}
+}} catch {{
+    Write-Error "SMB authentication failed: $_"
+    exit 1
+}}
+"""
+                smb_cleanup_block = f"""
+# Cleanup SMB connection
+net use '{smb_unc}' /delete 2>$null | Out-Null
+"""
+
         script = f"""
+{smb_auth_block}
 # Create export directory if it doesn't exist
 $exportPath = '{export_path}'
 if (-not (Test-Path $exportPath)) {{
@@ -842,12 +883,14 @@ if (Test-Path $vmExportPath) {{
     # Calculate total size
     $size = (Get-ChildItem $vmExportPath -Recurse -ErrorAction SilentlyContinue |
              Measure-Object -Property Length -Sum).Sum
+    {smb_cleanup_block}
     @{{
         Success = $true
         Path = $vmExportPath
         SizeBytes = if ($size) {{ $size }} else {{ 0 }}
     }} | ConvertTo-Json
 }} else {{
+    {smb_cleanup_block}
     @{{
         Success = $false
         Error = "Export completed but folder not found"
@@ -926,6 +969,8 @@ class HyperVBackupManager:
         backup_path: str,
         backup_mode: str = "online",
         progress_callback: Any | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
     ) -> dict[str, Any]:
         """Backup a Hyper-V VM.
 
@@ -934,6 +979,8 @@ class HyperVBackupManager:
             backup_path: Destination path (should be accessible from Hyper-V host)
             backup_mode: Backup mode (online, offline, checkpoint)
             progress_callback: Optional callback for progress updates
+            smb_username: SMB username for network share authentication
+            smb_password: SMB password for network share authentication
 
         Returns:
             Dict with backup result info
@@ -1004,7 +1051,11 @@ class HyperVBackupManager:
             vm_backup_path = f"{backup_path}\\{vm_name}_{timestamp}"
 
             success, export_result = self.api.export_vm(
-                vm_name, vm_backup_path, timeout=7200  # 2 hour timeout for large VMs
+                vm_name,
+                vm_backup_path,
+                timeout=7200,  # 2 hour timeout for large VMs
+                smb_username=smb_username,
+                smb_password=smb_password,
             )
 
             if success:

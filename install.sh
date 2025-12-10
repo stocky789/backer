@@ -306,9 +306,23 @@ info "Setting up Python environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 source "$INSTALL_DIR/venv/bin/activate"
 
-# Install backer
-pip install --quiet --upgrade pip
-pip install --quiet --no-cache-dir --force-reinstall -e "$INSTALL_DIR[server]"
+# Install backer with progress indication
+info "Installing Python dependencies (this may take 1-2 minutes)..."
+pip install --upgrade pip > /dev/null 2>&1
+
+# Show progress while pip installs (can take a while due to pywinrm/cryptography)
+pip install --no-cache-dir --force-reinstall -e "$INSTALL_DIR[server]" 2>&1 | while read -r line; do
+    # Show package names as they're installed
+    if [[ "$line" =~ "Successfully installed" ]]; then
+        echo -e "  ${GREEN}✓${NC} Dependencies installed"
+    elif [[ "$line" =~ "Collecting" ]]; then
+        pkg=$(echo "$line" | sed 's/Collecting \([^ ]*\).*/\1/')
+        echo -ne "\r  Installing: $pkg                              \r"
+    elif [[ "$line" =~ "Building wheel" ]]; then
+        echo -ne "\r  Building native extensions...                  \r"
+    fi
+done
+echo -ne "\r                                                        \r"
 success "Backer installed"
 
 # Download backup tools (rclone + restic)
@@ -367,12 +381,29 @@ info "Starting Backer service..."
 systemctl enable backer --quiet
 systemctl start backer
 
-# Wait for startup
-sleep 2
+# Wait for the HTTP server to be ready (not just the process)
+info "Waiting for server to be ready..."
+MAX_WAIT=60
+WAITED=0
+while [ $WAITED -lt $MAX_WAIT ]; do
+    if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8420/health 2>/dev/null | grep -q "200"; then
+        break
+    fi
+    sleep 2
+    WAITED=$((WAITED + 2))
+    # Show progress every 10 seconds
+    if [ $((WAITED % 10)) -eq 0 ] && [ $WAITED -gt 0 ]; then
+        echo -ne "\r${CYAN}==>${NC} Still starting... (${WAITED}s)"
+    fi
+done
+echo -ne "\r"  # Clear the progress line
 
 # Check if running
-if systemctl is-active --quiet backer; then
-    success "Backer service is running"
+if curl -s -o /dev/null http://127.0.0.1:8420/health 2>/dev/null; then
+    success "Backer service is running and ready"
+elif systemctl is-active --quiet backer; then
+    warn "Service is running but API not responding yet. It may need more time to initialize."
+    warn "Check: journalctl -u backer -f"
 else
     warn "Service may not have started correctly. Check: journalctl -u backer"
 fi
