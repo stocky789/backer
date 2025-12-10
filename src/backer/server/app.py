@@ -7125,9 +7125,62 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        if hypervisor["hypervisor_type"] != "proxmox":
-            raise HTTPException(status_code=400, detail="Only Proxmox hypervisors supported")
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
 
+        # Dispatch to appropriate handler based on hypervisor type
+        if hypervisor_type == "hyperv":
+            # Use the scheduler's Hyper-V backup trigger
+            repository_id = job.get("repository_id")
+            if not repository_id:
+                raise HTTPException(status_code=400, detail="No repository configured for this job")
+
+            repository = storage.get_repository(repository_id)
+            if not repository:
+                raise HTTPException(status_code=404, detail="Repository not found")
+
+            repo_type = repository.get("repo_type", "").lower()
+            if repo_type != "smb":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository type '{repo_type}' is not supported for Hyper-V backups. "
+                           "Use an SMB repository so the Hyper-V host can export directly to it."
+                )
+
+            # Trigger backup in background via scheduler mechanism
+            _trigger_hyperv_backup_job(job_id, job, hypervisor)
+
+            return {
+                "message": f"Hyper-V backup job '{job['name']}' started",
+                "job_id": job_id,
+            }
+
+        elif hypervisor_type == "unraid":
+            # Use the scheduler's Unraid backup trigger
+            repository_id = job.get("repository_id")
+            if not repository_id:
+                raise HTTPException(status_code=400, detail="No repository configured for this job")
+
+            repository = storage.get_repository(repository_id)
+            if not repository:
+                raise HTTPException(status_code=404, detail="Repository not found")
+
+            repo_type = repository.get("repo_type", "").lower()
+            if repo_type != "smb":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository type '{repo_type}' is not supported for Unraid backups. "
+                           "Use an SMB repository."
+                )
+
+            # Trigger backup in background via scheduler mechanism
+            _trigger_unraid_backup_job(job_id, job, hypervisor)
+
+            return {
+                "message": f"Unraid backup job '{job['name']}' started",
+                "job_id": job_id,
+            }
+
+        # Proxmox backup (original implementation below)
         # Get repository for backup destination
         repository_id = job.get("repository_id")
         if not repository_id:
@@ -7616,12 +7669,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         If node and storage_id are not provided, scans all backup-capable
         storages across all nodes.
-        """
-        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
 
+        Dispatches to hypervisor-specific implementations based on type.
+        """
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
+
+        # Dispatch to type-specific implementations
+        if hypervisor_type == "hyperv":
+            # Hyper-V needs a path to list backups - return empty if not provided
+            # The UI should use the dedicated hyperv-backups endpoint with path param
+            return []
+
+        elif hypervisor_type == "unraid":
+            # Unraid needs a path to list backups - return empty if not provided
+            return []
+
+        # Proxmox implementation
+        from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
 
         token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
         password = storage.get_hypervisor_password(hypervisor_id)
