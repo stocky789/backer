@@ -288,6 +288,35 @@ class HyperVAPI:
             logger.exception(f"WinRM execution failed: {e}")
             return 1, "", f"WinRM execution failed: {error_msg}"
 
+    def _run_powershell_large(
+        self, script: str, timeout: int | None = None
+    ) -> tuple[int, str, str]:
+        """Execute a large PowerShell script by writing it to a temp file first.
+
+        This avoids command line length limits for complex scripts.
+
+        Args:
+            script: PowerShell script to execute
+            timeout: Optional command timeout
+
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
+        import base64
+
+        # Encode script as base64 to avoid escaping issues
+        script_bytes = script.encode("utf-16-le")
+        script_b64 = base64.b64encode(script_bytes).decode("ascii")
+
+        # Create a wrapper script that decodes and executes the main script
+        wrapper = f"""
+$scriptB64 = '{script_b64}'
+$scriptBytes = [System.Convert]::FromBase64String($scriptB64)
+$scriptText = [System.Text.Encoding]::Unicode.GetString($scriptBytes)
+Invoke-Expression $scriptText
+"""
+        return self._run_powershell(wrapper, timeout=timeout)
+
     def test_connection(self) -> tuple[bool, str]:
         """Test connection to Hyper-V server.
 
@@ -1133,7 +1162,11 @@ if (Test-Path $vmExportPath) {{
     }} | ConvertTo-Json
 }}
 """
-        rc, stdout, stderr = self._run_powershell(script, timeout=timeout)
+        # Use _run_powershell_large for UNC paths (large script) to avoid command line limits
+        if is_unc_path and smb_username and smb_password:
+            rc, stdout, stderr = self._run_powershell_large(script, timeout=timeout)
+        else:
+            rc, stdout, stderr = self._run_powershell(script, timeout=timeout)
 
         if rc != 0:
             error = stderr.strip() or "Export failed"
