@@ -1139,36 +1139,78 @@ try {{
     $size = (Get-ChildItem $vmExportPath -Recurse -ErrorAction SilentlyContinue |
              Measure-Object -Property Length -Sum).Sum
 
-    # Now authenticate to SMB and copy files
-    # Remove any existing connection first
-    net use $smbUnc /delete 2>$null | Out-Null
-    $netResult = net use $smbUnc /user:$smbUser $smbPass 2>&1
-    if ($LASTEXITCODE -ne 0) {{
-        throw "Failed to connect to SMB share: $netResult"
+    # Now authenticate to SMB and copy files using credential-based PSDrive
+    # This is more reliable than net use for PowerShell cmdlets
+    $secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
+
+    # Create a unique drive letter for the SMB mapping
+    $driveName = "BackerSMB"
+    # Remove existing drive if present
+    if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
+        Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+    }}
+
+    # Map the SMB share with credentials
+    try {{
+        New-PSDrive -Name $driveName -PSProvider FileSystem -Root $smbUnc -Credential $cred -ErrorAction Stop | Out-Null
+    }} catch {{
+        throw "Failed to connect to SMB share $smbUnc : $_"
     }}
 
     try {{
+        # Build destination path using the mapped drive
+        # Extract the subpath after the share name
+        $subPath = $finalPath.Substring($smbUnc.Length).TrimStart('\\')
+        if ($subPath) {{
+            $mappedFinalPath = "${{driveName}}:\\$subPath"
+        }} else {{
+            $mappedFinalPath = "${{driveName}}:\\"
+        }}
+
         # Create destination directory if needed
-        if (-not (Test-Path $finalPath)) {{
-            New-Item -ItemType Directory -Path $finalPath -Force | Out-Null
+        if (-not (Test-Path $mappedFinalPath)) {{
+            New-Item -ItemType Directory -Path $mappedFinalPath -Force | Out-Null
         }}
 
         # Copy exported VM to network share
-        $destVmPath = Join-Path $finalPath $vmName
+        $destVmPath = Join-Path $mappedFinalPath $vmName
         # Remove existing backup if present (for clean overwrite)
         if (Test-Path $destVmPath) {{
-            Remove-Item -Path $destVmPath -Recurse -Force
+            Remove-Item -Path $destVmPath -Recurse -Force -ErrorAction SilentlyContinue
         }}
-        Copy-Item -Path $vmExportPath -Destination $finalPath -Recurse -Force
+
+        # Copy with explicit error action to catch failures
+        Copy-Item -Path $vmExportPath -Destination $mappedFinalPath -Recurse -Force -ErrorAction Stop
+
+        # Verify the copy succeeded by checking destination exists and has content
+        if (-not (Test-Path $destVmPath)) {{
+            throw "Copy completed but destination folder not found: $destVmPath"
+        }}
+
+        # Verify we copied actual VM files (should have Virtual Hard Disks or Virtual Machines folder)
+        $hasVhds = Test-Path (Join-Path $destVmPath 'Virtual Hard Disks')
+        $hasVms = Test-Path (Join-Path $destVmPath 'Virtual Machines')
+        if (-not $hasVhds -and -not $hasVms) {{
+            throw "Copy completed but VM structure not found in destination. Check permissions and disk space on SMB share."
+        }}
+
+        # Calculate size of copied files
+        $copiedSize = (Get-ChildItem $destVmPath -Recurse -ErrorAction SilentlyContinue |
+                       Measure-Object -Property Length -Sum).Sum
+
+        # Return the original UNC path (not the mapped drive path) for the result
+        $uncDestPath = Join-Path $finalPath $vmName
 
         @{{
             Success = $true
-            Path = $destVmPath
-            SizeBytes = if ($size) {{ $size }} else {{ 0 }}
+            Path = $uncDestPath
+            SizeBytes = if ($copiedSize) {{ $copiedSize }} else {{ 0 }}
+            SourceSize = if ($size) {{ $size }} else {{ 0 }}
         }} | ConvertTo-Json
     }} finally {{
-        # Cleanup SMB connection
-        net use $smbUnc /delete 2>$null | Out-Null
+        # Cleanup PSDrive
+        Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
     }}
 }} finally {{
     # Always cleanup temp export directory
