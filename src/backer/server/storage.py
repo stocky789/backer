@@ -1403,7 +1403,8 @@ class Storage:
         """Convert a database row to a hypervisor dict."""
         # Handle optional SSH columns that may not exist in older databases
         keys = row.keys()
-        return {
+        config = json.loads(row["config"]) if row["config"] else {}
+        result = {
             "id": row["id"],
             "name": row["name"],
             "hypervisor_type": row["hypervisor_type"],
@@ -1417,13 +1418,17 @@ class Storage:
             "version": row["version"],
             "last_checked": row["last_checked"],
             "created_at": row["created_at"],
-            "config": json.loads(row["config"]) if row["config"] else {},
+            "config": config,
             # SSH settings for incremental backups
             "ssh_user": row["ssh_user"] if "ssh_user" in keys else "root",
             "ssh_port": row["ssh_port"] if "ssh_port" in keys else 22,
             "ssh_key_path": row["ssh_key_path"] if "ssh_key_path" in keys else None,
             "ssh_use_api_password": row["ssh_use_api_password"] == 1 if "ssh_use_api_password" in keys else True,
         }
+        # Expose domain from config for Hyper-V
+        if config.get("domain"):
+            result["domain"] = config["domain"]
+        return result
 
     # =========================================================================
     # Hypervisor Job Operations

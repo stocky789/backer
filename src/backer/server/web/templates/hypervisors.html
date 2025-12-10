@@ -233,6 +233,7 @@
                     <select id="hvType" class="form-input" onchange="onHypervisorTypeChange()">
                         <option value="proxmox">Proxmox VE</option>
                         <option value="unraid">Unraid</option>
+                        <option value="hyperv">Microsoft Hyper-V</option>
                     </select>
                     <div class="form-hint">Select the hypervisor platform</div>
                 </div>
@@ -302,6 +303,29 @@
                         <label class="form-label">API Key</label>
                         <input type="password" id="hvUnraidApiKey" class="form-input" placeholder="Your Unraid API key">
                         <div class="form-hint">Generate an API key in Unraid: Settings → Management Access → API Keys</div>
+                    </div>
+                </div>
+
+                <!-- Hyper-V WinRM Authentication -->
+                <div id="hypervAuth" style="display: none;">
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" id="hvHypervUsername" class="form-input" placeholder="Administrator">
+                        <div class="form-hint">Windows username (e.g., Administrator or DOMAIN\user)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" id="hvHypervPassword" class="form-input">
+                        <div class="form-hint">Windows password</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Domain (optional)</label>
+                        <input type="text" id="hvHypervDomain" class="form-input" placeholder="MYDOMAIN">
+                        <div class="form-hint">Windows domain name if using domain authentication</div>
+                    </div>
+                    <div class="form-hint hyperv-note">
+                        <strong>Note:</strong> Hyper-V backups require SMB storage repositories. The Backer server connects via WinRM/PowerShell or SSH.
+                        Ensure WinRM is enabled on the Hyper-V host or enable OpenSSH Server.
                     </div>
                 </div>
 
@@ -570,6 +594,14 @@
     opacity: 0.5;
 }
 
+/* Hyper-V Note */
+.hyperv-note {
+    margin-top: 12px;
+    padding: 10px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+}
+
 /* Loading State */
 .loading-state {
     text-align: center;
@@ -786,17 +818,21 @@ function onHypervisorTypeChange() {
     const hvType = document.getElementById('hvType').value;
     const isUnraid = hvType === 'unraid';
     const isProxmox = hvType === 'proxmox';
+    const isHyperV = hvType === 'hyperv';
 
     // Show/hide auth sections
     document.getElementById('proxmoxAuthSection').style.display = isProxmox ? 'block' : 'none';
     document.getElementById('unraidAuth').style.display = isUnraid ? 'block' : 'none';
+    document.getElementById('hypervAuth').style.display = isHyperV ? 'block' : 'none';
 
     // Update port default
     const portInput = document.getElementById('hvPort');
-    if (isUnraid && (portInput.value === '8006' || portInput.value === '')) {
+    if (isUnraid && (portInput.value === '8006' || portInput.value === '5985' || portInput.value === '')) {
         portInput.value = '443';
-    } else if (isProxmox && (portInput.value === '443' || portInput.value === '')) {
+    } else if (isProxmox && (portInput.value === '443' || portInput.value === '5985' || portInput.value === '')) {
         portInput.value = '8006';
+    } else if (isHyperV && (portInput.value === '443' || portInput.value === '8006' || portInput.value === '')) {
+        portInput.value = '5985';
     }
 
     // Update placeholder and hints
@@ -805,6 +841,9 @@ function onHypervisorTypeChange() {
     if (isUnraid) {
         nameInput.placeholder = 'My Unraid Server';
         hostInput.placeholder = '192.168.1.100 or tower.local';
+    } else if (isHyperV) {
+        nameInput.placeholder = 'My Hyper-V Server';
+        hostInput.placeholder = '192.168.1.100 or hyperv.local';
     } else {
         nameInput.placeholder = 'My Proxmox Server';
         hostInput.placeholder = '192.168.1.100 or pve.local';
@@ -826,12 +865,18 @@ function getHypervisorFormData() {
     const hvType = document.getElementById('hvType').value;
     const authMethod = document.getElementById('hvAuthMethod').value;
     const isUnraid = hvType === 'unraid';
+    const isHyperV = hvType === 'hyperv';
+
+    // Determine default port based on type
+    let defaultPort = 8006;
+    if (isUnraid) defaultPort = 443;
+    else if (isHyperV) defaultPort = 5985;
 
     const data = {
         name: document.getElementById('hvName').value,
         hypervisor_type: hvType,
         host: document.getElementById('hvHost').value,
-        port: parseInt(document.getElementById('hvPort').value) || (isUnraid ? 443 : 8006),
+        port: parseInt(document.getElementById('hvPort').value) || defaultPort,
         verify_ssl: document.getElementById('hvVerifySSL').checked,
         ssh_user: document.getElementById('hvSshUser').value || 'root',
         ssh_port: parseInt(document.getElementById('hvSshPort').value) || 22,
@@ -844,6 +889,12 @@ function getHypervisorFormData() {
         // We store it as token_secret for consistency with backend
         data.auth_method = 'token';
         data.token_secret = document.getElementById('hvUnraidApiKey').value;
+    } else if (isHyperV) {
+        // Hyper-V uses WinRM + username/password
+        data.auth_method = 'password';
+        data.username = document.getElementById('hvHypervUsername').value;
+        data.password = document.getElementById('hvHypervPassword').value;
+        data.domain = document.getElementById('hvHypervDomain').value || null;
     } else {
         // Proxmox authentication
         data.auth_method = authMethod;
@@ -951,6 +1002,11 @@ async function editHypervisor(hvId) {
         if (hv.hypervisor_type === 'unraid') {
             // Unraid uses API key - clear the field (don't show existing key)
             document.getElementById('hvUnraidApiKey').value = '';
+        } else if (hv.hypervisor_type === 'hyperv') {
+            // Hyper-V uses username/password
+            document.getElementById('hvHypervUsername').value = hv.username || 'Administrator';
+            document.getElementById('hvHypervPassword').value = ''; // Don't show existing password
+            document.getElementById('hvHypervDomain').value = hv.domain || '';
         } else {
             // Proxmox auth
             if (hv.token_id) {

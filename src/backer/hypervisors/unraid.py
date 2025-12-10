@@ -1186,3 +1186,365 @@ class UnraidBackupManager:
                 "success": False,
                 "errors": [f"Unknown guest type: {guest_type}"],
             }
+
+    def restore_vm(
+        self,
+        backup_path: str,
+        vm_name: str | None = None,
+        restore_path: str | None = None,
+        start_after: bool = False,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Restore a VM from backup.
+
+        Restores VM disk files and XML configuration from a backup directory.
+
+        Args:
+            backup_path: Path to the VM backup directory (contains XML and disk files)
+            vm_name: Optional new name for the VM (if different from backup)
+            restore_path: Optional destination path for VM files (default: /mnt/user/domains)
+            start_after: Start VM after restore
+            progress_callback: Optional progress callback
+
+        Returns:
+            Dict with restore result info
+        """
+        from datetime import datetime as dt
+
+        started_at = dt.now()
+        result: dict[str, Any] = {
+            "success": False,
+            "backup_path": backup_path,
+            "vm_name": vm_name,
+            "errors": [],
+            "restored_files": [],
+            "duration_seconds": 0,
+        }
+
+        logger.info(f"Starting VM restore from {backup_path}")
+
+        try:
+            if progress_callback:
+                progress_callback({"status": "checking_backup", "path": backup_path})
+
+            # Check backup exists and find XML file
+            rc, stdout, stderr = self._run_ssh_command(f"ls -1 '{backup_path}'")
+            if rc != 0:
+                result["errors"].append(f"Backup path not accessible: {stderr}")
+                return result
+
+            files = stdout.strip().split("\n")
+            xml_file = next((f for f in files if f.endswith(".xml")), None)
+            disk_files = [f for f in files if f.endswith((".qcow2", ".img", ".raw", ".vmdk"))]
+
+            if not xml_file:
+                result["errors"].append("No VM XML configuration file found in backup")
+                return result
+
+            logger.info(f"Found VM config: {xml_file}, disks: {disk_files}")
+
+            # Read and parse XML to get/modify VM name
+            rc, xml_content, stderr = self._run_ssh_command(f"cat '{backup_path}/{xml_file}'")
+            if rc != 0:
+                result["errors"].append(f"Failed to read VM config: {stderr}")
+                return result
+
+            # Extract original VM name from XML
+            import re
+            name_match = re.search(r"<name>([^<]+)</name>", xml_content)
+            original_name = name_match.group(1) if name_match else xml_file.replace(".xml", "")
+            final_name = vm_name or original_name
+            result["vm_name"] = final_name
+
+            # Set restore destination
+            dest_path = restore_path or f"/mnt/user/domains/{final_name}"
+
+            if progress_callback:
+                progress_callback({"status": "preparing_destination", "path": dest_path})
+
+            # Create destination directory
+            rc, _, stderr = self._run_ssh_command(f"mkdir -p '{dest_path}'")
+            if rc != 0:
+                result["errors"].append(f"Failed to create destination: {stderr}")
+                return result
+
+            # Copy disk files
+            total_files = len(disk_files)
+            for idx, disk_file in enumerate(disk_files):
+                if progress_callback:
+                    progress_callback({
+                        "status": "copying_disk",
+                        "file": disk_file,
+                        "progress": int((idx / max(total_files, 1)) * 80),
+                    })
+
+                logger.info(f"Copying disk file: {disk_file}")
+                rc, _, stderr = self._run_ssh_command(
+                    f"cp -v '{backup_path}/{disk_file}' '{dest_path}/'",
+                    timeout=3600,  # Large files may take time
+                )
+                if rc != 0:
+                    result["errors"].append(f"Failed to copy {disk_file}: {stderr}")
+                    return result
+
+                result["restored_files"].append(f"{dest_path}/{disk_file}")
+
+            # Update XML with new paths and optionally new name
+            if progress_callback:
+                progress_callback({"status": "updating_config", "vm": final_name})
+
+            # Modify XML content for new location
+            modified_xml = xml_content
+
+            # Update VM name if changed
+            if vm_name and vm_name != original_name:
+                modified_xml = re.sub(
+                    r"<name>[^<]+</name>",
+                    f"<name>{vm_name}</name>",
+                    modified_xml
+                )
+
+            # Update disk paths to point to new location
+            for disk_file in disk_files:
+                # Replace old paths with new destination
+                modified_xml = re.sub(
+                    rf"<source file='[^']*{re.escape(disk_file)}'",
+                    f"<source file='{dest_path}/{disk_file}'",
+                    modified_xml
+                )
+
+            # Write modified XML to temp file
+            temp_xml = f"/tmp/restore_{final_name}.xml"
+            escaped_xml = modified_xml.replace("'", "'\\''")
+            rc, _, stderr = self._run_ssh_command(f"cat > '{temp_xml}' << 'XMLEOF'\n{modified_xml}\nXMLEOF")
+            if rc != 0:
+                result["errors"].append(f"Failed to write VM config: {stderr}")
+                return result
+
+            # Define the VM
+            if progress_callback:
+                progress_callback({"status": "defining_vm", "vm": final_name})
+
+            logger.info(f"Defining VM {final_name} from {temp_xml}")
+            rc, stdout, stderr = self._run_ssh_command(f"virsh define '{temp_xml}'")
+            if rc != 0:
+                result["errors"].append(f"Failed to define VM: {stderr}")
+                return result
+
+            # Clean up temp file
+            self._run_ssh_command(f"rm -f '{temp_xml}'")
+
+            result["success"] = True
+            logger.info(f"Successfully restored VM {final_name}")
+
+            # Start VM if requested
+            if start_after:
+                if progress_callback:
+                    progress_callback({"status": "starting_vm", "vm": final_name})
+
+                logger.info(f"Starting VM {final_name}")
+                rc, _, stderr = self._run_ssh_command(f"virsh start '{final_name}'")
+                if rc != 0:
+                    logger.warning(f"Failed to start VM after restore: {stderr}")
+                    result["started"] = False
+                else:
+                    result["started"] = True
+
+            if progress_callback:
+                progress_callback({
+                    "status": "completed",
+                    "success": True,
+                    "vm_name": final_name,
+                })
+
+        except Exception as e:
+            logger.exception(f"VM restore failed: {e}")
+            result["errors"].append(str(e))
+
+        finally:
+            result["duration_seconds"] = (dt.now() - started_at).total_seconds()
+
+        return result
+
+    def restore_appdata(
+        self,
+        backup_path: str,
+        container_name: str,
+        restore_path: str | None = None,
+        stop_container: bool = True,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Restore container appdata from backup.
+
+        Args:
+            backup_path: Path to the appdata backup (tar.gz or directory)
+            container_name: Name of the container
+            restore_path: Optional destination (default: /mnt/user/appdata/{container})
+            stop_container: Stop container before restore (recommended)
+            progress_callback: Optional progress callback
+
+        Returns:
+            Dict with restore result info
+        """
+        from datetime import datetime as dt
+
+        started_at = dt.now()
+        result: dict[str, Any] = {
+            "success": False,
+            "backup_path": backup_path,
+            "container_name": container_name,
+            "errors": [],
+            "duration_seconds": 0,
+        }
+
+        logger.info(f"Starting appdata restore for {container_name} from {backup_path}")
+
+        try:
+            dest_path = restore_path or f"/mnt/user/appdata/{container_name}"
+
+            # Check if container is running and stop if requested
+            was_running = False
+            if stop_container:
+                if progress_callback:
+                    progress_callback({"status": "checking_container", "container": container_name})
+
+                rc, stdout, _ = self._run_ssh_command(
+                    f"docker inspect -f '{{{{.State.Running}}}}' '{container_name}' 2>/dev/null"
+                )
+                if rc == 0 and stdout.strip().lower() == "true":
+                    was_running = True
+                    logger.info(f"Stopping container {container_name} for restore")
+                    if progress_callback:
+                        progress_callback({"status": "stopping_container", "container": container_name})
+                    self._run_ssh_command(f"docker stop '{container_name}'", timeout=120)
+
+            if progress_callback:
+                progress_callback({"status": "restoring", "path": dest_path})
+
+            # Determine backup type and restore
+            rc, file_type, _ = self._run_ssh_command(f"file '{backup_path}'")
+
+            if "gzip" in file_type.lower() or backup_path.endswith(".tar.gz"):
+                # Restore from tar.gz archive
+                logger.info(f"Restoring from archive to {dest_path}")
+                rc, _, stderr = self._run_ssh_command(
+                    f"mkdir -p '{dest_path}' && tar -xzf '{backup_path}' -C '{dest_path}'",
+                    timeout=3600,
+                )
+            else:
+                # Restore from directory (rsync)
+                logger.info(f"Restoring from directory to {dest_path}")
+                rc, _, stderr = self._run_ssh_command(
+                    f"mkdir -p '{dest_path}' && rsync -av '{backup_path}/' '{dest_path}/'",
+                    timeout=3600,
+                )
+
+            if rc != 0:
+                result["errors"].append(f"Restore failed: {stderr}")
+                return result
+
+            result["success"] = True
+            result["restore_path"] = dest_path
+            logger.info(f"Successfully restored appdata to {dest_path}")
+
+            # Restart container if it was running
+            if was_running:
+                if progress_callback:
+                    progress_callback({"status": "starting_container", "container": container_name})
+
+                logger.info(f"Restarting container {container_name}")
+                rc, _, stderr = self._run_ssh_command(f"docker start '{container_name}'", timeout=120)
+                if rc != 0:
+                    logger.warning(f"Failed to restart container: {stderr}")
+                    result["restarted"] = False
+                else:
+                    result["restarted"] = True
+
+            if progress_callback:
+                progress_callback({
+                    "status": "completed",
+                    "success": True,
+                    "container": container_name,
+                })
+
+        except Exception as e:
+            logger.exception(f"Appdata restore failed: {e}")
+            result["errors"].append(str(e))
+
+        finally:
+            result["duration_seconds"] = (dt.now() - started_at).total_seconds()
+
+        return result
+
+    def list_backups(
+        self,
+        backup_path: str,
+        backup_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List available backups in a directory.
+
+        Args:
+            backup_path: Path to search for backups
+            backup_type: Optional filter (vm, docker, flash, share)
+
+        Returns:
+            List of backup dicts with name, path, type, timestamp, size info
+        """
+        logger.info(f"Listing Unraid backups in {backup_path}")
+
+        rc, stdout, stderr = self._run_ssh_command(
+            f"find '{backup_path}' -maxdepth 2 -type d -name '*_*' 2>/dev/null | head -100"
+        )
+
+        if rc != 0:
+            logger.error(f"Failed to list backups: {stderr}")
+            return []
+
+        backups = []
+        dirs = stdout.strip().split("\n") if stdout.strip() else []
+
+        for backup_dir in dirs:
+            if not backup_dir:
+                continue
+
+            # Get directory info
+            rc, stat_out, _ = self._run_ssh_command(
+                f"stat -c '%Y %s' '{backup_dir}' 2>/dev/null && ls -1 '{backup_dir}' 2>/dev/null | head -5"
+            )
+            if rc != 0:
+                continue
+
+            lines = stat_out.strip().split("\n")
+            if not lines:
+                continue
+
+            try:
+                parts = lines[0].split()
+                mtime = int(parts[0]) if parts else 0
+                files = lines[1:] if len(lines) > 1 else []
+
+                # Determine backup type from contents
+                detected_type = "unknown"
+                if any(f.endswith(".xml") for f in files):
+                    detected_type = "vm"
+                elif any(f.endswith(".tar.gz") for f in files):
+                    detected_type = "docker"
+                elif "config" in backup_dir.lower():
+                    detected_type = "flash"
+
+                if backup_type and detected_type != backup_type:
+                    continue
+
+                from datetime import datetime as dt
+                backups.append({
+                    "name": backup_dir.split("/")[-1],
+                    "path": backup_dir,
+                    "type": detected_type,
+                    "modified_at": dt.fromtimestamp(mtime).isoformat() if mtime else "",
+                    "files": files,
+                })
+            except (ValueError, IndexError):
+                continue
+
+        logger.info(f"Found {len(backups)} Unraid backups")
+        return backups

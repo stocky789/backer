@@ -1,5 +1,11 @@
 """Hypervisor integrations for backing up VMs and containers."""
 
+from backer.hypervisors.hyperv import (
+    HyperVAPI,
+    HyperVAPIError,
+    HyperVBackupManager,
+    HyperVGuestType,
+)
 from backer.hypervisors.incremental import (
     BackupDecision,
     BackupType,
@@ -18,6 +24,10 @@ from backer.hypervisors.unraid import (
 __all__ = [
     "ProxmoxAPI",
     "ProxmoxBackupManager",
+    "HyperVAPI",
+    "HyperVAPIError",
+    "HyperVBackupManager",
+    "HyperVGuestType",
     "UnraidAPI",
     "UnraidAPIError",
     "UnraidBackupManager",

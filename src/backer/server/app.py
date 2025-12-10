@@ -269,6 +269,8 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         _trigger_unraid_backup_job(job_id, job, hypervisor)
     elif hypervisor_type == "proxmox":
         _trigger_proxmox_backup_job(job_id, job, hypervisor)
+    elif hypervisor_type == "hyperv":
+        _trigger_hyperv_backup_job(job_id, job, hypervisor)
     else:
         logger.error(f"Unsupported hypervisor type: {hypervisor_type}")
 
@@ -460,6 +462,9 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
             f"'{repository['name']}' ({len(guest_ids)} items)"
         )
 
+        # Collect results for metadata writing
+        backup_results = []
+
         for guest_id in guest_ids:
             guest = guest_map.get(guest_id)
             if not guest:
@@ -536,6 +541,20 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     errors=result.get("errors"),
                 )
 
+                # Collect result for metadata
+                backup_results.append({
+                    "vmid": guest_id,
+                    "guest_name": guest_name,
+                    "guest_type": guest_type,
+                    "success": result.get("success", False),
+                    "backup_filename": backup_filename,
+                    "backup_size": backup_size,
+                    "duration_seconds": result.get("duration_seconds"),
+                    "started_at": tz.get_now().isoformat(),
+                    "finished_at": tz.get_now().isoformat(),
+                    "errors": result.get("errors"),
+                })
+
                 if result.get("success"):
                     logger.info(
                         f"Backup succeeded for {guest_type} '{guest_name}' "
@@ -558,6 +577,14 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     finished_at=tz.get_now(),
                     errors=[str(e)],
                 )
+                # Collect failed result for metadata
+                backup_results.append({
+                    "vmid": guest_id,
+                    "guest_name": guest_name,
+                    "guest_type": guest_type,
+                    "success": False,
+                    "errors": [str(e)],
+                })
 
         # Cleanup: unmount external share if we mounted it
         if mount_point:
@@ -570,6 +597,25 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 backup_manager._run_ssh_command(f"rmdir '{mount_point}'")
 
         logger.info(f"Unraid backup job '{job.get('name')}' completed")
+
+        # Write metadata to repository
+        try:
+            # Get repository password for metadata writing
+            repo_password = _storage.get_repository_password(repository_id)
+            repo_with_password = {**repository, "password": repo_password}
+
+            _write_backup_metadata_to_repo(
+                repository=repo_with_password,
+                hypervisor=hypervisor,
+                job=job,
+                job_id=job_id,
+                run_id=run_id,
+                results=backup_results,
+                guest_map=guest_map,
+            )
+        except Exception as meta_err:
+            # Don't fail backup if metadata write fails
+            logger.warning(f"Failed to write Unraid backup metadata: {meta_err}")
 
     except Exception as e:
         logger.exception(f"Unraid backup job {job_id} failed: {e}")
@@ -799,6 +845,517 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
                 api.release_backer_storage(proxmox_storage_id)
             except Exception:
                 pass  # Best effort cleanup
+
+
+def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None:
+    """Trigger a Hyper-V backup job."""
+    from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+    # Get repository for backup destination
+    repository_id = job.get("repository_id")
+    if not repository_id:
+        logger.error(f"No repository configured for job: {job_id}")
+        return
+
+    repository = _storage.get_repository(repository_id)
+    if not repository:
+        logger.error(f"Repository not found: {repository_id}")
+        return
+
+    # Validate repository type (must be SMB for Hyper-V)
+    repo_type = repository.get("repo_type", "").lower()
+    if repo_type != "smb":
+        logger.error(
+            f"Repository type '{repo_type}' is not supported for Hyper-V backups. "
+            "Use an SMB repository so the Hyper-V host can export directly to it."
+        )
+        return
+
+    # Get credentials
+    hv_password = _storage.get_hypervisor_password(hypervisor["id"])
+
+    run_id = tz.get_now().strftime("%Y%m%d_%H%M%S_%f")
+
+    try:
+        # Get domain from hypervisor data (exposed from config by storage layer)
+        # or fall back to checking config directly for backward compatibility
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=hv_password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        backup_manager = HyperVBackupManager(api)
+
+        # Get guest IDs from job
+        guest_ids = job.get("guest_ids", [])
+
+        if not guest_ids:
+            # Backup all VMs
+            guests = backup_manager.list_all_guests()
+            guest_ids = [g["vmid"] for g in guests]
+
+        # Build guest name map
+        all_guests = backup_manager.list_all_guests()
+        guest_map = {g["vmid"]: g for g in all_guests}
+
+        # Build UNC path for export destination
+        # SMB repository format: //server/share/path
+        smb_server = repository.get("server", "")
+        smb_share = repository.get("share", "")
+        smb_path = repository.get("path", "")
+
+        # Build UNC path that Windows can use
+        backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+        if smb_path:
+            backup_base_path = f"{backup_base_path}\\{smb_path.replace('/', '\\')}"
+
+        # Add hypervisor subfolder
+        backup_base_path = f"{backup_base_path}\\Hypervisors\\{hypervisor['name']}"
+
+        logger.info(
+            f"Starting Hyper-V backup job '{job['name']}' to repository "
+            f"'{repository['name']}' (path: {backup_base_path})"
+        )
+
+        # Get backup mode
+        backup_mode = job.get("backup_mode", "online")
+
+        # Collect results for metadata writing
+        backup_results = []
+
+        for vmid in guest_ids:
+            guest = guest_map.get(vmid)
+            guest_name = guest.get("name", f"VM {vmid}") if guest else f"VM {vmid}"
+
+            # Save run as running
+            _storage.save_hypervisor_run(
+                run_id=run_id,
+                job_id=job_id,
+                job_name=job["name"],
+                hypervisor_id=hypervisor["id"],
+                guest_id=vmid,
+                guest_name=guest_name,
+                guest_type="vm",
+                status="running",
+            )
+
+            try:
+                result = backup_manager.backup_vm(
+                    vm_name=guest_name,
+                    backup_path=backup_base_path,
+                    backup_mode=backup_mode,
+                )
+
+                backup_size = result.get("size_bytes", 0)
+                backup_filename = result.get("export_path")
+
+                # Update run record
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    guest_type="vm",
+                    status="success" if result.get("success") else "failed",
+                    finished_at=tz.get_now(),
+                    duration_seconds=result.get("duration_seconds"),
+                    backup_size=backup_size,
+                    backup_filename=backup_filename,
+                    errors=result.get("errors"),
+                )
+
+                # Collect result for metadata
+                backup_results.append({
+                    "vmid": vmid,
+                    "guest_name": guest_name,
+                    "guest_type": "vm",
+                    "success": result.get("success", False),
+                    "backup_filename": backup_filename,
+                    "backup_size": backup_size,
+                    "duration_seconds": result.get("duration_seconds"),
+                    "started_at": tz.get_now().isoformat(),
+                    "finished_at": tz.get_now().isoformat(),
+                    "errors": result.get("errors"),
+                })
+
+                if result.get("success"):
+                    logger.info(
+                        f"Backup succeeded for VM '{guest_name}' "
+                        f"({backup_size / 1024 / 1024:.1f} MB)"
+                    )
+                else:
+                    logger.warning(f"Backup failed for VM '{guest_name}': {result.get('errors')}")
+
+            except Exception as e:
+                logger.exception(f"Backup failed for VM '{guest_name}': {e}")
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    guest_type="vm",
+                    status="failed",
+                    finished_at=tz.get_now(),
+                    errors=[str(e)],
+                )
+                # Collect failed result for metadata
+                backup_results.append({
+                    "vmid": vmid,
+                    "guest_name": guest_name,
+                    "guest_type": "vm",
+                    "success": False,
+                    "errors": [str(e)],
+                })
+
+        logger.info(f"Hyper-V backup job '{job.get('name')}' completed")
+
+        # Write metadata to repository
+        try:
+            # Get repository password for metadata writing
+            repo_password = _storage.get_repository_password(repository_id)
+            repo_with_password = {**repository, "password": repo_password}
+
+            _write_backup_metadata_to_repo(
+                repository=repo_with_password,
+                hypervisor=hypervisor,
+                job=job,
+                job_id=job_id,
+                run_id=run_id,
+                results=backup_results,
+                guest_map=guest_map,
+            )
+        except Exception as meta_err:
+            # Don't fail backup if metadata write fails
+            logger.warning(f"Failed to write Hyper-V backup metadata: {meta_err}")
+
+    except Exception as e:
+        logger.exception(f"Hyper-V job {job_id} failed: {e}")
+
+
+# ============================================================================
+# Module-level metadata writing functions
+# These are used by the scheduled job trigger functions above
+# ============================================================================
+
+
+def _write_metadata_nfs_ml(
+    server: str,
+    export: str,
+    hypervisor_name: str,
+    backer_dir: Path,
+) -> None:
+    """Write metadata to NFS share by temporarily mounting it (module-level version)."""
+    import subprocess
+    import tempfile
+
+    mount_point = tempfile.mkdtemp(prefix="backer_nfs_meta_")
+
+    try:
+        # Mount the NFS export
+        mount_cmd = [
+            "sudo", "-n", "mount", "-t", "nfs",
+            "-o", "soft,timeo=50,retrans=2",
+            f"{server}:{export}",
+            mount_point,
+        ]
+        result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            logger.warning(f"Failed to mount NFS for metadata write: {result.stderr.strip()}")
+            return
+
+        # Build target path: {mount}/Hypervisors/{hypervisor_name}/.backer
+        target_backer = f"{mount_point}/Hypervisors/{hypervisor_name}/.backer"
+
+        try:
+            # Create target directory
+            mkdir_result = subprocess.run(
+                ["mkdir", "-p", target_backer],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if mkdir_result.returncode != 0:
+                logger.warning(f"Failed to create metadata directory: {mkdir_result.stderr.strip()}")
+                return
+
+            # Copy all files from backer_dir to target
+            cp_result = subprocess.run(
+                ["cp", "-r", f"{backer_dir}/.", target_backer],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if cp_result.returncode != 0:
+                logger.warning(f"Failed to copy metadata files: {cp_result.stderr.strip()}")
+                return
+
+            logger.info(f"Wrote hypervisor backup metadata to {server}:{export}/Hypervisors/{hypervisor_name}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout writing metadata files to NFS")
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout mounting NFS {server}:{export} for metadata")
+    finally:
+        # Unmount
+        try:
+            subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
+        except Exception:
+            try:
+                subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
+            except Exception:
+                pass
+
+        # Remove temp mount point
+        try:
+            import os
+            os.rmdir(mount_point)
+        except Exception:
+            pass
+
+
+def _write_metadata_smb_ml(
+    server: str,
+    share: str,
+    subdir: str,
+    hypervisor_name: str,
+    username: str | None,
+    password: str | None,
+    domain: str | None,
+    backer_dir: Path,
+) -> None:
+    """Write metadata to SMB share using smbclient (module-level version)."""
+    import subprocess
+
+    # Build remote path: {repo_path}/Hypervisors/{hypervisor_name}/
+    base_path = subdir.strip("/") if subdir else ""
+    if base_path:
+        remote_base = f"{base_path}/Hypervisors/{hypervisor_name}"
+    else:
+        remote_base = f"Hypervisors/{hypervisor_name}"
+
+    # Build smbclient auth
+    auth_parts = []
+    if username:
+        auth_parts.extend(["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"])
+    else:
+        auth_parts.extend(["-N"])  # No password
+
+    # Track directories we've already created
+    created_dirs: set[str] = set()
+
+    def ensure_remote_dir(dir_path: str) -> None:
+        """Create remote directory and all parents using smbclient."""
+        if not dir_path or dir_path in created_dirs:
+            return
+
+        parts = dir_path.split("/")
+        for i in range(1, len(parts) + 1):
+            partial_path = "/".join(parts[:i])
+            if partial_path and partial_path not in created_dirs:
+                mkdir_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"mkdir {partial_path}"]
+                subprocess.run(mkdir_cmd, capture_output=True, timeout=30)
+                created_dirs.add(partial_path)
+
+    # Upload each file in .backer directory
+    for local_file in backer_dir.rglob("*"):
+        if not local_file.is_file():
+            continue
+
+        rel_path = local_file.relative_to(backer_dir)
+        rel_path_str = str(rel_path).replace("\\", "/")
+
+        parent_str = str(rel_path.parent).replace("\\", "/")
+        if parent_str == ".":
+            remote_dir = f"{remote_base}/.backer"
+        else:
+            remote_dir = f"{remote_base}/.backer/{parent_str}"
+
+        ensure_remote_dir(remote_dir)
+
+        remote_file = f"{remote_base}/.backer/{rel_path_str}"
+        put_cmd = [
+            "smbclient", f"//{server}/{share}", *auth_parts,
+            "-c", f"put {local_file} {remote_file}"
+        ]
+        result = subprocess.run(put_cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
+        else:
+            logger.debug(f"Uploaded metadata: {remote_file}")
+
+    logger.info(f"Wrote hypervisor backup metadata to //{server}/{share}/{remote_base}")
+
+
+def _write_backup_metadata_to_repo(
+    repository: dict[str, Any],
+    hypervisor: dict[str, Any],
+    job: dict[str, Any],
+    job_id: str,
+    run_id: str,
+    results: list[dict[str, Any]],
+    guest_map: dict[str, Any],
+) -> None:
+    """Write backup metadata to the repository (module-level version).
+
+    This allows the metadata to be discovered if the Backer server is reinstalled.
+    Used by scheduled backup trigger functions.
+
+    Args:
+        repository: Repository dict (with password already included)
+        hypervisor: Hypervisor dict
+        job: Job configuration dict
+        job_id: Job ID
+        run_id: Run ID
+        results: List of backup result dicts
+        guest_map: Dict mapping guest_id to guest info dict
+    """
+    import tempfile
+
+    from backer.hypervisors.metadata import HypervisorMetadata
+
+    repo_type = repository.get("repo_type", "").lower()
+    if repo_type not in ("smb", "nfs"):
+        logger.debug(f"Skipping metadata write for repo type: {repo_type}")
+        return
+
+    server = repository.get("server", "")
+    share = repository.get("share", "")
+    subdir = repository.get("path", "")
+    username = repository.get("username")
+    password = repository.get("password")
+    domain = repository.get("domain")
+
+    if not server or not share:
+        logger.warning("Cannot write metadata: missing server or share")
+        return
+
+    # Sanitize hypervisor name for folder
+    safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
+
+    # Create metadata in a temp directory first
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        metadata = HypervisorMetadata(tmp_path)
+
+        # Initialize if needed
+        if not metadata.is_initialized():
+            metadata.initialize()
+
+        # Save hypervisor info
+        metadata.save_hypervisor(
+            hypervisor_id=hypervisor["id"],
+            name=hypervisor["name"],
+            hypervisor_type=hypervisor.get("hypervisor_type", "proxmox"),
+            host=hypervisor["host"],
+        )
+
+        # Save job configuration (for discovery on reinstall)
+        metadata.save_job(
+            job_id=job_id,
+            name=job["name"],
+            hypervisor_id=hypervisor["id"],
+            repository_id=job.get("repository_id", ""),
+            guest_ids=job.get("guest_ids"),
+            backup_mode=job.get("backup_mode", "snapshot"),
+            compression=job.get("compression", "zstd"),
+            schedule_cron=job.get("schedule_cron"),
+            enabled=job.get("enabled", True),
+            copies_to_keep=job.get("copies_to_keep", 0),
+            hypervisor_name=hypervisor["name"],
+            hypervisor_host=hypervisor["host"],
+        )
+
+        # Save guest and run info for each result
+        for result in results:
+            vmid = result.get("vmid") or result.get("guest_id")
+            if not vmid:
+                continue
+
+            guest = guest_map.get(vmid) or guest_map.get(str(vmid))
+
+            # Handle both dict guests (Hyper-V/Unraid) and object guests (Proxmox)
+            if guest:
+                if hasattr(guest, "name"):
+                    guest_name = guest.name
+                else:
+                    guest_name = guest.get("name", f"Guest {vmid}")
+
+                if hasattr(guest, "guest_type"):
+                    guest_type = guest.guest_type.value if hasattr(guest.guest_type, "value") else str(guest.guest_type)
+                else:
+                    guest_type = guest.get("guest_type", "vm")
+
+                if hasattr(guest, "node"):
+                    node = guest.node
+                else:
+                    node = guest.get("node", hypervisor["host"])
+            else:
+                guest_name = result.get("guest_name", f"Guest {vmid}")
+                guest_type = result.get("guest_type", "vm")
+                node = hypervisor["host"]
+
+            # Save guest info (vmid needs to be int for save_guest)
+            vmid_int = int(vmid) if isinstance(vmid, str) and vmid.isdigit() else hash(str(vmid)) % (10**9)
+            metadata.save_guest(
+                vmid=vmid_int,
+                name=guest_name,
+                guest_type=guest_type,
+                node=node,
+                hypervisor_id=hypervisor["id"],
+            )
+
+            # Save run record
+            metadata.save_backup_run(
+                vmid=vmid_int,
+                run_id=run_id,
+                status="success" if result.get("success") else "failed",
+                backup_file=result.get("archive_name") or result.get("backup_filename") or result.get("export_path", ""),
+                started_at=result.get("started_at", tz.get_now().isoformat()),
+                finished_at=result.get("finished_at"),
+                size_bytes=result.get("archive_size") or result.get("backup_size"),
+                duration_seconds=result.get("duration_seconds"),
+                backup_type=result.get("backup_type", "full"),
+                skipped=result.get("skipped", False),
+                job_name=job["name"],
+                job_id=job_id,
+                hypervisor_id=hypervisor["id"],
+            )
+
+        # Now upload the .backer directory to the share
+        backer_dir = tmp_path / ".backer"
+        if not backer_dir.exists():
+            return
+
+        if repo_type == "nfs":
+            _write_metadata_nfs_ml(
+                server=server,
+                export=share,
+                hypervisor_name=safe_hv_name,
+                backer_dir=backer_dir,
+            )
+        else:
+            _write_metadata_smb_ml(
+                server=server,
+                share=share,
+                subdir=subdir,
+                hypervisor_name=safe_hv_name,
+                username=username,
+                password=password,
+                domain=domain,
+                backer_dir=backer_dir,
+            )
 
 
 def verify_client(
@@ -3830,6 +4387,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         ssh_key_path = body.get("ssh_key_path")
         ssh_use_api_password = body.get("ssh_use_api_password", True)
 
+        # Hyper-V specific: domain for WinRM authentication
+        domain = body.get("domain")
+
+        # Build config dict for type-specific settings
+        config: dict[str, Any] = {}
+        if domain:
+            config["domain"] = domain
+
         # Validate
         validate_name(name, "name")
         if not host:
@@ -3858,6 +4423,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             token_secret=token_secret,
             password=password,
             verify_ssl=verify_ssl,
+            config=config if config else None,
             ssh_user=ssh_user,
             ssh_port=ssh_port,
             ssh_key_path=ssh_key_path,
@@ -3874,6 +4440,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         This is used to validate credentials before creating a hypervisor.
         """
+        from backer.hypervisors.hyperv import HyperVAPI
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
         from backer.hypervisors.unraid import UnraidAPI
 
@@ -3888,11 +4455,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         token_secret = body.get("token_secret")
         password = body.get("password")
         verify_ssl = body.get("verify_ssl", False)
+        domain = body.get("domain")
 
         if not host:
             return {"success": False, "message": "Host is required"}
 
-        if hypervisor_type not in ("proxmox", "unraid"):
+        if hypervisor_type not in ("proxmox", "unraid", "hyperv"):
             return {"success": False, "message": f"Unsupported hypervisor type: {hypervisor_type}"}
 
         try:
@@ -3922,6 +4490,36 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "message": message,
                     "version": api.version if success else None,
                 }
+
+            elif hypervisor_type == "hyperv":
+                # Hyper-V uses WinRM + PowerShell
+                if not username:
+                    return {"success": False, "message": "Username is required for Hyper-V"}
+                if not password:
+                    return {"success": False, "message": "Password is required for Hyper-V"}
+
+                # Default port for WinRM is 5985 (HTTP) or 5986 (HTTPS)
+                if port == 8006:  # User didn't change from Proxmox default
+                    port = 5985
+
+                api = HyperVAPI(
+                    host=host,
+                    username=username,
+                    password=password,
+                    port=port,
+                    use_ssl=port == 5986,
+                    verify_ssl=verify_ssl,
+                    domain=domain,
+                )
+
+                success, message = api.test_connection()
+
+                return {
+                    "success": success,
+                    "message": message,
+                    "version": api.version if success else None,
+                }
+
             else:
                 # Proxmox
                 pve_auth = ProxmoxAuthMethod.TOKEN if auth_method == "token" else ProxmoxAuthMethod.PASSWORD
@@ -4086,6 +4684,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
         """Test connection to a hypervisor."""
+        from backer.hypervisors.hyperv import HyperVAPI
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
         from backer.hypervisors.unraid import UnraidAPI
 
@@ -4112,6 +4711,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 port=port,
                 use_https=port in (443, 8443),
                 verify_ssl=hypervisor.get("verify_ssl", False),
+            )
+
+            success, message = api.test_connection()
+
+        elif hypervisor_type == "hyperv":
+            # Hyper-V uses WinRM + PowerShell
+            if not password:
+                return {"success": False, "message": "Password not configured", "hypervisor_id": hypervisor_id}
+
+            port = hypervisor.get("port", 5985)
+            # Get domain from hypervisor data or config
+            domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+            api = HyperVAPI(
+                host=hypervisor["host"],
+                username=hypervisor.get("username", "Administrator"),
+                password=password,
+                port=port,
+                use_ssl=port == 5986,
+                verify_ssl=hypervisor.get("verify_ssl", False),
+                domain=domain,
             )
 
             success, message = api.test_connection()
@@ -4166,6 +4785,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage: Storage = Depends(get_storage),
     ) -> list[dict[str, Any]]:
         """List VMs and containers on a hypervisor."""
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
         from backer.hypervisors.proxmox import ProxmoxAPI, ProxmoxAuthMethod
         from backer.hypervisors.unraid import UnraidAPI, UnraidBackupManager
 
@@ -4203,6 +4823,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     ssh_password=password if hypervisor.get("ssh_use_api_password") else None,
                 )
 
+                return backup_manager.list_all_guests()
+
+            elif hypervisor_type == "hyperv":
+                # Hyper-V uses WinRM + PowerShell
+                if not password:
+                    raise HTTPException(status_code=400, detail="Password not configured")
+
+                port = hypervisor.get("port", 5985)
+                # Get domain from hypervisor data or config
+                domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+                api = HyperVAPI(
+                    host=hypervisor["host"],
+                    username=hypervisor.get("username", "Administrator"),
+                    password=password,
+                    port=port,
+                    use_ssl=port == 5986,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                    domain=domain,
+                )
+
+                backup_manager = HyperVBackupManager(api)
                 return backup_manager.list_all_guests()
 
             elif hypervisor_type == "proxmox":
@@ -7660,6 +8301,319 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "message": f"Restore started for VMID {vmid}",
             "filename": filename,
         }
+
+    # ============ Unraid Restore API ============
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/unraid-restore")
+    async def restore_unraid_backup(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Restore an Unraid VM or container appdata from backup.
+
+        Supports restoring:
+        - VMs: Restores disk files and XML configuration
+        - Docker appdata: Restores container data directory
+        """
+        from backer.hypervisors.unraid import UnraidAPI, UnraidBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") != "unraid":
+            raise HTTPException(status_code=400, detail="This endpoint is only for Unraid hypervisors")
+
+        body = await request.json()
+
+        # Required
+        backup_path = body.get("backup_path")
+        restore_type = body.get("type", "vm")  # vm or docker
+
+        if not backup_path:
+            raise HTTPException(status_code=400, detail="backup_path is required")
+
+        # Type-specific options
+        vm_name = body.get("vm_name")  # For VM restores
+        container_name = body.get("container_name")  # For Docker restores
+        restore_path = body.get("restore_path")  # Custom destination
+        start_after = body.get("start", False)
+        stop_container = body.get("stop_container", True)
+
+        # Get credentials
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+        api_key = token_secret or password
+
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API key not configured")
+
+        port = hypervisor.get("port", 443)
+        api = UnraidAPI(
+            host=hypervisor["host"],
+            api_key=api_key,
+            port=port,
+            use_https=port in (443, 8443),
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        # Get SSH settings
+        ssh_password = password if hypervisor.get("ssh_use_api_password", True) else None
+
+        manager = UnraidBackupManager(
+            api=api,
+            ssh_host=hypervisor["host"],
+            ssh_user=hypervisor.get("ssh_user", "root"),
+            ssh_port=hypervisor.get("ssh_port", 22),
+            ssh_key_path=hypervisor.get("ssh_key_path"),
+            ssh_password=ssh_password,
+        )
+
+        def run_restore_task(task: Task) -> dict[str, Any]:
+            def progress_callback(status: dict[str, Any]) -> None:
+                task.message = status.get("status", "Restoring...")
+                if "progress" in status:
+                    task.progress = status["progress"]
+
+            try:
+                if restore_type == "vm":
+                    task.message = f"Restoring VM from {backup_path}..."
+                    result = manager.restore_vm(
+                        backup_path=backup_path,
+                        vm_name=vm_name,
+                        restore_path=restore_path,
+                        start_after=start_after,
+                        progress_callback=progress_callback,
+                    )
+                elif restore_type == "docker":
+                    if not container_name:
+                        return {"success": False, "errors": ["container_name is required for docker restores"]}
+                    task.message = f"Restoring appdata for {container_name}..."
+                    result = manager.restore_appdata(
+                        backup_path=backup_path,
+                        container_name=container_name,
+                        restore_path=restore_path,
+                        stop_container=stop_container,
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    return {"success": False, "errors": [f"Unknown restore type: {restore_type}"]}
+
+                task.progress = 100
+                task.message = "Restore completed" if result.get("success") else "Restore failed"
+                return result
+
+            except Exception as e:
+                logger.exception(f"Unraid restore failed: {e}")
+                return {"success": False, "errors": [str(e)]}
+
+        task_manager = get_task_manager()
+        task = task_manager.submit(
+            task_type="hypervisor_restore",
+            description=f"Restoring {restore_type} from {backup_path}",
+            func=run_restore_task,
+        )
+
+        return {
+            "task_id": task.id,
+            "message": f"Restore started from {backup_path}",
+        }
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/unraid-backups")
+    async def list_unraid_backups(
+        hypervisor_id: str,
+        path: str,
+        backup_type: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List available Unraid backups in a directory."""
+        from backer.hypervisors.unraid import UnraidAPI, UnraidBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") != "unraid":
+            raise HTTPException(status_code=400, detail="This endpoint is only for Unraid hypervisors")
+
+        token_secret = storage.get_hypervisor_token_secret(hypervisor_id)
+        password = storage.get_hypervisor_password(hypervisor_id)
+        api_key = token_secret or password
+
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API key not configured")
+
+        port = hypervisor.get("port", 443)
+        api = UnraidAPI(
+            host=hypervisor["host"],
+            api_key=api_key,
+            port=port,
+            use_https=port in (443, 8443),
+            verify_ssl=hypervisor.get("verify_ssl", False),
+        )
+
+        ssh_password = password if hypervisor.get("ssh_use_api_password", True) else None
+
+        manager = UnraidBackupManager(
+            api=api,
+            ssh_host=hypervisor["host"],
+            ssh_user=hypervisor.get("ssh_user", "root"),
+            ssh_port=hypervisor.get("ssh_port", 22),
+            ssh_key_path=hypervisor.get("ssh_key_path"),
+            ssh_password=ssh_password,
+        )
+
+        return manager.list_backups(path, backup_type)
+
+    # ============ Hyper-V Restore API ============
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/hyperv-restore")
+    async def restore_hyperv_backup(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Restore a Hyper-V VM from an export backup.
+
+        This endpoint imports a VM from a previously exported backup folder.
+        The backup must be accessible from the Hyper-V host (typically via SMB/UNC path).
+        """
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") != "hyperv":
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
+
+        body = await request.json()
+
+        # Required: path to the exported VM folder
+        import_path = body.get("import_path")
+        if not import_path:
+            raise HTTPException(status_code=400, detail="import_path is required")
+
+        # Optional parameters
+        vm_name = body.get("vm_name")  # New name for the VM
+        restore_path = body.get("restore_path")  # Where to store VM files
+        vhd_destination_path = body.get("vhd_destination_path")  # Where to store VHDs
+        generate_new_id = body.get("generate_new_id", True)  # Generate new VM ID
+        start_after = body.get("start", False)  # Start VM after restore
+
+        # Get credentials
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Hypervisor password not configured")
+
+        # Get domain from hypervisor data or config
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        def run_restore_task(task: Task) -> dict[str, Any]:
+            manager = HyperVBackupManager(api)
+            task.message = f"Importing VM from {import_path}..."
+            task.progress = 10
+
+            def progress_callback(status: dict[str, Any]) -> None:
+                if status.get("status") == "importing":
+                    task.message = f"Importing from {status.get('path', import_path)}..."
+                    task.progress = 30
+                elif status.get("status") == "completed":
+                    task.progress = 90
+                    task.message = "Import completed"
+
+            try:
+                result = manager.restore_vm(
+                    import_path=import_path,
+                    vm_name=vm_name,
+                    restore_path=restore_path,
+                    vhd_destination_path=vhd_destination_path,
+                    generate_new_id=generate_new_id,
+                    progress_callback=progress_callback,
+                )
+
+                # Start VM if requested
+                if result.get("success") and start_after:
+                    task.message = "Starting VM..."
+                    task.progress = 95
+                    imported_name = result.get("vm_name")
+                    if imported_name:
+                        api.start_vm(imported_name)
+                        result["started"] = True
+
+                task.progress = 100
+                task.message = "Restore completed" if result.get("success") else "Restore failed"
+                return result
+
+            except Exception as e:
+                logger.exception(f"Hyper-V restore failed: {e}")
+                return {"success": False, "errors": [str(e)]}
+
+        task_manager = get_task_manager()
+        task = task_manager.submit(
+            task_type="hypervisor_restore",
+            description=f"Restoring Hyper-V VM from {import_path}",
+            func=run_restore_task,
+        )
+
+        return {
+            "task_id": task.id,
+            "message": f"Restore started from {import_path}",
+        }
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/hyperv-backups")
+    async def list_hyperv_backups(
+        hypervisor_id: str,
+        path: str | None = None,
+        vm_name: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List available Hyper-V VM backups in a directory.
+
+        If no path is provided, lists backups from the hypervisor's default backup location.
+        """
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") != "hyperv":
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
+
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Hypervisor password not configured")
+
+        if not path:
+            raise HTTPException(status_code=400, detail="path query parameter is required")
+
+        # Get domain from hypervisor data or config
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        manager = HyperVBackupManager(api)
+        return manager.list_backups(path, vm_name)
 
     # ============ Logs API ============
 

@@ -274,7 +274,7 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
 
 @server.command("update")
 @click.option("--dev", is_flag=True, help="Update to the latest dev branch instead of release")
-@click.option("--version", "-v", help="Update to a specific version (e.g., 0.4.0)")
+@click.option("--version", "-v", help="Update to a specific version (e.g., 0.4.1)")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 def server_update(dev: bool, version: str | None, yes: bool) -> None:
     """Update the Backer server to the latest version.
