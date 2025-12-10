@@ -8695,6 +8695,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         This endpoint imports a VM from a previously exported backup folder.
         The backup must be accessible from the Hyper-V host (typically via SMB/UNC path).
+
+        For SMB paths, provide repository_id to use the repository's SMB credentials
+        for authentication when accessing the backup files.
         """
         from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
 
@@ -8718,14 +8721,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         vhd_destination_path = body.get("vhd_destination_path")  # Where to store VHDs
         generate_new_id = body.get("generate_new_id", True)  # Generate new VM ID
         start_after = body.get("start", False)  # Start VM after restore
+        repository_id = body.get("repository_id")  # Repository for SMB credentials
 
-        # Get credentials
+        # Get Hyper-V credentials
         password = storage.get_hypervisor_password(hypervisor_id)
         if not password:
             raise HTTPException(status_code=400, detail="Hypervisor password not configured")
 
         # Get domain from hypervisor data or config
         domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        # Get SMB credentials from repository if provided
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if repository_id:
+            repository = storage.get_repository(repository_id)
+            if repository and repository.get("repo_type") == "smb":
+                smb_username = repository.get("username", "")
+                smb_password = storage.get_repository_password(repository_id)
+                smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
             host=hypervisor["host"],
@@ -8758,6 +8774,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     vhd_destination_path=vhd_destination_path,
                     generate_new_id=generate_new_id,
                     progress_callback=progress_callback,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
                 )
 
                 # Start VM if requested
@@ -8794,11 +8813,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hypervisor_id: str,
         path: str | None = None,
         vm_name: str | None = None,
+        repository_id: str | None = None,
         storage: Storage = Depends(get_storage),
     ) -> list[dict[str, Any]]:
         """List available Hyper-V VM backups in a directory.
 
-        If no path is provided, lists backups from the hypervisor's default backup location.
+        For SMB paths, provide repository_id to use the repository's SMB credentials
+        for authentication when accessing the backup directory.
+
+        Args:
+            hypervisor_id: The Hyper-V hypervisor to query from
+            path: UNC path to the backup directory
+            vm_name: Optional filter by VM name
+            repository_id: Optional repository ID for SMB credentials
         """
         from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
 
@@ -8819,6 +8846,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get domain from hypervisor data or config
         domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
 
+        # Get SMB credentials from repository if provided
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if repository_id:
+            repository = storage.get_repository(repository_id)
+            if repository and repository.get("repo_type") == "smb":
+                smb_username = repository.get("username", "")
+                smb_password = storage.get_repository_password(repository_id)
+                smb_domain = repository.get("domain", "")
+
         api = HyperVAPI(
             host=hypervisor["host"],
             username=hypervisor.get("username", "Administrator"),
@@ -8830,7 +8869,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         manager = HyperVBackupManager(api)
-        return manager.list_backups(path, vm_name)
+        return manager.list_backups(
+            path,
+            vm_name,
+            smb_username=smb_username,
+            smb_password=smb_password,
+            smb_domain=smb_domain,
+        )
 
     # ============ Logs API ============
 

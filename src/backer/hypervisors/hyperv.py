@@ -1406,9 +1406,11 @@ class HyperVBackupManager:
             if progress_callback:
                 progress_callback({"status": "exporting", "vm": vm_name})
 
-            # Create timestamped backup directory
+            # Create VM-centric backup directory structure:
+            # {backup_path}/{vm_name}/{timestamp}/
+            # This keeps all backups for a VM together for easier management
             timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
-            vm_backup_path = f"{backup_path}\\{vm_name}_{timestamp}"
+            vm_backup_path = f"{backup_path}\\{vm_name}\\{timestamp}"
 
             success, export_result = self.api.export_vm(
                 vm_name,
@@ -1477,6 +1479,9 @@ if (Test-Path $path) {{
         vhd_destination_path: str | None = None,
         generate_new_id: bool = True,
         progress_callback: Any | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> dict[str, Any]:
         """Restore (import) a Hyper-V VM from an export.
 
@@ -1484,9 +1489,11 @@ if (Test-Path $path) {{
         - Register in-place: Uses -Path only (files stay where they are)
         - Copy: Uses -Copy flag with optional destination paths
 
+        For SMB/UNC paths, the backup files are first copied to local storage
+        before import, since Import-VM may have issues with network paths.
+
         Args:
-            import_path: Path to the exported VM configuration file (.vmcx)
-                        or the folder containing Virtual Machines subfolder
+            import_path: Path to the exported VM folder containing Virtual Machines subfolder
             vm_name: Optional new name for the VM after import
             restore_path: Optional destination path for VM configuration files
                          (maps to -VirtualMachinePath parameter)
@@ -1494,6 +1501,9 @@ if (Test-Path $path) {{
                                  (maps to -VhdDestinationPath parameter)
             generate_new_id: Generate new VM ID (required for duplicate imports)
             progress_callback: Optional callback for progress updates
+            smb_username: SMB username for network path authentication
+            smb_password: SMB password for network path authentication
+            smb_domain: SMB domain for network path authentication
 
         Returns:
             Dict with restore result info
@@ -1513,11 +1523,104 @@ if (Test-Path $path) {{
             if progress_callback:
                 progress_callback({"status": "importing", "path": import_path})
 
-            # Per Microsoft docs: Import-VM needs the .vmcx file path, not just folder
-            # First, find the .vmcx configuration file
-            find_vmcx_script = f"""
+            # Check if source is a UNC path (network share)
+            is_unc_path = import_path.startswith("\\\\")
+
+            if is_unc_path and smb_username and smb_password:
+                # For UNC paths, copy backup to local temp, then import
+                # This avoids authentication issues with Import-VM on network paths
+                unc_parts = import_path.lstrip("\\").split("\\")
+                if len(unc_parts) >= 2:
+                    smb_server = unc_parts[0]
+                    smb_share = unc_parts[1]
+                    smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                    safe_password = smb_password.replace("'", "''")
+                    full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
+
+                    # Build import parameters for the script
+                    import_params = ""
+                    if generate_new_id:
+                        import_params += " -Copy -GenerateNewId"
+                    if vhd_destination_path:
+                        import_params += f" -VhdDestinationPath '{vhd_destination_path}'"
+                    if restore_path:
+                        import_params += f" -VirtualMachinePath '{restore_path}'"
+
+                    script = f"""
+$ErrorActionPreference = 'Stop'
 $importPath = '{import_path}'
-# Check if path is already a .vmcx file
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+# Authenticate to SMB share using PSDrive
+$secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
+
+$driveName = "BackerSMB"
+if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+
+try {{
+    New-PSDrive -Name $driveName -PSProvider FileSystem -Root $smbUnc -Credential $cred -ErrorAction Stop | Out-Null
+}} catch {{
+    throw "Failed to connect to SMB share $smbUnc : $_"
+}}
+
+try {{
+    # Convert UNC path to mapped drive path
+    $subPath = $importPath.Substring($smbUnc.Length).TrimStart('\\')
+    $mappedImportPath = "${{driveName}}:\\$subPath"
+
+    # Verify source exists
+    if (-not (Test-Path $mappedImportPath)) {{
+        throw "Backup path not found: $importPath"
+    }}
+
+    # Find the .vmcx file
+    $vmFolder = Join-Path $mappedImportPath 'Virtual Machines'
+    if (Test-Path $vmFolder) {{
+        $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $vmcx) {{
+            throw "No .vmcx file found in $vmFolder"
+        }}
+        $vmcxPath = $vmcx.FullName
+    }} else {{
+        # Try to find .vmcx anywhere in the folder
+        $vmcx = Get-ChildItem -Path $mappedImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $vmcx) {{
+            throw "No .vmcx file found in $mappedImportPath"
+        }}
+        $vmcxPath = $vmcx.FullName
+    }}
+
+    # Import the VM - use -Copy to copy from network to local Hyper-V storage
+    # This ensures files are copied to local storage where Hyper-V can access them
+    $vm = Import-VM -Path $vmcxPath{import_params} -ErrorAction Stop
+
+    if ($vm) {{
+        @{{
+            Success = $true
+            VMId = $vm.Id.ToString()
+            VMName = $vm.Name
+        }} | ConvertTo-Json
+    }} else {{
+        @{{ Success = $false; Error = "Import returned no VM" }} | ConvertTo-Json
+    }}
+}} finally {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+"""
+                    rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
+                else:
+                    result["errors"].append("Invalid UNC path format")
+                    return result
+            else:
+                # Local path - import directly
+                # First, find the .vmcx configuration file
+                find_vmcx_script = f"""
+$importPath = '{import_path}'
 if ($importPath -like '*.vmcx') {{
     if (Test-Path $importPath) {{
         $importPath
@@ -1526,7 +1629,6 @@ if ($importPath -like '*.vmcx') {{
         exit 1
     }}
 }} else {{
-    # Look for .vmcx in Virtual Machines subfolder (standard export structure)
     $vmFolder = Join-Path $importPath 'Virtual Machines'
     if (Test-Path $vmFolder) {{
         $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1537,9 +1639,7 @@ if ($importPath -like '*.vmcx') {{
             exit 1
         }}
     }} else {{
-        # Maybe it's directly in the path
-        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($vmcx) {{
             $vmcx.FullName
         }} else {{
@@ -1549,28 +1649,27 @@ if ($importPath -like '*.vmcx') {{
     }}
 }}
 """
-            rc, stdout, stderr = self.api._run_powershell(find_vmcx_script)
-            if rc != 0:
-                result["errors"].append(f"Failed to find VM configuration: {stderr}")
-                return result
+                rc, stdout, stderr = self.api._run_powershell(find_vmcx_script)
+                if rc != 0:
+                    result["errors"].append(f"Failed to find VM configuration: {stderr}")
+                    return result
 
-            vmcx_path = stdout.strip()
+                vmcx_path = stdout.strip()
 
-            # Build import command per Microsoft docs
-            # -Copy is required when using -GenerateNewId or destination paths
-            use_copy = generate_new_id or restore_path or vhd_destination_path
-            import_cmd = f"Import-VM -Path '{vmcx_path}'"
+                # Build import command per Microsoft docs
+                use_copy = generate_new_id or restore_path or vhd_destination_path
+                import_cmd = f"Import-VM -Path '{vmcx_path}'"
 
-            if use_copy:
-                import_cmd += " -Copy"
-                if generate_new_id:
-                    import_cmd += " -GenerateNewId"
-                if vhd_destination_path:
-                    import_cmd += f" -VhdDestinationPath '{vhd_destination_path}'"
-                if restore_path:
-                    import_cmd += f" -VirtualMachinePath '{restore_path}'"
+                if use_copy:
+                    import_cmd += " -Copy"
+                    if generate_new_id:
+                        import_cmd += " -GenerateNewId"
+                    if vhd_destination_path:
+                        import_cmd += f" -VhdDestinationPath '{vhd_destination_path}'"
+                    if restore_path:
+                        import_cmd += f" -VirtualMachinePath '{restore_path}'"
 
-            script = f"""
+                script = f"""
 $vm = {import_cmd} -ErrorAction Stop
 if ($vm) {{
     @{{
@@ -1582,7 +1681,7 @@ if ($vm) {{
     @{{ Success = $false; Error = "Import returned no VM" }} | ConvertTo-Json
 }}
 """
-            rc, stdout, stderr = self.api._run_powershell(script, timeout=3600)
+                rc, stdout, stderr = self.api._run_powershell(script, timeout=86400)
 
             if rc != 0:
                 result["errors"].append(f"Import failed: {stderr}")
@@ -1631,46 +1730,175 @@ Rename-VM -VMName '{import_result.get("VMName")}' -NewName '{vm_name}' -ErrorAct
         self,
         backup_path: str,
         vm_name: str | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         """List available VM backups in a directory.
 
-        Scans the backup path for exported VMs (folders containing .vmcx files).
+        Scans the backup path for exported VMs using the VM-centric structure:
+        {backup_path}/{vm_name}/{timestamp}/{vm_name}/Virtual Machines/*.vmcx
+
+        Supports both local paths and SMB/UNC network paths with authentication.
 
         Args:
-            backup_path: UNC path to the backup directory
+            backup_path: Path to the backup directory (local or UNC)
             vm_name: Optional filter by VM name
+            smb_username: SMB username for network path authentication
+            smb_password: SMB password for network path authentication
+            smb_domain: SMB domain for network path authentication
 
         Returns:
-            List of backup dicts with name, path, timestamp, size info
+            List of backup dicts with vm_name, timestamp, path, size info
         """
         logger.info(f"Listing Hyper-V backups in: {backup_path}")
 
-        filter_clause = ""
+        vm_filter = ""
         if vm_name:
-            filter_clause = f"| Where-Object {{ $_.Name -like '{vm_name}*' }}"
+            vm_filter = f"| Where-Object {{ $_.Name -eq '{vm_name}' }}"
 
-        script = f"""
+        # Check if path is a UNC path (network share)
+        is_unc_path = backup_path.startswith("\\\\")
+
+        if is_unc_path and smb_username and smb_password:
+            # For UNC paths, use PSDrive with credentials
+            unc_parts = backup_path.lstrip("\\").split("\\")
+            if len(unc_parts) >= 2:
+                smb_server = unc_parts[0]
+                smb_share = unc_parts[1]
+                smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                safe_password = smb_password.replace("'", "''")
+                full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
+
+                script = f"""
+$ErrorActionPreference = 'Stop'
+$backupPath = '{backup_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+# Authenticate to SMB share using PSDrive
+$secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
+
+$driveName = "BackerSMB"
+if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+
+try {{
+    New-PSDrive -Name $driveName -PSProvider FileSystem -Root $smbUnc -Credential $cred -ErrorAction Stop | Out-Null
+}} catch {{
+    throw "Failed to connect to SMB share $smbUnc : $_"
+}}
+
+try {{
+    # Convert UNC path to mapped drive path
+    $subPath = $backupPath.Substring($smbUnc.Length).TrimStart('\\')
+    if ($subPath) {{
+        $mappedPath = "${{driveName}}:\\$subPath"
+    }} else {{
+        $mappedPath = "${{driveName}}:\\"
+    }}
+
+    $backups = @()
+
+    if (Test-Path $mappedPath) {{
+        # VM-centric structure: {backup_path}/{vm_name}/{timestamp}/{vm_name}/Virtual Machines/*.vmcx
+        # First level: VM name folders
+        Get-ChildItem -Path $mappedPath -Directory {vm_filter} | ForEach-Object {{
+            $vmFolder = $_
+            $vmFolderName = $vmFolder.Name
+
+            # Skip .backer metadata folder
+            if ($vmFolderName -eq '.backer') {{ return }}
+
+            # Second level: timestamp folders within each VM folder
+            Get-ChildItem -Path $vmFolder.FullName -Directory | ForEach-Object {{
+                $timestampFolder = $_
+                $timestampName = $timestampFolder.Name
+
+                # Look for the VM export folder inside timestamp
+                # Export-VM creates: {timestamp}/{vm_name}/Virtual Machines/
+                $vmExportFolder = Join-Path $timestampFolder.FullName $vmFolderName
+                $vmcxPath = Join-Path $vmExportFolder 'Virtual Machines'
+
+                if (Test-Path $vmcxPath) {{
+                    $vmcxFiles = Get-ChildItem -Path $vmcxPath -Filter '*.vmcx' -ErrorAction SilentlyContinue
+                    if ($vmcxFiles) {{
+                        $size = (Get-ChildItem $vmExportFolder -Recurse -ErrorAction SilentlyContinue |
+                                 Measure-Object -Property Length -Sum).Sum
+
+                        # Return the UNC path to the VM export folder
+                        $uncPath = $backupPath.TrimEnd('\\') + '\\' + $vmFolderName + '\\' + $timestampName + '\\' + $vmFolderName
+
+                        $backups += @{{
+                            VMName = $vmFolderName
+                            Timestamp = $timestampName
+                            Name = $vmFolderName + '/' + $timestampName
+                            Path = $uncPath
+                            CreatedAt = $timestampFolder.CreationTime.ToString('o')
+                            ModifiedAt = $timestampFolder.LastWriteTime.ToString('o')
+                            SizeBytes = if ($size) {{ $size }} else {{ 0 }}
+                            VmcxFile = $vmcxFiles[0].Name
+                        }}
+                    }}
+                }}
+            }}
+        }}
+    }}
+
+    $backups | ConvertTo-Json -Compress
+}} finally {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+"""
+            else:
+                logger.error(f"Invalid UNC path format: {backup_path}")
+                return []
+        else:
+            # Local path - access directly
+            script = f"""
 $backupPath = '{backup_path}'
 $backups = @()
 
 if (Test-Path $backupPath) {{
-    # Look for VM export folders (contain Virtual Machines subfolder with .vmcx)
-    Get-ChildItem -Path $backupPath -Directory {filter_clause} | ForEach-Object {{
+    # VM-centric structure: {{backup_path}}/{{vm_name}}/{{timestamp}}/{{vm_name}}/Virtual Machines/*.vmcx
+    # First level: VM name folders
+    Get-ChildItem -Path $backupPath -Directory {vm_filter} | ForEach-Object {{
         $vmFolder = $_
-        $vmcxPath = Join-Path $vmFolder.FullName 'Virtual Machines'
-        $vmcxFiles = Get-ChildItem -Path $vmcxPath -Filter '*.vmcx' -ErrorAction SilentlyContinue
+        $vmFolderName = $vmFolder.Name
 
-        if ($vmcxFiles) {{
-            $size = (Get-ChildItem $vmFolder.FullName -Recurse -ErrorAction SilentlyContinue |
-                     Measure-Object -Property Length -Sum).Sum
+        # Skip .backer metadata folder
+        if ($vmFolderName -eq '.backer') {{ return }}
 
-            $backups += @{{
-                Name = $vmFolder.Name
-                Path = $vmFolder.FullName
-                CreatedAt = $vmFolder.CreationTime.ToString('o')
-                ModifiedAt = $vmFolder.LastWriteTime.ToString('o')
-                SizeBytes = if ($size) {{ $size }} else {{ 0 }}
-                VmcxFile = $vmcxFiles[0].FullName
+        # Second level: timestamp folders within each VM folder
+        Get-ChildItem -Path $vmFolder.FullName -Directory | ForEach-Object {{
+            $timestampFolder = $_
+            $timestampName = $timestampFolder.Name
+
+            # Look for the VM export folder inside timestamp
+            # Export-VM creates: {{timestamp}}/{{vm_name}}/Virtual Machines/
+            $vmExportFolder = Join-Path $timestampFolder.FullName $vmFolderName
+            $vmcxPath = Join-Path $vmExportFolder 'Virtual Machines'
+
+            if (Test-Path $vmcxPath) {{
+                $vmcxFiles = Get-ChildItem -Path $vmcxPath -Filter '*.vmcx' -ErrorAction SilentlyContinue
+                if ($vmcxFiles) {{
+                    $size = (Get-ChildItem $vmExportFolder -Recurse -ErrorAction SilentlyContinue |
+                             Measure-Object -Property Length -Sum).Sum
+
+                    $backups += @{{
+                        VMName = $vmFolderName
+                        Timestamp = $timestampName
+                        Name = $vmFolderName + '/' + $timestampName
+                        Path = $vmExportFolder
+                        CreatedAt = $timestampFolder.CreationTime.ToString('o')
+                        ModifiedAt = $timestampFolder.LastWriteTime.ToString('o')
+                        SizeBytes = if ($size) {{ $size }} else {{ 0 }}
+                        VmcxFile = $vmcxFiles[0].FullName
+                    }}
+                }}
             }}
         }}
     }}
@@ -1678,7 +1906,8 @@ if (Test-Path $backupPath) {{
 
 $backups | ConvertTo-Json -Compress
 """
-        rc, stdout, stderr = self.api._run_powershell(script, timeout=120)
+
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=300)
 
         if rc != 0:
             logger.error(f"Failed to list backups: {stderr}")
@@ -1696,6 +1925,8 @@ $backups | ConvertTo-Json -Compress
             backups = []
             for item in data:
                 backups.append({
+                    "vm_name": item.get("VMName", ""),
+                    "timestamp": item.get("Timestamp", ""),
                     "name": item.get("Name", ""),
                     "path": item.get("Path", ""),
                     "created_at": item.get("CreatedAt", ""),
@@ -1703,6 +1934,9 @@ $backups | ConvertTo-Json -Compress
                     "size_bytes": item.get("SizeBytes", 0),
                     "vmcx_file": item.get("VmcxFile", ""),
                 })
+
+            # Sort by created_at descending (newest first)
+            backups.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
             logger.info(f"Found {len(backups)} Hyper-V backups in {backup_path}")
             return backups
