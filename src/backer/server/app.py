@@ -1612,6 +1612,486 @@ def verify_client(
     return client
 
 
+def _enforce_copies_limit(
+    repository: dict[str, Any],
+    hypervisor_name: str,
+    vmid: int | str,
+    copies_to_keep: int,
+    hypervisor_type: str = "proxmox",
+) -> None:
+    """Enforce the copies_to_keep limit by deleting oldest backups.
+
+    After a successful backup, this function checks how many backups exist
+    for the VM and deletes the oldest ones to stay within the limit.
+
+    Args:
+        repository: Repository configuration dict
+        hypervisor_name: Name of the hypervisor
+        vmid: VM ID (int for Proxmox, str VM name for Hyper-V)
+        copies_to_keep: Number of backups to keep (0 = unlimited, delete nothing)
+        hypervisor_type: Type of hypervisor ("proxmox" or "hyperv")
+
+    For Proxmox:
+        Files are named: vzdump-{type}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
+        Also deletes associated .notes and .log files.
+        Location: {repo_path}/Hypervisors/{hypervisor_name}/dump/
+
+    For Hyper-V:
+        Backup folders: {repo_path}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}/{timestamp}/
+        Deletes entire timestamp folders.
+    """
+    if copies_to_keep <= 0:
+        # 0 means unlimited - don't delete anything
+        return
+
+    repo_type = repository.get("repo_type", "").lower()
+    if repo_type not in ("smb", "nfs"):
+        logger.debug(f"copies_to_keep enforcement not supported for repo type: {repo_type}")
+        return
+
+    # Sanitize hypervisor name for folder
+    safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
+
+    if hypervisor_type == "hyperv":
+        if repo_type == "smb":
+            _enforce_copies_limit_hyperv_smb(repository, safe_hv_name, str(vmid), copies_to_keep)
+        # NFS not typically used with Hyper-V but could be added
+    else:
+        # Proxmox (default)
+        if repo_type == "smb":
+            _enforce_copies_limit_smb(repository, safe_hv_name, int(vmid), copies_to_keep)
+        elif repo_type == "nfs":
+            _enforce_copies_limit_nfs(repository, safe_hv_name, int(vmid), copies_to_keep)
+
+def _enforce_copies_limit_smb(
+    repository: dict[str, Any],
+    hypervisor_name: str,
+    vmid: int,
+    copies_to_keep: int,
+) -> None:
+    """Enforce backup copies limit for a VM on SMB share by deleting oldest backups."""
+    import re
+    import subprocess
+
+    server = repository.get("server", "")
+    share = repository.get("share", "")
+    subdir = repository.get("path", "").strip("/")
+    username = repository.get("username")
+    password = repository.get("password")
+    domain = repository.get("domain")
+
+    if not server or not share:
+        return
+
+    # Build path to dump directory
+    base_path = f"{subdir}/Hypervisors/{hypervisor_name}/dump" if subdir else f"Hypervisors/{hypervisor_name}/dump"
+
+    # Build smbclient auth
+    auth_opts = []
+    if username:
+        if password:
+            auth_opts = ["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"]
+        else:
+            auth_opts = ["-U", f"{domain}\\{username}" if domain else username]
+    else:
+        auth_opts = ["-N"]
+
+    # List all files matching the VMID pattern
+    # vzdump-qemu-{vmid}-* or vzdump-lxc-{vmid}-*
+    list_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; ls"]
+    try:
+        result = subprocess.run(list_cmd, capture_output=True, timeout=60, text=True)
+        if result.returncode != 0:
+            logger.debug(f"Could not list files in {base_path}: {result.stderr}")
+            return
+
+        # Parse file listing and find backup files for this VMID
+        # Pattern: vzdump-{qemu|lxc}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
+        # Must end with .vma, .vma.zst, .vma.gz, or .vma.lzo (not .notes or .log)
+        lines = result.stdout.strip().split("\n")
+        backup_files: list[tuple[str, str]] = []  # (timestamp, filename)
+        timestamp_pattern = re.compile(r"vzdump-(?:qemu|lxc)-\d+-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})\.vma")
+        # Only match actual backup files, not .notes or .log
+        backup_ext_pattern = re.compile(r"\.vma(\.zst|\.gz|\.lzo)?$")
+
+        for line in lines:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            filename = parts[0]
+            # Match vzdump-{type}-{vmid}-{timestamp}.vma* (but not .notes or .log)
+            if (
+                filename.startswith(f"vzdump-qemu-{vmid}-")
+                or filename.startswith(f"vzdump-lxc-{vmid}-")
+            ) and backup_ext_pattern.search(filename):
+                # Extract timestamp for sorting
+                match = timestamp_pattern.search(filename)
+                if match:
+                    timestamp = match.group(1)
+                    backup_files.append((timestamp, filename))
+
+        # Sort by timestamp (oldest first)
+        backup_files.sort(key=lambda x: x[0])
+
+        current_count = len(backup_files)
+        logger.info(f"VM {vmid}: Found {current_count} backups, limit is {copies_to_keep}")
+
+        if current_count <= copies_to_keep:
+            logger.debug(f"VM {vmid}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
+            return
+
+        # Delete oldest backups to stay within limit
+        backups_to_delete = current_count - copies_to_keep
+        deleted_count = 0
+
+        for i in range(backups_to_delete):
+            timestamp, backup_file = backup_files[i]
+            files_to_delete = [backup_file]
+
+            # Also delete associated .log and .notes files
+            base_name = (
+                backup_file.replace(".vma.zst", "")
+                .replace(".vma.gz", "")
+                .replace(".vma.lzo", "")
+                .replace(".vma", "")
+            )
+            files_to_delete.append(f"{base_name}.log")
+            files_to_delete.append(f"{backup_file}.notes")
+
+            for filename in files_to_delete:
+                smb_del_cmd = f'cd {base_path}; del "{filename}"'
+                del_cmd = [
+                    "smbclient", f"//{server}/{share}", *auth_opts, "-c", smb_del_cmd
+                ]
+                del_result = subprocess.run(del_cmd, capture_output=True, timeout=30)
+                if del_result.returncode == 0:
+                    logger.info(f"Deleted old backup file: {filename}")
+                    if filename == backup_file:
+                        deleted_count += 1
+                else:
+                    # Ignore errors for .log/.notes files that may not exist
+                    if filename == backup_file:
+                        err = del_result.stderr.decode() if del_result.stderr else "unknown error"
+                        logger.warning(f"Failed to delete {filename}: {err}")
+
+        if deleted_count > 0:
+            logger.info(
+                f"Retention enforcement: deleted {deleted_count} old backups "
+                f"for VM {vmid}, keeping {copies_to_keep}"
+            )
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout enforcing retention for VM {vmid} from SMB")
+    except Exception as e:
+        logger.warning(f"Error enforcing retention for VM {vmid} from SMB: {e}")
+
+def _enforce_copies_limit_nfs(
+    repository: dict[str, Any],
+    hypervisor_name: str,
+    vmid: int,
+    copies_to_keep: int,
+) -> None:
+    """Enforce backup copies limit for a VM on NFS share by deleting oldest backups."""
+    import re
+    import subprocess
+    import tempfile
+
+    server = repository.get("server", "")
+    export = repository.get("share", "")  # NFS export path
+    subdir = repository.get("path", "").strip("/")
+
+    if not server or not export:
+        return
+
+    # Create temp mount point
+    mount_point = tempfile.mkdtemp(prefix="backer_nfs_del_")
+
+    try:
+        # Mount the NFS share
+        mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", f"{server}:{export}", mount_point]
+        result = subprocess.run(mount_cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            err = result.stderr.decode() if result.stderr else "unknown error"
+            logger.warning(f"Failed to mount NFS for retention enforcement: {err}")
+            return
+
+        # Build path to dump directory
+        if subdir:
+            dump_dir = Path(mount_point) / subdir / "Hypervisors" / hypervisor_name / "dump"
+        else:
+            dump_dir = Path(mount_point) / "Hypervisors" / hypervisor_name / "dump"
+
+        if not dump_dir.exists():
+            logger.debug(f"Dump directory does not exist: {dump_dir}")
+            return
+
+        # Find all backup files for this VMID with timestamps
+        # Pattern: vzdump-{qemu|lxc}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
+        # Must end with .vma, .vma.zst, .vma.gz, or .vma.lzo (not .notes or .log)
+        timestamp_pattern = re.compile(r"vzdump-(?:qemu|lxc)-\d+-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})\.vma")
+        backup_ext_pattern = re.compile(r"\.vma(\.zst|\.gz|\.lzo)?$")
+        backup_files: list[tuple[str, Path]] = []  # (timestamp, path)
+
+        for entry in dump_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if (
+                entry.name.startswith(f"vzdump-qemu-{vmid}-")
+                or entry.name.startswith(f"vzdump-lxc-{vmid}-")
+            ) and backup_ext_pattern.search(entry.name):
+                match = timestamp_pattern.search(entry.name)
+                if match:
+                    timestamp = match.group(1)
+                    backup_files.append((timestamp, entry))
+
+        # Sort by timestamp (oldest first)
+        backup_files.sort(key=lambda x: x[0])
+
+        current_count = len(backup_files)
+        logger.info(f"VM {vmid}: Found {current_count} backups, limit is {copies_to_keep}")
+
+        if current_count <= copies_to_keep:
+            logger.debug(f"VM {vmid}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
+            return
+
+        # Delete oldest backups to stay within limit
+        backups_to_delete = current_count - copies_to_keep
+        deleted = 0
+
+        for i in range(backups_to_delete):
+            timestamp, entry = backup_files[i]
+
+            # Delete the main backup file
+            try:
+                entry.unlink()
+                logger.info(f"Deleted old backup file: {entry.name}")
+                deleted += 1
+            except OSError as e:
+                logger.warning(f"Failed to delete {entry.name}: {e}")
+                continue
+
+            # Delete associated .notes file if exists
+            notes_file = entry.parent / f"{entry.name}.notes"
+            if notes_file.exists():
+                try:
+                    notes_file.unlink()
+                    logger.debug(f"Deleted notes file: {notes_file.name}")
+                except OSError:
+                    pass
+
+            # Delete associated .log file if exists
+            base_name = (
+                entry.name.replace(".vma.zst", "")
+                .replace(".vma.gz", "")
+                .replace(".vma.lzo", "")
+                .replace(".vma", "")
+            )
+            log_file = entry.parent / f"{base_name}.log"
+            if log_file.exists():
+                try:
+                    log_file.unlink()
+                    logger.debug(f"Deleted log file: {log_file.name}")
+                except OSError:
+                    pass
+
+        if deleted > 0:
+            logger.info(
+                f"Retention enforcement: deleted {deleted} old backups "
+                f"for VM {vmid}, keeping {copies_to_keep}"
+            )
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout enforcing retention for VM {vmid} from NFS")
+    except Exception as e:
+        logger.warning(f"Error enforcing retention for VM {vmid} from NFS: {e}")
+    finally:
+        # Unmount
+        try:
+            subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
+        except Exception:
+            try:
+                subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
+            except Exception:
+                pass
+
+        # Remove temp mount point
+        try:
+            import os
+            os.rmdir(mount_point)
+        except Exception:
+            pass
+
+def _enforce_copies_limit_hyperv_smb(
+    repository: dict[str, Any],
+    hypervisor_name: str,
+    vm_name: str,
+    copies_to_keep: int,
+) -> None:
+    """Enforce backup copies limit for a Hyper-V VM on SMB share.
+
+    Hyper-V backups use a VM-centric folder structure:
+    {repo_path}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
+
+    This function lists timestamp folders, sorts them by timestamp,
+    and recursively deletes the oldest folders to stay within the limit.
+    """
+    import re
+
+    from backer.server.repositories import SMBBrowser
+
+    server = repository.get("server", "")
+    share = repository.get("share", "")
+    subdir = repository.get("path", "").strip("/")
+    username = repository.get("username")
+    password = repository.get("password")
+    domain = repository.get("domain")
+
+    if not server or not share:
+        return
+
+    # Build path to VM's backup directory
+    # Structure: Hypervisors/{hv_name}/hyperv/{vm_name}/
+    if subdir:
+        vm_path = f"{subdir}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}"
+    else:
+        vm_path = f"Hypervisors/{hypervisor_name}/hyperv/{vm_name}"
+
+    try:
+        # List timestamp folders in the VM directory using SMBBrowser
+        success, entries = SMBBrowser.list_directory(
+            server, share, vm_path, username, password, domain
+        )
+        if not success:
+            logger.debug(f"Could not list Hyper-V backups in {vm_path}")
+            return
+
+        # Find timestamp folders (format: YYYYMMDD_HHMMSS)
+        timestamp_pattern = re.compile(r"^(\d{8}_\d{6})$")
+        backup_folders: list[tuple[str, str]] = []  # (timestamp, folder_name)
+
+        for entry in entries:
+            if entry.name in [".", ".."]:
+                continue
+            if entry.is_dir:
+                match = timestamp_pattern.match(entry.name)
+                if match:
+                    backup_folders.append((match.group(1), entry.name))
+
+        # Sort by timestamp (oldest first)
+        backup_folders.sort(key=lambda x: x[0])
+
+        current_count = len(backup_folders)
+        logger.info(f"VM {vm_name}: Found {current_count} Hyper-V backups, limit is {copies_to_keep}")
+
+        if current_count <= copies_to_keep:
+            logger.debug(
+                f"VM {vm_name}: {current_count} backups <= {copies_to_keep} limit, nothing to delete"
+            )
+            return
+
+        # Delete oldest backup folders to stay within limit
+        folders_to_delete = current_count - copies_to_keep
+        deleted_count = 0
+
+        # Build smbclient auth
+        auth_opts = []
+        if username:
+            if password:
+                auth_opts = [
+                    "-U",
+                    f"{domain}\\{username}%{password}" if domain else f"{username}%{password}",
+                ]
+            else:
+                auth_opts = ["-U", f"{domain}\\{username}" if domain else username]
+        else:
+            auth_opts = ["-N"]
+
+        for i in range(folders_to_delete):
+            timestamp, folder_name = backup_folders[i]
+            folder_path = f"{vm_path}/{folder_name}"
+
+            # Recursively delete the timestamp folder and all contents
+            deleted = _delete_smb_folder_recursive(
+                server, share, folder_path, auth_opts, username, password, domain
+            )
+            if deleted:
+                logger.info(f"Deleted old Hyper-V backup folder: {folder_name}")
+                deleted_count += 1
+            else:
+                logger.warning(f"Failed to delete Hyper-V backup folder: {folder_name}")
+
+        if deleted_count > 0:
+            logger.info(
+                f"Retention enforcement: deleted {deleted_count} old Hyper-V backups "
+                f"for VM {vm_name}, keeping {copies_to_keep}"
+            )
+
+    except Exception as e:
+        logger.warning(f"Error enforcing Hyper-V retention for VM {vm_name}: {e}")
+
+def _delete_smb_folder_recursive(
+    server: str,
+    share: str,
+    folder_path: str,
+    auth_opts: list[str],
+    username: str | None,
+    password: str | None,
+    domain: str | None,
+) -> bool:
+    """Recursively delete an SMB folder and all its contents.
+
+    Returns True if successful, False otherwise.
+    """
+    import subprocess
+
+    from backer.server.repositories import SMBBrowser
+
+    try:
+        # List contents of the folder
+        success, entries = SMBBrowser.list_directory(
+            server, share, folder_path, username, password, domain
+        )
+        if not success:
+            return False
+
+        # Delete contents first (files and subdirectories)
+        for entry in entries:
+            if entry.name in [".", ".."]:
+                continue
+
+            entry_path = f"{folder_path}/{entry.name}"
+
+            if entry.is_dir:
+                # Recursively delete subdirectory
+                _delete_smb_folder_recursive(
+                    server, share, entry_path, auth_opts, username, password, domain
+                )
+            else:
+                # Delete file
+                del_cmd = [
+                    "smbclient",
+                    f"//{server}/{share}",
+                    *auth_opts,
+                    "-c",
+                    f'del "{entry_path}"',
+                ]
+                subprocess.run(del_cmd, capture_output=True, timeout=30)
+
+        # Now delete the empty folder
+        rmdir_cmd = [
+            "smbclient",
+            f"//{server}/{share}",
+            *auth_opts,
+            "-c",
+            f'rmdir "{folder_path}"',
+        ]
+        result = subprocess.run(rmdir_cmd, capture_output=True, timeout=30)
+        return result.returncode == 0
+
+    except Exception as e:
+        logger.debug(f"Error deleting SMB folder {folder_path}: {e}")
+        return False
+
 def create_app(data_dir: Path | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
     global _storage, _scheduler
@@ -5555,486 +6035,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             result["cleanup_warnings"] = cleanup_errors
         return result
 
-    def _enforce_copies_limit(
-        repository: dict[str, Any],
-        hypervisor_name: str,
-        vmid: int | str,
-        copies_to_keep: int,
-        hypervisor_type: str = "proxmox",
-    ) -> None:
-        """Enforce the copies_to_keep limit by deleting oldest backups.
-
-        After a successful backup, this function checks how many backups exist
-        for the VM and deletes the oldest ones to stay within the limit.
-
-        Args:
-            repository: Repository configuration dict
-            hypervisor_name: Name of the hypervisor
-            vmid: VM ID (int for Proxmox, str VM name for Hyper-V)
-            copies_to_keep: Number of backups to keep (0 = unlimited, delete nothing)
-            hypervisor_type: Type of hypervisor ("proxmox" or "hyperv")
-
-        For Proxmox:
-            Files are named: vzdump-{type}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
-            Also deletes associated .notes and .log files.
-            Location: {repo_path}/Hypervisors/{hypervisor_name}/dump/
-
-        For Hyper-V:
-            Backup folders: {repo_path}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}/{timestamp}/
-            Deletes entire timestamp folders.
-        """
-        if copies_to_keep <= 0:
-            # 0 means unlimited - don't delete anything
-            return
-
-        repo_type = repository.get("repo_type", "").lower()
-        if repo_type not in ("smb", "nfs"):
-            logger.debug(f"copies_to_keep enforcement not supported for repo type: {repo_type}")
-            return
-
-        # Sanitize hypervisor name for folder
-        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
-
-        if hypervisor_type == "hyperv":
-            if repo_type == "smb":
-                _enforce_copies_limit_hyperv_smb(repository, safe_hv_name, str(vmid), copies_to_keep)
-            # NFS not typically used with Hyper-V but could be added
-        else:
-            # Proxmox (default)
-            if repo_type == "smb":
-                _enforce_copies_limit_smb(repository, safe_hv_name, int(vmid), copies_to_keep)
-            elif repo_type == "nfs":
-                _enforce_copies_limit_nfs(repository, safe_hv_name, int(vmid), copies_to_keep)
-
-    def _enforce_copies_limit_smb(
-        repository: dict[str, Any],
-        hypervisor_name: str,
-        vmid: int,
-        copies_to_keep: int,
-    ) -> None:
-        """Enforce backup copies limit for a VM on SMB share by deleting oldest backups."""
-        import re
-        import subprocess
-
-        server = repository.get("server", "")
-        share = repository.get("share", "")
-        subdir = repository.get("path", "").strip("/")
-        username = repository.get("username")
-        password = repository.get("password")
-        domain = repository.get("domain")
-
-        if not server or not share:
-            return
-
-        # Build path to dump directory
-        base_path = f"{subdir}/Hypervisors/{hypervisor_name}/dump" if subdir else f"Hypervisors/{hypervisor_name}/dump"
-
-        # Build smbclient auth
-        auth_opts = []
-        if username:
-            if password:
-                auth_opts = ["-U", f"{domain}\\{username}%{password}" if domain else f"{username}%{password}"]
-            else:
-                auth_opts = ["-U", f"{domain}\\{username}" if domain else username]
-        else:
-            auth_opts = ["-N"]
-
-        # List all files matching the VMID pattern
-        # vzdump-qemu-{vmid}-* or vzdump-lxc-{vmid}-*
-        list_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", f"cd {base_path}; ls"]
-        try:
-            result = subprocess.run(list_cmd, capture_output=True, timeout=60, text=True)
-            if result.returncode != 0:
-                logger.debug(f"Could not list files in {base_path}: {result.stderr}")
-                return
-
-            # Parse file listing and find backup files for this VMID
-            # Pattern: vzdump-{qemu|lxc}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
-            # Must end with .vma, .vma.zst, .vma.gz, or .vma.lzo (not .notes or .log)
-            lines = result.stdout.strip().split("\n")
-            backup_files: list[tuple[str, str]] = []  # (timestamp, filename)
-            timestamp_pattern = re.compile(r"vzdump-(?:qemu|lxc)-\d+-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})\.vma")
-            # Only match actual backup files, not .notes or .log
-            backup_ext_pattern = re.compile(r"\.vma(\.zst|\.gz|\.lzo)?$")
-
-            for line in lines:
-                parts = line.strip().split()
-                if not parts:
-                    continue
-                filename = parts[0]
-                # Match vzdump-{type}-{vmid}-{timestamp}.vma* (but not .notes or .log)
-                if (
-                    filename.startswith(f"vzdump-qemu-{vmid}-")
-                    or filename.startswith(f"vzdump-lxc-{vmid}-")
-                ) and backup_ext_pattern.search(filename):
-                    # Extract timestamp for sorting
-                    match = timestamp_pattern.search(filename)
-                    if match:
-                        timestamp = match.group(1)
-                        backup_files.append((timestamp, filename))
-
-            # Sort by timestamp (oldest first)
-            backup_files.sort(key=lambda x: x[0])
-
-            current_count = len(backup_files)
-            logger.info(f"VM {vmid}: Found {current_count} backups, limit is {copies_to_keep}")
-
-            if current_count <= copies_to_keep:
-                logger.debug(f"VM {vmid}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
-                return
-
-            # Delete oldest backups to stay within limit
-            backups_to_delete = current_count - copies_to_keep
-            deleted_count = 0
-
-            for i in range(backups_to_delete):
-                timestamp, backup_file = backup_files[i]
-                files_to_delete = [backup_file]
-
-                # Also delete associated .log and .notes files
-                base_name = (
-                    backup_file.replace(".vma.zst", "")
-                    .replace(".vma.gz", "")
-                    .replace(".vma.lzo", "")
-                    .replace(".vma", "")
-                )
-                files_to_delete.append(f"{base_name}.log")
-                files_to_delete.append(f"{backup_file}.notes")
-
-                for filename in files_to_delete:
-                    smb_del_cmd = f'cd {base_path}; del "{filename}"'
-                    del_cmd = [
-                        "smbclient", f"//{server}/{share}", *auth_opts, "-c", smb_del_cmd
-                    ]
-                    del_result = subprocess.run(del_cmd, capture_output=True, timeout=30)
-                    if del_result.returncode == 0:
-                        logger.info(f"Deleted old backup file: {filename}")
-                        if filename == backup_file:
-                            deleted_count += 1
-                    else:
-                        # Ignore errors for .log/.notes files that may not exist
-                        if filename == backup_file:
-                            err = del_result.stderr.decode() if del_result.stderr else "unknown error"
-                            logger.warning(f"Failed to delete {filename}: {err}")
-
-            if deleted_count > 0:
-                logger.info(
-                    f"Retention enforcement: deleted {deleted_count} old backups "
-                    f"for VM {vmid}, keeping {copies_to_keep}"
-                )
-
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Timeout enforcing retention for VM {vmid} from SMB")
-        except Exception as e:
-            logger.warning(f"Error enforcing retention for VM {vmid} from SMB: {e}")
-
-    def _enforce_copies_limit_nfs(
-        repository: dict[str, Any],
-        hypervisor_name: str,
-        vmid: int,
-        copies_to_keep: int,
-    ) -> None:
-        """Enforce backup copies limit for a VM on NFS share by deleting oldest backups."""
-        import re
-        import subprocess
-        import tempfile
-
-        server = repository.get("server", "")
-        export = repository.get("share", "")  # NFS export path
-        subdir = repository.get("path", "").strip("/")
-
-        if not server or not export:
-            return
-
-        # Create temp mount point
-        mount_point = tempfile.mkdtemp(prefix="backer_nfs_del_")
-
-        try:
-            # Mount the NFS share
-            mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", f"{server}:{export}", mount_point]
-            result = subprocess.run(mount_cmd, capture_output=True, timeout=30)
-            if result.returncode != 0:
-                err = result.stderr.decode() if result.stderr else "unknown error"
-                logger.warning(f"Failed to mount NFS for retention enforcement: {err}")
-                return
-
-            # Build path to dump directory
-            if subdir:
-                dump_dir = Path(mount_point) / subdir / "Hypervisors" / hypervisor_name / "dump"
-            else:
-                dump_dir = Path(mount_point) / "Hypervisors" / hypervisor_name / "dump"
-
-            if not dump_dir.exists():
-                logger.debug(f"Dump directory does not exist: {dump_dir}")
-                return
-
-            # Find all backup files for this VMID with timestamps
-            # Pattern: vzdump-{qemu|lxc}-{vmid}-{YYYY_MM_DD-HH_MM_SS}.vma.{zst|gz|lzo}
-            # Must end with .vma, .vma.zst, .vma.gz, or .vma.lzo (not .notes or .log)
-            timestamp_pattern = re.compile(r"vzdump-(?:qemu|lxc)-\d+-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})\.vma")
-            backup_ext_pattern = re.compile(r"\.vma(\.zst|\.gz|\.lzo)?$")
-            backup_files: list[tuple[str, Path]] = []  # (timestamp, path)
-
-            for entry in dump_dir.iterdir():
-                if not entry.is_file():
-                    continue
-                if (
-                    entry.name.startswith(f"vzdump-qemu-{vmid}-")
-                    or entry.name.startswith(f"vzdump-lxc-{vmid}-")
-                ) and backup_ext_pattern.search(entry.name):
-                    match = timestamp_pattern.search(entry.name)
-                    if match:
-                        timestamp = match.group(1)
-                        backup_files.append((timestamp, entry))
-
-            # Sort by timestamp (oldest first)
-            backup_files.sort(key=lambda x: x[0])
-
-            current_count = len(backup_files)
-            logger.info(f"VM {vmid}: Found {current_count} backups, limit is {copies_to_keep}")
-
-            if current_count <= copies_to_keep:
-                logger.debug(f"VM {vmid}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
-                return
-
-            # Delete oldest backups to stay within limit
-            backups_to_delete = current_count - copies_to_keep
-            deleted = 0
-
-            for i in range(backups_to_delete):
-                timestamp, entry = backup_files[i]
-
-                # Delete the main backup file
-                try:
-                    entry.unlink()
-                    logger.info(f"Deleted old backup file: {entry.name}")
-                    deleted += 1
-                except OSError as e:
-                    logger.warning(f"Failed to delete {entry.name}: {e}")
-                    continue
-
-                # Delete associated .notes file if exists
-                notes_file = entry.parent / f"{entry.name}.notes"
-                if notes_file.exists():
-                    try:
-                        notes_file.unlink()
-                        logger.debug(f"Deleted notes file: {notes_file.name}")
-                    except OSError:
-                        pass
-
-                # Delete associated .log file if exists
-                base_name = (
-                    entry.name.replace(".vma.zst", "")
-                    .replace(".vma.gz", "")
-                    .replace(".vma.lzo", "")
-                    .replace(".vma", "")
-                )
-                log_file = entry.parent / f"{base_name}.log"
-                if log_file.exists():
-                    try:
-                        log_file.unlink()
-                        logger.debug(f"Deleted log file: {log_file.name}")
-                    except OSError:
-                        pass
-
-            if deleted > 0:
-                logger.info(
-                    f"Retention enforcement: deleted {deleted} old backups "
-                    f"for VM {vmid}, keeping {copies_to_keep}"
-                )
-
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Timeout enforcing retention for VM {vmid} from NFS")
-        except Exception as e:
-            logger.warning(f"Error enforcing retention for VM {vmid} from NFS: {e}")
-        finally:
-            # Unmount
-            try:
-                subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
-            except Exception:
-                try:
-                    subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
-                except Exception:
-                    pass
-
-            # Remove temp mount point
-            try:
-                import os
-                os.rmdir(mount_point)
-            except Exception:
-                pass
-
-    def _enforce_copies_limit_hyperv_smb(
-        repository: dict[str, Any],
-        hypervisor_name: str,
-        vm_name: str,
-        copies_to_keep: int,
-    ) -> None:
-        """Enforce backup copies limit for a Hyper-V VM on SMB share.
-
-        Hyper-V backups use a VM-centric folder structure:
-        {repo_path}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
-
-        This function lists timestamp folders, sorts them by timestamp,
-        and recursively deletes the oldest folders to stay within the limit.
-        """
-        import re
-        import subprocess
-
-        from backer.server.repositories import SMBBrowser
-
-        server = repository.get("server", "")
-        share = repository.get("share", "")
-        subdir = repository.get("path", "").strip("/")
-        username = repository.get("username")
-        password = repository.get("password")
-        domain = repository.get("domain")
-
-        if not server or not share:
-            return
-
-        # Build path to VM's backup directory
-        # Structure: Hypervisors/{hv_name}/hyperv/{vm_name}/
-        if subdir:
-            vm_path = f"{subdir}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}"
-        else:
-            vm_path = f"Hypervisors/{hypervisor_name}/hyperv/{vm_name}"
-
-        try:
-            # List timestamp folders in the VM directory using SMBBrowser
-            success, entries = SMBBrowser.list_directory(
-                server, share, vm_path, username, password, domain
-            )
-            if not success:
-                logger.debug(f"Could not list Hyper-V backups in {vm_path}")
-                return
-
-            # Find timestamp folders (format: YYYYMMDD_HHMMSS)
-            timestamp_pattern = re.compile(r"^(\d{8}_\d{6})$")
-            backup_folders: list[tuple[str, str]] = []  # (timestamp, folder_name)
-
-            for entry in entries:
-                if entry.name in [".", ".."]:
-                    continue
-                if entry.is_dir:
-                    match = timestamp_pattern.match(entry.name)
-                    if match:
-                        backup_folders.append((match.group(1), entry.name))
-
-            # Sort by timestamp (oldest first)
-            backup_folders.sort(key=lambda x: x[0])
-
-            current_count = len(backup_folders)
-            logger.info(f"VM {vm_name}: Found {current_count} Hyper-V backups, limit is {copies_to_keep}")
-
-            if current_count <= copies_to_keep:
-                logger.debug(
-                    f"VM {vm_name}: {current_count} backups <= {copies_to_keep} limit, nothing to delete"
-                )
-                return
-
-            # Delete oldest backup folders to stay within limit
-            folders_to_delete = current_count - copies_to_keep
-            deleted_count = 0
-
-            # Build smbclient auth
-            auth_opts = []
-            if username:
-                if password:
-                    auth_opts = [
-                        "-U",
-                        f"{domain}\\{username}%{password}" if domain else f"{username}%{password}",
-                    ]
-                else:
-                    auth_opts = ["-U", f"{domain}\\{username}" if domain else username]
-            else:
-                auth_opts = ["-N"]
-
-            for i in range(folders_to_delete):
-                timestamp, folder_name = backup_folders[i]
-                folder_path = f"{vm_path}/{folder_name}"
-
-                # Recursively delete the timestamp folder and all contents
-                deleted = _delete_smb_folder_recursive(
-                    server, share, folder_path, auth_opts, username, password, domain
-                )
-                if deleted:
-                    logger.info(f"Deleted old Hyper-V backup folder: {folder_name}")
-                    deleted_count += 1
-                else:
-                    logger.warning(f"Failed to delete Hyper-V backup folder: {folder_name}")
-
-            if deleted_count > 0:
-                logger.info(
-                    f"Retention enforcement: deleted {deleted_count} old Hyper-V backups "
-                    f"for VM {vm_name}, keeping {copies_to_keep}"
-                )
-
-        except Exception as e:
-            logger.warning(f"Error enforcing Hyper-V retention for VM {vm_name}: {e}")
-
-    def _delete_smb_folder_recursive(
-        server: str,
-        share: str,
-        folder_path: str,
-        auth_opts: list[str],
-        username: str | None,
-        password: str | None,
-        domain: str | None,
-    ) -> bool:
-        """Recursively delete an SMB folder and all its contents.
-
-        Returns True if successful, False otherwise.
-        """
-        import subprocess
-
-        from backer.server.repositories import SMBBrowser
-
-        try:
-            # List contents of the folder
-            success, entries = SMBBrowser.list_directory(
-                server, share, folder_path, username, password, domain
-            )
-            if not success:
-                return False
-
-            # Delete contents first (files and subdirectories)
-            for entry in entries:
-                if entry.name in [".", ".."]:
-                    continue
-
-                entry_path = f"{folder_path}/{entry.name}"
-
-                if entry.is_dir:
-                    # Recursively delete subdirectory
-                    _delete_smb_folder_recursive(
-                        server, share, entry_path, auth_opts, username, password, domain
-                    )
-                else:
-                    # Delete file
-                    del_cmd = [
-                        "smbclient",
-                        f"//{server}/{share}",
-                        *auth_opts,
-                        "-c",
-                        f'del "{entry_path}"',
-                    ]
-                    subprocess.run(del_cmd, capture_output=True, timeout=30)
-
-            # Now delete the empty folder
-            rmdir_cmd = [
-                "smbclient",
-                f"//{server}/{share}",
-                *auth_opts,
-                "-c",
-                f'rmdir "{folder_path}"',
-            ]
-            result = subprocess.run(rmdir_cmd, capture_output=True, timeout=30)
-            return result.returncode == 0
-
-        except Exception as e:
-            logger.debug(f"Error deleting SMB folder {folder_path}: {e}")
-            return False
 
     def _auto_import_hypervisor_jobs(
         storage: Storage,
