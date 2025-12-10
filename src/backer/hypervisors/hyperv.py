@@ -316,50 +316,34 @@ class HyperVAPI:
         script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
 
         # Split base64 into chunks to avoid command line limits
-        # WinRM has ~8KB limit per command, so use ~6KB chunks to be safe
-        chunk_size = 6000
+        # pywinrm's run_ps() base64-encodes again, so we need small chunks (~2KB)
+        # to stay under the ~8KB WinRM command limit after double-encoding
+        chunk_size = 2000
         chunks = [script_b64[i : i + chunk_size] for i in range(0, len(script_b64), chunk_size)]
 
+        logger.debug(f"Splitting script into {len(chunks)} chunks for WinRM transfer")
+
         # First, create the file and write first chunk
-        create_cmd = f"""
-$f = '{temp_script_path}'
-$b64 = '{chunks[0]}'
-[System.IO.File]::WriteAllText($f, $b64)
-'CHUNK_OK'
-"""
-        rc, stdout, stderr = self._run_powershell(create_cmd)
-        if rc != 0 or "CHUNK_OK" not in stdout:
+        rc, stdout, stderr = self._run_powershell(
+            f"[IO.File]::WriteAllText('{temp_script_path}','{chunks[0]}');'OK'"
+        )
+        if rc != 0 or "OK" not in stdout:
             return rc, stdout, stderr or "Failed to create temp script file"
 
         # Append remaining chunks
         for i, chunk in enumerate(chunks[1:], 1):
-            append_cmd = f"""
-$f = '{temp_script_path}'
-$b64 = '{chunk}'
-[System.IO.File]::AppendAllText($f, $b64)
-'CHUNK_OK'
-"""
-            rc, stdout, stderr = self._run_powershell(append_cmd)
-            if rc != 0 or "CHUNK_OK" not in stdout:
-                # Try to cleanup
+            rc, stdout, stderr = self._run_powershell(
+                f"[IO.File]::AppendAllText('{temp_script_path}','{chunk}');'OK'"
+            )
+            if rc != 0 or "OK" not in stdout:
                 self._run_powershell(f"Remove-Item '{temp_script_path}' -Force -EA SilentlyContinue")
                 return rc, stdout, stderr or f"Failed to write chunk {i}"
 
         # Now decode and execute the script
-        exec_cmd = f"""
-$f = '{temp_script_path}'
-try {{
-    $b64 = [System.IO.File]::ReadAllText($f)
-    $bytes = [System.Convert]::FromBase64String($b64)
-    $script = [System.Text.Encoding]::UTF8.GetString($bytes)
-    # Write decoded script back to file for execution
-    [System.IO.File]::WriteAllText($f, $script, [System.Text.Encoding]::UTF8)
-    # Execute the script file
-    & $f
-}} finally {{
-    Remove-Item $f -Force -ErrorAction SilentlyContinue
-}}
-"""
+        exec_cmd = f"""$f='{temp_script_path}'
+try{{$b=[Convert]::FromBase64String([IO.File]::ReadAllText($f))
+[IO.File]::WriteAllBytes($f,$b)
+&$f}}finally{{Remove-Item $f -Force -EA SilentlyContinue}}"""
         return self._run_powershell(exec_cmd, timeout=timeout)
 
     def test_connection(self) -> tuple[bool, str]:
