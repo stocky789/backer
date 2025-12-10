@@ -1039,20 +1039,81 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
 
         # Collect results for metadata writing
         backup_results = []
+        total_vms = len(guest_ids)
 
         for idx, vmid in enumerate(guest_ids):
             guest = guest_map.get(vmid)
             guest_name = guest.get("name", f"VM {vmid}") if guest else f"VM {vmid}"
+            vm_num = idx + 1  # 1-based for display
 
-            # Update job progress for activity panel
-            progress_pct = int((idx / len(guest_ids)) * 100)
+            # Progress strategy for multi-VM jobs (Option C):
+            # - Progress bar shows overall completion (VM count based)
+            # - Text shows current phase with "VM X of Y" context
+            # - Completed VMs count toward progress, current VM adds partial progress
+
+            # Phase weights - how far through the current VM's backup we are
+            # The "exporting" phase is the longest, taking most of the time
+            phase_weights = {
+                "starting": 0,
+                "shutting_down": 5,
+                "creating_checkpoint": 10,
+                "exporting": 15,  # Stays here during the long export+copy
+                "verifying": 85,
+                "cleanup": 95,
+                "starting_vm": 98,
+                "completed": 100,
+            }
+
+            def hyperv_progress_callback(progress_info: dict) -> None:
+                """Update job progress based on Hyper-V backup phase."""
+                phase = progress_info.get("status", "")
+                vm = progress_info.get("vm", guest_name)
+
+                phase_pct = phase_weights.get(phase, 0)
+
+                # Calculate overall progress:
+                # (completed_vms + current_vm_progress) / total_vms * 100
+                completed_vms = idx  # VMs completed before this one
+                current_vm_progress = phase_pct / 100.0  # 0.0 to 1.0
+                overall_pct = int(((completed_vms + current_vm_progress) / total_vms) * 100)
+                overall_pct = min(overall_pct, 99)  # Never show 100% until truly done
+
+                # Human-readable phase messages with VM count context
+                vm_context = f"[{vm_num}/{total_vms}] " if total_vms > 1 else ""
+
+                phase_messages = {
+                    "starting": f"{vm_context}Starting: {vm}",
+                    "shutting_down": f"{vm_context}Shutting down: {vm}",
+                    "creating_checkpoint": f"{vm_context}Creating checkpoint: {vm}",
+                    "exporting": f"{vm_context}Exporting & copying: {vm}",
+                    "verifying": f"{vm_context}Verifying: {vm}",
+                    "cleanup": f"{vm_context}Cleaning up: {vm}",
+                    "starting_vm": f"{vm_context}Restarting: {vm}",
+                    "completed": f"{vm_context}Completed: {vm}",
+                }
+                message = phase_messages.get(phase, f"{vm_context}Backing up: {vm}")
+
+                _storage.update_job_progress(
+                    run_id=run_id,
+                    status="running",
+                    progress_percent=overall_pct,
+                    message=message,
+                    current_file=vm,
+                    files_processed=idx,
+                    total_files=total_vms,
+                )
+
+            # Initial progress update for this VM
+            base_pct = int((idx / total_vms) * 100)
+            vm_context = f"[{vm_num}/{total_vms}] " if total_vms > 1 else ""
             _storage.update_job_progress(
                 run_id=run_id,
                 status="running",
-                progress_percent=progress_pct,
-                message=f"Backing up VM: {guest_name}",
+                progress_percent=base_pct,
+                message=f"{vm_context}Starting: {guest_name}",
                 current_file=guest_name,
                 files_processed=idx,
+                total_files=total_vms,
             )
 
             # Save run as running
@@ -1072,6 +1133,7 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     vm_name=guest_name,
                     backup_path=backup_base_path,
                     backup_mode=backup_mode,
+                    progress_callback=hyperv_progress_callback,
                     smb_username=smb_username,
                     smb_password=smb_password,
                     smb_domain=smb_domain,
@@ -4198,7 +4260,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """
         import subprocess
 
-        from backer.server.repositories import smb_auth_file, smb_list_files
+        from backer.server.repositories import smb_auth_file, SMBBrowser
 
         repo = storage.get_repository(repo_id)
         if not repo:
@@ -4248,24 +4310,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 count = 0
                 task.message = f"Scanning {path}..."
 
-                # List contents
-                success, entries = smb_list_files(server, share, path, username, password, domain)
+                # List contents using SMBBrowser.list_directory to get is_dir attribute
+                success, entries = SMBBrowser.list_directory(server, share, path, username, password, domain)
                 if not success:
                     # Path might not exist or be inaccessible
                     return 0
 
-                # Process each entry
+                # Process each entry - entries are DirectoryEntry objects with is_dir attribute
                 for entry in entries:
-                    if entry in [".", ".."]:
+                    if entry.name in [".", ".."]:
                         continue
 
-                    entry_path = f"{path}/{entry}" if path else entry
+                    entry_path = f"{path}/{entry.name}" if path else entry.name
 
-                    # Check if it's a directory by trying to list it
-                    is_dir_success, dir_entries = smb_list_files(server, share, entry_path, username, password, domain)
-
-                    if is_dir_success:
-                        # It's a directory, recurse first
+                    if entry.is_dir:
+                        # It's a directory, recurse first to delete contents
                         count += delete_path_recursive(entry_path, depth + 1)
 
                         # Then delete the empty directory
@@ -6015,6 +6074,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         repo_type = repository.get("repo_type", "").lower()
         server = repository.get("server", "")
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
 
         # Get hypervisor name for path construction
         hv_name = hypervisor.get("name", "unknown")
@@ -6049,10 +6109,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Log what we're about to clean up
         for filename in filenames_to_delete:
-            logger.info(f"  - Will delete backup file: {filename}")
+            logger.info(f"  - Will delete backup file/folder: {filename}")
         for guest_id, dt in timestamp_fallback:
             logger.info(f"  - Will look for VMID {guest_id} backup from {dt.isoformat()} (legacy timestamp match)")
 
+        # Hyper-V uses a different folder structure than Proxmox
+        # Structure: {repo_path}/Hypervisors/{hv_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
+        # The backup_filename stores the full UNC path to the VM export folder
+        if hypervisor_type == "hyperv":
+            if repo_type == "smb":
+                share = repository.get("share", "")
+                username = repository.get("username")
+                domain = repository.get("domain")
+                repo_password = storage.get_repository_password(repository_id)
+
+                if not server or not share:
+                    logger.warning("Cannot clean up SMB: missing server or share")
+                    return
+
+                logger.info(f"[HYPERV CLEANUP] Cleaning up Hyper-V backup folders for job {job.get('name')}")
+                _cleanup_hyperv_smb_job_files(
+                    server, share, username, repo_password, domain, filenames_to_delete
+                )
+            else:
+                logger.warning(f"Hyper-V backup cleanup not supported for repo type: {repo_type}")
+            return
+
+        # Proxmox/standard cleanup below
         if repo_type == "nfs":
             # NFS storage: Proxmox mounts the export root and vzdump creates dump/ there
             # So backups are at: {export}/dump/vzdump-*.vma.zst
@@ -6605,6 +6688,128 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         logger.info("[NFS CLEANUP] Lazy unmount successful")
                     except Exception as e:
                         logger.warning(f"[NFS CLEANUP] Could not unmount: {e}")
+
+    def _cleanup_hyperv_smb_job_files(
+        server: str,
+        share: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None,
+        backup_paths: list[str],
+    ) -> None:
+        """Clean up Hyper-V backup folders from an SMB share.
+
+        For Hyper-V, backup_paths contains full UNC paths to VM export folders like:
+        \\\\server\\share\\Backer\\Hypervisors\\hyperv\\testwin11\\20251210_191813\\testwin11
+
+        We need to delete the timestamp folder (parent of the VM name folder), e.g.:
+        \\\\server\\share\\Backer\\Hypervisors\\hyperv\\testwin11\\20251210_191813\\
+
+        Structure: {repo_path}/Hypervisors/{hv_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
+        """
+        import subprocess
+
+        from backer.server.repositories import SMBBrowser
+
+        # Build smbclient auth
+        if username:
+            if domain:
+                auth_str = f"{domain}\\{username}%{password or ''}"
+            else:
+                auth_str = f"{username}%{password or ''}"
+            auth_parts = ["-U", auth_str]
+        else:
+            auth_parts = ["-N"]
+
+        def run_smb_cmd(cmd: str, timeout: int = 60) -> tuple[bool, str]:
+            """Run an smbclient command and return success status and output."""
+            full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
+            try:
+                result = subprocess.run(
+                    full_cmd, capture_output=True, timeout=timeout, text=True
+                )
+                return result.returncode == 0, result.stderr or result.stdout
+            except subprocess.TimeoutExpired:
+                return False, "Command timed out"
+            except Exception as e:
+                return False, str(e)
+
+        def delete_folder_recursive(smb_path: str) -> bool:
+            """Recursively delete a folder and all its contents."""
+            # List directory contents using SMBBrowser for proper file type detection
+            success, entries = SMBBrowser.list_directory(
+                server, share, smb_path, username, password, domain
+            )
+            if not success:
+                logger.debug(f"[HYPERV CLEANUP] Could not list {smb_path}: {entries}")
+                return False
+
+            # Delete contents first
+            for entry in entries:
+                if entry.name in [".", ".."]:
+                    continue
+                entry_path = f"{smb_path}/{entry.name}"
+                if entry.is_dir:
+                    delete_folder_recursive(entry_path)
+                    run_smb_cmd(f'rmdir "{entry_path}"')
+                else:
+                    run_smb_cmd(f'del "{entry_path}"')
+
+            return True
+
+        logger.info(f"[HYPERV CLEANUP] Starting cleanup for {len(backup_paths)} Hyper-V backup(s)")
+        deleted_count = 0
+
+        for backup_path in backup_paths:
+            if not backup_path:
+                continue
+
+            # backup_path is the full UNC path to the VM export folder:
+            # \\server\share\Backer\Hypervisors\hyperv\testwin11\20251210_191813\testwin11
+            # We need to delete the timestamp folder (parent)
+            # Convert UNC path to SMB relative path
+            unc_prefix = f"\\\\{server}\\{share}"
+            if not backup_path.startswith(unc_prefix):
+                # Try with forward slashes
+                unc_prefix_fwd = f"//{server}/{share}"
+                if backup_path.startswith(unc_prefix_fwd):
+                    smb_path = backup_path[len(unc_prefix_fwd):].lstrip("/\\")
+                else:
+                    logger.warning(f"[HYPERV CLEANUP] Path doesn't match share: {backup_path}")
+                    continue
+            else:
+                smb_path = backup_path[len(unc_prefix):].lstrip("/\\")
+
+            # Normalize path separators
+            smb_path = smb_path.replace("\\", "/")
+
+            # The smb_path is like: Backer/Hypervisors/hyperv/testwin11/20251210_191813/testwin11
+            # We want to delete the timestamp folder: Backer/Hypervisors/hyperv/testwin11/20251210_191813
+            parts = smb_path.rstrip("/").split("/")
+            if len(parts) >= 2:
+                # Remove the last part (VM name folder created by Export-VM) to get timestamp folder
+                timestamp_folder = "/".join(parts[:-1])
+            else:
+                timestamp_folder = smb_path
+
+            logger.info(f"[HYPERV CLEANUP] Deleting: {timestamp_folder}")
+
+            # Recursively delete the timestamp folder and all its contents
+            delete_folder_recursive(timestamp_folder)
+
+            # Delete the timestamp folder itself
+            ok, output = run_smb_cmd(f'rmdir "{timestamp_folder}"')
+            if ok:
+                deleted_count += 1
+                logger.info(f"[HYPERV CLEANUP] DELETED folder: {timestamp_folder}")
+            else:
+                # Try to delete anyway - folder might already be empty
+                if "NT_STATUS_NO_SUCH_FILE" in output or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in output:
+                    logger.debug(f"[HYPERV CLEANUP] Folder already deleted: {timestamp_folder}")
+                else:
+                    logger.warning(f"[HYPERV CLEANUP] Failed to delete folder {timestamp_folder}: {output}")
+
+        logger.info(f"[HYPERV CLEANUP] Cleanup complete. Deleted {deleted_count} folder(s)")
 
     def _cleanup_smb_job_files(
         server: str,

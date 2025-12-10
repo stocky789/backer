@@ -1403,8 +1403,14 @@ class HyperVBackupManager:
                     return result
 
             # Perform export
+            # For SMB paths, this exports locally then copies to network
+            is_smb_backup = backup_path.startswith("\\\\") and smb_username and smb_password
             if progress_callback:
-                progress_callback({"status": "exporting", "vm": vm_name})
+                if is_smb_backup:
+                    # For SMB: export to local temp, then copy to share
+                    progress_callback({"status": "exporting", "vm": vm_name})
+                else:
+                    progress_callback({"status": "exporting", "vm": vm_name})
 
             # Create VM-centric backup directory structure:
             # {backup_path}/{vm_name}/{timestamp}/
@@ -1420,6 +1426,10 @@ class HyperVBackupManager:
                 smb_password=smb_password,
                 smb_domain=smb_domain,
             )
+
+            # Report verification phase after export completes
+            if progress_callback:
+                progress_callback({"status": "verifying", "vm": vm_name})
 
             if success:
                 result["success"] = True
@@ -1448,7 +1458,7 @@ if (Test-Path $path) {{
             # Cleanup checkpoint if created
             if checkpoint_id:
                 if progress_callback:
-                    progress_callback({"status": "removing_checkpoint", "vm": vm_name})
+                    progress_callback({"status": "cleanup", "vm": vm_name})
                 self.api.remove_checkpoint(vm_name, checkpoint_id)
 
             # Restart VM if it was running and we stopped it
