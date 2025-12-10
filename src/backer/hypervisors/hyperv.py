@@ -293,7 +293,10 @@ class HyperVAPI:
     ) -> tuple[int, str, str]:
         """Execute a large PowerShell script by writing it to a temp file first.
 
-        This avoids command line length limits for complex scripts.
+        This avoids command line length limits for complex scripts by:
+        1. Writing the script to a temp file on the Windows host in chunks
+        2. Executing the temp file
+        3. Cleaning up the temp file
 
         Args:
             script: PowerShell script to execute
@@ -303,19 +306,61 @@ class HyperVAPI:
             Tuple of (return_code, stdout, stderr)
         """
         import base64
+        import uuid
 
-        # Encode script as base64 to avoid escaping issues
-        script_bytes = script.encode("utf-16-le")
-        script_b64 = base64.b64encode(script_bytes).decode("ascii")
+        # Generate a unique temp file path
+        script_id = str(uuid.uuid4()).replace("-", "")[:12]
+        temp_script_path = f"$env:TEMP\\backer_script_{script_id}.ps1"
 
-        # Create a wrapper script that decodes and executes the main script
-        wrapper = f"""
-$scriptB64 = '{script_b64}'
-$scriptBytes = [System.Convert]::FromBase64String($scriptB64)
-$scriptText = [System.Text.Encoding]::Unicode.GetString($scriptBytes)
-Invoke-Expression $scriptText
+        # Encode script as base64 (UTF-8 this time, not UTF-16)
+        script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+
+        # Split base64 into chunks to avoid command line limits
+        # WinRM has ~8KB limit per command, so use ~6KB chunks to be safe
+        chunk_size = 6000
+        chunks = [script_b64[i : i + chunk_size] for i in range(0, len(script_b64), chunk_size)]
+
+        # First, create the file and write first chunk
+        create_cmd = f"""
+$f = '{temp_script_path}'
+$b64 = '{chunks[0]}'
+[System.IO.File]::WriteAllText($f, $b64)
+'CHUNK_OK'
 """
-        return self._run_powershell(wrapper, timeout=timeout)
+        rc, stdout, stderr = self._run_powershell(create_cmd)
+        if rc != 0 or "CHUNK_OK" not in stdout:
+            return rc, stdout, stderr or "Failed to create temp script file"
+
+        # Append remaining chunks
+        for i, chunk in enumerate(chunks[1:], 1):
+            append_cmd = f"""
+$f = '{temp_script_path}'
+$b64 = '{chunk}'
+[System.IO.File]::AppendAllText($f, $b64)
+'CHUNK_OK'
+"""
+            rc, stdout, stderr = self._run_powershell(append_cmd)
+            if rc != 0 or "CHUNK_OK" not in stdout:
+                # Try to cleanup
+                self._run_powershell(f"Remove-Item '{temp_script_path}' -Force -EA SilentlyContinue")
+                return rc, stdout, stderr or f"Failed to write chunk {i}"
+
+        # Now decode and execute the script
+        exec_cmd = f"""
+$f = '{temp_script_path}'
+try {{
+    $b64 = [System.IO.File]::ReadAllText($f)
+    $bytes = [System.Convert]::FromBase64String($b64)
+    $script = [System.Text.Encoding]::UTF8.GetString($bytes)
+    # Write decoded script back to file for execution
+    [System.IO.File]::WriteAllText($f, $script, [System.Text.Encoding]::UTF8)
+    # Execute the script file
+    & $f
+}} finally {{
+    Remove-Item $f -Force -ErrorAction SilentlyContinue
+}}
+"""
+        return self._run_powershell(exec_cmd, timeout=timeout)
 
     def test_connection(self) -> tuple[bool, str]:
         """Test connection to Hyper-V server.
