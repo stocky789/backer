@@ -1126,7 +1126,8 @@ if ($importPath -like '*.vmcx') {{
         }}
     }} else {{
         # Maybe it's directly in the path
-        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
         if ($vmcx) {{
             $vmcx.FullName
         }} else {{
@@ -1244,7 +1245,8 @@ if (Test-Path $backupPath) {{
     # Look for VM export folders (contain Virtual Machines subfolder with .vmcx)
     Get-ChildItem -Path $backupPath -Directory {filter_clause} | ForEach-Object {{
         $vmFolder = $_
-        $vmcxFiles = Get-ChildItem -Path (Join-Path $vmFolder.FullName 'Virtual Machines') -Filter '*.vmcx' -ErrorAction SilentlyContinue
+        $vmcxPath = Join-Path $vmFolder.FullName 'Virtual Machines'
+        $vmcxFiles = Get-ChildItem -Path $vmcxPath -Filter '*.vmcx' -ErrorAction SilentlyContinue
 
         if ($vmcxFiles) {{
             $size = (Get-ChildItem $vmFolder.FullName -Recurse -ErrorAction SilentlyContinue |

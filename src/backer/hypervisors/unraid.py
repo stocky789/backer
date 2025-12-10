@@ -1315,7 +1315,6 @@ class UnraidBackupManager:
 
             # Write modified XML to temp file
             temp_xml = f"/tmp/restore_{final_name}.xml"
-            escaped_xml = modified_xml.replace("'", "'\\''")
             rc, _, stderr = self._run_ssh_command(f"cat > '{temp_xml}' << 'XMLEOF'\n{modified_xml}\nXMLEOF")
             if rc != 0:
                 result["errors"].append(f"Failed to write VM config: {stderr}")

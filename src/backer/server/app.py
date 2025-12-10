@@ -914,7 +914,8 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         # Build UNC path that Windows can use
         backup_base_path = f"\\\\{smb_server}\\{smb_share}"
         if smb_path:
-            backup_base_path = f"{backup_base_path}\\{smb_path.replace('/', '\\')}"
+            smb_path_win = smb_path.replace("/", "\\")
+            backup_base_path = f"{backup_base_path}\\{smb_path_win}"
 
         # Add hypervisor subfolder
         backup_base_path = f"{backup_base_path}\\Hypervisors\\{hypervisor['name']}"
@@ -1321,7 +1322,9 @@ def _write_backup_metadata_to_repo(
                 vmid=vmid_int,
                 run_id=run_id,
                 status="success" if result.get("success") else "failed",
-                backup_file=result.get("archive_name") or result.get("backup_filename") or result.get("export_path", ""),
+                backup_file=(
+                    result.get("archive_name") or result.get("backup_filename") or result.get("export_path", "")
+                ),
                 started_at=result.get("started_at", tz.get_now().isoformat()),
                 finished_at=result.get("finished_at"),
                 size_bytes=result.get("archive_size") or result.get("backup_size"),
