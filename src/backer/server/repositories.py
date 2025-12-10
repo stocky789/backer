@@ -184,9 +184,11 @@ class SMBBrowser:
         # Normalize path
         if path:
             path = path.replace("\\", "/").strip("/")
-            smb_path = f"/{path}/*"
+            # For paths with spaces, we need to cd into the directory first, then ls
+            # Direct ls with quoted paths containing wildcards doesn't work well in smbclient
+            smb_path = f"/{path}"
         else:
-            smb_path = "/*"
+            smb_path = ""
 
         with smb_auth_file(username, password, domain) as auth_path:
             # Build smbclient command
@@ -197,8 +199,12 @@ class SMBBrowser:
             else:
                 cmd.append("-N")
 
-            # Quote the path to handle spaces in directory names like "Virtual Machines"
-            cmd.extend(["-c", f'ls "{smb_path}"'])
+            # Use cd + ls to handle paths with spaces (like "Virtual Machines")
+            # Quoting the path in cd works better than trying to quote ls with wildcards
+            if smb_path:
+                cmd.extend(["-c", f'cd "{smb_path}"; ls'])
+            else:
+                cmd.extend(["-c", "ls"])
 
             try:
                 result = subprocess.run(

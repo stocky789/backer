@@ -2078,28 +2078,41 @@ def _delete_smb_folder_recursive(
                 if not sub_deleted:
                     logger.warning(f"[RETENTION] Failed to delete subdirectory: {entry_path}")
             else:
-                # Delete file
+                # Delete file - use cd to parent dir then del filename to handle spaces
                 logger.debug(f"[RETENTION] Deleting file: {entry_path}")
                 del_cmd = [
                     "smbclient",
                     f"//{server}/{share}",
                     *auth_opts,
                     "-c",
-                    f'del "{entry_path}"',
+                    f'cd "{folder_path}"; del "{entry.name}"',
                 ]
                 result = subprocess.run(del_cmd, capture_output=True, text=True, timeout=30)
                 if result.returncode != 0:
                     logger.warning(f"[RETENTION] Failed to delete file {entry_path}: {result.stderr}")
 
-        # Now delete the empty folder
-        logger.debug(f"[RETENTION] Removing directory: {folder_path}")
-        rmdir_cmd = [
-            "smbclient",
-            f"//{server}/{share}",
-            *auth_opts,
-            "-c",
-            f'rmdir "{folder_path}"',
-        ]
+        # Now delete the empty folder - cd to parent and rmdir the folder name
+        # This handles paths with spaces better than trying to rmdir the full path
+        parent_path = "/".join(folder_path.strip("/").split("/")[:-1])
+        folder_name = folder_path.strip("/").split("/")[-1]
+        logger.debug(f"[RETENTION] Removing directory: {folder_path} (parent={parent_path}, name={folder_name})")
+        if parent_path:
+            rmdir_cmd = [
+                "smbclient",
+                f"//{server}/{share}",
+                *auth_opts,
+                "-c",
+                f'cd "{parent_path}"; rmdir "{folder_name}"',
+            ]
+        else:
+            # Root level directory
+            rmdir_cmd = [
+                "smbclient",
+                f"//{server}/{share}",
+                *auth_opts,
+                "-c",
+                f'rmdir "{folder_name}"',
+            ]
         result = subprocess.run(rmdir_cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode != 0:
@@ -4865,9 +4878,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         # It's a directory, recurse first to delete contents
                         count += delete_path_recursive(entry_path, depth + 1)
 
-                        # Then delete the empty directory
+                        # Then delete the empty directory - use cd + rmdir for paths with spaces
                         task.message = f"Removing directory {entry_path}..."
-                        rc, _, err = run_smb_command(f'rmdir "{entry_path}"')
+                        if path:
+                            cmd = f'cd "{path}"; rmdir "{entry.name}"'
+                        else:
+                            cmd = f'rmdir "{entry.name}"'
+                        rc, _, err = run_smb_command(cmd)
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
                             logger.info(f"Deleted directory: {entry_path}")
                             count += 1
@@ -4876,7 +4893,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             logger.warning(f"Directory not empty, re-scanning: {entry_path}")
                             count += delete_path_recursive(entry_path, depth + 1)
                             # Try again to delete the directory
-                            rc2, _, err2 = run_smb_command(f'rmdir "{entry_path}"')
+                            rc2, _, err2 = run_smb_command(cmd)
                             if rc2 == 0 or "NT_STATUS_NO_SUCH_FILE" in err2 or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err2:
                                 logger.info(f"Deleted directory on retry: {entry_path}")
                                 count += 1
@@ -4885,9 +4902,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         else:
                             errors.append(f"rmdir {entry_path}: {err.strip()[:100]}")
                     else:
-                        # It's a file, delete it
+                        # It's a file - use cd + del for paths with spaces
                         task.message = f"Deleting {entry_path}..."
-                        rc, _, err = run_smb_command(f'del "{entry_path}"')
+                        if path:
+                            cmd = f'cd "{path}"; del "{entry.name}"'
+                        else:
+                            cmd = f'del "{entry.name}"'
+                        rc, _, err = run_smb_command(cmd)
                         if rc == 0 or "NT_STATUS_NO_SUCH_FILE" in err or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err:
                             count += 1
                         else:
