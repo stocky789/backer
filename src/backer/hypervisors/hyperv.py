@@ -810,6 +810,11 @@ exit 1
         - Virtual Hard Disks: VM virtual disks
         - Virtual Machines: Configuration files (.vmcx)
 
+        For network (UNC) paths, the export is performed to a local temp
+        directory first, then copied to the network share. This is required
+        because Export-VM runs under the VMMS service (SYSTEM account) which
+        cannot access network shares authenticated via WinRM (double-hop issue).
+
         Args:
             vm_name: VM name
             export_path: Destination path for export (can be UNC path for SMB)
@@ -825,17 +830,18 @@ exit 1
             Tuple of (success, message/error)
         """
         # Build the Export-VM command with proper parameters per Microsoft docs
-        export_cmd = f"Export-VM -Name '{vm_name}' -Path $exportPath"
+        export_cmd_base = f"Export-VM -Name '{vm_name}' -Path"
+        capture_param = ""
         if capture_live_state:
-            export_cmd += f" -CaptureLiveState {capture_live_state}"
-        export_cmd += " -ErrorAction Stop"
+            capture_param = f" -CaptureLiveState {capture_live_state}"
 
-        # Build SMB authentication block if credentials provided
-        # This is needed for the "double-hop" problem with WinRM
-        smb_auth_block = ""
-        smb_cleanup_block = ""
-        if smb_username and smb_password and export_path.startswith("\\\\"):
-            # Extract server and share from UNC path (\\server\share\path)
+        # Check if destination is a UNC path (network share)
+        is_unc_path = export_path.startswith("\\\\")
+
+        if is_unc_path and smb_username and smb_password:
+            # For UNC paths, export to local temp first, then copy to network share
+            # This avoids the double-hop problem where Export-VM (running as SYSTEM)
+            # cannot access network shares authenticated via WinRM session
             unc_parts = export_path.lstrip("\\").split("\\")
             if len(unc_parts) >= 2:
                 smb_server = unc_parts[0]
@@ -843,39 +849,87 @@ exit 1
                 smb_unc = f"\\\\{smb_server}\\{smb_share}"
                 # Escape single quotes in password
                 safe_password = smb_password.replace("'", "''")
-                smb_auth_block = f"""
-# Authenticate to SMB share (required for WinRM double-hop)
+
+                script = f"""
+$ErrorActionPreference = 'Stop'
+$vmName = '{vm_name}'
+$finalPath = '{export_path}'
+$smbUnc = '{smb_unc}'
 $smbUser = '{smb_username}'
-$smbPass = ConvertTo-SecureString '{safe_password}' -AsPlainText -Force
-$smbCred = New-Object System.Management.Automation.PSCredential($smbUser, $smbPass)
+$smbPass = '{safe_password}'
+
+# Create a local temp directory for export
+$tempBase = 'C:\Backer\temp'
+if (-not (Test-Path $tempBase)) {{
+    New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+}}
+$localExportPath = Join-Path $tempBase ([System.Guid]::NewGuid().ToString())
+New-Item -ItemType Directory -Path $localExportPath -Force | Out-Null
+
 try {{
+    # Export VM to local temp directory (this works because VMMS can access local paths)
+    {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
+
+    $vmExportPath = Join-Path $localExportPath $vmName
+    if (-not (Test-Path $vmExportPath)) {{
+        throw "Export completed but VM folder not found at $vmExportPath"
+    }}
+
+    # Calculate size before copy
+    $size = (Get-ChildItem $vmExportPath -Recurse -ErrorAction SilentlyContinue |
+             Measure-Object -Property Length -Sum).Sum
+
+    # Now authenticate to SMB and copy files
     # Remove any existing connection first
-    net use '{smb_unc}' /delete 2>$null | Out-Null
-    # Connect with credentials
-    $netResult = net use '{smb_unc}' /user:$smbUser '{safe_password}' 2>&1
+    net use $smbUnc /delete 2>$null | Out-Null
+    $netResult = net use $smbUnc /user:$smbUser $smbPass 2>&1
     if ($LASTEXITCODE -ne 0) {{
         throw "Failed to connect to SMB share: $netResult"
     }}
-}} catch {{
-    Write-Error "SMB authentication failed: $_"
-    exit 1
+
+    try {{
+        # Create destination directory if needed
+        if (-not (Test-Path $finalPath)) {{
+            New-Item -ItemType Directory -Path $finalPath -Force | Out-Null
+        }}
+
+        # Copy exported VM to network share
+        $destVmPath = Join-Path $finalPath $vmName
+        # Remove existing backup if present (for clean overwrite)
+        if (Test-Path $destVmPath) {{
+            Remove-Item -Path $destVmPath -Recurse -Force
+        }}
+        Copy-Item -Path $vmExportPath -Destination $finalPath -Recurse -Force
+
+        @{{
+            Success = $true
+            Path = $destVmPath
+            SizeBytes = if ($size) {{ $size }} else {{ 0 }}
+        }} | ConvertTo-Json
+    }} finally {{
+        # Cleanup SMB connection
+        net use $smbUnc /delete 2>$null | Out-Null
+    }}
+}} finally {{
+    # Always cleanup local temp directory
+    if (Test-Path $localExportPath) {{
+        Remove-Item -Path $localExportPath -Recurse -Force -ErrorAction SilentlyContinue
+    }}
 }}
 """
-                smb_cleanup_block = f"""
-# Cleanup SMB connection
-net use '{smb_unc}' /delete 2>$null | Out-Null
-"""
-
-        script = f"""
-{smb_auth_block}
-# Create export directory if it doesn't exist
+        else:
+            # Local path or no SMB credentials - export directly
+            script = f"""
+$ErrorActionPreference = 'Stop'
 $exportPath = '{export_path}'
+
+# Create export directory if it doesn't exist
 if (-not (Test-Path $exportPath)) {{
     New-Item -ItemType Directory -Path $exportPath -Force | Out-Null
 }}
 
 # Export the VM
-{export_cmd}
+{export_cmd_base} $exportPath{capture_param} -ErrorAction Stop
 
 # Get the exported VM folder
 $vmExportPath = Join-Path $exportPath '{vm_name}'
@@ -883,14 +937,12 @@ if (Test-Path $vmExportPath) {{
     # Calculate total size
     $size = (Get-ChildItem $vmExportPath -Recurse -ErrorAction SilentlyContinue |
              Measure-Object -Property Length -Sum).Sum
-    {smb_cleanup_block}
     @{{
         Success = $true
         Path = $vmExportPath
         SizeBytes = if ($size) {{ $size }} else {{ 0 }}
     }} | ConvertTo-Json
 }} else {{
-    {smb_cleanup_block}
     @{{
         Success = $false
         Error = "Export completed but folder not found"
