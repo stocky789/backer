@@ -1637,7 +1637,7 @@ def _enforce_copies_limit(
         Location: {repo_path}/Hypervisors/{hypervisor_name}/dump/
 
     For Hyper-V:
-        Backup folders: {repo_path}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}/{timestamp}/
+        Backup folders: {repo_path}/Hypervisors/{hypervisor_name}/{vm_name}/{timestamp}/
         Deletes entire timestamp folders.
     """
     if copies_to_keep <= 0:
@@ -1930,7 +1930,7 @@ def _enforce_copies_limit_hyperv_smb(
     """Enforce backup copies limit for a Hyper-V VM on SMB share.
 
     Hyper-V backups use a VM-centric folder structure:
-    {repo_path}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
+    {repo_path}/Hypervisors/{hypervisor_name}/{vm_name}/{timestamp}/{vm_name}/
 
     This function lists timestamp folders, sorts them by timestamp,
     and recursively deletes the oldest folders to stay within the limit.
@@ -1950,19 +1950,23 @@ def _enforce_copies_limit_hyperv_smb(
         return
 
     # Build path to VM's backup directory
-    # Structure: Hypervisors/{hv_name}/hyperv/{vm_name}/
+    # Structure: Hypervisors/{hv_name}/{vm_name}/
+    # (backup_vm creates: {backup_path}/{vm_name}/{timestamp}/)
     if subdir:
-        vm_path = f"{subdir}/Hypervisors/{hypervisor_name}/hyperv/{vm_name}"
+        vm_path = f"{subdir}/Hypervisors/{hypervisor_name}/{vm_name}"
     else:
-        vm_path = f"Hypervisors/{hypervisor_name}/hyperv/{vm_name}"
+        vm_path = f"Hypervisors/{hypervisor_name}/{vm_name}"
 
     try:
+        logger.info(f"Checking retention for Hyper-V VM {vm_name} at //{server}/{share}/{vm_path}")
+
         # List timestamp folders in the VM directory using SMBBrowser
         success, entries = SMBBrowser.list_directory(
             server, share, vm_path, username, password, domain
         )
         if not success:
-            logger.debug(f"Could not list Hyper-V backups in {vm_path}")
+            error_msg = entries if isinstance(entries, str) else "Unknown error"
+            logger.warning(f"Could not list Hyper-V backups in {vm_path}: {error_msg}")
             return
 
         # Find timestamp folders (format: YYYYMMDD_HHMMSS)
@@ -6341,7 +6345,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.info(f"  - Will look for VMID {guest_id} backup from {dt.isoformat()} (legacy timestamp match)")
 
         # Hyper-V uses a different folder structure than Proxmox
-        # Structure: {repo_path}/Hypervisors/{hv_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
+        # Structure: {repo_path}/Hypervisors/{hv_name}/{vm_name}/{timestamp}/{vm_name}/
         # The backup_filename stores the full UNC path to the VM export folder
         if hypervisor_type == "hyperv":
             if repo_type == "smb":
@@ -6927,12 +6931,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Clean up Hyper-V backup folders from an SMB share.
 
         For Hyper-V, backup_paths contains full UNC paths to VM export folders like:
-        \\\\server\\share\\Backer\\Hypervisors\\hyperv\\testwin11\\20251210_191813\\testwin11
+        \\\\server\\share\\Backer\\Hypervisors\\{hv_name}\\testwin11\\20251210_191813\\testwin11
 
         We need to delete the timestamp folder (parent of the VM name folder), e.g.:
-        \\\\server\\share\\Backer\\Hypervisors\\hyperv\\testwin11\\20251210_191813\\
+        \\\\server\\share\\Backer\\Hypervisors\\{hv_name}\\testwin11\\20251210_191813\\
 
-        Structure: {repo_path}/Hypervisors/{hv_name}/hyperv/{vm_name}/{timestamp}/{vm_name}/
+        Structure: {repo_path}/Hypervisors/{hv_name}/{vm_name}/{timestamp}/{vm_name}/
         """
         import subprocess
 
@@ -7010,8 +7014,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Normalize path separators
             smb_path = smb_path.replace("\\", "/")
 
-            # The smb_path is like: Backer/Hypervisors/hyperv/testwin11/20251210_191813/testwin11
-            # We want to delete the timestamp folder: Backer/Hypervisors/hyperv/testwin11/20251210_191813
+            # The smb_path is like: Backer/Hypervisors/{hv_name}/testwin11/20251210_191813/testwin11
+            # We want to delete the timestamp folder: Backer/Hypervisors/{hv_name}/testwin11/20251210_191813
             parts = smb_path.rstrip("/").split("/")
             if len(parts) >= 2:
                 # Remove the last part (VM name folder created by Export-VM) to get timestamp folder
