@@ -1040,8 +1040,9 @@ if (-not $vmStoragePath) {{
 }}
 
 if (-not $vmStoragePath) {{
-    $checkedPathsList = ($candidatePaths | ForEach-Object {{ "$($_.Path) ($($_.Type))" }}) -join ', '
-    throw "No suitable storage found with enough free space ($([math]::Round($requiredSpace / 1GB, 2)) GB required) and write access. Checked paths: $checkedPathsList"
+    $pathsList = ($candidatePaths | ForEach-Object {{ "$($_.Path) ($($_.Type))" }}) -join ', '
+    $reqGB = [math]::Round($requiredSpace / 1GB, 2)
+    throw "No suitable storage with $reqGB GB free and write access. Checked: $pathsList"
 }}
 
 # Create temp export directory
