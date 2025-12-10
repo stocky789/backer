@@ -655,7 +655,7 @@ class UnraidBackupManager:
                 return result
 
             # Create backup directory
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
             vm_backup_dir = f"{backup_path}/{vm_name}_{timestamp}"
             rc, _, stderr = self._run_ssh_command(f"mkdir -p '{vm_backup_dir}'")
             if rc != 0:
@@ -762,7 +762,7 @@ class UnraidBackupManager:
                 )
 
             result["success"] = len(result["errors"]) == 0
-            result["duration_seconds"] = (datetime.now() - started_at).total_seconds()
+            result["duration_seconds"] = (dt.now() - started_at).total_seconds()
 
         except Exception as e:
             logger.exception(f"VM backup failed: {e}")
@@ -874,7 +874,7 @@ class UnraidBackupManager:
                     logger.info(f"Restarted container '{container_name}'")
 
             result["success"] = result["backup_file"] is not None
-            result["duration_seconds"] = (datetime.now() - started_at).total_seconds()
+            result["duration_seconds"] = (dt.now() - started_at).total_seconds()
 
         except Exception as e:
             logger.exception(f"Container backup failed: {e}")
@@ -927,7 +927,7 @@ class UnraidBackupManager:
             rc, hostname, _ = self._run_ssh_command("hostname")
             hostname = hostname.strip() or "unraid"
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
             backup_file = f"{backup_path}/flash_config_{hostname}_{timestamp}.tar.gz"
 
             # Create tar archive of /boot/config
@@ -946,7 +946,7 @@ class UnraidBackupManager:
                 result["success"] = True
                 logger.info(f"Created flash backup: {backup_file}")
 
-            result["duration_seconds"] = (datetime.now() - started_at).total_seconds()
+            result["duration_seconds"] = (dt.now() - started_at).total_seconds()
 
         except Exception as e:
             logger.exception(f"Flash backup failed: {e}")
@@ -1004,7 +1004,7 @@ class UnraidBackupManager:
                 progress_callback({"status": "backing_up_share", "share": share_name})
 
             # Create backup directory
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
             share_backup_dir = f"{backup_path}/{share_name}_{timestamp}"
             rc, _, stderr = self._run_ssh_command(f"mkdir -p '{share_backup_dir}'")
             if rc != 0:
@@ -1040,7 +1040,7 @@ class UnraidBackupManager:
                 if bytes_match:
                     result["bytes_transferred"] = int(bytes_match.group(1).replace(",", ""))
 
-            result["duration_seconds"] = (datetime.now() - started_at).total_seconds()
+            result["duration_seconds"] = (dt.now() - started_at).total_seconds()
 
         except Exception as e:
             logger.exception(f"Share backup failed: {e}")
