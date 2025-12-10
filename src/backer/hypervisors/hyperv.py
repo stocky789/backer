@@ -799,6 +799,7 @@ exit 1
         timeout: int = 3600,
         smb_username: str | None = None,
         smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> tuple[bool, str]:
         """Export a VM to a path.
 
@@ -825,6 +826,7 @@ exit 1
             timeout: Export timeout in seconds
             smb_username: Optional SMB username for network path authentication
             smb_password: Optional SMB password for network path authentication
+            smb_domain: Optional SMB domain for network path authentication
 
         Returns:
             Tuple of (success, message/error)
@@ -849,13 +851,15 @@ exit 1
                 smb_unc = f"\\\\{smb_server}\\{smb_share}"
                 # Escape single quotes in password
                 safe_password = smb_password.replace("'", "''")
+                # Build username with domain if provided (domain\username format)
+                full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
 
                 script = f"""
 $ErrorActionPreference = 'Stop'
 $vmName = '{vm_name}'
 $finalPath = '{export_path}'
 $smbUnc = '{smb_unc}'
-$smbUser = '{smb_username}'
+$smbUser = '{full_username}'
 $smbPass = '{safe_password}'
 
 # Create a local temp directory for export
@@ -1023,6 +1027,7 @@ class HyperVBackupManager:
         progress_callback: Any | None = None,
         smb_username: str | None = None,
         smb_password: str | None = None,
+        smb_domain: str | None = None,
     ) -> dict[str, Any]:
         """Backup a Hyper-V VM.
 
@@ -1033,6 +1038,7 @@ class HyperVBackupManager:
             progress_callback: Optional callback for progress updates
             smb_username: SMB username for network share authentication
             smb_password: SMB password for network share authentication
+            smb_domain: SMB domain for network share authentication
 
         Returns:
             Dict with backup result info
@@ -1105,9 +1111,10 @@ class HyperVBackupManager:
             success, export_result = self.api.export_vm(
                 vm_name,
                 vm_backup_path,
-                timeout=7200,  # 2 hour timeout for large VMs
+                timeout=86400,  # 24 hour timeout for large VMs on slow connections
                 smb_username=smb_username,
                 smb_password=smb_password,
+                smb_domain=smb_domain,
             )
 
             if success:

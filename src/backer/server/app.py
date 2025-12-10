@@ -1022,6 +1022,7 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         # Get SMB credentials for authentication (required for WinRM double-hop)
         smb_username = repository.get("username", "")
         smb_password = _storage.get_repository_password(repository_id)
+        smb_domain = repository.get("domain", "")
 
         # Start job progress tracking for activity panel
         _storage.start_job_progress(
@@ -1073,6 +1074,7 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     backup_mode=backup_mode,
                     smb_username=smb_username,
                     smb_password=smb_password,
+                    smb_domain=smb_domain,
                 )
 
                 backup_size = result.get("size_bytes", 0)
