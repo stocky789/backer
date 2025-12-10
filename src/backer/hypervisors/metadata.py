@@ -319,6 +319,85 @@ class HypervisorMetadata:
         runs = self.get_backup_runs(vmid, limit=1)
         return runs[0] if runs else None
 
+    def delete_backup_run_by_file(self, vmid: int | str, backup_file: str) -> bool:
+        """Delete a backup run record that references a specific backup file.
+
+        Called when a backup file is deleted for retention enforcement.
+        Removes the corresponding run metadata.
+
+        Args:
+            vmid: VM/container ID (int for Proxmox, str name for Hyper-V)
+            backup_file: Backup filename or path to match
+
+        Returns:
+            True if a run was found and deleted
+        """
+        runs_dir = self.metadata_dir / "hypervisor_backups" / str(vmid) / "runs"
+        if not runs_dir.exists():
+            return False
+
+        # Look for run record that matches this backup file
+        for path in runs_dir.glob("*.json"):
+            data = self._read_json(path)
+            if data:
+                stored_file = data.get("backup_file", "")
+                # Match by filename or path (handle both full paths and just filenames)
+                if stored_file == backup_file or Path(stored_file).name == backup_file:
+                    try:
+                        path.unlink()
+                        logger.info(f"Deleted run metadata for backup: {backup_file}")
+                        return True
+                    except OSError as e:
+                        logger.warning(f"Failed to delete run metadata {path}: {e}")
+                        return False
+
+        return False
+
+    def delete_old_runs_for_vm(self, vmid: int | str, keep_count: int) -> int:
+        """Delete oldest run records to match retention limit.
+
+        Called after retention enforcement to sync metadata with actual backups.
+        Keeps the newest `keep_count` runs and deletes older ones.
+
+        Args:
+            vmid: VM/container ID (int for Proxmox, str name for Hyper-V)
+            keep_count: Number of runs to keep
+
+        Returns:
+            Number of runs deleted
+        """
+        runs_dir = self.metadata_dir / "hypervisor_backups" / str(vmid) / "runs"
+        if not runs_dir.exists():
+            return 0
+
+        # Get all runs sorted by started_at
+        runs: list[tuple[str, Path]] = []  # (timestamp, path)
+        for path in runs_dir.glob("*.json"):
+            data = self._read_json(path)
+            if data:
+                runs.append((data.get("started_at", ""), path))
+
+        # Sort by timestamp (newest first)
+        runs.sort(key=lambda x: x[0], reverse=True)
+
+        if len(runs) <= keep_count:
+            return 0
+
+        # Delete oldest runs beyond the keep count
+        deleted = 0
+        for timestamp, path in runs[keep_count:]:
+            try:
+                path.unlink()
+                logger.debug(f"Deleted old run metadata: {path.name}")
+                deleted += 1
+            except OSError as e:
+                logger.warning(f"Failed to delete run metadata {path}: {e}")
+
+        if deleted > 0:
+            logger.info(f"Cleaned up {deleted} old run metadata files for VM {vmid}")
+
+        return deleted
+
     def save_job(
         self,
         job_id: str,

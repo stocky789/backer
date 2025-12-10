@@ -1192,7 +1192,7 @@ try {{
         $hasVhds = Test-Path (Join-Path $destVmPath 'Virtual Hard Disks')
         $hasVms = Test-Path (Join-Path $destVmPath 'Virtual Machines')
         if (-not $hasVhds -and -not $hasVms) {{
-            throw "Copy completed but VM structure not found in destination. Check permissions and disk space on SMB share."
+            throw "Copy completed but VM structure not found. Check permissions and disk space."
         }}
 
         # Calculate size of copied files
@@ -1598,7 +1598,8 @@ try {{
         $vmcxPath = $vmcx.FullName
     }} else {{
         # Try to find .vmcx anywhere in the folder
-        $vmcx = Get-ChildItem -Path $mappedImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $mappedImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
         if (-not $vmcx) {{
             throw "No .vmcx file found in $mappedImportPath"
         }}
@@ -1649,7 +1650,8 @@ if ($importPath -like '*.vmcx') {{
             exit 1
         }}
     }} else {{
-        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
         if ($vmcx) {{
             $vmcx.FullName
         }} else {{
@@ -1814,7 +1816,7 @@ try {{
     $backups = @()
 
     if (Test-Path $mappedPath) {{
-        # VM-centric structure: {backup_path}/{vm_name}/{timestamp}/{vm_name}/Virtual Machines/*.vmcx
+        # VM-centric structure: backup_path/vm_name/timestamp/vm_name/Virtual Machines/*.vmcx
         # First level: VM name folders
         Get-ChildItem -Path $mappedPath -Directory {vm_filter} | ForEach-Object {{
             $vmFolder = $_
@@ -1829,7 +1831,7 @@ try {{
                 $timestampName = $timestampFolder.Name
 
                 # Look for the VM export folder inside timestamp
-                # Export-VM creates: {timestamp}/{vm_name}/Virtual Machines/
+                # Export-VM creates: timestamp/vm_name/Virtual Machines/
                 $vmExportFolder = Join-Path $timestampFolder.FullName $vmFolderName
                 $vmcxPath = Join-Path $vmExportFolder 'Virtual Machines'
 
@@ -1840,7 +1842,8 @@ try {{
                                  Measure-Object -Property Length -Sum).Sum
 
                         # Return the UNC path to the VM export folder
-                        $uncPath = $backupPath.TrimEnd('\\') + '\\' + $vmFolderName + '\\' + $timestampName + '\\' + $vmFolderName
+                        $uncPath = $backupPath.TrimEnd('\\') + '\\' + $vmFolderName + '\\' + `
+                            $timestampName + '\\' + $vmFolderName
 
                         $backups += @{{
                             VMName = $vmFolderName
