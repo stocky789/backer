@@ -862,16 +862,195 @@ $smbUnc = '{smb_unc}'
 $smbUser = '{full_username}'
 $smbPass = '{safe_password}'
 
-# Create a local temp directory for export
-$tempBase = 'C:\\Backer\\temp'
-if (-not (Test-Path $tempBase)) {{
-    New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+# Function to test if a path is accessible by SYSTEM/VMMS for export
+# Returns: 'local' for drive letter paths, 'smb' for UNC paths that VM uses, $null for inaccessible
+function Test-ExportPath {{
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) {{ return $null }}
+
+    # Drive letter paths are local/SAN/iSCSI - always accessible by SYSTEM
+    if ($Path -match '^[A-Za-z]:') {{ return 'local' }}
+
+    # UNC paths - if the VM is using this storage, Hyper-V must have persistent access
+    # (either via machine account or stored credentials). We can try to use it.
+    if ($Path.StartsWith('\\')) {{ return 'smb' }}
+
+    return $null
 }}
-$localExportPath = Join-Path $tempBase ([System.Guid]::NewGuid().ToString())
+
+# Function to test if we can write to a path
+function Test-WritablePath {{
+    param([string]$Path)
+    try {{
+        if (-not (Test-Path $Path)) {{
+            # Try to create it
+            New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+        }}
+        # Try to create a temp file to verify write access
+        $testFile = Join-Path $Path ".backer_write_test_$([System.Guid]::NewGuid().ToString())"
+        [System.IO.File]::WriteAllText($testFile, "test")
+        Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        return $true
+    }} catch {{
+        return $false
+    }}
+}}
+
+# Function to get free space on a path (in bytes)
+function Get-PathFreeSpace {{
+    param([string]$Path)
+    try {{
+        # For UNC paths, use .NET to get disk space
+        if ($Path.StartsWith('\\')) {{
+            $drive = New-Object System.IO.DriveInfo((Get-Item $Path).PSDrive.Root)
+            return $drive.AvailableFreeSpace
+        }}
+        # For local paths, use PSDrive
+        $drive = (Get-Item $Path -ErrorAction Stop).PSDrive
+        if ($drive -and $drive.Free) {{
+            return $drive.Free
+        }}
+        # Fallback to WMI for local drives
+        $driveLetter = $Path.Substring(0, 2)
+        $disk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='$driveLetter'" -ErrorAction SilentlyContinue
+        if ($disk) {{
+            return $disk.FreeSpace
+        }}
+    }} catch {{}}
+    return 0
+}}
+
+# Get the VM to determine storage locations
+$vm = Get-VM -Name $vmName -ErrorAction Stop
+
+# Collect all potential storage paths (prioritized)
+# We track both local and SMB paths - SMB paths the VM uses should be accessible
+$candidatePaths = @()
+
+# 1. VM's VHD locations (where the actual disk files are)
+#    If VM runs from SMB storage, Hyper-V has persistent access to it
+$vhds = $vm | Get-VMHardDiskDrive | Select-Object -ExpandProperty Path -ErrorAction SilentlyContinue
+foreach ($vhd in $vhds) {{
+    if ($vhd) {{
+        $vhdDir = Split-Path -Parent $vhd
+        $pathType = Test-ExportPath $vhdDir
+        if ($pathType) {{
+            $candidatePaths += @{{ Path = $vhdDir; Type = $pathType }}
+        }}
+    }}
+}}
+
+# 2. VM's SnapshotFileLocation (where checkpoints are stored)
+$snapPath = $vm.SnapshotFileLocation
+if ($snapPath) {{
+    $pathType = Test-ExportPath $snapPath
+    if ($pathType) {{
+        $candidatePaths += @{{ Path = $snapPath; Type = $pathType }}
+    }}
+}}
+
+# 3. VM's ConfigurationLocation
+$configPath = $vm.ConfigurationLocation
+if ($configPath) {{
+    $pathType = Test-ExportPath $configPath
+    if ($pathType) {{
+        $candidatePaths += @{{ Path = $configPath; Type = $pathType }}
+    }}
+}}
+
+# 4. Default Hyper-V paths from host settings
+$vmHost = Get-VMHost -ErrorAction SilentlyContinue
+if ($vmHost) {{
+    if ($vmHost.VirtualMachinePath) {{
+        $pathType = Test-ExportPath $vmHost.VirtualMachinePath
+        if ($pathType) {{
+            $candidatePaths += @{{ Path = $vmHost.VirtualMachinePath; Type = $pathType }}
+        }}
+    }}
+    if ($vmHost.VirtualHardDiskPath) {{
+        $pathType = Test-ExportPath $vmHost.VirtualHardDiskPath
+        if ($pathType) {{
+            $candidatePaths += @{{ Path = $vmHost.VirtualHardDiskPath; Type = $pathType }}
+        }}
+    }}
+}}
+
+# 5. Last resort - system drive temp (always local)
+$candidatePaths += @{{ Path = "$env:SystemDrive\\BackerTemp"; Type = 'local' }}
+
+# Remove duplicates while preserving order (based on Path)
+$seen = @{{}}
+$uniquePaths = @()
+foreach ($item in $candidatePaths) {{
+    if (-not $seen.ContainsKey($item.Path)) {{
+        $seen[$item.Path] = $true
+        $uniquePaths += $item
+    }}
+}}
+$candidatePaths = $uniquePaths
+
+# Estimate required space (sum of all VHD sizes + 10% buffer)
+$requiredSpace = 0
+foreach ($vhd in $vhds) {{
+    if ($vhd -and (Test-Path $vhd -ErrorAction SilentlyContinue)) {{
+        $requiredSpace += (Get-Item $vhd).Length
+    }}
+}}
+$requiredSpace = [math]::Ceiling($requiredSpace * 1.1)  # 10% buffer
+if ($requiredSpace -eq 0) {{
+    # If we couldn't determine size, assume 50GB minimum
+    $requiredSpace = 50GB
+}}
+
+# Find first path with enough space and write access
+# Prefer local paths over SMB to avoid potential auth issues
+$vmStoragePath = $null
+$selectedPathType = $null
+
+# First pass: try local paths
+foreach ($item in $candidatePaths) {{
+    if ($item.Type -ne 'local') {{ continue }}
+    $path = $item.Path
+
+    if (-not (Test-WritablePath $path)) {{ continue }}
+
+    $freeSpace = Get-PathFreeSpace $path
+    if ($freeSpace -ge $requiredSpace) {{
+        $vmStoragePath = $path
+        $selectedPathType = 'local'
+        break
+    }}
+}}
+
+# Second pass: try SMB paths if no local path found
+if (-not $vmStoragePath) {{
+    foreach ($item in $candidatePaths) {{
+        if ($item.Type -ne 'smb') {{ continue }}
+        $path = $item.Path
+
+        if (-not (Test-WritablePath $path)) {{ continue }}
+
+        $freeSpace = Get-PathFreeSpace $path
+        if ($freeSpace -ge $requiredSpace) {{
+            $vmStoragePath = $path
+            $selectedPathType = 'smb'
+            break
+        }}
+    }}
+}}
+
+if (-not $vmStoragePath) {{
+    $checkedPathsList = ($candidatePaths | ForEach-Object {{ "$($_.Path) ($($_.Type))" }}) -join ', '
+    throw "No suitable storage found with enough free space ($([math]::Round($requiredSpace / 1GB, 2)) GB required) and write access. Checked paths: $checkedPathsList"
+}}
+
+# Create temp export directory
+$tempExportId = [System.Guid]::NewGuid().ToString()
+$localExportPath = Join-Path $vmStoragePath "BackerExport_$tempExportId"
 New-Item -ItemType Directory -Path $localExportPath -Force | Out-Null
 
 try {{
-    # Export VM to local temp directory (this works because VMMS can access local paths)
+    # Export VM to temp directory on local/SAN storage
     {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
 
     $vmExportPath = Join-Path $localExportPath $vmName
@@ -879,7 +1058,7 @@ try {{
         throw "Export completed but VM folder not found at $vmExportPath"
     }}
 
-    # Calculate size before copy
+    # Calculate actual export size
     $size = (Get-ChildItem $vmExportPath -Recurse -ErrorAction SilentlyContinue |
              Measure-Object -Property Length -Sum).Sum
 
@@ -915,7 +1094,7 @@ try {{
         net use $smbUnc /delete 2>$null | Out-Null
     }}
 }} finally {{
-    # Always cleanup local temp directory
+    # Always cleanup temp export directory
     if (Test-Path $localExportPath) {{
         Remove-Item -Path $localExportPath -Recurse -Force -ErrorAction SilentlyContinue
     }}
