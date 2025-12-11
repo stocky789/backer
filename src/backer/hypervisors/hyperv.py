@@ -3013,14 +3013,19 @@ try {{
     $currentVhds = Get-VMHardDiskDrive -VMName $vmName
 
     # Find backup VHDs
-    # First find the VM subfolder in import path
+    # Check if Virtual Hard Disks exists directly in import path or in a subfolder
     $vmBackupFolder = $null
-    $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
-    foreach ($folder in $subfolders) {{
-        $vmFolder = Join-Path $folder.FullName 'Virtual Hard Disks'
-        if (Test-Path $vmFolder) {{
-            $vmBackupFolder = $folder.FullName
-            break
+    $directVhdPath = Join-Path $importPath 'Virtual Hard Disks'
+    if (Test-Path $directVhdPath) {{
+        $vmBackupFolder = $importPath
+    }} else {{
+        $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+        foreach ($folder in $subfolders) {{
+            $vmFolder = Join-Path $folder.FullName 'Virtual Hard Disks'
+            if (Test-Path $vmFolder) {{
+                $vmBackupFolder = $folder.FullName
+                break
+            }}
         }}
     }}
 
@@ -3276,18 +3281,24 @@ try {{
     $defaultVhdPath = if ($vhdDestPath) {{ $vhdDestPath }} else {{ (Get-VMHost).VirtualHardDiskPath }}
 
     # Find VHD files in backup
+    # Check if Virtual Hard Disks exists directly in import path or in a subfolder
     $vmBackupFolder = $null
-    $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
-    foreach ($folder in $subfolders) {{
-        $vhdFolder = Join-Path $folder.FullName 'Virtual Hard Disks'
-        if (Test-Path $vhdFolder) {{
-            $vmBackupFolder = $folder.FullName
-            break
+    $directVhdPath = Join-Path $importPath 'Virtual Hard Disks'
+    if (Test-Path $directVhdPath) {{
+        $vmBackupFolder = $importPath
+    }} else {{
+        $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+        foreach ($folder in $subfolders) {{
+            $vhdFolder = Join-Path $folder.FullName 'Virtual Hard Disks'
+            if (Test-Path $vhdFolder) {{
+                $vmBackupFolder = $folder.FullName
+                break
+            }}
         }}
     }}
 
     if (-not $vmBackupFolder) {{
-        throw "Could not find VM backup folder with VHDs"
+        throw "Could not find VM backup folder with VHDs in $importPath"
     }}
 
     $vhdFolder = Join-Path $vmBackupFolder 'Virtual Hard Disks'
