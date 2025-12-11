@@ -925,7 +925,9 @@ try {{
             $config.firmware = @{{
                 secureBootEnabled = $fw.SecureBoot -eq 'On'
                 secureBootTemplate = $fw.SecureBootTemplate
-                secureBootTemplateId = if ($fw.SecureBootTemplateId) {{ $fw.SecureBootTemplateId.ToString() }} else {{ $null }}
+                secureBootTemplateId = if ($fw.SecureBootTemplateId) {{
+                    $fw.SecureBootTemplateId.ToString()
+                }} else {{ $null }}
                 preferredNetworkBootProtocol = $fw.PreferredNetworkBootProtocol.ToString()
                 consoleMode = $fw.ConsoleMode.ToString()
                 pauseAfterBootFailure = $fw.PauseAfterBootFailure -eq 'On'
@@ -988,7 +990,9 @@ try {{
             # VLAN settings
             vlanAccess = @{{
                 accessVlanId = $nic.VlanSetting.AccessVlanId
-                operationMode = if ($nic.VlanSetting.OperationMode) {{ $nic.VlanSetting.OperationMode.ToString() }} else {{ "Untagged" }}
+                operationMode = if ($nic.VlanSetting.OperationMode) {{
+                    $nic.VlanSetting.OperationMode.ToString()
+                }} else {{ "Untagged" }}
                 nativeVlanId = $nic.VlanSetting.NativeVlanId
                 allowedVlanIdList = $nic.VlanSetting.AllowedVlanIdList
             }}
@@ -1010,7 +1014,9 @@ try {{
             # VMQ and IOV
             vmqWeight = $nic.VmqWeight
             iovWeight = $nic.IovWeight
-            iovInterruptModeration = if ($nic.IovInterruptModeration) {{ $nic.IovInterruptModeration.ToString() }} else {{ $null }}
+            iovInterruptModeration = if ($nic.IovInterruptModeration) {{
+                $nic.IovInterruptModeration.ToString()
+            }} else {{ $null }}
             iovQueuePairsRequested = $nic.IovQueuePairsRequested
 
             # Other settings
@@ -1188,18 +1194,24 @@ try {{
             if (-not $clusterRes) {{
                 $clusterRes = Get-ClusterResource | Where-Object {{
                     $_.ResourceType -eq 'Virtual Machine' -and
-                    (Get-ClusterParameter -InputObject $_ -Name VmId -ErrorAction SilentlyContinue).Value -eq $vm.Id.ToString()
+                    (Get-ClusterParameter -InputObject $_ -Name VmId -ErrorAction SilentlyContinue
+                    ).Value -eq $vm.Id.ToString()
                 }} | Select-Object -First 1
             }}
 
             if ($clusterRes) {{
                 $config.cluster.clusterName = (Get-Cluster).Name
                 $config.cluster.resourceGroupName = $clusterRes.OwnerGroup.Name
-                $config.cluster.preferredOwners = @($clusterRes.OwnerGroup.PreferredOwnerNodes | ForEach-Object {{ $_.Name }})
-                $config.cluster.possibleOwners = @($clusterRes.OwnerNodes | ForEach-Object {{ $_.Name }})
+                $config.cluster.preferredOwners = @(
+                    $clusterRes.OwnerGroup.PreferredOwnerNodes | ForEach-Object {{ $_.Name }}
+                )
+                $config.cluster.possibleOwners = @(
+                    $clusterRes.OwnerNodes | ForEach-Object {{ $_.Name }}
+                )
 
                 # Get anti-affinity
-                $aaParam = Get-ClusterParameter -InputObject $clusterRes -Name AntiAffinityClassNames -ErrorAction SilentlyContinue
+                $aaParam = Get-ClusterParameter -InputObject $clusterRes `
+                    -Name AntiAffinityClassNames -ErrorAction SilentlyContinue
                 if ($aaParam -and $aaParam.Value) {{
                     $config.cluster.antiAffinityClassNames = @($aaParam.Value -split ',')
                 }}
@@ -1408,7 +1420,8 @@ try {{
             $procParams.CompatibilityForMigrationEnabled = $config.processor.compatibilityForMigrationEnabled
         }}
         if ($null -ne $config.processor.compatibilityForOlderOperatingSystemsEnabled) {{
-            $procParams.CompatibilityForOlderOperatingSystemsEnabled = $config.processor.compatibilityForOlderOperatingSystemsEnabled
+            $procParams.CompatibilityForOlderOperatingSystemsEnabled = `
+                $config.processor.compatibilityForOlderOperatingSystemsEnabled
         }}
         # ExposeVirtualizationExtensions requires VM to be off
         if ($isOff -and $null -ne $config.processor.exposeVirtualizationExtensions) {{
@@ -1645,7 +1658,7 @@ try {{
 
     # === Handle Assignable Devices (DDA/GPU Passthrough) ===
     if ($config.assignableDevices -and $config.assignableDevices.Count -gt 0) {{
-        $warnings += "GPU/Device passthrough (DDA) detected in backup - these are host-specific and cannot be automatically restored"
+        $warnings += "GPU/Device passthrough (DDA) detected - host-specific, cannot auto-restore"
         $warnings += "Original passthrough devices: $($config.assignableDevices.Count)"
         foreach ($dev in $config.assignableDevices) {{
             $warnings += "  - Device: $($dev.instancePath)"
@@ -2685,7 +2698,8 @@ Write-Output "SUCCESS"
                 import_path, smb_unc, full_username, safe_password
             )
             if full_config:
-                logger.info(f"Loaded comprehensive config from backup (version {full_config.get('capture_version', '1.0')})")
+                cfg_ver = full_config.get('capture_version', '1.0')
+                logger.info(f"Loaded comprehensive config from backup (version {cfg_ver})")
                 result["config_loaded"] = True
             else:
                 logger.info("No vm_full_config.json found, will use limited restore")
@@ -3115,7 +3129,8 @@ try {{
     foreach ($folder in $subfolders) {{
         $vmFolder = Join-Path $folder.FullName 'Virtual Machines'
         if (Test-Path $vmFolder) {{
-            $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
+            $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
             if ($vmcx) {{
                 $vmcxPath = $vmcx.FullName
                 $vmBackupFolder = $folder.FullName
@@ -3223,7 +3238,7 @@ try {{
         generation = 2
         memory_bytes = 4 * 1024 * 1024 * 1024  # 4GB
         processor_count = 2
-        enable_tpm = False  # Don't enable by default in rebuild, let apply_vm_config handle it
+        # Note: TPM not enabled by default in rebuild - apply_vm_config handles it
 
         if full_config:
             vm_settings = full_config.get("vm", {})
@@ -3532,7 +3547,9 @@ if (Test-Path $backupPath) {{
                     $size = (Get-ChildItem $vmExportFolder -Recurse -ErrorAction SilentlyContinue |
                              Measure-Object -Property Length -Sum).Sum
 
-                    $configFile = if ($vmcxFiles) {{ $vmcxFiles[0].FullName }} else {{ Join-Path $vmcxPath 'vm_config.json' }}
+                    $configFile = if ($vmcxFiles) {{
+                        $vmcxFiles[0].FullName
+                    }} else {{ Join-Path $vmcxPath 'vm_config.json' }}
                     $backups += @{{
                         VMName = $vmFolderName
                         Timestamp = $timestampName
