@@ -3354,8 +3354,32 @@ try {{
     $vmConfigPath = Join-Path $defaultVmPath $vmName
     if (Test-Path $vmConfigPath) {{
         # Wait briefly for any handles to release
-        Start-Sleep -Seconds 2
-        Remove-Item -Path $vmConfigPath -Recurse -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        try {{
+            # Try to forcefully remove using cmd /c rd for stubborn folders
+            Remove-Item -Path $vmConfigPath -Recurse -Force -ErrorAction Stop
+        }} catch {{
+            # Fallback: use cmd rd which can sometimes succeed when Remove-Item fails
+            $null = & cmd /c rd /s /q "$vmConfigPath" 2>&1
+            $warnings += "Used fallback cleanup for $vmConfigPath"
+        }}
+    }}
+
+    # Also clean up from the system VM registration path in case of ghost VMs
+    $sysVmPath = "C:\\ProgramData\\Microsoft\\Windows\\Hyper-V\\Virtual Machines"
+    if (Test-Path $sysVmPath) {{
+        Get-ChildItem -Path $sysVmPath -Filter "*.vmcx" -ErrorAction SilentlyContinue | ForEach-Object {{
+            # Check if this vmcx is orphaned (no VM references it)
+            $vmcxId = $_.BaseName
+            $linkedVm = Get-VM -ErrorAction SilentlyContinue | Where-Object {{ $_.Id.ToString() -eq $vmcxId }}
+            if (-not $linkedVm) {{
+                # Orphaned vmcx - try to remove it
+                try {{
+                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                    $warnings += "Removed orphaned vmcx: $($_.Name)"
+                }} catch {{ }}
+            }}
+        }}
     }}
 
     # Copy VHDs to local storage
@@ -4904,9 +4928,30 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                 logger.info("Populating node IP map before restore")
                 self.cluster_api.test_connection()
 
+            # Load backup config to get original owner node
+            backup_config = None
+            if smb_username and smb_password:
+                # Build SMB UNC for config loading
+                if import_path.startswith("\\\\"):
+                    unc_parts = import_path.lstrip("\\").split("\\")
+                    if len(unc_parts) >= 2:
+                        smb_server = unc_parts[0]
+                        smb_share = unc_parts[1]
+                        smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                        safe_password = smb_password.replace("'", "''") if smb_password else ""
+                        full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
+
+                        # Use the cluster API to load config (it can connect to any node)
+                        backup_manager_for_config = HyperVBackupManager(self.cluster_api)
+                        backup_config = backup_manager_for_config._load_backup_config(
+                            import_path, smb_unc, full_username, safe_password
+                        )
+                        if backup_config:
+                            logger.info(f"Loaded backup config for node selection")
+
             # Determine target node
             if not target_node:
-                # If VM exists in cluster, use current owner
+                # First priority: check if VM currently exists in cluster
                 if vm_name:
                     existing_owner = self.cluster_api.get_vm_owner_node(vm_name)
                     if existing_owner:
@@ -4916,7 +4961,31 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                             "will restore there"
                         )
 
-                # Otherwise use the connected node
+                # Second priority: use original owner node from backup config
+                if not target_node and backup_config:
+                    cluster_info = backup_config.get("cluster", {})
+                    original_owner = cluster_info.get("ownerNodeAtBackup")
+                    if original_owner:
+                        # Verify this node is online
+                        nodes = self.cluster_api.get_cluster_nodes()
+                        online_nodes = [n["Name"] for n in nodes if n.get("State") == "Up"]
+                        # Check if original owner (or its short name) is online
+                        original_short = original_owner.split(".")[0].lower()
+                        for node in online_nodes:
+                            node_short = node.split(".")[0].lower()
+                            if node_short == original_short:
+                                target_node = node
+                                logger.info(
+                                    f"Using original owner node '{target_node}' from backup config"
+                                )
+                                break
+                        if not target_node:
+                            logger.warning(
+                                f"Original owner '{original_owner}' is not online, "
+                                "will use another node"
+                            )
+
+                # Fallback: use first available online node
                 if not target_node:
                     nodes = self.cluster_api.get_cluster_nodes()
                     online_nodes = [
@@ -4924,6 +4993,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                     ]
                     if online_nodes:
                         target_node = online_nodes[0]
+                        logger.info(f"Using first available node: {target_node}")
                     else:
                         target_node = self.cluster_api.host
 
