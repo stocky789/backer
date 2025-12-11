@@ -9054,6 +9054,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         smb_username = repository.get("username", "")
         smb_domain = repository.get("domain")
 
+        logger.info(f"Starting Hyper-V restore from {import_path}")
+
         def run_hyperv_restore(task: Task) -> dict[str, Any]:
             try:
                 task.update_status("running", f"Restoring VM from {import_path}")
@@ -9097,7 +9099,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return {"success": False, "errors": [str(e)]}
 
         # Run restore as background task
-        task = task_manager.submit(
+        task_mgr = get_task_manager()
+        task = task_mgr.submit(
             name=f"Restoring Hyper-V VM from {filename}",
             func=run_hyperv_restore,
         )
