@@ -1193,17 +1193,33 @@ try {{
     if ($checkpoints) {{
         # Remove all checkpoints before export to avoid duplicate file issues
         # This merges the checkpoint chain into the base VHD
-        $checkpoints | Remove-VMSnapshot -IncludeAllChildSnapshots -ErrorAction SilentlyContinue
-        # Wait for merge operation to complete
-        Start-Sleep -Seconds 5
-        # Additional wait if VM is still merging
+        $checkpoints | Remove-VMSnapshot -IncludeAllChildSnapshots -ErrorAction Stop
+
+        # Wait for merge operation to complete - check for AVHDX files disappearing
         $mergeWait = 0
-        while ($mergeWait -lt 120) {{
-            $vmState = (Get-VM -Name $vmName).State
-            if ($vmState -eq 'Running' -or $vmState -eq 'Off') {{ break }}
+        $maxWait = 300  # 5 minutes max wait for merge
+        while ($mergeWait -lt $maxWait) {{
             Start-Sleep -Seconds 5
             $mergeWait += 5
+
+            # Check if any AVHDX (differencing disks) still exist for this VM
+            $vhdPaths = $vm | Get-VMHardDiskDrive | Select-Object -ExpandProperty Path
+            $hasAvhdx = $false
+            foreach ($path in $vhdPaths) {{
+                if ($path -like '*.avhdx') {{
+                    $hasAvhdx = $true
+                    break
+                }}
+            }}
+
+            if (-not $hasAvhdx) {{
+                # No more differencing disks - merge is complete
+                break
+            }}
         }}
+
+        # Re-fetch the VM to get updated disk paths after merge
+        $vm = Get-VM -Name $vmName -ErrorAction Stop
     }}
 
     # Export VM to temp directory on local/SAN storage
@@ -1230,15 +1246,31 @@ try {{
             New-Item -ItemType Directory -Path $vhdDestPath -Force | Out-Null
             New-Item -ItemType Directory -Path $vmConfigPath -Force | Out-Null
 
-            # Get all VHD paths (deduplicated)
+            # Get all VHD paths (deduplicated), following AVHDX chains to base VHDs
             $vhdPaths = @{{}}
             $vm | Get-VMHardDiskDrive | ForEach-Object {{
                 $vhdPath = $_.Path
-                if ($vhdPath -and (Test-Path $vhdPath) -and -not $vhdPaths.ContainsKey($vhdPath)) {{
-                    $vhdPaths[$vhdPath] = $true
-                    $vhdName = Split-Path -Leaf $vhdPath
-                    $destVhd = Join-Path $vhdDestPath $vhdName
-                    Copy-Item -Path $vhdPath -Destination $destVhd -Force
+                if ($vhdPath -and (Test-Path $vhdPath)) {{
+                    # Follow the differencing disk chain to find the base VHD
+                    $currentPath = $vhdPath
+                    while ($currentPath) {{
+                        $vhdInfo = Get-VHD -Path $currentPath -ErrorAction SilentlyContinue
+                        if ($vhdInfo.ParentPath) {{
+                            # This is a differencing disk, follow to parent
+                            $currentPath = $vhdInfo.ParentPath
+                        }} else {{
+                            # This is the base VHD
+                            break
+                        }}
+                    }}
+
+                    # Copy the base VHD (not the differencing disk)
+                    if ($currentPath -and (Test-Path $currentPath) -and -not $vhdPaths.ContainsKey($currentPath)) {{
+                        $vhdPaths[$currentPath] = $true
+                        $vhdName = Split-Path -Leaf $currentPath
+                        $destVhd = Join-Path $vhdDestPath $vhdName
+                        Copy-Item -Path $currentPath -Destination $destVhd -Force
+                    }}
                 }}
             }}
 
@@ -1713,22 +1745,40 @@ try {{
         throw "Backup path not found: $importPath"
     }}
 
-    # Find the .vmcx file
+    # Find the .vmcx file or vm_config.json (manual backup fallback)
     $vmFolder = Join-Path $importPath 'Virtual Machines'
+    $vmcxPath = $null
+    $manualBackupConfig = $null
+
     if (Test-Path $vmFolder) {{
         $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue `
             | Select-Object -First 1
-        if (-not $vmcx) {{
-            throw "No .vmcx file found in $vmFolder"
+        if ($vmcx) {{
+            $vmcxPath = $vmcx.FullName
+        }} else {{
+            # Check for manual backup JSON config
+            $jsonConfig = Join-Path $vmFolder 'vm_config.json'
+            if (Test-Path $jsonConfig) {{
+                $manualBackupConfig = Get-Content $jsonConfig -Raw | ConvertFrom-Json
+            }} else {{
+                throw "No .vmcx file or vm_config.json found in $vmFolder"
+            }}
         }}
-        $vmcxPath = $vmcx.FullName
     }} else {{
         $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
             | Select-Object -First 1
-        if (-not $vmcx) {{
-            throw "No .vmcx file found in $importPath"
+        if ($vmcx) {{
+            $vmcxPath = $vmcx.FullName
+        }} else {{
+            # Check for manual backup JSON config
+            $jsonConfig = Get-ChildItem -Path $importPath -Filter 'vm_config.json' -Recurse `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($jsonConfig) {{
+                $manualBackupConfig = Get-Content $jsonConfig.FullName -Raw | ConvertFrom-Json
+            }} else {{
+                throw "No .vmcx file or vm_config.json found in $importPath"
+            }}
         }}
-        $vmcxPath = $vmcx.FullName
     }}
 
     # Get default paths
@@ -1758,56 +1808,110 @@ try {{
         Remove-VM -Name $vmName -Force
     }}
 
-    # Try standard import first
-    $importError = $null
-    try {{
-        $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId `
-            -VirtualMachinePath $defaultVmPath `
-            -VhdDestinationPath $defaultVhdPath `
-            -ErrorAction Stop
-    }} catch {{
-        $importError = $_
+    # Helper function to create VM from VHDs (used for manual backups and vTPM fallback)
+    function New-VMFromVHDs {{
+        param(
+            [string]$VMName,
+            [string]$ImportPath,
+            [string]$DefaultVmPath,
+            [string]$DefaultVhdPath,
+            [int]$Generation = 2,
+            [long]$MemoryBytes = 4GB,
+            [int]$ProcessorCount = 2,
+            [bool]$EnableTPM = $true
+        )
+
+        # Find VHD files
+        $vhdFolder = Join-Path $ImportPath 'Virtual Hard Disks'
+        $vhds = @()
+        if (Test-Path $vhdFolder) {{
+            # Only get base VHDx files, skip AVHDX differencing disks
+            $vhds = Get-ChildItem -Path $vhdFolder -Include *.vhdx,*.vhd -Recurse |
+                Where-Object {{ $_.Extension -ne '.avhdx' }}
+        }}
+        if ($vhds.Count -eq 0) {{
+            throw "No VHD files found in backup for VM creation"
+        }}
+
+        # Copy VHDs to local storage
+        $localVhdPath = Join-Path $DefaultVhdPath $VMName
+        if (Test-Path $localVhdPath) {{
+            Remove-Item -Path $localVhdPath -Recurse -Force
+        }}
+        New-Item -ItemType Directory -Path $localVhdPath -Force | Out-Null
+
+        $localVhds = @()
+        foreach ($vhd in $vhds) {{
+            $destVhd = Join-Path $localVhdPath $vhd.Name
+            Copy-Item -Path $vhd.FullName -Destination $destVhd -Force
+            $localVhds += $destVhd
+        }}
+
+        # Create new VM with specified generation
+        $vm = New-VM -Name $VMName -Generation $Generation -MemoryStartupBytes $MemoryBytes `
+            -Path $DefaultVmPath -NoVHD
+
+        # Set processor count
+        Set-VMProcessor -VMName $VMName -Count $ProcessorCount
+
+        # Attach copied VHDs
+        foreach ($vhd in $localVhds) {{
+            Add-VMHardDiskDrive -VMName $VMName -Path $vhd -ControllerType SCSI
+        }}
+
+        # Enable vTPM with new local key protector (for Gen2 VMs only)
+        if ($EnableTPM -and $Generation -eq 2) {{
+            try {{
+                Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector
+                Enable-VMTPM -VMName $VMName
+            }} catch {{
+                # TPM setup may fail, continue without it
+                Write-Warning "Could not enable TPM: $_"
+            }}
+        }}
+
+        return $vm
     }}
 
-    # If import failed (likely vTPM issue), fall back to creating new VM from VHDs
-    if (-not $vm -and $importError) {{
-        # Check if it's a vTPM/vmgs related error
-        if ($importError.Exception.Message -match 'vmgs|0x80070032|not supported|used by another') {{
-            # Find VHD files
-            $vhdFolder = Join-Path $importPath 'Virtual Hard Disks'
-            $vhds = @()
-            if (Test-Path $vhdFolder) {{
-                $vhds = Get-ChildItem -Path $vhdFolder -Include *.vhdx,*.vhd -Recurse
+    $vm = $null
+
+    # Check if this is a manual backup (vm_config.json instead of .vmcx)
+    if ($manualBackupConfig) {{
+        # Manual backup - create VM from VHDs using saved config
+        $generation = if ($manualBackupConfig.Generation) {{ $manualBackupConfig.Generation }} else {{ 2 }}
+        $memoryBytes = if ($manualBackupConfig.MemoryStartupBytes) {{
+            [long]$manualBackupConfig.MemoryStartupBytes
+        }} else {{ 4GB }}
+        $processorCount = if ($manualBackupConfig.ProcessorCount) {{
+            $manualBackupConfig.ProcessorCount
+        }} else {{ 2 }}
+
+        $vm = New-VMFromVHDs -VMName $vmName -ImportPath $importPath `
+            -DefaultVmPath $defaultVmPath -DefaultVhdPath $defaultVhdPath `
+            -Generation $generation -MemoryBytes $memoryBytes `
+            -ProcessorCount $processorCount -EnableTPM $true
+    }} else {{
+        # Standard backup with .vmcx - try Import-VM first
+        $importError = $null
+        try {{
+            $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId `
+                -VirtualMachinePath $defaultVmPath `
+                -VhdDestinationPath $defaultVhdPath `
+                -ErrorAction Stop
+        }} catch {{
+            $importError = $_
+        }}
+
+        # If import failed (likely vTPM issue), fall back to creating new VM from VHDs
+        if (-not $vm -and $importError) {{
+            # Check if it's a vTPM/vmgs related error
+            if ($importError.Exception.Message -match 'vmgs|0x80070032|not supported|used by another') {{
+                $vm = New-VMFromVHDs -VMName $vmName -ImportPath $importPath `
+                    -DefaultVmPath $defaultVmPath -DefaultVhdPath $defaultVhdPath `
+                    -Generation 2 -MemoryBytes 4GB -ProcessorCount 2 -EnableTPM $true
+            }} else {{
+                throw $importError
             }}
-            if ($vhds.Count -eq 0) {{
-                throw "Import failed and no VHD files found for fallback: $importError"
-            }}
-
-            # Copy VHDs to local storage
-            $localVhdPath = Join-Path $defaultVhdPath $vmName
-            New-Item -ItemType Directory -Path $localVhdPath -Force | Out-Null
-
-            $localVhds = @()
-            foreach ($vhd in $vhds) {{
-                $destVhd = Join-Path $localVhdPath $vhd.Name
-                Copy-Item -Path $vhd.FullName -Destination $destVhd -Force
-                $localVhds += $destVhd
-            }}
-
-            # Create new Gen2 VM (most modern VMs are Gen2)
-            $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes 4GB `
-                -Path $defaultVmPath -NoVHD
-
-            # Attach copied VHDs
-            foreach ($vhd in $localVhds) {{
-                Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
-            }}
-
-            # Enable vTPM with new local key protector (fresh, not tied to old host)
-            Set-VMKeyProtector -VMName $vmName -NewLocalKeyProtector
-            Enable-VMTPM -VMName $vmName
-        }} else {{
-            throw $importError
         }}
     }}
 
@@ -2039,7 +2143,10 @@ try {{
 
                 if (Test-Path $vmcxPath) {{
                     $vmcxFiles = Get-ChildItem -Path $vmcxPath -Filter '*.vmcx' -ErrorAction SilentlyContinue
-                    if ($vmcxFiles) {{
+                    $jsonConfig = Get-ChildItem -Path $vmcxPath -Filter 'vm_config.json' -ErrorAction SilentlyContinue
+
+                    # Accept either .vmcx (standard export) or vm_config.json (manual fallback)
+                    if ($vmcxFiles -or $jsonConfig) {{
                         $size = (Get-ChildItem $vmExportFolder -Recurse -ErrorAction SilentlyContinue |
                                  Measure-Object -Property Length -Sum).Sum
 
@@ -2047,6 +2154,7 @@ try {{
                         $uncPath = $backupPath.TrimEnd('\\') + '\\' + $vmFolderName + '\\' + `
                             $timestampName + '\\' + $vmFolderName
 
+                        $configFile = if ($vmcxFiles) {{ $vmcxFiles[0].Name }} else {{ 'vm_config.json' }}
                         $backups += @{{
                             VMName = $vmFolderName
                             Timestamp = $timestampName
@@ -2055,7 +2163,8 @@ try {{
                             CreatedAt = $timestampFolder.CreationTime.ToString('o')
                             ModifiedAt = $timestampFolder.LastWriteTime.ToString('o')
                             SizeBytes = if ($size) {{ $size }} else {{ 0 }}
-                            VmcxFile = $vmcxFiles[0].Name
+                            VmcxFile = $configFile
+                            IsManualBackup = [bool]$jsonConfig
                         }}
                     }}
                 }}
@@ -2099,10 +2208,14 @@ if (Test-Path $backupPath) {{
 
             if (Test-Path $vmcxPath) {{
                 $vmcxFiles = Get-ChildItem -Path $vmcxPath -Filter '*.vmcx' -ErrorAction SilentlyContinue
-                if ($vmcxFiles) {{
+                $jsonConfig = Get-ChildItem -Path $vmcxPath -Filter 'vm_config.json' -ErrorAction SilentlyContinue
+
+                # Accept either .vmcx (standard export) or vm_config.json (manual fallback)
+                if ($vmcxFiles -or $jsonConfig) {{
                     $size = (Get-ChildItem $vmExportFolder -Recurse -ErrorAction SilentlyContinue |
                              Measure-Object -Property Length -Sum).Sum
 
+                    $configFile = if ($vmcxFiles) {{ $vmcxFiles[0].FullName }} else {{ Join-Path $vmcxPath 'vm_config.json' }}
                     $backups += @{{
                         VMName = $vmFolderName
                         Timestamp = $timestampName
@@ -2111,7 +2224,8 @@ if (Test-Path $backupPath) {{
                         CreatedAt = $timestampFolder.CreationTime.ToString('o')
                         ModifiedAt = $timestampFolder.LastWriteTime.ToString('o')
                         SizeBytes = if ($size) {{ $size }} else {{ 0 }}
-                        VmcxFile = $vmcxFiles[0].FullName
+                        VmcxFile = $configFile
+                        IsManualBackup = [bool]$jsonConfig
                     }}
                 }}
             }}
