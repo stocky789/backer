@@ -4948,6 +4948,23 @@ class HyperVClusterBackupManager(HyperVBackupManager):
             result.update(backup_result)
             result["owner_node"] = owner_node
 
+            # Add cluster info to the saved config file
+            # The node backup doesn't know about cluster info, so we need to update it
+            if backup_result.get("success") and backup_result.get("config_path"):
+                config_path = backup_result["config_path"]
+                try:
+                    # Load the saved config, add cluster info, and save it back
+                    self._update_config_with_cluster_info(
+                        config_path=config_path,
+                        owner_node=owner_node,
+                        smb_username=smb_username,
+                        smb_password=smb_password,
+                        smb_domain=smb_domain,
+                    )
+                    logger.info(f"Added cluster info to backup config (owner: {owner_node})")
+                except Exception as e:
+                    logger.warning(f"Failed to update config with cluster info: {e}")
+
             # Update duration
             ended_at = dt.now()
             result["duration_seconds"] = (ended_at - started_at).total_seconds()
@@ -4960,6 +4977,75 @@ class HyperVClusterBackupManager(HyperVBackupManager):
             ended_at = dt.now()
             result["duration_seconds"] = (ended_at - started_at).total_seconds()
             return result
+
+    def _update_config_with_cluster_info(
+        self,
+        config_path: str,
+        owner_node: str,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> None:
+        """Update the saved config file with cluster-specific information.
+
+        Args:
+            config_path: UNC path to the config file
+            owner_node: The node that owns this VM
+            smb_username: SMB username
+            smb_password: SMB password
+            smb_domain: SMB domain
+        """
+        # Build credentials for SMB access
+        safe_password = smb_password.replace("'", "''") if smb_password else ""
+        full_username = f"{smb_domain}\\{smb_username}" if smb_domain and smb_username else smb_username or ""
+
+        # Extract SMB UNC for net use
+        smb_unc = None
+        if config_path.startswith("\\\\"):
+            unc_parts = config_path.lstrip("\\").split("\\")
+            if len(unc_parts) >= 2:
+                smb_server = unc_parts[0]
+                smb_share = unc_parts[1]
+                smb_unc = f"\\\\{smb_server}\\{smb_share}"
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$configPath = '{config_path}'
+$smbUnc = '{smb_unc or ""}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+$ownerNode = '{owner_node}'
+
+# Mount SMB share if needed
+if ($smbUnc -and $smbUser) {{
+    $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+}}
+
+try {{
+    if (Test-Path $configPath) {{
+        $content = Get-Content $configPath -Raw
+        $config = $content | ConvertFrom-Json
+
+        # Add or update cluster info
+        if (-not $config.cluster) {{
+            $config | Add-Member -NotePropertyName 'cluster' -NotePropertyValue @{{}} -Force
+        }}
+        $config.cluster.ownerNodeAtBackup = $ownerNode
+        $config.cluster.isClustered = $true
+
+        # Save back
+        $config | ConvertTo-Json -Depth 20 | Set-Content $configPath -Encoding UTF8
+        Write-Output "SUCCESS"
+    }} else {{
+        Write-Output "CONFIG_NOT_FOUND"
+    }}
+}} catch {{
+    Write-Output "ERROR: $_"
+}}
+"""
+        rc, stdout, stderr = self.cluster_api.run_powershell(script)
+        if "SUCCESS" not in stdout:
+            logger.warning(f"Config update result: {stdout.strip()}")
 
     def _cluster_inplace_restore(
         self,
@@ -5185,6 +5271,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                 if backup_config:
                     cluster_info = backup_config.get("cluster", {})
                     original_owner = cluster_info.get("ownerNodeAtBackup")
+                    logger.info(f"Backup config cluster info: {cluster_info}")
                     if original_owner:
                         # Verify this node is online
                         nodes = self.cluster_api.get_cluster_nodes()
@@ -5289,6 +5376,16 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                 node_api = self.cluster_api._get_or_create_node_connection(target_node)
                 node_backup_manager = HyperVBackupManager(node_api)
 
+                # When VM doesn't exist in cluster, don't use in-place mode
+                # The base class might find leftover registrations on individual nodes
+                effective_restore_mode = restore_mode
+                if not existing_owner and restore_mode in ("auto", "inplace"):
+                    effective_restore_mode = "import"  # Use import for fresh restore
+                    logger.info(
+                        f"VM not in cluster, using '{effective_restore_mode}' mode "
+                        f"instead of '{restore_mode}'"
+                    )
+
                 # Perform restore on target node
                 restore_result = node_backup_manager.restore_vm(
                     import_path=import_path,
@@ -5302,7 +5399,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                     smb_password=smb_password,
                     smb_domain=smb_domain,
                     network_mapping=network_mapping,
-                    restore_mode=restore_mode,
+                    restore_mode=effective_restore_mode,
                 )
 
             # Merge results
