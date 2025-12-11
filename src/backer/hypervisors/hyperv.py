@@ -3682,6 +3682,7 @@ class HyperVClusterAPI(HyperVAPI):
         )
         self.cluster_name = cluster_name
         self._cluster_nodes: list[str] = []
+        self._cluster_domain: str = ""
         self._node_connections: dict[str, HyperVAPI] = {}
 
     def _get_or_create_node_connection(self, node_name: str) -> "HyperVAPI":
@@ -3739,37 +3740,68 @@ class HyperVClusterAPI(HyperVAPI):
 
         try:
             # Test basic connectivity and get cluster info
-            script = """
+            # Try with explicit cluster name first, fall back to local detection
+            script = f"""
 $ErrorActionPreference = 'Stop'
-try {
-    $cluster = Get-Cluster -ErrorAction Stop
-    $nodes = Get-ClusterNode -Cluster $cluster.Name | Select-Object Name, State, Id
-    $vmGroups = Get-ClusterGroup -Cluster $cluster.Name |
-        Where-Object { $_.GroupType -eq 'VirtualMachine' }
+try {{
+    # Try to get cluster - with name if provided, otherwise auto-detect
+    $cluster = $null
+    $clusterName = $null
+
+    # First try with explicit cluster name if provided
+    $explicitName = "{self.cluster_name or ''}"
+    if ($explicitName) {{
+        try {{
+            $cluster = Get-Cluster -Name $explicitName -ErrorAction Stop
+            $clusterName = $cluster.Name
+        }} catch {{
+            # Explicit name failed, will try auto-detect
+        }}
+    }}
+
+    # If no explicit name or it failed, try auto-detect on local node
+    if (-not $cluster) {{
+        try {{
+            $cluster = Get-Cluster -ErrorAction Stop
+            $clusterName = $cluster.Name
+        }} catch {{
+            # Not a cluster node, try using the host as cluster name
+            try {{
+                $cluster = Get-Cluster -Name '{self.host}' -ErrorAction Stop
+                $clusterName = $cluster.Name
+            }} catch {{
+                throw "Could not detect cluster. Connect to a cluster node or specify cluster name."
+            }}
+        }}
+    }}
+
+    $nodes = Get-ClusterNode -Cluster $clusterName | Select-Object Name, State, Id
+    $vmGroups = Get-ClusterGroup -Cluster $clusterName |
+        Where-Object {{ $_.GroupType -eq 'VirtualMachine' }}
 
     $os = Get-CimInstance Win32_OperatingSystem
 
-    @{
-        ClusterName = $cluster.Name
+    @{{
+        ClusterName = $clusterName
         ClusterDomain = $cluster.Domain
-        Nodes = @($nodes | ForEach-Object {
-            @{
+        Nodes = @($nodes | ForEach-Object {{
+            @{{
                 Name = $_.Name
                 State = $_.State.ToString()
                 Id = $_.Id.ToString()
-            }
-        })
+            }}
+        }})
         TotalVMs = $vmGroups.Count
         OSVersion = $os.Caption
         OSBuild = $os.BuildNumber
-        QuorumType = $cluster.QuorumType.ToString()
-    } | ConvertTo-Json -Depth 3
-} catch {
-    @{
+        QuorumType = if ($cluster.QuorumType) {{ $cluster.QuorumType.ToString() }} else {{ "Unknown" }}
+    }} | ConvertTo-Json -Depth 3
+}} catch {{
+    @{{
         Error = $_.Exception.Message
         IsCluster = $false
-    } | ConvertTo-Json
-}
+    }} | ConvertTo-Json
+}}
 """
             rc, stdout, stderr = self._run_powershell(script)
 
@@ -3787,9 +3819,48 @@ try {
                         return False, f"Cluster error: {info['Error']}"
 
                     self.cluster_name = info.get("ClusterName", self.cluster_name)
-                    self._cluster_nodes = [
-                        n["Name"] for n in info.get("Nodes", [])
-                    ]
+                    cluster_domain = info.get("ClusterDomain", "")
+
+                    # Determine domain for FQDN resolution - try multiple sources:
+                    # 1. Explicit domain parameter
+                    # 2. Domain from username (DOMAIN\user format)
+                    # 3. Domain from host FQDN (node1.stockhome.local)
+                    # 4. ClusterDomain from PowerShell
+                    dns_domain = ""
+                    if self.domain:
+                        dns_domain = self.domain
+                        logger.debug(f"Using explicit domain for DNS: {dns_domain}")
+                    elif "\\" in self.username:
+                        # Extract domain from DOMAIN\username format
+                        dns_domain = self.username.split("\\")[0]
+                        logger.debug(f"Extracted domain from username: {dns_domain}")
+                    elif "." in self.host:
+                        # Extract domain from FQDN host (e.g., node1.stockhome.local)
+                        parts = self.host.split(".", 1)
+                        if len(parts) > 1:
+                            dns_domain = parts[1]
+                            logger.debug(f"Extracted domain from host FQDN: {dns_domain}")
+                    elif cluster_domain:
+                        dns_domain = cluster_domain
+                        logger.debug(f"Using cluster domain: {dns_domain}")
+
+                    self._cluster_domain = dns_domain
+
+                    # Build node names - append domain for FQDN resolution
+                    # Node names from cluster are often short names (e.g., "node1")
+                    # but DNS may require FQDN (e.g., "node1.stockhome.local")
+                    self._cluster_nodes = []
+                    for n in info.get("Nodes", []):
+                        node_name = n["Name"]
+                        # If node name doesn't contain a dot and we have a domain,
+                        # create FQDN
+                        if "." not in node_name and dns_domain:
+                            node_fqdn = f"{node_name}.{dns_domain}"
+                        else:
+                            node_fqdn = node_name
+                        self._cluster_nodes.append(node_fqdn)
+                        logger.debug(f"Cluster node: {node_name} -> {node_fqdn}")
+
                     self._version = info.get("OSVersion", "Unknown")
 
                     node_count = len(self._cluster_nodes)
@@ -3801,8 +3872,10 @@ try {
 
                     logger.info(
                         f"Connected to cluster '{self.cluster_name}' "
-                        f"({online_nodes}/{node_count} nodes online, {vm_count} VMs)"
+                        f"(dns_domain: {dns_domain}, "
+                        f"{online_nodes}/{node_count} nodes online, {vm_count} VMs)"
                     )
+                    logger.info(f"Cluster nodes: {self._cluster_nodes}")
                     return True, (
                         f"Connected to cluster '{self.cluster_name}' - "
                         f"{online_nodes}/{node_count} nodes online, {vm_count} VMs"
