@@ -3799,6 +3799,9 @@ try {{
 }} catch {{
     @{{
         Error = $_.Exception.Message
+        FullError = $_.ToString()
+        ScriptStackTrace = $_.ScriptStackTrace
+        Category = $_.CategoryInfo.Category.ToString()
         IsCluster = $false
     }} | ConvertTo-Json
 }}
@@ -3816,7 +3819,16 @@ try {{
                     info = json.loads(json_match.group())
 
                     if info.get("Error"):
-                        return False, f"Cluster error: {info['Error']}"
+                        error_msg = info.get("Error", "Unknown error")
+                        full_error = info.get("FullError", "")
+                        category = info.get("Category", "")
+                        stack = info.get("ScriptStackTrace", "")
+                        logger.error(f"Cluster error: {error_msg}")
+                        logger.error(f"Category: {category}")
+                        logger.error(f"Full error: {full_error}")
+                        if stack:
+                            logger.error(f"Stack trace: {stack}")
+                        return False, f"Cluster error: {error_msg}"
 
                     self.cluster_name = info.get("ClusterName", self.cluster_name)
                     cluster_domain = info.get("ClusterDomain", "")
