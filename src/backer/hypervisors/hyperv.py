@@ -5131,7 +5131,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                 logger.info("Populating node IP map before restore")
                 self.cluster_api.test_connection()
 
-            # Load backup config to get original owner node
+            # Load backup config to get original owner node and VM name
             backup_config = None
             if smb_username and smb_password:
                 # Build SMB UNC for config loading
@@ -5152,12 +5152,31 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                         if backup_config:
                             logger.info("Loaded backup config for node selection")
 
+            # Determine VM name - need this to check if VM exists in cluster
+            effective_vm_name = vm_name
+            if not effective_vm_name:
+                # Try to get from backup config
+                if backup_config and backup_config.get("vm", {}).get("name"):
+                    config_name = backup_config["vm"]["name"]
+                    # Handle PowerShell JSON array quirk
+                    if isinstance(config_name, list):
+                        effective_vm_name = config_name[0] if config_name else None
+                    else:
+                        effective_vm_name = config_name
+                    if effective_vm_name:
+                        logger.info(f"Got VM name from backup config: {effective_vm_name}")
+                # Fallback: extract from path
+                if not effective_vm_name:
+                    effective_vm_name = self._get_vm_name_from_path(import_path)
+                    if effective_vm_name:
+                        logger.info(f"Got VM name from path: {effective_vm_name}")
+
             # Check if VM currently exists in cluster
             existing_owner = None
-            if vm_name:
-                existing_owner = self.cluster_api.get_vm_owner_node(vm_name)
+            if effective_vm_name:
+                existing_owner = self.cluster_api.get_vm_owner_node(effective_vm_name)
                 if existing_owner:
-                    logger.info(f"VM '{vm_name}' currently exists on '{existing_owner}'")
+                    logger.info(f"VM '{effective_vm_name}' currently exists on '{existing_owner}'")
 
             # Determine target node - user-specified takes priority
             user_specified_node = target_node is not None
@@ -5209,7 +5228,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
             if progress_callback:
                 progress_callback({
                     "status": "starting",
-                    "vm": vm_name,
+                    "vm": effective_vm_name or vm_name,
                     "mode": restore_mode,
                     "target_node": target_node,
                 })
@@ -5229,7 +5248,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                 # Use cluster-aware in-place restore
                 # This handles the case where VM is on a different node than target
                 restore_result = self._cluster_inplace_restore(
-                    vm_name=vm_name,
+                    vm_name=effective_vm_name,  # Use the resolved VM name
                     import_path=import_path,
                     existing_owner=existing_owner,
                     target_node=target_node,
