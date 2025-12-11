@@ -1656,7 +1656,7 @@ async function loadJobBackups(jobId, hvId) {
                     <div class="backup-meta"><span class="status-badge ${typeBadgeClass}">${typeLabel} ${backup.vmid}</span> | Size: ${sizeGB} GB | Date: ${date}</div>
                 </div>
                 <div class="backup-actions">
-                    <button class="btn btn-primary btn-sm" onclick="showRestoreFromRepoDialog('${hvId}', '${escapeHtml(backup.filename)}', '${guestType}', ${backup.vmid})">Restore</button>
+                    <button class="btn btn-primary btn-sm" onclick="showRestoreFromRepoDialog('${hvId}', '${escapeHtml(backup.filename)}', '${guestType}', '${escapeHtml(String(backup.vmid))}')">Restore</button>
                 </div>
             </div>`;
         }
