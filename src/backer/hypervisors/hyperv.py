@@ -81,6 +81,9 @@ class HyperVGuest:
     path: str = ""  # VM configuration path
     dynamic_memory: bool = False
     checkpoints_enabled: bool = True
+    # Cluster-specific fields
+    owner_node: str = ""  # Node currently owning the VM (cluster only)
+    is_clustered: bool = False  # Whether VM is part of a failover cluster
 
     @property
     def is_running(self) -> bool:
@@ -3618,3 +3621,1026 @@ $backups | ConvertTo-Json -Compress
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse backup list: {e}")
             return []
+
+
+class HyperVClusterAPI(HyperVAPI):
+    """Client for Hyper-V Failover Cluster management via WinRM + PowerShell.
+
+    Extends HyperVAPI to handle clustered VMs. Key differences:
+    - Connects to any cluster node (or cluster name)
+    - Uses Failover Cluster cmdlets to find VM owner nodes
+    - Routes VM operations to the correct owner node
+    - Handles VM live migration between nodes
+
+    Example usage:
+        api = HyperVClusterAPI(
+            cluster_name="HVCluster",
+            host="node1.domain.com",  # Any cluster node to connect through
+            username="Administrator",
+            password="mypassword",
+        )
+        vms = api.list_guests()  # Gets VMs from all cluster nodes
+    """
+
+    def __init__(
+        self,
+        host: str,
+        username: str,
+        password: str,
+        cluster_name: str | None = None,
+        port: int = 5985,
+        use_ssl: bool = False,
+        auth_method: HyperVAuthMethod = HyperVAuthMethod.NTLM,
+        verify_ssl: bool = False,
+        timeout: int = 60,
+        domain: str | None = None,
+    ):
+        """Initialize Hyper-V Cluster API client.
+
+        Args:
+            host: Any cluster node hostname/IP to connect through
+            username: Windows username (domain admin recommended)
+            password: Windows password
+            cluster_name: Optional cluster name (auto-detected if not provided)
+            port: WinRM port (5985 for HTTP, 5986 for HTTPS)
+            use_ssl: Use HTTPS for WinRM
+            auth_method: Authentication method (basic, ntlm, kerberos)
+            verify_ssl: Whether to verify SSL certificates
+            timeout: Command timeout in seconds
+            domain: Windows domain (required for cluster operations)
+        """
+        super().__init__(
+            host=host,
+            username=username,
+            password=password,
+            port=port,
+            use_ssl=use_ssl,
+            auth_method=auth_method,
+            verify_ssl=verify_ssl,
+            timeout=timeout,
+            domain=domain,
+        )
+        self.cluster_name = cluster_name
+        self._cluster_nodes: list[str] = []
+        self._node_connections: dict[str, HyperVAPI] = {}
+
+    def _get_or_create_node_connection(self, node_name: str) -> "HyperVAPI":
+        """Get or create a WinRM connection to a specific cluster node.
+
+        Args:
+            node_name: Cluster node hostname
+
+        Returns:
+            HyperVAPI instance connected to the specified node
+        """
+        if node_name not in self._node_connections:
+            self._node_connections[node_name] = HyperVAPI(
+                host=node_name,
+                username=self.username,
+                password=self.password,
+                port=self.port,
+                use_ssl=self.use_ssl,
+                auth_method=self.auth_method,
+                verify_ssl=self.verify_ssl,
+                timeout=self.timeout,
+                domain=self.domain,
+            )
+        return self._node_connections[node_name]
+
+    def _run_powershell_on_node(
+        self,
+        node_name: str,
+        script: str,
+        timeout: int | None = None,
+    ) -> tuple[int, str, str]:
+        """Execute PowerShell on a specific cluster node.
+
+        Args:
+            node_name: Target cluster node
+            script: PowerShell script to execute
+            timeout: Optional command timeout
+
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
+        node_api = self._get_or_create_node_connection(node_name)
+        return node_api._run_powershell(script, timeout)
+
+    def test_connection(self) -> tuple[bool, str]:
+        """Test connection to the Hyper-V cluster.
+
+        Returns:
+            Tuple of (success: bool, message: str with cluster info or error)
+        """
+        full_username = self._get_full_username()
+        logger.info(
+            f"Testing Hyper-V Cluster connection via {self.host} as {full_username}"
+        )
+
+        try:
+            # Test basic connectivity and get cluster info
+            script = """
+$ErrorActionPreference = 'Stop'
+try {
+    $cluster = Get-Cluster -ErrorAction Stop
+    $nodes = Get-ClusterNode -Cluster $cluster.Name | Select-Object Name, State, Id
+    $vmGroups = Get-ClusterGroup -Cluster $cluster.Name |
+        Where-Object { $_.GroupType -eq 'VirtualMachine' }
+
+    $os = Get-CimInstance Win32_OperatingSystem
+
+    @{
+        ClusterName = $cluster.Name
+        ClusterDomain = $cluster.Domain
+        Nodes = @($nodes | ForEach-Object {
+            @{
+                Name = $_.Name
+                State = $_.State.ToString()
+                Id = $_.Id.ToString()
+            }
+        })
+        TotalVMs = $vmGroups.Count
+        OSVersion = $os.Caption
+        OSBuild = $os.BuildNumber
+        QuorumType = $cluster.QuorumType.ToString()
+    } | ConvertTo-Json -Depth 3
+} catch {
+    @{
+        Error = $_.Exception.Message
+        IsCluster = $false
+    } | ConvertTo-Json
+}
+"""
+            rc, stdout, stderr = self._run_powershell(script)
+
+            if rc != 0:
+                error_msg = stderr.strip() or "Connection failed"
+                logger.error(f"Cluster connection failed: {error_msg}")
+                return False, f"Cluster connection failed: {error_msg}"
+
+            try:
+                json_match = re.search(r"\{.*\}", stdout, re.DOTALL)
+                if json_match:
+                    info = json.loads(json_match.group())
+
+                    if info.get("Error"):
+                        return False, f"Cluster error: {info['Error']}"
+
+                    self.cluster_name = info.get("ClusterName", self.cluster_name)
+                    self._cluster_nodes = [
+                        n["Name"] for n in info.get("Nodes", [])
+                    ]
+                    self._version = info.get("OSVersion", "Unknown")
+
+                    node_count = len(self._cluster_nodes)
+                    vm_count = info.get("TotalVMs", 0)
+                    online_nodes = sum(
+                        1 for n in info.get("Nodes", [])
+                        if n.get("State") == "Up"
+                    )
+
+                    logger.info(
+                        f"Connected to cluster '{self.cluster_name}' "
+                        f"({online_nodes}/{node_count} nodes online, {vm_count} VMs)"
+                    )
+                    return True, (
+                        f"Connected to cluster '{self.cluster_name}' - "
+                        f"{online_nodes}/{node_count} nodes online, {vm_count} VMs"
+                    )
+                else:
+                    return False, "Failed to parse cluster response"
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse cluster info: {e}")
+                return False, f"Failed to parse cluster info: {e}"
+
+        except Exception as e:
+            logger.exception("Cluster connection test failed")
+            return False, f"Connection failed: {e}"
+
+    def get_cluster_nodes(self) -> list[dict[str, Any]]:
+        """Get all nodes in the failover cluster.
+
+        Returns:
+            List of node info dicts with name, state, and VM count
+        """
+        script = """
+$ErrorActionPreference = 'Stop'
+$nodes = Get-ClusterNode | ForEach-Object {
+    $nodeName = $_.Name
+    $vmCount = (Get-ClusterGroup | Where-Object {
+        $_.GroupType -eq 'VirtualMachine' -and $_.OwnerNode.Name -eq $nodeName
+    }).Count
+
+    @{
+        Name = $_.Name
+        State = $_.State.ToString()
+        Id = $_.Id.ToString()
+        VMCount = $vmCount
+    }
+}
+$nodes | ConvertTo-Json -Depth 2
+"""
+        rc, stdout, stderr = self._run_powershell(script)
+
+        if rc != 0:
+            logger.error(f"Failed to get cluster nodes: {stderr}")
+            return []
+
+        try:
+            stdout = stdout.strip()
+            if not stdout or stdout == "null":
+                return []
+
+            data = json.loads(stdout)
+            if isinstance(data, dict):
+                data = [data]
+
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse cluster nodes: {e}")
+            return []
+
+    def get_vm_owner_node(self, vm_name: str) -> str | None:
+        """Find which cluster node currently owns a VM.
+
+        Args:
+            vm_name: VM name to look up
+
+        Returns:
+            Node name or None if not found/not clustered
+        """
+        # Try to find by cluster group name first (usually matches VM name)
+        script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$group = Get-ClusterGroup -Name '{vm_name}' -ErrorAction SilentlyContinue
+if ($group -and $group.GroupType -eq 'VirtualMachine') {{
+    $group.OwnerNode.Name
+}} else {{
+    # Search by VM ID in cluster resources
+    $vmGroups = Get-ClusterGroup | Where-Object {{ $_.GroupType -eq 'VirtualMachine' }}
+    foreach ($g in $vmGroups) {{
+        $vmRes = Get-ClusterResource -InputObject $g |
+            Where-Object {{ $_.ResourceType -eq 'Virtual Machine' }}
+        if ($vmRes) {{
+            $vmId = (Get-ClusterParameter -InputObject $vmRes -Name VmId `
+                -ErrorAction SilentlyContinue).Value
+            $vm = Get-VM -Id $vmId -ErrorAction SilentlyContinue
+            if ($vm -and $vm.Name -eq '{vm_name}') {{
+                $g.OwnerNode.Name
+                break
+            }}
+        }}
+    }}
+}}
+"""
+        rc, stdout, stderr = self._run_powershell(script)
+
+        if rc == 0 and stdout.strip():
+            owner = stdout.strip()
+            logger.debug(f"VM '{vm_name}' is owned by node '{owner}'")
+            return owner
+
+        logger.debug(f"Could not find owner node for VM '{vm_name}'")
+        return None
+
+    def list_guests(self) -> list[HyperVGuest]:
+        """List all VMs across the cluster with owner node info.
+
+        Returns:
+            List of HyperVGuest objects with cluster info populated
+        """
+        script = """
+$ErrorActionPreference = 'Stop'
+$results = @()
+
+# Get all VM cluster groups with their owner nodes
+$vmGroups = Get-ClusterGroup | Where-Object { $_.GroupType -eq 'VirtualMachine' }
+
+foreach ($group in $vmGroups) {
+    $ownerNode = $group.OwnerNode.Name
+
+    # Get VM details from the owner node
+    $vmRes = Get-ClusterResource -InputObject $group |
+        Where-Object { $_.ResourceType -eq 'Virtual Machine' }
+
+    if ($vmRes) {
+        $vmId = (Get-ClusterParameter -InputObject $vmRes -Name VmId `
+            -ErrorAction SilentlyContinue).Value
+
+        if ($vmId) {
+            # Query VM on its owner node
+            $vm = Invoke-Command -ComputerName $ownerNode -ScriptBlock {
+                param($id)
+                Get-VM -Id $id -ErrorAction SilentlyContinue |
+                    Select-Object Id, Name, State, ProcessorCount, MemoryAssigned,
+                        Uptime, Generation, Version, Path, DynamicMemoryEnabled,
+                        @{N='CheckpointsEnabled';E={$_.CheckpointType -ne 'Disabled'}},
+                        IsClustered
+            } -ArgumentList $vmId -ErrorAction SilentlyContinue
+
+            if ($vm) {
+                $results += @{
+                    Id = $vm.Id.ToString()
+                    Name = $vm.Name
+                    State = $vm.State.ToString()
+                    ProcessorCount = $vm.ProcessorCount
+                    MemoryAssigned = $vm.MemoryAssigned
+                    Uptime = @{
+                        TotalSeconds = $vm.Uptime.TotalSeconds
+                    }
+                    Generation = $vm.Generation
+                    Version = $vm.Version
+                    Path = $vm.Path
+                    DynamicMemoryEnabled = $vm.DynamicMemoryEnabled
+                    CheckpointsEnabled = $vm.CheckpointsEnabled
+                    IsClustered = $true
+                    OwnerNode = $ownerNode
+                    ClusterGroupName = $group.Name
+                }
+            }
+        }
+    }
+}
+
+$results | ConvertTo-Json -Depth 3 -Compress
+"""
+        rc, stdout, stderr = self._run_powershell(script, timeout=120)
+
+        if rc != 0:
+            logger.error(f"Failed to list cluster VMs: {stderr}")
+            # Fall back to querying each node directly
+            return self._list_guests_fallback()
+
+        guests = []
+        try:
+            stdout = stdout.strip()
+            if not stdout or stdout == "null" or stdout == "[]":
+                return []
+
+            data = json.loads(stdout)
+            if isinstance(data, dict):
+                data = [data]
+
+            for vm in data:
+                memory_bytes = vm.get("MemoryAssigned", 0) or 0
+                memory_mb = memory_bytes // (1024 * 1024)
+
+                uptime_seconds = 0
+                uptime = vm.get("Uptime")
+                if isinstance(uptime, dict):
+                    uptime_seconds = int(uptime.get("TotalSeconds", 0) or 0)
+
+                guest = HyperVGuest(
+                    vmid=str(vm.get("Id", "")),
+                    name=vm.get("Name", "Unknown"),
+                    state=str(vm.get("State", "Unknown")),
+                    cpus=vm.get("ProcessorCount", 0) or 0,
+                    memory_mb=memory_mb,
+                    uptime=uptime_seconds,
+                    generation=vm.get("Generation", 1) or 1,
+                    version=str(vm.get("Version", "")),
+                    path=vm.get("Path", "") or "",
+                    dynamic_memory=bool(vm.get("DynamicMemoryEnabled", False)),
+                    checkpoints_enabled=bool(vm.get("CheckpointsEnabled", True)),
+                    owner_node=vm.get("OwnerNode", ""),
+                    is_clustered=True,
+                )
+                guests.append(guest)
+
+            logger.info(f"Found {len(guests)} VMs in cluster")
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse cluster VM list: {e}")
+            return self._list_guests_fallback()
+
+        return guests
+
+    def _list_guests_fallback(self) -> list[HyperVGuest]:
+        """Fallback method to list VMs by querying each node directly.
+
+        Used when Invoke-Command fails (e.g., CredSSP not configured).
+
+        Returns:
+            List of HyperVGuest objects
+        """
+        logger.info("Using fallback method to list cluster VMs")
+
+        # First get the cluster nodes
+        nodes = self.get_cluster_nodes()
+        if not nodes:
+            # If we can't get nodes, try the connected host
+            return super().list_guests()
+
+        all_guests: dict[str, HyperVGuest] = {}  # Use dict to dedup by vmid
+
+        for node_info in nodes:
+            node_name = node_info.get("Name", "")
+            if node_info.get("State") != "Up":
+                logger.debug(f"Skipping offline node: {node_name}")
+                continue
+
+            try:
+                node_api = self._get_or_create_node_connection(node_name)
+                node_vms = node_api.list_guests()
+
+                for vm in node_vms:
+                    # Add owner node info
+                    vm.owner_node = node_name
+                    vm.is_clustered = True
+                    all_guests[vm.vmid] = vm
+
+            except Exception as e:
+                logger.warning(f"Failed to list VMs on node {node_name}: {e}")
+
+        return list(all_guests.values())
+
+    def get_guest(self, vm_name: str) -> HyperVGuest | None:
+        """Get a specific VM by name, finding it across cluster nodes.
+
+        Args:
+            vm_name: VM name
+
+        Returns:
+            HyperVGuest object or None if not found
+        """
+        # First find which node owns the VM
+        owner_node = self.get_vm_owner_node(vm_name)
+
+        if owner_node:
+            # Query the owner node directly
+            node_api = self._get_or_create_node_connection(owner_node)
+            guest = node_api.get_guest(vm_name)
+            if guest:
+                guest.owner_node = owner_node
+                guest.is_clustered = True
+            return guest
+
+        # Fallback: search all nodes
+        nodes = self.get_cluster_nodes()
+        for node_info in nodes:
+            node_name = node_info.get("Name", "")
+            if node_info.get("State") != "Up":
+                continue
+
+            try:
+                node_api = self._get_or_create_node_connection(node_name)
+                guest = node_api.get_guest(vm_name)
+                if guest:
+                    guest.owner_node = node_name
+                    guest.is_clustered = True
+                    return guest
+            except Exception as e:
+                logger.debug(f"VM not found on node {node_name}: {e}")
+
+        return None
+
+    def get_guest_by_id(self, vmid: str) -> HyperVGuest | None:
+        """Get a specific VM by GUID, finding it across cluster nodes.
+
+        Args:
+            vmid: VM GUID
+
+        Returns:
+            HyperVGuest object or None if not found
+        """
+        # Search for VM by ID across cluster
+        script = f"""
+$vmGroups = Get-ClusterGroup | Where-Object {{ $_.GroupType -eq 'VirtualMachine' }}
+foreach ($group in $vmGroups) {{
+    $vmRes = Get-ClusterResource -InputObject $group |
+        Where-Object {{ $_.ResourceType -eq 'Virtual Machine' }}
+    if ($vmRes) {{
+        $id = (Get-ClusterParameter -InputObject $vmRes -Name VmId `
+            -ErrorAction SilentlyContinue).Value
+        if ($id -eq '{vmid}') {{
+            $group.OwnerNode.Name
+            break
+        }}
+    }}
+}}
+"""
+        rc, stdout, stderr = self._run_powershell(script)
+
+        if rc == 0 and stdout.strip():
+            owner_node = stdout.strip()
+            node_api = self._get_or_create_node_connection(owner_node)
+            guest = node_api.get_guest_by_id(vmid)
+            if guest:
+                guest.owner_node = owner_node
+                guest.is_clustered = True
+            return guest
+
+        # Fallback: search all nodes
+        nodes = self.get_cluster_nodes()
+        for node_info in nodes:
+            node_name = node_info.get("Name", "")
+            if node_info.get("State") != "Up":
+                continue
+
+            try:
+                node_api = self._get_or_create_node_connection(node_name)
+                guest = node_api.get_guest_by_id(vmid)
+                if guest:
+                    guest.owner_node = node_name
+                    guest.is_clustered = True
+                    return guest
+            except Exception:
+                pass
+
+        return None
+
+    def live_migrate_vm(
+        self,
+        vm_name: str,
+        target_node: str,
+        migration_type: str = "Live",
+    ) -> tuple[bool, str]:
+        """Live migrate a VM to a different cluster node.
+
+        Args:
+            vm_name: VM name to migrate
+            target_node: Destination cluster node
+            migration_type: Migration type (Live, Quick, Shutdown, ShutdownForce, TurnOff)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        valid_types = ["Live", "Quick", "Shutdown", "ShutdownForce", "TurnOff"]
+        if migration_type not in valid_types:
+            return False, f"Invalid migration type. Must be one of: {valid_types}"
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+try {{
+    Move-ClusterVirtualMachineRole -Name '{vm_name}' -Node '{target_node}' `
+        -MigrationType {migration_type} -Wait 0
+    "Migration initiated successfully"
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}}
+"""
+        rc, stdout, stderr = self._run_powershell(script, timeout=300)
+
+        output = stdout.strip()
+        if rc != 0 or output.startswith("ERROR:"):
+            error_msg = output.replace("ERROR: ", "") if output else stderr
+            logger.error(f"Live migration of '{vm_name}' failed: {error_msg}")
+            return False, f"Migration failed: {error_msg}"
+
+        logger.info(f"Live migration of '{vm_name}' to '{target_node}' initiated")
+        return True, f"Migration of '{vm_name}' to '{target_node}' initiated"
+
+    def add_vm_to_cluster(self, vm_name: str) -> tuple[bool, str]:
+        """Add a VM to the failover cluster for high availability.
+
+        Args:
+            vm_name: VM name to add to cluster
+
+        Returns:
+            Tuple of (success, message)
+        """
+        script = f"""
+$ErrorActionPreference = 'Stop'
+try {{
+    Add-ClusterVirtualMachineRole -VMName '{vm_name}'
+    "VM added to cluster successfully"
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}}
+"""
+        rc, stdout, stderr = self._run_powershell(script)
+
+        output = stdout.strip()
+        if rc != 0 or output.startswith("ERROR:"):
+            error_msg = output.replace("ERROR: ", "") if output else stderr
+            logger.error(f"Failed to add '{vm_name}' to cluster: {error_msg}")
+            return False, f"Failed to add VM to cluster: {error_msg}"
+
+        logger.info(f"Added '{vm_name}' to failover cluster")
+        return True, f"VM '{vm_name}' added to cluster"
+
+    def remove_vm_from_cluster(self, vm_name: str) -> tuple[bool, str]:
+        """Remove a VM from the failover cluster.
+
+        Note: This does not delete the VM, just removes HA protection.
+
+        Args:
+            vm_name: VM name to remove from cluster
+
+        Returns:
+            Tuple of (success, message)
+        """
+        script = f"""
+$ErrorActionPreference = 'Stop'
+try {{
+    $group = Get-ClusterGroup -Name '{vm_name}' -ErrorAction Stop
+    Remove-ClusterGroup -Name '{vm_name}' -RemoveResources -Force
+    "VM removed from cluster successfully"
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}}
+"""
+        rc, stdout, stderr = self._run_powershell(script)
+
+        output = stdout.strip()
+        if rc != 0 or output.startswith("ERROR:"):
+            error_msg = output.replace("ERROR: ", "") if output else stderr
+            logger.error(f"Failed to remove '{vm_name}' from cluster: {error_msg}")
+            return False, f"Failed to remove VM from cluster: {error_msg}"
+
+        logger.info(f"Removed '{vm_name}' from failover cluster")
+        return True, f"VM '{vm_name}' removed from cluster"
+
+    def shutdown_vm(self, vm_name: str, timeout: int = 300) -> tuple[bool, str]:
+        """Gracefully shutdown a clustered VM.
+
+        Routes the command to the owner node.
+
+        Args:
+            vm_name: VM name
+            timeout: Timeout in seconds
+
+        Returns:
+            Tuple of (success, message)
+        """
+        owner_node = self.get_vm_owner_node(vm_name)
+        if owner_node:
+            node_api = self._get_or_create_node_connection(owner_node)
+            return node_api.shutdown_vm(vm_name, timeout)
+        return False, f"Could not find owner node for VM '{vm_name}'"
+
+    def stop_vm(self, vm_name: str, force: bool = False) -> tuple[bool, str]:
+        """Stop a clustered VM.
+
+        Routes the command to the owner node.
+
+        Args:
+            vm_name: VM name
+            force: Force stop (turn off)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        owner_node = self.get_vm_owner_node(vm_name)
+        if owner_node:
+            node_api = self._get_or_create_node_connection(owner_node)
+            return node_api.stop_vm(vm_name, force)
+        return False, f"Could not find owner node for VM '{vm_name}'"
+
+    def start_vm(self, vm_name: str) -> tuple[bool, str]:
+        """Start a clustered VM.
+
+        Routes the command to the owner node.
+
+        Args:
+            vm_name: VM name
+
+        Returns:
+            Tuple of (success, message)
+        """
+        owner_node = self.get_vm_owner_node(vm_name)
+        if owner_node:
+            node_api = self._get_or_create_node_connection(owner_node)
+            return node_api.start_vm(vm_name)
+        return False, f"Could not find owner node for VM '{vm_name}'"
+
+    def capture_vm_config(self, vm_name: str) -> dict[str, Any] | None:
+        """Capture comprehensive VM configuration from the owner node.
+
+        Routes to the owner node and adds cluster-specific config.
+
+        Args:
+            vm_name: VM name
+
+        Returns:
+            Configuration dict or None
+        """
+        owner_node = self.get_vm_owner_node(vm_name)
+        if not owner_node:
+            logger.error(f"Could not find owner node for VM '{vm_name}'")
+            return None
+
+        node_api = self._get_or_create_node_connection(owner_node)
+        config = node_api.capture_vm_config(vm_name)
+
+        if config:
+            # Add cluster-specific information
+            config["cluster"] = config.get("cluster", {})
+            config["cluster"]["ownerNodeAtBackup"] = owner_node
+            config["cluster"]["isClustered"] = True
+
+        return config
+
+
+class HyperVClusterBackupManager(HyperVBackupManager):
+    """Backup manager for Hyper-V Failover Clusters.
+
+    Extends HyperVBackupManager to handle cluster-aware operations:
+    - Routes backup operations to the correct owner node
+    - Handles VM migration during backup if needed
+    - Supports cluster-aware restore with optional re-clustering
+    """
+
+    def __init__(self, api: HyperVClusterAPI):
+        """Initialize cluster backup manager.
+
+        Args:
+            api: HyperVClusterAPI instance for cluster communication
+        """
+        super().__init__(api)
+        self.cluster_api: HyperVClusterAPI = api
+
+    def list_all_guests(self) -> list[dict[str, Any]]:
+        """List all VMs in the cluster in a format suitable for the API.
+
+        Returns:
+            List of guest info dicts with standardized fields
+        """
+        guests = []
+
+        try:
+            vms = self.cluster_api.list_guests()
+            for vm in vms:
+                guests.append(
+                    {
+                        "vmid": vm.vmid,
+                        "name": vm.name,
+                        "node": vm.owner_node or self.cluster_api.host,
+                        "type": "vm",
+                        "guest_type": HyperVGuestType.VM.value,
+                        "status": vm.state.lower(),
+                        "cpus": vm.cpus,
+                        "maxmem_gb": vm.memory_gb,
+                        "maxdisk_gb": 0,
+                        "generation": vm.generation,
+                        "is_clustered": vm.is_clustered,
+                        "owner_node": vm.owner_node,
+                    }
+                )
+        except Exception as e:
+            logger.error(f"Failed to list cluster VMs: {e}")
+
+        return guests
+
+    def backup_vm(
+        self,
+        vm_name: str,
+        backup_path: str,
+        backup_mode: str = "online",
+        progress_callback: Any | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """Backup a VM in the cluster.
+
+        Automatically routes to the owner node for the backup operation.
+
+        Args:
+            vm_name: VM name to backup
+            backup_path: Destination path (should be accessible from all nodes)
+            backup_mode: Backup mode (online, offline, checkpoint)
+            progress_callback: Optional callback for progress updates
+            smb_username: SMB username for network share authentication
+            smb_password: SMB password for network share authentication
+            smb_domain: SMB domain for network share authentication
+
+        Returns:
+            Dict with backup result info
+        """
+        from datetime import datetime as dt
+
+        started_at = dt.now()
+        result: dict[str, Any] = {
+            "success": False,
+            "vm_name": vm_name,
+            "backup_path": backup_path,
+            "backup_mode": backup_mode,
+            "files": [],
+            "errors": [],
+            "size_bytes": 0,
+            "duration_seconds": 0,
+            "owner_node": None,
+        }
+
+        try:
+            # Find which node owns the VM
+            owner_node = self.cluster_api.get_vm_owner_node(vm_name)
+            if not owner_node:
+                result["errors"].append(
+                    f"Could not find VM '{vm_name}' in cluster"
+                )
+                return result
+
+            result["owner_node"] = owner_node
+            logger.info(f"VM '{vm_name}' is on node '{owner_node}', routing backup there")
+
+            if progress_callback:
+                progress_callback({
+                    "status": "starting",
+                    "vm": vm_name,
+                    "mode": backup_mode,
+                    "node": owner_node,
+                })
+
+            # Get connection to owner node and perform backup
+            node_api = self.cluster_api._get_or_create_node_connection(owner_node)
+            node_backup_manager = HyperVBackupManager(node_api)
+
+            # Perform backup on owner node
+            backup_result = node_backup_manager.backup_vm(
+                vm_name=vm_name,
+                backup_path=backup_path,
+                backup_mode=backup_mode,
+                progress_callback=progress_callback,
+                smb_username=smb_username,
+                smb_password=smb_password,
+                smb_domain=smb_domain,
+            )
+
+            # Merge results
+            result.update(backup_result)
+            result["owner_node"] = owner_node
+
+            # Update duration
+            ended_at = dt.now()
+            result["duration_seconds"] = (ended_at - started_at).total_seconds()
+
+            return result
+
+        except Exception as e:
+            logger.exception(f"Cluster backup of '{vm_name}' failed")
+            result["errors"].append(str(e))
+            ended_at = dt.now()
+            result["duration_seconds"] = (ended_at - started_at).total_seconds()
+            return result
+
+    def restore_vm(
+        self,
+        import_path: str,
+        vm_name: str | None = None,
+        restore_path: str | None = None,
+        vhd_dest_path: str | None = None,
+        register_only: bool = False,
+        generate_new_id: bool = True,
+        start_after_restore: bool = False,
+        progress_callback: Any | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+        network_mapping: dict[str, str] | None = None,
+        restore_mode: str = "auto",
+        target_node: str | None = None,
+        add_to_cluster: bool = True,
+    ) -> dict[str, Any]:
+        """Restore a VM to the cluster.
+
+        Args:
+            import_path: Path to backup files
+            vm_name: Override VM name (optional)
+            restore_path: Override VM storage path
+            vhd_dest_path: Override VHD storage path
+            register_only: Only register VM (don't copy files)
+            generate_new_id: Generate a new VM ID
+            start_after_restore: Start VM after restore
+            progress_callback: Optional callback for progress updates
+            smb_username: SMB username
+            smb_password: SMB password
+            smb_domain: SMB domain
+            network_mapping: Map old switches to new ones
+            restore_mode: Restore mode (auto, inplace, import, rebuild)
+            target_node: Specific node to restore to (optional)
+            add_to_cluster: Whether to add restored VM to cluster (default True)
+
+        Returns:
+            Dict with restore result info
+        """
+        from datetime import datetime as dt
+
+        started_at = dt.now()
+        result: dict[str, Any] = {
+            "success": False,
+            "vm_name": vm_name or "Unknown",
+            "import_path": import_path,
+            "restore_mode": restore_mode,
+            "errors": [],
+            "warnings": [],
+            "target_node": target_node,
+            "added_to_cluster": False,
+        }
+
+        try:
+            # Determine target node
+            if not target_node:
+                # If VM exists in cluster, use current owner
+                if vm_name:
+                    existing_owner = self.cluster_api.get_vm_owner_node(vm_name)
+                    if existing_owner:
+                        target_node = existing_owner
+                        logger.info(
+                            f"VM '{vm_name}' exists on '{target_node}', "
+                            "will restore there"
+                        )
+
+                # Otherwise use the connected node
+                if not target_node:
+                    nodes = self.cluster_api.get_cluster_nodes()
+                    online_nodes = [
+                        n["Name"] for n in nodes if n.get("State") == "Up"
+                    ]
+                    if online_nodes:
+                        target_node = online_nodes[0]
+                    else:
+                        target_node = self.cluster_api.host
+
+            result["target_node"] = target_node
+            logger.info(f"Restoring VM to cluster node '{target_node}'")
+
+            if progress_callback:
+                progress_callback({
+                    "status": "starting",
+                    "vm": vm_name,
+                    "mode": restore_mode,
+                    "target_node": target_node,
+                })
+
+            # Get connection to target node
+            node_api = self.cluster_api._get_or_create_node_connection(target_node)
+            node_backup_manager = HyperVBackupManager(node_api)
+
+            # Perform restore on target node
+            restore_result = node_backup_manager.restore_vm(
+                import_path=import_path,
+                vm_name=vm_name,
+                restore_path=restore_path,
+                vhd_dest_path=vhd_dest_path,
+                register_only=register_only,
+                generate_new_id=generate_new_id,
+                start_after_restore=False,  # Don't start yet, add to cluster first
+                progress_callback=progress_callback,
+                smb_username=smb_username,
+                smb_password=smb_password,
+                smb_domain=smb_domain,
+                network_mapping=network_mapping,
+                restore_mode=restore_mode,
+            )
+
+            # Merge results
+            result.update(restore_result)
+            result["target_node"] = target_node
+
+            # Add to cluster if restore succeeded and requested
+            if restore_result.get("success") and add_to_cluster:
+                restored_vm_name = restore_result.get("vm_name", vm_name)
+                if restored_vm_name:
+                    # Check if already in cluster
+                    owner = self.cluster_api.get_vm_owner_node(restored_vm_name)
+                    if not owner:
+                        logger.info(
+                            f"Adding restored VM '{restored_vm_name}' to cluster"
+                        )
+                        if progress_callback:
+                            progress_callback({
+                                "status": "adding_to_cluster",
+                                "vm": restored_vm_name,
+                            })
+
+                        success, msg = self.cluster_api.add_vm_to_cluster(
+                            restored_vm_name
+                        )
+                        if success:
+                            result["added_to_cluster"] = True
+                            logger.info(f"VM '{restored_vm_name}' added to cluster")
+                        else:
+                            result["warnings"].append(
+                                f"Failed to add VM to cluster: {msg}"
+                            )
+                    else:
+                        result["added_to_cluster"] = True
+                        logger.info(
+                            f"VM '{restored_vm_name}' already in cluster "
+                            f"on node '{owner}'"
+                        )
+
+            # Start VM if requested (after adding to cluster)
+            if (
+                restore_result.get("success")
+                and start_after_restore
+                and restore_result.get("vm_name")
+            ):
+                restored_vm_name = restore_result["vm_name"]
+                logger.info(f"Starting restored VM '{restored_vm_name}'")
+                self.cluster_api.start_vm(restored_vm_name)
+
+            ended_at = dt.now()
+            result["duration_seconds"] = (ended_at - started_at).total_seconds()
+            return result
+
+        except Exception as e:
+            logger.exception("Cluster restore failed")
+            result["errors"].append(str(e))
+            ended_at = dt.now()
+            result["duration_seconds"] = (ended_at - started_at).total_seconds()
+            return result

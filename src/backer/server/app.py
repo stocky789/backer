@@ -271,6 +271,8 @@ def trigger_hypervisor_job_internal(job_id: str) -> None:
         _trigger_proxmox_backup_job(job_id, job, hypervisor)
     elif hypervisor_type == "hyperv":
         _trigger_hyperv_backup_job(job_id, job, hypervisor)
+    elif hypervisor_type == "hyperv-cluster":
+        _trigger_hyperv_cluster_backup_job(job_id, job, hypervisor)
     else:
         logger.error(f"Unsupported hypervisor type: {hypervisor_type}")
 
@@ -1270,6 +1272,326 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
             pass  # Best effort cleanup
 
 
+def _trigger_hyperv_cluster_backup_job(job_id: str, job: dict, hypervisor: dict) -> None:
+    """Trigger a Hyper-V Cluster backup job.
+
+    Similar to _trigger_hyperv_backup_job but uses cluster-aware API
+    that routes to the correct owner node for each VM.
+    """
+    from backer.hypervisors.hyperv import HyperVClusterAPI, HyperVClusterBackupManager
+
+    # Get repository for backup destination
+    repository_id = job.get("repository_id")
+    if not repository_id:
+        logger.error(f"No repository configured for job: {job_id}")
+        return
+
+    repository = _storage.get_repository(repository_id)
+    if not repository:
+        logger.error(f"Repository not found: {repository_id}")
+        return
+
+    # Validate repository type (must be SMB for Hyper-V)
+    repo_type = repository.get("repo_type", "").lower()
+    if repo_type != "smb":
+        logger.error(
+            f"Repository type '{repo_type}' is not supported for Hyper-V backups. "
+            "Use an SMB repository so the Hyper-V host can export directly to it."
+        )
+        return
+
+    # Get credentials
+    hv_password = _storage.get_hypervisor_password(hypervisor["id"])
+
+    run_id = tz.get_now().strftime("%Y%m%d_%H%M%S_%f")
+
+    try:
+        # Get domain and cluster_name from hypervisor data
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+        cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
+
+        api = HyperVClusterAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=hv_password,
+            cluster_name=cluster_name,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        backup_manager = HyperVClusterBackupManager(api)
+
+        # Get guest IDs from job
+        guest_ids = job.get("guest_ids", [])
+
+        if not guest_ids:
+            # Backup all VMs
+            guests = backup_manager.list_all_guests()
+            guest_ids = [g["vmid"] for g in guests]
+
+        # Build guest name map
+        all_guests = backup_manager.list_all_guests()
+        guest_map = {g["vmid"]: g for g in all_guests}
+
+        # Build UNC path for export destination
+        smb_server = repository.get("server", "")
+        smb_share = repository.get("share", "")
+        smb_path = repository.get("path", "")
+
+        backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+        if smb_path:
+            smb_path_win = smb_path.replace("/", "\\")
+            backup_base_path = f"{backup_base_path}\\{smb_path_win}"
+
+        # Add hypervisor subfolder
+        backup_base_path = f"{backup_base_path}\\Hypervisors\\{hypervisor['name']}"
+
+        logger.info(
+            f"Starting Hyper-V Cluster backup job '{job['name']}' to repository "
+            f"'{repository['name']}' (path: {backup_base_path})"
+        )
+
+        # Get backup mode
+        backup_mode = job.get("backup_mode", "online")
+
+        # Get SMB credentials
+        smb_username = repository.get("username", "")
+        smb_password = _storage.get_repository_password(repository_id)
+        smb_domain = repository.get("domain", "")
+
+        # Start job progress tracking
+        _storage.start_job_progress(
+            run_id=run_id,
+            job_name=job["name"],
+        )
+        _storage.update_job_progress(
+            run_id=run_id,
+            status="running",
+            message=f"Starting backup of {len(guest_ids)} VM(s) from cluster",
+            total_files=len(guest_ids),
+            files_processed=0,
+        )
+
+        backup_results = []
+        total_vms = len(guest_ids)
+
+        for idx, vmid in enumerate(guest_ids):
+            guest = guest_map.get(vmid)
+            guest_name = guest.get("name", f"VM {vmid}") if guest else f"VM {vmid}"
+            owner_node = guest.get("owner_node", "unknown") if guest else "unknown"
+            vm_num = idx + 1
+
+            phase_weights = {
+                "starting": 0,
+                "shutting_down": 5,
+                "creating_checkpoint": 10,
+                "exporting": 15,
+                "verifying": 85,
+                "cleanup": 95,
+                "starting_vm": 98,
+                "completed": 100,
+            }
+
+            def hyperv_cluster_progress_callback(progress_info: dict) -> None:
+                """Update job progress based on Hyper-V Cluster backup phase."""
+                phase = progress_info.get("status", "")
+                vm = progress_info.get("vm", guest_name)
+                node = progress_info.get("node", owner_node)
+
+                phase_pct = phase_weights.get(phase, 0)
+                completed_vms = idx
+                current_vm_progress = phase_pct / 100.0
+                overall_pct = int(((completed_vms + current_vm_progress) / total_vms) * 100)
+                overall_pct = min(overall_pct, 99)
+
+                vm_context = f"[{vm_num}/{total_vms}] " if total_vms > 1 else ""
+
+                phase_messages = {
+                    "starting": f"{vm_context}Starting: {vm} (node: {node})",
+                    "shutting_down": f"{vm_context}Shutting down: {vm}",
+                    "creating_checkpoint": f"{vm_context}Creating checkpoint: {vm}",
+                    "exporting": f"{vm_context}Exporting & copying: {vm}",
+                    "verifying": f"{vm_context}Verifying: {vm}",
+                    "cleanup": f"{vm_context}Cleaning up: {vm}",
+                    "starting_vm": f"{vm_context}Restarting: {vm}",
+                    "completed": f"{vm_context}Completed: {vm}",
+                }
+                message = phase_messages.get(phase, f"{vm_context}Backing up: {vm}")
+
+                _storage.update_job_progress(
+                    run_id=run_id,
+                    status="running",
+                    progress_percent=overall_pct,
+                    message=message,
+                    current_file=vm,
+                    files_processed=idx,
+                    total_files=total_vms,
+                )
+
+            # Initial progress update
+            base_pct = int((idx / total_vms) * 100)
+            vm_context = f"[{vm_num}/{total_vms}] " if total_vms > 1 else ""
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="running",
+                progress_percent=base_pct,
+                message=f"{vm_context}Starting: {guest_name} (node: {owner_node})",
+                current_file=guest_name,
+                files_processed=idx,
+                total_files=total_vms,
+            )
+
+            # Save run as running
+            _storage.save_hypervisor_run(
+                run_id=run_id,
+                job_id=job_id,
+                job_name=job["name"],
+                hypervisor_id=hypervisor["id"],
+                guest_id=vmid,
+                guest_name=guest_name,
+                guest_type="vm",
+                status="running",
+            )
+
+            try:
+                result = backup_manager.backup_vm(
+                    vm_name=guest_name,
+                    backup_path=backup_base_path,
+                    backup_mode=backup_mode,
+                    progress_callback=hyperv_cluster_progress_callback,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
+                )
+
+                backup_size = result.get("size_bytes", 0)
+                backup_filename = result.get("export_path")
+
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    guest_type="vm",
+                    status="success" if result.get("success") else "failed",
+                    finished_at=tz.get_now(),
+                    duration_seconds=result.get("duration_seconds"),
+                    backup_size=backup_size,
+                    backup_filename=backup_filename,
+                    errors=result.get("errors"),
+                )
+
+                backup_results.append({
+                    "vmid": vmid,
+                    "guest_name": guest_name,
+                    "guest_type": "vm",
+                    "success": result.get("success", False),
+                    "backup_filename": backup_filename,
+                    "backup_size": backup_size,
+                    "duration_seconds": result.get("duration_seconds"),
+                    "started_at": tz.get_now().isoformat(),
+                    "finished_at": tz.get_now().isoformat(),
+                    "errors": result.get("errors"),
+                    "owner_node": result.get("owner_node"),
+                })
+
+                if result.get("success"):
+                    logger.info(
+                        f"Cluster backup succeeded for VM '{guest_name}' "
+                        f"on node '{result.get('owner_node')}' "
+                        f"({backup_size / 1024 / 1024:.1f} MB)"
+                    )
+
+                    # Enforce retention
+                    copies_to_keep = job.get("copies_to_keep", 0)
+                    if copies_to_keep > 0:
+                        logger.info(f"Enforcing copies_to_keep={copies_to_keep} for VM {guest_name}")
+                        try:
+                            repo_password = _storage.get_repository_password(repository_id)
+                            repo_with_password = {**repository, "password": repo_password}
+                            _enforce_copies_limit(
+                                repository=repo_with_password,
+                                hypervisor_name=hypervisor["name"],
+                                vmid=guest_name,
+                                copies_to_keep=copies_to_keep,
+                                hypervisor_type="hyperv",
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to enforce retention for VM {guest_name}: {e}")
+                else:
+                    logger.warning(f"Cluster backup failed for VM '{guest_name}': {result.get('errors')}")
+
+            except Exception as e:
+                logger.exception(f"Cluster backup failed for VM '{guest_name}': {e}")
+                _storage.save_hypervisor_run(
+                    run_id=run_id,
+                    job_id=job_id,
+                    job_name=job["name"],
+                    hypervisor_id=hypervisor["id"],
+                    guest_id=vmid,
+                    guest_name=guest_name,
+                    guest_type="vm",
+                    status="failed",
+                    finished_at=tz.get_now(),
+                    errors=[str(e)],
+                )
+                backup_results.append({
+                    "vmid": vmid,
+                    "guest_name": guest_name,
+                    "guest_type": "vm",
+                    "success": False,
+                    "errors": [str(e)],
+                })
+
+        # Finish job progress tracking
+        success_count = sum(1 for r in backup_results if r.get("success"))
+        fail_count = len(backup_results) - success_count
+        final_status = "completed" if fail_count == 0 else "failed" if success_count == 0 else "completed"
+        _storage.update_job_progress(
+            run_id=run_id,
+            status=final_status,
+            progress_percent=100,
+            message=f"Completed: {success_count} succeeded, {fail_count} failed",
+            files_processed=len(guest_ids),
+        )
+        _storage.finish_job_progress(run_id, final_status)
+
+        logger.info(f"Hyper-V Cluster backup job '{job.get('name')}' completed")
+
+        # Write metadata to repository
+        try:
+            repo_password = _storage.get_repository_password(repository_id)
+            repo_with_password = {**repository, "password": repo_password}
+
+            _write_backup_metadata_to_repo(
+                repository=repo_with_password,
+                hypervisor=hypervisor,
+                job=job,
+                job_id=job_id,
+                run_id=run_id,
+                results=backup_results,
+                guest_map=guest_map,
+            )
+        except Exception as meta_err:
+            logger.warning(f"Failed to write Hyper-V Cluster backup metadata: {meta_err}")
+
+    except Exception as e:
+        logger.exception(f"Hyper-V Cluster job {job_id} failed: {e}")
+        try:
+            _storage.update_job_progress(
+                run_id=run_id,
+                status="failed",
+                message=f"Job failed: {e}",
+            )
+            _storage.finish_job_progress(run_id, "failed")
+        except Exception:
+            pass
+
+
 # ============================================================================
 # Module-level metadata writing functions
 # These are used by the scheduled job trigger functions above
@@ -1652,7 +1974,7 @@ def _enforce_copies_limit(
     # Sanitize hypervisor name for folder
     safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor_name)
 
-    if hypervisor_type == "hyperv":
+    if hypervisor_type in ("hyperv", "hyperv-cluster"):
         if repo_type == "smb":
             _enforce_copies_limit_hyperv_smb(repository, safe_hv_name, str(vmid), copies_to_keep)
         # NFS not typically used with Hyper-V but could be added
@@ -5244,7 +5566,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not host:
             return {"success": False, "message": "Host is required"}
 
-        if hypervisor_type not in ("proxmox", "unraid", "hyperv"):
+        if hypervisor_type not in ("proxmox", "unraid", "hyperv", "hyperv-cluster"):
             return {"success": False, "message": f"Unsupported hypervisor type: {hypervisor_type}"}
 
         try:
@@ -5275,7 +5597,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "version": api.version if success else None,
                 }
 
-            elif hypervisor_type == "hyperv":
+            elif hypervisor_type in ("hyperv", "hyperv-cluster"):
                 # Hyper-V uses WinRM + PowerShell
                 if not username:
                     return {"success": False, "message": "Username is required for Hyper-V"}
@@ -5286,15 +5608,29 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if port == 8006:  # User didn't change from Proxmox default
                     port = 5985
 
-                api = HyperVAPI(
-                    host=host,
-                    username=username,
-                    password=password,
-                    port=port,
-                    use_ssl=port == 5986,
-                    verify_ssl=verify_ssl,
-                    domain=domain,
-                )
+                if hypervisor_type == "hyperv-cluster":
+                    from backer.hypervisors.hyperv import HyperVClusterAPI
+                    cluster_name = body.get("cluster_name")
+                    api = HyperVClusterAPI(
+                        host=host,
+                        username=username,
+                        password=password,
+                        cluster_name=cluster_name,
+                        port=port,
+                        use_ssl=port == 5986,
+                        verify_ssl=verify_ssl,
+                        domain=domain,
+                    )
+                else:
+                    api = HyperVAPI(
+                        host=host,
+                        username=username,
+                        password=password,
+                        port=port,
+                        use_ssl=port == 5986,
+                        verify_ssl=verify_ssl,
+                        domain=domain,
+                    )
 
                 success, message = api.test_connection()
 
@@ -5499,7 +5835,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             success, message = api.test_connection()
 
-        elif hypervisor_type == "hyperv":
+        elif hypervisor_type in ("hyperv", "hyperv-cluster"):
             # Hyper-V uses WinRM + PowerShell
             if not password:
                 return {"success": False, "message": "Password not configured", "hypervisor_id": hypervisor_id}
@@ -5507,15 +5843,30 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             port = hypervisor.get("port", 5985)
             # Get domain from hypervisor data or config
             domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
-            api = HyperVAPI(
-                host=hypervisor["host"],
-                username=hypervisor.get("username", "Administrator"),
-                password=password,
-                port=port,
-                use_ssl=port == 5986,
-                verify_ssl=hypervisor.get("verify_ssl", False),
-                domain=domain,
-            )
+
+            if hypervisor_type == "hyperv-cluster":
+                from backer.hypervisors.hyperv import HyperVClusterAPI
+                cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
+                api = HyperVClusterAPI(
+                    host=hypervisor["host"],
+                    username=hypervisor.get("username", "Administrator"),
+                    password=password,
+                    cluster_name=cluster_name,
+                    port=port,
+                    use_ssl=port == 5986,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                    domain=domain,
+                )
+            else:
+                api = HyperVAPI(
+                    host=hypervisor["host"],
+                    username=hypervisor.get("username", "Administrator"),
+                    password=password,
+                    port=port,
+                    use_ssl=port == 5986,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                    domain=domain,
+                )
 
             success, message = api.test_connection()
 
@@ -5609,7 +5960,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 return backup_manager.list_all_guests()
 
-            elif hypervisor_type == "hyperv":
+            elif hypervisor_type in ("hyperv", "hyperv-cluster"):
                 # Hyper-V uses WinRM + PowerShell
                 if not password:
                     raise HTTPException(status_code=400, detail="Password not configured")
@@ -5617,17 +5968,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 port = hypervisor.get("port", 5985)
                 # Get domain from hypervisor data or config
                 domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
-                api = HyperVAPI(
-                    host=hypervisor["host"],
-                    username=hypervisor.get("username", "Administrator"),
-                    password=password,
-                    port=port,
-                    use_ssl=port == 5986,
-                    verify_ssl=hypervisor.get("verify_ssl", False),
-                    domain=domain,
-                )
 
-                backup_manager = HyperVBackupManager(api)
+                if hypervisor_type == "hyperv-cluster":
+                    from backer.hypervisors.hyperv import HyperVClusterAPI, HyperVClusterBackupManager
+                    cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
+                    api = HyperVClusterAPI(
+                        host=hypervisor["host"],
+                        username=hypervisor.get("username", "Administrator"),
+                        password=password,
+                        cluster_name=cluster_name,
+                        port=port,
+                        use_ssl=port == 5986,
+                        verify_ssl=hypervisor.get("verify_ssl", False),
+                        domain=domain,
+                    )
+                    backup_manager = HyperVClusterBackupManager(api)
+                else:
+                    api = HyperVAPI(
+                        host=hypervisor["host"],
+                        username=hypervisor.get("username", "Administrator"),
+                        password=password,
+                        port=port,
+                        use_ssl=port == 5986,
+                        verify_ssl=hypervisor.get("verify_ssl", False),
+                        domain=domain,
+                    )
+                    backup_manager = HyperVBackupManager(api)
+
                 return backup_manager.list_all_guests()
 
             elif hypervisor_type == "proxmox":
@@ -6401,7 +6768,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Hyper-V uses a different folder structure than Proxmox
         # Structure: {repo_path}/Hypervisors/{hv_name}/{vm_name}/{timestamp}/{vm_name}/
         # The backup_filename stores the full UNC path to the VM export folder
-        if hypervisor_type == "hyperv":
+        if hypervisor_type in ("hyperv", "hyperv-cluster"):
             if repo_type == "smb":
                 share = repository.get("share", "")
                 username = repository.get("username")
@@ -7764,7 +8131,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
 
         # Dispatch to appropriate handler based on hypervisor type
-        if hypervisor_type == "hyperv":
+        if hypervisor_type in ("hyperv", "hyperv-cluster"):
             # Use the scheduler's Hyper-V backup trigger
             repository_id = job.get("repository_id")
             if not repository_id:
@@ -7783,7 +8150,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 )
 
             # Trigger backup in background via scheduler mechanism
-            _trigger_hyperv_backup_job(job_id, job, hypervisor)
+            if hypervisor_type == "hyperv-cluster":
+                _trigger_hyperv_cluster_backup_job(job_id, job, hypervisor)
+            else:
+                _trigger_hyperv_backup_job(job_id, job, hypervisor)
 
             return {
                 "message": f"Hyper-V backup job '{job['name']}' started",
@@ -8447,7 +8817,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
 
         # Dispatch to type-specific implementations
-        if hypervisor_type == "hyperv":
+        if hypervisor_type in ("hyperv", "hyperv-cluster"):
             # Hyper-V backups are stored in repositories, not on the hypervisor
             # Aggregate backups from all jobs associated with this hypervisor
             all_backups = []
@@ -8610,8 +8980,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         logger.info(f"list_hypervisor_job_backups: job={job_id}, hypervisor_type={hypervisor_type}")
 
         # Handle Hyper-V backups (different folder structure)
-        if hypervisor_type == "hyperv":
-            logger.info("Calling _get_hyperv_job_backups for Hyper-V")
+        if hypervisor_type in ("hyperv", "hyperv-cluster"):
+            logger.info(f"Calling _get_hyperv_job_backups for {hypervisor_type}")
             return _get_hyperv_job_backups(
                 job=job,
                 hypervisor=hypervisor,
@@ -9015,18 +9385,34 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get domain from hypervisor
         hv_domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+        hypervisor_type = hypervisor.get("hypervisor_type", "hyperv")
 
-        api = HyperVAPI(
-            host=hypervisor["host"],
-            username=hypervisor.get("username", "Administrator"),
-            password=hv_password,
-            port=hypervisor.get("port", 5985),
-            use_ssl=hypervisor.get("port", 5985) == 5986,
-            verify_ssl=hypervisor.get("verify_ssl", False),
-            domain=hv_domain,
-        )
-
-        backup_manager = HyperVBackupManager(api)
+        # Use cluster API for hyperv-cluster type
+        if hypervisor_type == "hyperv-cluster":
+            from backer.hypervisors.hyperv import HyperVClusterAPI, HyperVClusterBackupManager
+            cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
+            api = HyperVClusterAPI(
+                host=hypervisor["host"],
+                username=hypervisor.get("username", "Administrator"),
+                password=hv_password,
+                cluster_name=cluster_name,
+                port=hypervisor.get("port", 5985),
+                use_ssl=hypervisor.get("port", 5985) == 5986,
+                verify_ssl=hypervisor.get("verify_ssl", False),
+                domain=hv_domain,
+            )
+            backup_manager = HyperVClusterBackupManager(api)
+        else:
+            api = HyperVAPI(
+                host=hypervisor["host"],
+                username=hypervisor.get("username", "Administrator"),
+                password=hv_password,
+                port=hypervisor.get("port", 5985),
+                use_ssl=hypervisor.get("port", 5985) == 5986,
+                verify_ssl=hypervisor.get("verify_ssl", False),
+                domain=hv_domain,
+            )
+            backup_manager = HyperVBackupManager(api)
 
         # Build UNC path to backup
         smb_server = repository.get("server", "")
@@ -9153,7 +9539,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Check hypervisor type - Hyper-V has different restore flow
         hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
-        if hypervisor_type == "hyperv":
+        if hypervisor_type in ("hyperv", "hyperv-cluster"):
             return await _restore_hyperv_from_repository(
                 job=job,
                 hypervisor=hypervisor,
@@ -9515,7 +9901,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        if hypervisor.get("hypervisor_type") != "hyperv":
+        if hypervisor.get("hypervisor_type") not in ("hyperv", "hyperv-cluster"):
             raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
 
         body = await request.json()
@@ -9636,7 +10022,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        if hypervisor.get("hypervisor_type") != "hyperv":
+        if hypervisor.get("hypervisor_type") not in ("hyperv", "hyperv-cluster"):
             raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
 
         password = storage.get_hypervisor_password(hypervisor_id)

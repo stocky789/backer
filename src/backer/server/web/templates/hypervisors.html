@@ -234,6 +234,7 @@
                         <option value="proxmox">Proxmox VE</option>
                         <option value="unraid">Unraid</option>
                         <option value="hyperv">Microsoft Hyper-V</option>
+                        <option value="hyperv-cluster">Hyper-V Failover Cluster</option>
                     </select>
                     <div class="form-hint">Select the hypervisor platform</div>
                 </div>
@@ -323,9 +324,20 @@
                         <input type="text" id="hvHypervDomain" class="form-input" placeholder="MYDOMAIN">
                         <div class="form-hint">Windows domain name if using domain authentication</div>
                     </div>
-                    <div class="form-hint hyperv-note">
+                    <!-- Cluster-specific field -->
+                    <div id="hypervClusterNameGroup" class="form-group" style="display: none;">
+                        <label class="form-label">Cluster Name (optional)</label>
+                        <input type="text" id="hvHypervClusterName" class="form-input" placeholder="HVCluster">
+                        <div class="form-hint">Failover cluster name (auto-detected if not specified)</div>
+                    </div>
+                    <div class="form-hint hyperv-note" id="hypervStandaloneNote">
                         <strong>Note:</strong> Hyper-V backups require SMB storage repositories. Backer connects via WinRM (native Windows remote management).
                         Run <code>Enable-PSRemoting -Force</code> on the Hyper-V host if WinRM isn't already enabled.
+                    </div>
+                    <div class="form-hint hyperv-note" id="hypervClusterNote" style="display: none;">
+                        <strong>Note:</strong> Hyper-V Cluster backups require SMB storage accessible from all cluster nodes.
+                        Connect to any cluster node - Backer will automatically route operations to the correct owner node for each VM.
+                        Domain authentication is recommended for cluster environments.
                     </div>
                 </div>
 
@@ -844,11 +856,18 @@ function onHypervisorTypeChange() {
     const isUnraid = hvType === 'unraid';
     const isProxmox = hvType === 'proxmox';
     const isHyperV = hvType === 'hyperv';
+    const isHyperVCluster = hvType === 'hyperv-cluster';
+    const isAnyHyperV = isHyperV || isHyperVCluster;
 
     // Show/hide auth sections
     document.getElementById('proxmoxAuthSection').style.display = isProxmox ? 'block' : 'none';
     document.getElementById('unraidAuth').style.display = isUnraid ? 'block' : 'none';
-    document.getElementById('hypervAuth').style.display = isHyperV ? 'block' : 'none';
+    document.getElementById('hypervAuth').style.display = isAnyHyperV ? 'block' : 'none';
+
+    // Show/hide cluster-specific fields
+    document.getElementById('hypervClusterNameGroup').style.display = isHyperVCluster ? 'block' : 'none';
+    document.getElementById('hypervStandaloneNote').style.display = isHyperV ? 'block' : 'none';
+    document.getElementById('hypervClusterNote').style.display = isHyperVCluster ? 'block' : 'none';
 
     // Update port default
     const portInput = document.getElementById('hvPort');
@@ -856,7 +875,7 @@ function onHypervisorTypeChange() {
         portInput.value = '443';
     } else if (isProxmox && (portInput.value === '443' || portInput.value === '5985' || portInput.value === '')) {
         portInput.value = '8006';
-    } else if (isHyperV && (portInput.value === '443' || portInput.value === '8006' || portInput.value === '')) {
+    } else if (isAnyHyperV && (portInput.value === '443' || portInput.value === '8006' || portInput.value === '')) {
         portInput.value = '5985';
     }
 
@@ -866,6 +885,9 @@ function onHypervisorTypeChange() {
     if (isUnraid) {
         nameInput.placeholder = 'My Unraid Server';
         hostInput.placeholder = '192.168.1.100 or tower.local';
+    } else if (isHyperVCluster) {
+        nameInput.placeholder = 'My HV Cluster';
+        hostInput.placeholder = 'node1.domain.com (any cluster node)';
     } else if (isHyperV) {
         nameInput.placeholder = 'My Hyper-V Server';
         hostInput.placeholder = '192.168.1.100 or hyperv.local';
@@ -891,11 +913,13 @@ function getHypervisorFormData() {
     const authMethod = document.getElementById('hvAuthMethod').value;
     const isUnraid = hvType === 'unraid';
     const isHyperV = hvType === 'hyperv';
+    const isHyperVCluster = hvType === 'hyperv-cluster';
+    const isAnyHyperV = isHyperV || isHyperVCluster;
 
     // Determine default port based on type
     let defaultPort = 8006;
     if (isUnraid) defaultPort = 443;
-    else if (isHyperV) defaultPort = 5985;
+    else if (isAnyHyperV) defaultPort = 5985;
 
     const data = {
         name: document.getElementById('hvName').value,
@@ -914,12 +938,16 @@ function getHypervisorFormData() {
         // We store it as token_secret for consistency with backend
         data.auth_method = 'token';
         data.token_secret = document.getElementById('hvUnraidApiKey').value;
-    } else if (isHyperV) {
+    } else if (isAnyHyperV) {
         // Hyper-V uses WinRM + username/password
         data.auth_method = 'password';
         data.username = document.getElementById('hvHypervUsername').value;
         data.password = document.getElementById('hvHypervPassword').value;
         data.domain = document.getElementById('hvHypervDomain').value || null;
+        // Cluster-specific field
+        if (isHyperVCluster) {
+            data.cluster_name = document.getElementById('hvHypervClusterName').value || null;
+        }
     } else {
         // Proxmox authentication
         data.auth_method = authMethod;
@@ -1027,11 +1055,15 @@ async function editHypervisor(hvId) {
         if (hv.hypervisor_type === 'unraid') {
             // Unraid uses API key - clear the field (don't show existing key)
             document.getElementById('hvUnraidApiKey').value = '';
-        } else if (hv.hypervisor_type === 'hyperv') {
+        } else if (hv.hypervisor_type === 'hyperv' || hv.hypervisor_type === 'hyperv-cluster') {
             // Hyper-V uses username/password
             document.getElementById('hvHypervUsername').value = hv.username || 'Administrator';
             document.getElementById('hvHypervPassword').value = ''; // Don't show existing password
             document.getElementById('hvHypervDomain').value = hv.domain || '';
+            // Cluster-specific field
+            if (hv.hypervisor_type === 'hyperv-cluster') {
+                document.getElementById('hvHypervClusterName').value = hv.cluster_name || '';
+            }
         } else {
             // Proxmox auth
             if (hv.token_id) {
@@ -1422,7 +1454,7 @@ async function onJobHypervisorChange() {
     const jobModeSelect = document.getElementById('jobMode');
     const compressionGroup = document.getElementById('jobCompressionGroup');
 
-    if (hvType === 'hyperv') {
+    if (hvType === 'hyperv' || hvType === 'hyperv-cluster') {
         // Hyper-V: different backup modes, no compression
         jobModeSelect.innerHTML = `
             <option value="online">Online (VSS)</option>
