@@ -1122,42 +1122,72 @@ if (-not $vmStoragePath) {{
 }}
 
 # Clean up any old BackerExport_* folders from previous failed backups
-Get-ChildItem -Path $vmStoragePath -Directory -Filter 'BackerExport_*' -ErrorAction SilentlyContinue |
-    ForEach-Object {{
-        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    }}
+# This is critical for handling renamed VMs where previous exports may have left
+# partial data with the old VM name structure
+# We clean up in both the selected storage path AND the default Hyper-V paths
+# to handle cases where different paths were used in previous backup attempts
+$pathsToClean = @($vmStoragePath)
+if ($vmHost.VirtualHardDiskPath -and $vmHost.VirtualHardDiskPath -ne $vmStoragePath) {{
+    $pathsToClean += $vmHost.VirtualHardDiskPath
+}}
+if ($vmHost.VirtualMachinePath -and $vmHost.VirtualMachinePath -ne $vmStoragePath) {{
+    $pathsToClean += $vmHost.VirtualMachinePath
+}}
 
-# Also clean up any orphaned VM-named folders in the VHD storage path that might conflict
-# This handles renamed VMs where the VHDX filename differs from VM name
-$vmFolderInStorage = Join-Path $vmStoragePath $vmName
-if (Test-Path $vmFolderInStorage) {{
-    # Check if this folder is NOT actively used by the VM we're exporting
-    $vmDisks = (Get-VM -Name $vmName -ErrorAction SilentlyContinue | Get-VMHardDiskDrive).Path
-    $folderInUse = $false
-    foreach ($disk in $vmDisks) {{
-        if ($disk -like "$vmFolderInStorage*") {{
-            $folderInUse = $true
-            break
+foreach ($cleanPath in $pathsToClean) {{
+    $oldExportFolders = Get-ChildItem -Path $cleanPath -Directory -Filter 'BackerExport_*' -ErrorAction SilentlyContinue
+    foreach ($folder in $oldExportFolders) {{
+        try {{
+            # Remove the folder and all contents
+            Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction Stop
+        }} catch {{
+            # If standard removal fails, try robocopy trick to remove stubborn files
+            $emptyDir = Join-Path $env:TEMP "EmptyDir_$([Guid]::NewGuid())"
+            New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+            & robocopy $emptyDir $folder.FullName /MIR /NFL /NDL /NJH /NJS /nc /ns /np 2>&1 | Out-Null
+            Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $emptyDir -Force -ErrorAction SilentlyContinue
         }}
-    }}
-    if (-not $folderInUse) {{
-        Remove-Item -Path $vmFolderInStorage -Recurse -Force -ErrorAction SilentlyContinue
     }}
 }}
 
-# Create temp export directory
+# Create temp export directory with a fresh GUID
 $tempExportId = [System.Guid]::NewGuid().ToString()
 $localExportPath = Join-Path $vmStoragePath "BackerExport_$tempExportId"
+
+# Ensure the export path is completely clean (remove if exists from failed run)
+if (Test-Path $localExportPath) {{
+    Remove-Item -Path $localExportPath -Recurse -Force -ErrorAction SilentlyContinue
+}}
 New-Item -ItemType Directory -Path $localExportPath -Force | Out-Null
 
 try {{
-    # Ensure destination VM folder doesn't exist (handles edge cases)
+    # Ensure destination VM folder doesn't exist (handles edge cases with renamed VMs)
+    # Export-VM creates: $localExportPath\$vmName\Virtual Hard Disks\...
+    # If VM was renamed but VHDX files kept old names, a prior failed export
+    # could leave files that conflict with the new export
     $destVmFolder = Join-Path $localExportPath $vmName
     if (Test-Path $destVmFolder) {{
         Remove-Item -Path $destVmFolder -Recurse -Force -ErrorAction SilentlyContinue
     }}
 
+    # Also check for any subfolder in the export path that might contain
+    # VHD files with conflicting names (handles VM renames where VHDX names differ)
+    Get-ChildItem -Path $localExportPath -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {{
+            Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }}
+
+    # Final verification: ensure the export path is completely empty
+    # This catches any edge cases where cleanup didn't fully succeed
+    $remainingItems = Get-ChildItem -Path $localExportPath -ErrorAction SilentlyContinue
+    if ($remainingItems) {{
+        # Something is still in the export folder - remove it
+        $remainingItems | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+
     # Export VM to temp directory on local/SAN storage
+    # Note: Export-VM creates $localExportPath\$vmName\... structure
     {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
 
     $vmExportPath = Join-Path $localExportPath $vmName
