@@ -8676,7 +8676,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Hyper-V backups use a VM-centric folder structure:
         {backup_path}/{vm_name}/{timestamp}/{vm_name}/Virtual Machines/*.vmcx
         """
-        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager, HyperVClusterAPI, HyperVClusterBackupManager
 
         repo_type = repository.get("repo_type", "").lower()
         if repo_type != "smb":
@@ -8685,22 +8685,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get Hyper-V credentials
         hv_password = storage.get_hypervisor_password(hypervisor["id"])
+        hypervisor_type = hypervisor.get("hypervisor_type", "hyperv")
 
         try:
             # Get domain from hypervisor data
             hv_domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
 
-            api = HyperVAPI(
-                host=hypervisor["host"],
-                username=hypervisor.get("username", "Administrator"),
-                password=hv_password,
-                port=hypervisor.get("port", 5985),
-                use_ssl=hypervisor.get("port", 5985) == 5986,
-                verify_ssl=hypervisor.get("verify_ssl", False),
-                domain=hv_domain,
-            )
-
-            backup_manager = HyperVBackupManager(api)
+            # Use cluster API for hyperv-cluster type
+            if hypervisor_type == "hyperv-cluster":
+                cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
+                api = HyperVClusterAPI(
+                    host=hypervisor["host"],
+                    username=hypervisor.get("username", "Administrator"),
+                    password=hv_password,
+                    port=hypervisor.get("port", 5985),
+                    use_ssl=hypervisor.get("port", 5985) == 5986,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                    domain=hv_domain,
+                    cluster_name=cluster_name,
+                )
+                backup_manager = HyperVClusterBackupManager(api)
+            else:
+                api = HyperVAPI(
+                    host=hypervisor["host"],
+                    username=hypervisor.get("username", "Administrator"),
+                    password=hv_password,
+                    port=hypervisor.get("port", 5985),
+                    use_ssl=hypervisor.get("port", 5985) == 5986,
+                    verify_ssl=hypervisor.get("verify_ssl", False),
+                    domain=hv_domain,
+                )
+                backup_manager = HyperVBackupManager(api)
 
             # Build UNC path to backups
             smb_server = repository.get("server", "")
