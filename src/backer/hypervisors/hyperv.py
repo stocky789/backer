@@ -3350,6 +3350,14 @@ try {{
         $warnings += "Removed existing VM '$vmName' before rebuild"
     }}
 
+    # Clean up any leftover VM config folder from previous failed attempts
+    $vmConfigPath = Join-Path $defaultVmPath $vmName
+    if (Test-Path $vmConfigPath) {{
+        # Wait briefly for any handles to release
+        Start-Sleep -Seconds 2
+        Remove-Item -Path $vmConfigPath -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+
     # Copy VHDs to local storage
     $localVhdPath = Join-Path $defaultVhdPath $vmName
     if (Test-Path $localVhdPath) {{
