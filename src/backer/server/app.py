@@ -8312,9 +8312,41 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Dispatch to type-specific implementations
         if hypervisor_type == "hyperv":
-            # Hyper-V needs a path to list backups - return empty if not provided
-            # The UI should use the dedicated hyperv-backups endpoint with path param
-            return []
+            # Hyper-V backups are stored in repositories, not on the hypervisor
+            # Aggregate backups from all jobs associated with this hypervisor
+            all_backups = []
+            jobs = storage.list_hypervisor_jobs()
+            for job in jobs:
+                if job.get("hypervisor_id") != hypervisor_id:
+                    continue
+                repository_id = job.get("repository_id")
+                if not repository_id:
+                    continue
+                repository = storage.get_repository(repository_id)
+                if not repository:
+                    continue
+                repo_password = storage.get_repository_password(repository_id)
+                try:
+                    job_backups = _get_hyperv_job_backups(
+                        job=job,
+                        hypervisor=hypervisor,
+                        repository=repository,
+                        repo_password=repo_password,
+                        storage=storage,
+                        job_guest_ids=[],  # Get all backups, not filtered
+                    )
+                    all_backups.extend(job_backups)
+                except Exception as e:
+                    logger.warning(f"Error listing backups for job {job.get('name')}: {e}")
+            # Sort by ctime descending and deduplicate by path
+            seen_paths: set[str] = set()
+            unique_backups = []
+            for b in sorted(all_backups, key=lambda x: x.get("ctime", 0), reverse=True):
+                path = b.get("path", "")
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    unique_backups.append(b)
+            return unique_backups[:50]
 
         elif hypervisor_type == "unraid":
             # Unraid needs a path to list backups - return empty if not provided
