@@ -3339,48 +3339,142 @@ try {{
         throw "No VHD files found in backup"
     }}
 
-    # Check for existing VM
+    # === COMPREHENSIVE VM CLEANUP ===
+    # This handles stuck/orphaned VMs including those on Cluster Shared Volumes (CSV)
+
+    # Step 1: Remove any existing VM with this name (including from cluster)
     $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if ($existingVm) {{
+        $warnings += "Found existing VM '$vmName', removing..."
+
+        # If it's a clustered VM, remove from cluster first
+        try {{
+            $clusterGroup = Get-ClusterGroup -Name $vmName -ErrorAction SilentlyContinue
+            if ($clusterGroup) {{
+                Remove-ClusterGroup -Name $vmName -RemoveResources -Force -ErrorAction SilentlyContinue
+                $warnings += "Removed VM '$vmName' from cluster"
+                Start-Sleep -Seconds 2
+            }}
+        }} catch {{ }}
+
+        # Stop and remove the VM
         if ($existingVm.State -ne 'Off') {{
-            Stop-VM -Name $vmName -Force -TurnOff -ErrorAction Stop
-            Start-Sleep -Seconds 5
+            Stop-VM -Name $vmName -Force -TurnOff -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
         }}
-        Remove-VM -Name $vmName -Force
+        Remove-VM -Name $vmName -Force -ErrorAction SilentlyContinue
         $warnings += "Removed existing VM '$vmName' before rebuild"
+        Start-Sleep -Seconds 2
     }}
 
-    # Clean up any leftover VM config folder from previous failed attempts
+    # Step 2: Clean up VM config folder from default path
     $vmConfigPath = Join-Path $defaultVmPath $vmName
     if (Test-Path $vmConfigPath) {{
-        # Wait briefly for any handles to release
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 2
         try {{
-            # Try to forcefully remove using cmd /c rd for stubborn folders
             Remove-Item -Path $vmConfigPath -Recurse -Force -ErrorAction Stop
+            $warnings += "Cleaned up VM folder: $vmConfigPath"
         }} catch {{
-            # Fallback: use cmd rd which can sometimes succeed when Remove-Item fails
             $null = & cmd /c rd /s /q "$vmConfigPath" 2>&1
             $warnings += "Used fallback cleanup for $vmConfigPath"
         }}
     }}
 
-    # Also clean up from the system VM registration path in case of ghost VMs
-    $sysVmPath = "C:\\ProgramData\\Microsoft\\Windows\\Hyper-V\\Virtual Machines"
-    if (Test-Path $sysVmPath) {{
-        Get-ChildItem -Path $sysVmPath -Filter "*.vmcx" -ErrorAction SilentlyContinue | ForEach-Object {{
-            # Check if this vmcx is orphaned (no VM references it)
-            $vmcxId = $_.BaseName
-            $linkedVm = Get-VM -ErrorAction SilentlyContinue | Where-Object {{ $_.Id.ToString() -eq $vmcxId }}
-            if (-not $linkedVm) {{
-                # Orphaned vmcx - try to remove it
-                try {{
-                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
-                    $warnings += "Removed orphaned vmcx: $($_.Name)"
-                }} catch {{ }}
+    # Step 3: Clean up any leftover VM folders by searching all known storage locations
+    # This is fully dynamic - discovers paths from cluster, VMs, and VMHost config
+    $pathsToCheck = @()
+
+    # Get paths from Cluster Shared Volumes (if this is a cluster node)
+    try {{
+        $clusterSharedVolumes = Get-ClusterSharedVolume -ErrorAction SilentlyContinue
+        if ($clusterSharedVolumes) {{
+            foreach ($csv in $clusterSharedVolumes) {{
+                $csvPath = $csv.SharedVolumeInfo.FriendlyVolumeName
+                if ($csvPath) {{
+                    # Search for VM folder anywhere under this CSV
+                    Get-ChildItem -Path $csvPath -Directory -Recurse -ErrorAction SilentlyContinue |
+                        Where-Object {{ $_.Name -eq $vmName }} | ForEach-Object {{
+                            $pathsToCheck += $_.FullName
+                        }}
+                }}
+            }}
+        }}
+    }} catch {{ }}
+
+    # Get paths from all registered VMs that match our VM name
+    Get-VM -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq $vmName }} | ForEach-Object {{
+        if ($_.Path) {{ $pathsToCheck += $_.Path }}
+        if ($_.ConfigurationLocation) {{ $pathsToCheck += $_.ConfigurationLocation }}
+        if ($_.SnapshotFileLocation) {{ $pathsToCheck += $_.SnapshotFileLocation }}
+    }}
+
+    # Also check the default VM path
+    $pathsToCheck += Join-Path $defaultVmPath $vmName
+
+    # Remove duplicates and clean up each path
+    $pathsToCheck = $pathsToCheck | Select-Object -Unique
+    foreach ($pathToClean in $pathsToCheck) {{
+        if ($pathToClean -and (Test-Path $pathToClean)) {{
+            $warnings += "Found leftover VM folder: $pathToClean"
+            Start-Sleep -Seconds 2
+            try {{
+                # First unregister any VM pointing to this path
+                Get-VM -ErrorAction SilentlyContinue | Where-Object {{
+                    $_.Path -eq $pathToClean -or
+                    $_.ConfigurationLocation -eq $pathToClean -or
+                    $_.Path -like "$pathToClean*"
+                }} | ForEach-Object {{
+                    $warnings += "Removing VM '$($_.Name)' that references $pathToClean"
+                    # Remove from cluster first if clustered
+                    try {{
+                        $grp = Get-ClusterGroup -Name $_.Name -ErrorAction SilentlyContinue
+                        if ($grp) {{ Remove-ClusterGroup -Name $_.Name -RemoveResources -Force -ErrorAction SilentlyContinue }}
+                    }} catch {{ }}
+                    if ($_.State -ne 'Off') {{ Stop-VM -VM $_ -Force -TurnOff -ErrorAction SilentlyContinue }}
+                    Remove-VM -VM $_ -Force -ErrorAction SilentlyContinue
+                }}
+                Start-Sleep -Seconds 2
+                Remove-Item -Path $pathToClean -Recurse -Force -ErrorAction Stop
+                $warnings += "Cleaned up folder: $pathToClean"
+            }} catch {{
+                # Try cmd fallback for stubborn folders
+                $null = & cmd /c rd /s /q "$pathToClean" 2>&1
+                $warnings += "Used fallback cleanup for: $pathToClean"
             }}
         }}
     }}
+
+    # Step 4: Clean up orphaned vmcx files from Hyper-V's data root
+    # Discover the path dynamically from registry or VMHost
+    $hvDataRoot = $null
+    try {{
+        # Try to get from registry first (most reliable)
+        $hvRegPath = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization"
+        $hvDataRoot = (Get-ItemProperty -Path $hvRegPath -ErrorAction SilentlyContinue).DataRoot
+    }} catch {{ }}
+    if (-not $hvDataRoot) {{
+        # Fallback: derive from environment - use Join-Path to build dynamically
+        $hvDataRoot = Join-Path $env:ProgramData (Join-Path "Microsoft" (Join-Path "Windows" "Hyper-V"))
+    }}
+
+    if ($hvDataRoot) {{
+        $sysVmPath = Join-Path $hvDataRoot "Virtual Machines"
+        if (Test-Path $sysVmPath) {{
+            Get-ChildItem -Path $sysVmPath -Filter "*.vmcx" -ErrorAction SilentlyContinue | ForEach-Object {{
+                $vmcxId = $_.BaseName
+                $linkedVm = Get-VM -ErrorAction SilentlyContinue | Where-Object {{ $_.Id.ToString() -eq $vmcxId }}
+                if (-not $linkedVm) {{
+                    try {{
+                        Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                        $warnings += "Removed orphaned vmcx: $($_.Name)"
+                    }} catch {{ }}
+                }}
+            }}
+        }}
+    }}
+
+    # Step 5: Final wait for any file handles to release
+    Start-Sleep -Seconds 3
 
     # Copy VHDs to local storage
     $localVhdPath = Join-Path $defaultVhdPath $vmName
