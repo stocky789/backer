@@ -8390,18 +8390,29 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "node": hypervisor.get("name", "unknown"),
                     "path": backup.get("path", ""),
                     "timestamp": timestamp,
+                    "vmcx_file": backup.get("vmcx_file", ""),
                 })
 
             # Filter by job's guest_ids if specified (for Hyper-V, these are VM names or GUIDs)
             logger.info(f"Before filter: {len(result)} backups, job_guest_ids={job_guest_ids}")
             if job_guest_ids:
-                # Convert guest_ids to strings for comparison
-                guest_id_strs = [str(gid) for gid in job_guest_ids]
+                # Convert guest_ids to lowercase strings for comparison
+                guest_id_strs = [str(gid).lower() for gid in job_guest_ids]
                 logger.info(f"Filtering by guest_id_strs={guest_id_strs}")
-                result = [
-                    b for b in result
-                    if b.get("vm_name") in guest_id_strs or b.get("vmid") in guest_id_strs
-                ]
+
+                def backup_matches(b: dict) -> bool:
+                    """Check if backup matches any of the job's guest IDs."""
+                    vm_name = b.get("vm_name", "").lower()
+                    vmid = str(b.get("vmid", "")).lower() if b.get("vmid") else ""
+                    # Also check vmcx_file which contains the VM GUID
+                    vmcx = b.get("vmcx_file", "").lower().replace(".vmcx", "")
+                    return (
+                        vm_name in guest_id_strs or
+                        vmid in guest_id_strs or
+                        vmcx in guest_id_strs
+                    )
+
+                result = [b for b in result if backup_matches(b)]
                 logger.info(f"After filter: {len(result)} backups")
 
             # Sort by ctime descending (newest first)
