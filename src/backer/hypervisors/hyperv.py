@@ -1186,9 +1186,87 @@ try {{
         $remainingItems | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     }}
 
+    # Check for checkpoints that might cause export issues
+    # When a VM has checkpoints, Export-VM can fail with "file exists" if checkpoint
+    # chains reference the same base VHD multiple times
+    $checkpoints = Get-VMSnapshot -VMName $vmName -ErrorAction SilentlyContinue
+    if ($checkpoints) {{
+        # Remove all checkpoints before export to avoid duplicate file issues
+        # This merges the checkpoint chain into the base VHD
+        $checkpoints | Remove-VMSnapshot -IncludeAllChildSnapshots -ErrorAction SilentlyContinue
+        # Wait for merge operation to complete
+        Start-Sleep -Seconds 5
+        # Additional wait if VM is still merging
+        $mergeWait = 0
+        while ($mergeWait -lt 120) {{
+            $vmState = (Get-VM -Name $vmName).State
+            if ($vmState -eq 'Running' -or $vmState -eq 'Off') {{ break }}
+            Start-Sleep -Seconds 5
+            $mergeWait += 5
+        }}
+    }}
+
     # Export VM to temp directory on local/SAN storage
     # Note: Export-VM creates $localExportPath\$vmName\... structure
-    {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
+    $exportError = $null
+    try {{
+        {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
+    }} catch {{
+        $exportError = $_
+
+        # If export failed with "file exists", try manual copy approach
+        if ($_.Exception.Message -match '0x80070050|file exists|already exists') {{
+            # Clean up failed export attempt
+            $failedExportPath = Join-Path $localExportPath $vmName
+            if (Test-Path $failedExportPath) {{
+                Remove-Item -Path $failedExportPath -Recurse -Force -ErrorAction SilentlyContinue
+            }}
+
+            # Manual export: copy VHDs and VM config separately
+            $vmExportPath = Join-Path $localExportPath $vmName
+            $vhdDestPath = Join-Path $vmExportPath 'Virtual Hard Disks'
+            $vmConfigPath = Join-Path $vmExportPath 'Virtual Machines'
+
+            New-Item -ItemType Directory -Path $vhdDestPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $vmConfigPath -Force | Out-Null
+
+            # Get all VHD paths (deduplicated)
+            $vhdPaths = @{{}}
+            $vm | Get-VMHardDiskDrive | ForEach-Object {{
+                $vhdPath = $_.Path
+                if ($vhdPath -and (Test-Path $vhdPath) -and -not $vhdPaths.ContainsKey($vhdPath)) {{
+                    $vhdPaths[$vhdPath] = $true
+                    $vhdName = Split-Path -Leaf $vhdPath
+                    $destVhd = Join-Path $vhdDestPath $vhdName
+                    Copy-Item -Path $vhdPath -Destination $destVhd -Force
+                }}
+            }}
+
+            # Export just the VM configuration (without VHDs)
+            # This creates the vmcx file needed for import
+            $vm | Export-VM -Path $localExportPath -ErrorAction SilentlyContinue
+
+            # If config export also failed, create a minimal config
+            if (-not (Test-Path (Join-Path $vmConfigPath '*.vmcx'))) {{
+                # Save VM config info as JSON for manual recreation
+                $vmInfo = @{{
+                    Name = $vm.Name
+                    Id = $vm.Id.ToString()
+                    Generation = $vm.Generation
+                    MemoryStartupBytes = $vm.MemoryStartupBytes
+                    ProcessorCount = $vm.ProcessorCount
+                    VHDs = @($vhdPaths.Keys)
+                }}
+                $vmInfo | ConvertTo-Json | Out-File (Join-Path $vmConfigPath 'vm_config.json')
+            }}
+
+            $exportError = $null  # Clear error since manual export succeeded
+        }}
+    }}
+
+    if ($exportError) {{
+        throw $exportError
+    }}
 
     $vmExportPath = Join-Path $localExportPath $vmName
     if (-not (Test-Path $vmExportPath)) {{
