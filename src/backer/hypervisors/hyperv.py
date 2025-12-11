@@ -1563,15 +1563,10 @@ $smbUnc = '{smb_unc}'
 $smbUser = '{full_username}'
 $smbPass = '{safe_password}'
 
-# Create local temp directory for import
-$tempId = [System.Guid]::NewGuid().ToString().Substring(0, 8)
-$localImportPath = "$env:TEMP\\BackerRestore_$tempId"
-
 try {{
-    # First, establish SMB connection with net use (robocopy needs this, not PSDrive)
+    # Establish SMB connection with credentials
     $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) {{
-        # Exit code 2 means already connected, which is fine
         throw "Failed to connect to SMB share: $netUseResult"
     }}
 
@@ -1580,17 +1575,8 @@ try {{
         throw "Backup path not found: $importPath"
     }}
 
-    # Copy backup to local temp using robocopy
-    New-Item -ItemType Directory -Path $localImportPath -Force | Out-Null
-
-    # /E = copy subdirs, /R:1 /W:1 = minimal retries, /NP /NDL /NFL = quiet
-    & robocopy $importPath $localImportPath /E /R:1 /W:1 /NP /NDL /NFL
-    if ($LASTEXITCODE -ge 8) {{
-        throw "Failed to copy backup files: robocopy exit code $LASTEXITCODE"
-    }}
-
-    # Find the .vmcx file in local copy
-    $vmFolder = Join-Path $localImportPath 'Virtual Machines'
+    # Find the .vmcx file
+    $vmFolder = Join-Path $importPath 'Virtual Machines'
     if (Test-Path $vmFolder) {{
         $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $vmcx) {{
@@ -1598,16 +1584,23 @@ try {{
         }}
         $vmcxPath = $vmcx.FullName
     }} else {{
-        $vmcx = Get-ChildItem -Path $localImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $vmcx) {{
-            throw "No .vmcx file found in $localImportPath"
+            throw "No .vmcx file found in $importPath"
         }}
         $vmcxPath = $vmcx.FullName
     }}
 
-    # Import the VM - use AsJob to get better error handling
-    # Don't use -Copy since files are already local, just register in place then move
-    $vm = Import-VM -Path $vmcxPath -GenerateNewId -ErrorAction Stop
+    # Import with -Copy and -GenerateNewId
+    # Let Hyper-V handle the copy to its default storage locations
+    # Use default Hyper-V paths for VM config and VHDs
+    $defaultVmPath = (Get-VMHost).VirtualMachinePath
+    $defaultVhdPath = (Get-VMHost).VirtualHardDiskPath
+
+    $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId `
+        -VirtualMachinePath $defaultVmPath `
+        -VhdDestinationPath $defaultVhdPath `
+        -ErrorAction Stop
 
     if ($vm) {{
         @{{
@@ -1619,11 +1612,8 @@ try {{
         @{{ Success = $false; Error = "Import returned no VM" }} | ConvertTo-Json
     }}
 }} finally {{
-    # Cleanup
+    # Disconnect SMB
     & net use $smbUnc /delete /y 2>&1 | Out-Null
-    if (Test-Path $localImportPath) {{
-        Remove-Item -Path $localImportPath -Recurse -Force -ErrorAction SilentlyContinue
-    }}
 }}
 """
                     rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
