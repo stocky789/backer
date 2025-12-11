@@ -1696,7 +1696,21 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
         if (storageGroup) storageGroup.style.display = 'none';
         // Hide force/overwrite option (Hyper-V always generates new ID)
         if (forceGroup) forceGroup.style.display = 'none';
+        // Show vTPM/BitLocker warning for Hyper-V
+        let tpmWarning = document.getElementById('restoreTpmWarning');
+        if (!tpmWarning) {
+            tpmWarning = document.createElement('div');
+            tpmWarning.id = 'restoreTpmWarning';
+            tpmWarning.className = 'form-hint';
+            tpmWarning.style.cssText = 'background: var(--warning-bg, #fff3cd); color: var(--warning-text, #856404); padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 12px;';
+            tpmWarning.innerHTML = '<strong>Note:</strong> If this VM uses BitLocker with TPM, you will need the BitLocker recovery key on first boot after restore.';
+            document.getElementById('restoreForm').insertBefore(tpmWarning, document.getElementById('restoreForm').firstChild);
+        }
+        tpmWarning.style.display = 'block';
     } else {
+        // Hide vTPM warning for non-Hyper-V
+        const tpmWarning = document.getElementById('restoreTpmWarning');
+        if (tpmWarning) tpmWarning.style.display = 'none';
         document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
         if (vmidLabel) vmidLabel.textContent = 'Restore as VMID';
         vmidInput.type = 'number';

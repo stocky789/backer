@@ -9001,7 +9001,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if new_vm_name in (None, "", "null"):
             new_vm_name = None
         start_after = body.get("start", False)
-        force = body.get("force", False)
 
         if not filename:
             raise HTTPException(status_code=400, detail="filename is required")

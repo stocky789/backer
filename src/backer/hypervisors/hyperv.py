@@ -1578,29 +1578,86 @@ try {{
     # Find the .vmcx file
     $vmFolder = Join-Path $importPath 'Virtual Machines'
     if (Test-Path $vmFolder) {{
-        $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
         if (-not $vmcx) {{
             throw "No .vmcx file found in $vmFolder"
         }}
         $vmcxPath = $vmcx.FullName
     }} else {{
-        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
         if (-not $vmcx) {{
             throw "No .vmcx file found in $importPath"
         }}
         $vmcxPath = $vmcx.FullName
     }}
 
-    # Import with -Copy and -GenerateNewId
-    # Let Hyper-V handle the copy to its default storage locations
-    # Use default Hyper-V paths for VM config and VHDs
+    # Get default paths
     $defaultVmPath = (Get-VMHost).VirtualMachinePath
     $defaultVhdPath = (Get-VMHost).VirtualHardDiskPath
 
-    $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId `
-        -VirtualMachinePath $defaultVmPath `
-        -VhdDestinationPath $defaultVhdPath `
-        -ErrorAction Stop
+    # Try standard import first
+    $importError = $null
+    try {{
+        $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId `
+            -VirtualMachinePath $defaultVmPath `
+            -VhdDestinationPath $defaultVhdPath `
+            -ErrorAction Stop
+    }} catch {{
+        $importError = $_
+    }}
+
+    # If import failed (likely vTPM issue), fall back to creating new VM from VHDs
+    if (-not $vm -and $importError) {{
+        # Check if it's a vTPM/vmgs related error
+        if ($importError.Exception.Message -match 'vmgs|0x80070032|not supported') {{
+            # Find VHD files
+            $vhdFolder = Join-Path $importPath 'Virtual Hard Disks'
+            $vhds = @()
+            if (Test-Path $vhdFolder) {{
+                $vhds = Get-ChildItem -Path $vhdFolder -Include *.vhdx,*.vhd -Recurse
+            }}
+            if ($vhds.Count -eq 0) {{
+                throw "Import failed and no VHD files found for fallback: $importError"
+            }}
+
+            # Get VM name from folder
+            $vmName = Split-Path -Leaf $importPath
+
+            # Copy VHDs to local storage
+            $localVhdPath = Join-Path $defaultVhdPath $vmName
+            New-Item -ItemType Directory -Path $localVhdPath -Force | Out-Null
+
+            $localVhds = @()
+            foreach ($vhd in $vhds) {{
+                $destVhd = Join-Path $localVhdPath $vhd.Name
+                Copy-Item -Path $vhd.FullName -Destination $destVhd -Force
+                $localVhds += $destVhd
+            }}
+
+            # Create new Gen2 VM (most modern VMs are Gen2)
+            $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes 4GB `
+                -Path $defaultVmPath -NoVHD
+
+            # Attach copied VHDs
+            $first = $true
+            foreach ($vhd in $localVhds) {{
+                if ($first) {{
+                    Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
+                    $first = $false
+                }} else {{
+                    Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
+                }}
+            }}
+
+            # Enable vTPM with new local key protector (fresh, not tied to old host)
+            Set-VMKeyProtector -VMName $vmName -NewLocalKeyProtector
+            Enable-VMTPM -VMName $vmName
+        }} else {{
+            throw $importError
+        }}
+    }}
 
     if ($vm) {{
         @{{
