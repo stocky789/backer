@@ -550,9 +550,9 @@
                 </div>
 
                 <div class="form-group">
-                    <label class="form-label">Restore as VMID</label>
+                    <label class="form-label" id="restoreVmidLabel">Restore as VMID</label>
                     <input type="number" id="restoreVmid" class="form-input" placeholder="Leave empty for original VMID">
-                    <div class="form-hint">Specify VMID or leave empty to use the original</div>
+                    <div class="form-hint" id="restoreVmidHint">Specify VMID or leave empty to use the original</div>
                 </div>
 
                 <div class="form-group">
@@ -1647,7 +1647,9 @@ async function loadJobBackups(jobId, hvId) {
             const sizeGB = (backup.size / 1024 / 1024 / 1024).toFixed(2);
             const date = backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : '-';
             const guestType = backup.guest_type || 'qemu';
-            const typeLabel = guestType === 'lxc' ? 'LXC' : 'VM';
+            const backupFormat = backup.format || 'vma';
+            const isHyperV = backupFormat === 'vmcx';
+            const typeLabel = isHyperV ? 'VM' : (guestType === 'lxc' ? 'LXC' : 'VM');
             const typeBadgeClass = guestType === 'lxc' ? 'lxc' : 'vm';
 
             html += `<div class="backup-item">
@@ -1656,7 +1658,7 @@ async function loadJobBackups(jobId, hvId) {
                     <div class="backup-meta"><span class="status-badge ${typeBadgeClass}">${typeLabel} ${backup.vmid}</span> | Size: ${sizeGB} GB | Date: ${date}</div>
                 </div>
                 <div class="backup-actions">
-                    <button class="btn btn-primary btn-sm" onclick="showRestoreFromRepoDialog('${hvId}', '${escapeHtml(backup.filename)}', '${guestType}', '${escapeHtml(String(backup.vmid))}')">Restore</button>
+                    <button class="btn btn-primary btn-sm" onclick="showRestoreFromRepoDialog('${hvId}', '${escapeHtml(backup.filename)}', '${guestType}', '${escapeHtml(String(backup.vmid))}', '${backupFormat}')">Restore</button>
                 </div>
             </div>`;
         }
@@ -1667,22 +1669,55 @@ async function loadJobBackups(jobId, hvId) {
     }
 }
 
-function showRestoreFromRepoDialog(hvId, filename, guestType, vmid) {
+function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat = 'vma') {
+    const isHyperV = backupFormat === 'vmcx';
+
     document.getElementById('restoreHypervisorId').value = hvId;
     document.getElementById('restoreArchive').value = filename;
     document.getElementById('restoreNode').value = '';
     document.getElementById('restoreGuestType').value = guestType;
     document.getElementById('restoreBackupName').value = filename;
-    document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
+
+    // Adjust labels based on hypervisor type
+    const vmidLabel = document.getElementById('restoreVmidLabel');
+    const vmidInput = document.getElementById('restoreVmid');
+    const vmidHint = document.getElementById('restoreVmidHint');
+    const storageGroup = document.getElementById('restoreStorage').closest('.form-group');
+    const forceGroup = document.getElementById('restoreForce').closest('.form-group');
+
+    if (isHyperV) {
+        document.getElementById('restoreGuestTypeLabel').textContent = 'Type: Hyper-V Virtual Machine';
+        // Change VMID field to VM Name for Hyper-V
+        if (vmidLabel) vmidLabel.textContent = 'Restore as VM Name';
+        vmidInput.type = 'text';
+        vmidInput.placeholder = 'Leave empty for original name';
+        if (vmidHint) vmidHint.textContent = 'Specify new VM name or leave empty to use the original';
+        // Hide storage selector (not applicable for Hyper-V)
+        if (storageGroup) storageGroup.style.display = 'none';
+        // Hide force/overwrite option (Hyper-V always generates new ID)
+        if (forceGroup) forceGroup.style.display = 'none';
+    } else {
+        document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
+        if (vmidLabel) vmidLabel.textContent = 'Restore as VMID';
+        vmidInput.type = 'number';
+        vmidInput.placeholder = 'Leave empty for original VMID';
+        if (vmidHint) vmidHint.textContent = 'Specify VMID or leave empty to use the original';
+        if (storageGroup) storageGroup.style.display = 'block';
+        if (forceGroup) forceGroup.style.display = 'block';
+    }
+
     document.getElementById('restoreVmid').value = '';
     document.getElementById('restoreForce').checked = false;
-    document.getElementById('restoreStart').checked = false;
+    document.getElementById('restoreStart').checked = true;  // Default to start after restore
     document.getElementById('restoreError').style.display = 'none';
 
     document.getElementById('restoreForm').dataset.restoreType = 'repository';
     document.getElementById('restoreForm').dataset.jobId = currentJobId;
+    document.getElementById('restoreForm').dataset.backupFormat = backupFormat;
 
-    loadRestoreStorages(hvId);
+    if (!isHyperV) {
+        loadRestoreStorages(hvId);
+    }
     document.getElementById('restoreModal').style.display = 'flex';
 }
 

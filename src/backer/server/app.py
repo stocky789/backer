@@ -8985,6 +8985,128 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "message": f"Restore started for VMID {vmid}",
         }
 
+    async def _restore_hyperv_from_repository(
+        job: dict,
+        hypervisor: dict,
+        repository: dict,
+        body: dict,
+        storage: Storage,
+    ) -> dict[str, Any]:
+        """Restore a Hyper-V VM from a backup in the repository."""
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+        filename = body.get("filename")  # e.g., "testwin11/20251211_123556"
+        new_vm_name = body.get("vmid")  # For Hyper-V, vmid field is used as new VM name
+        start_after = body.get("start", False)
+        force = body.get("force", False)
+
+        if not filename:
+            raise HTTPException(status_code=400, detail="filename is required")
+
+        # Get credentials
+        hv_password = storage.get_hypervisor_password(hypervisor["id"])
+        repo_password = storage.get_repository_password(repository["id"])
+
+        # Get domain from hypervisor
+        hv_domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=hv_password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=hv_domain,
+        )
+
+        backup_manager = HyperVBackupManager(api)
+
+        # Build UNC path to backup
+        smb_server = repository.get("server", "")
+        smb_share = repository.get("share", "")
+        smb_path = repository.get("path", "")
+
+        backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+        if smb_path:
+            smb_path_win = smb_path.replace("/", "\\").strip("\\")
+            backup_base_path = f"{backup_base_path}\\{smb_path_win}"
+
+        # Add hypervisor subfolder
+        safe_hv_name = "".join(
+            c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+        )
+        backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
+
+        # Build full path to the backup
+        # filename is like "testwin11/20251211_123556"
+        # Full path: \\server\share\path\Hypervisors\hvname\testwin11\20251211_123556\testwin11
+        parts = filename.replace("/", "\\").split("\\")
+        if len(parts) >= 2:
+            vm_name = parts[0]
+            timestamp = parts[1]
+            import_path = f"{backup_base_path}\\{vm_name}\\{timestamp}\\{vm_name}"
+        else:
+            import_path = f"{backup_base_path}\\{filename}"
+            vm_name = filename
+
+        # Get SMB credentials from repository
+        smb_username = repository.get("username", "")
+        smb_domain = repository.get("domain")
+
+        def run_hyperv_restore(task: Task) -> dict[str, Any]:
+            try:
+                task.update_status("running", f"Restoring VM from {import_path}")
+
+                result = backup_manager.restore_vm(
+                    import_path=import_path,
+                    vm_name=new_vm_name if new_vm_name else None,
+                    generate_new_id=True,
+                    smb_username=smb_username,
+                    smb_password=repo_password,
+                    smb_domain=smb_domain,
+                )
+
+                if result.get("success"):
+                    restored_name = result.get("vm_name", vm_name)
+                    task.update_status("completed", f"VM '{restored_name}' restored successfully")
+
+                    # Start VM if requested
+                    if start_after and restored_name:
+                        try:
+                            api.start_vm(restored_name)
+                            task.update_status("completed", f"VM '{restored_name}' restored and started")
+                        except Exception as start_err:
+                            logger.warning(f"Failed to start VM after restore: {start_err}")
+
+                    return {
+                        "success": True,
+                        "vm_name": restored_name,
+                        "message": f"VM '{restored_name}' restored successfully",
+                    }
+                else:
+                    errors = result.get("errors", ["Unknown error"])
+                    task.update_status("failed", f"Restore failed: {errors}")
+                    return {
+                        "success": False,
+                        "errors": errors,
+                    }
+            except Exception as e:
+                logger.exception(f"Hyper-V restore failed: {e}")
+                task.update_status("failed", str(e))
+                return {"success": False, "errors": [str(e)]}
+
+        # Run restore as background task
+        task = task_manager.submit(
+            name=f"Restoring Hyper-V VM from {filename}",
+            func=run_hyperv_restore,
+        )
+
+        return {
+            "task_id": task.id,
+            "message": f"Hyper-V restore started for {vm_name}",
+        }
+
     @app.post("/api/v1/hypervisor-jobs/{job_id}/restore")
     async def restore_from_repository(
         job_id: str,
@@ -9021,6 +9143,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Repository not found")
 
         body = await request.json()
+
+        # Check hypervisor type - Hyper-V has different restore flow
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
+        if hypervisor_type == "hyperv":
+            return await _restore_hyperv_from_repository(
+                job=job,
+                hypervisor=hypervisor,
+                repository=repository,
+                body=body,
+                storage=storage,
+            )
 
         filename = body.get("filename")  # e.g., "vzdump-qemu-100-2025_12_07-10_04_54.vma.zst"
         target_vmid = body.get("vmid")  # Optional: restore to different VMID
