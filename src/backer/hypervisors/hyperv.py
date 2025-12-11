@@ -4947,7 +4947,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                             import_path, smb_unc, full_username, safe_password
                         )
                         if backup_config:
-                            logger.info(f"Loaded backup config for node selection")
+                            logger.info("Loaded backup config for node selection")
 
             # Determine target node
             if not target_node:

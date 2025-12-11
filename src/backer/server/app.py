@@ -8676,7 +8676,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Hyper-V backups use a VM-centric folder structure:
         {backup_path}/{vm_name}/{timestamp}/{vm_name}/Virtual Machines/*.vmcx
         """
-        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager, HyperVClusterAPI, HyperVClusterBackupManager
+        from backer.hypervisors.hyperv import (
+            HyperVAPI,
+            HyperVBackupManager,
+            HyperVClusterAPI,
+            HyperVClusterBackupManager,
+        )
 
         repo_type = repository.get("repo_type", "").lower()
         if repo_type != "smb":
