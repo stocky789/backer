@@ -1829,10 +1829,15 @@ async function submitRestore(event) {
     const hvId = document.getElementById('restoreHypervisorId').value;
 
     if (restoreType === 'repository' && jobId) {
+        const backupFormat = form.dataset.backupFormat || 'vma';
+        const isHyperV = backupFormat === 'vmcx';
+        const vmidValue = document.getElementById('restoreVmid').value;
+
         const data = {
             filename: document.getElementById('restoreArchive').value,
             guest_type: document.getElementById('restoreGuestType').value || 'qemu',
-            vmid: document.getElementById('restoreVmid').value ? parseInt(document.getElementById('restoreVmid').value) : null,
+            // For Hyper-V, vmid is a string (VM name); for Proxmox, it's an integer
+            vmid: vmidValue ? (isHyperV ? vmidValue : parseInt(vmidValue)) : null,
             storage: document.getElementById('restoreStorage').value || null,
             force: document.getElementById('restoreForce').checked,
             start: document.getElementById('restoreStart').checked,

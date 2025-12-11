@@ -8997,6 +8997,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         filename = body.get("filename")  # e.g., "testwin11/20251211_123556"
         new_vm_name = body.get("vmid")  # For Hyper-V, vmid field is used as new VM name
+        # Handle case where vmid is sent as null or empty string
+        if new_vm_name in (None, "", "null"):
+            new_vm_name = None
         start_after = body.get("start", False)
         force = body.get("force", False)
 
@@ -9058,7 +9061,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         def run_hyperv_restore(task: Task) -> dict[str, Any]:
             try:
-                task.update_status("running", f"Restoring VM from {import_path}")
+                task.message = f"Restoring VM from {import_path}"
+                task.progress = 10
 
                 result = backup_manager.restore_vm(
                     import_path=import_path,
@@ -9071,13 +9075,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 if result.get("success"):
                     restored_name = result.get("vm_name", vm_name)
-                    task.update_status("completed", f"VM '{restored_name}' restored successfully")
+                    task.message = f"VM '{restored_name}' restored successfully"
+                    task.progress = 90
 
                     # Start VM if requested
                     if start_after and restored_name:
                         try:
                             api.start_vm(restored_name)
-                            task.update_status("completed", f"VM '{restored_name}' restored and started")
+                            task.message = f"VM '{restored_name}' restored and started"
                         except Exception as start_err:
                             logger.warning(f"Failed to start VM after restore: {start_err}")
 
@@ -9088,20 +9093,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     }
                 else:
                     errors = result.get("errors", ["Unknown error"])
-                    task.update_status("failed", f"Restore failed: {errors}")
-                    return {
-                        "success": False,
-                        "errors": errors,
-                    }
+                    raise Exception(f"Restore failed: {errors}")
             except Exception as e:
                 logger.exception(f"Hyper-V restore failed: {e}")
-                task.update_status("failed", str(e))
-                return {"success": False, "errors": [str(e)]}
+                raise
 
         # Run restore as background task
         task_mgr = get_task_manager()
         task = task_mgr.submit(
-            name=f"Restoring Hyper-V VM from {filename}",
+            task_type="hyperv_restore",
+            description=f"Restoring Hyper-V VM from {filename}",
             func=run_hyperv_restore,
         )
 
