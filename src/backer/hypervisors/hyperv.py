@@ -4778,7 +4778,10 @@ try {{
         owner_node = self.get_vm_owner_node(vm_name)
         if owner_node:
             node_api = self._get_or_create_node_connection(owner_node)
-            return node_api.shutdown_vm(vm_name, timeout)
+            success = node_api.shutdown_vm(vm_name, timeout)
+            if success:
+                return True, f"VM '{vm_name}' shutdown on node '{owner_node}'"
+            return False, f"Failed to shutdown VM '{vm_name}' on node '{owner_node}'"
         return False, f"Could not find owner node for VM '{vm_name}'"
 
     def stop_vm(self, vm_name: str, force: bool = False) -> tuple[bool, str]:
@@ -4796,7 +4799,10 @@ try {{
         owner_node = self.get_vm_owner_node(vm_name)
         if owner_node:
             node_api = self._get_or_create_node_connection(owner_node)
-            return node_api.stop_vm(vm_name, force)
+            success = node_api.stop_vm(vm_name, force)
+            if success:
+                return True, f"VM '{vm_name}' stopped on node '{owner_node}'"
+            return False, f"Failed to stop VM '{vm_name}' on node '{owner_node}'"
         return False, f"Could not find owner node for VM '{vm_name}'"
 
     def start_vm(self, vm_name: str) -> tuple[bool, str]:
@@ -4813,7 +4819,10 @@ try {{
         owner_node = self.get_vm_owner_node(vm_name)
         if owner_node:
             node_api = self._get_or_create_node_connection(owner_node)
-            return node_api.start_vm(vm_name)
+            success = node_api.start_vm(vm_name)
+            if success:
+                return True, f"VM '{vm_name}' started on node '{owner_node}'"
+            return False, f"Failed to start VM '{vm_name}' on node '{owner_node}'"
         return False, f"Could not find owner node for VM '{vm_name}'"
 
     def capture_vm_config(self, vm_name: str) -> dict[str, Any] | None:
