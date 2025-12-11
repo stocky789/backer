@@ -8592,9 +8592,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Check hypervisor type for type-specific backup listing
         hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
+        logger.info(f"list_hypervisor_job_backups: job={job_id}, hypervisor_type={hypervisor_type}")
 
         # Handle Hyper-V backups (different folder structure)
         if hypervisor_type == "hyperv":
+            logger.info("Calling _get_hyperv_job_backups for Hyper-V")
             return _get_hyperv_job_backups(
                 job=job,
                 hypervisor=hypervisor,
