@@ -1121,6 +1121,12 @@ if (-not $vmStoragePath) {{
     throw "No suitable storage with $reqGB GB free and write access. Checked: $pathsList"
 }}
 
+# Clean up any old BackerExport_* folders from previous failed backups
+Get-ChildItem -Path $vmStoragePath -Directory -Filter 'BackerExport_*' -ErrorAction SilentlyContinue |
+    ForEach-Object {{
+        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+
 # Create temp export directory
 $tempExportId = [System.Guid]::NewGuid().ToString()
 $localExportPath = Join-Path $vmStoragePath "BackerExport_$tempExportId"
