@@ -8399,10 +8399,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Sort by ctime descending (newest first)
             result.sort(key=lambda x: x.get("ctime", 0), reverse=True)
 
+            logger.info(f"Returning {len(result)} Hyper-V backups to frontend")
             return result[:50]  # Limit to 50 most recent
 
         except Exception as e:
-            logger.warning(f"Error listing Hyper-V backups: {e}")
+            logger.warning(f"Error listing Hyper-V backups: {e}", exc_info=True)
             return []
 
     @app.get("/api/v1/hypervisors/{hypervisor_id}/backups")
