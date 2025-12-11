@@ -3153,23 +3153,37 @@ try {{
     $vmcxPath = $null
     $vmBackupFolder = $null
 
-    # Check subfolders for VM export structure
-    $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
-    foreach ($folder in $subfolders) {{
-        $vmFolder = Join-Path $folder.FullName 'Virtual Machines'
-        if (Test-Path $vmFolder) {{
-            $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($vmcx) {{
-                $vmcxPath = $vmcx.FullName
-                $vmBackupFolder = $folder.FullName
-                break
+    # First check if 'Virtual Machines' folder exists directly in import path
+    # This handles the case where import_path already includes the VM folder name
+    $directVmFolder = Join-Path $importPath 'Virtual Machines'
+    if (Test-Path $directVmFolder) {{
+        $vmcx = Get-ChildItem -Path $directVmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($vmcx) {{
+            $vmcxPath = $vmcx.FullName
+            $vmBackupFolder = $importPath
+        }}
+    }}
+
+    # If not found directly, check subfolders for VM export structure
+    if (-not $vmcxPath) {{
+        $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+        foreach ($folder in $subfolders) {{
+            $vmFolder = Join-Path $folder.FullName 'Virtual Machines'
+            if (Test-Path $vmFolder) {{
+                $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                if ($vmcx) {{
+                    $vmcxPath = $vmcx.FullName
+                    $vmBackupFolder = $folder.FullName
+                    break
+                }}
             }}
         }}
     }}
 
     if (-not $vmcxPath) {{
-        throw "No .vmcx file found in backup"
+        throw "No .vmcx file found in backup at $importPath"
     }}
 
     # Get default paths if not specified
@@ -5043,7 +5057,7 @@ try {{
     Write-Output "ERROR: $_"
 }}
 """
-        rc, stdout, stderr = self.cluster_api.run_powershell(script)
+        rc, stdout, stderr = self.cluster_api._run_powershell(script)
         if "SUCCESS" not in stdout:
             logger.warning(f"Config update result: {stdout.strip()}")
 
