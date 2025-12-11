@@ -3718,16 +3718,23 @@ class HyperVClusterAPI(HyperVAPI):
             return self._node_connections[node_name]
 
         # Determine the host to connect to
-        # Try hostname first, fall back to IP if we have it
-        connect_host = node_name
-        node_ip = self._node_ip_map.get(node_name)
-
-        # Also check short name in IP map if FQDN was provided
         short_name = node_name.split(".")[0] if "." in node_name else node_name
+
+        # Build FQDN if we have a short name and know the cluster domain
+        if "." not in node_name and self._cluster_domain:
+            connect_host = f"{node_name}.{self._cluster_domain}"
+            logger.debug(f"Built FQDN '{connect_host}' from short name '{node_name}'")
+        else:
+            connect_host = node_name
+
+        # Get IP for fallback - check both short name and FQDN in the map
+        node_ip = self._node_ip_map.get(node_name)
         if not node_ip and short_name in self._node_ip_map:
             node_ip = self._node_ip_map[short_name]
+        if not node_ip and connect_host in self._node_ip_map:
+            node_ip = self._node_ip_map[connect_host]
 
-        # Try to create connection with hostname first
+        # Try to create connection with FQDN/hostname first
         try:
             api = HyperVAPI(
                 host=connect_host,
@@ -4868,6 +4875,12 @@ class HyperVClusterBackupManager(HyperVBackupManager):
         }
 
         try:
+            # Ensure node IP map is populated for DNS fallback
+            # This is needed when restore creates a fresh API instance
+            if not self.cluster_api._node_ip_map:
+                logger.info("Populating node IP map before restore")
+                self.cluster_api.test_connection()
+
             # Determine target node
             if not target_node:
                 # If VM exists in cluster, use current owner
