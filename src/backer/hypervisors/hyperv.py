@@ -4961,6 +4961,115 @@ class HyperVClusterBackupManager(HyperVBackupManager):
             result["duration_seconds"] = (ended_at - started_at).total_seconds()
             return result
 
+    def _cluster_inplace_restore(
+        self,
+        vm_name: str,
+        import_path: str,
+        existing_owner: str,
+        target_node: str,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+        progress_callback: Any | None = None,
+        backup_config: dict | None = None,
+    ) -> dict[str, Any]:
+        """Perform cluster-aware in-place restore.
+
+        This handles restoring a VM that exists in the cluster, potentially on
+        a different node than the target. For clustered VMs on shared storage
+        (CSV), the VHDs are accessible from any node.
+
+        Args:
+            vm_name: Name of the VM to restore
+            import_path: Path to backup files
+            existing_owner: Current owner node of the VM
+            target_node: Target node for the restore
+            smb_username: SMB username for backup access
+            smb_password: SMB password for backup access
+            smb_domain: SMB domain
+            progress_callback: Optional progress callback
+            backup_config: Optional backup configuration
+
+        Returns:
+            Dict with restore result
+        """
+        result: dict[str, Any] = {
+            "success": False,
+            "vm_name": vm_name,
+            "actual_mode": "inplace",
+            "errors": [],
+            "warnings": [],
+        }
+
+        try:
+            # Get the VM using the cluster API (routes to correct owner node)
+            existing_vm = self.cluster_api.get_guest(vm_name)
+            if not existing_vm:
+                result["errors"].append(f"VM '{vm_name}' not found in cluster")
+                return result
+
+            result["vm_id"] = existing_vm.vmid
+
+            # Get connection to the VM's actual owner node for the restore
+            owner_api = self.cluster_api._get_or_create_node_connection(existing_owner)
+            owner_backup_manager = HyperVBackupManager(owner_api)
+
+            if progress_callback:
+                progress_callback({
+                    "status": "inplace_restore",
+                    "vm": vm_name,
+                    "owner_node": existing_owner,
+                })
+
+            # Build SMB connection info
+            smb_unc = None
+            full_username = None
+            safe_password = None
+            if smb_username and smb_password and import_path.startswith("\\\\"):
+                unc_parts = import_path.lstrip("\\").split("\\")
+                if len(unc_parts) >= 2:
+                    smb_server = unc_parts[0]
+                    smb_share = unc_parts[1]
+                    smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                    safe_password = smb_password.replace("'", "''")
+                    full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
+
+            # Perform the in-place restore on the owner node
+            logger.info(f"Performing in-place restore of '{vm_name}' on owner node '{existing_owner}'")
+            success, message = owner_backup_manager._restore_inplace(
+                vm_name,
+                import_path,
+                smb_unc,
+                full_username,
+                safe_password,
+                progress_callback,
+            )
+
+            if success:
+                result["success"] = True
+                result["warnings"].append("In-place restore completed - VM configuration unchanged")
+                logger.info(f"Cluster in-place restore of '{vm_name}' completed successfully")
+
+                # If target node is different from current owner, optionally move VM
+                if target_node and existing_owner:
+                    target_short = target_node.split(".")[0].lower()
+                    owner_short = existing_owner.split(".")[0].lower()
+                    if target_short != owner_short:
+                        result["warnings"].append(
+                            f"VM remains on '{existing_owner}'. "
+                            f"Use cluster manager to migrate to '{target_node}' if needed."
+                        )
+            else:
+                result["errors"].append(f"In-place restore failed: {message}")
+                logger.error(f"Cluster in-place restore failed: {message}")
+
+            return result
+
+        except Exception as e:
+            logger.exception(f"Cluster in-place restore of '{vm_name}' failed")
+            result["errors"].append(str(e))
+            return result
+
     def restore_vm(
         self,
         import_path: str,
@@ -5043,20 +5152,18 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                         if backup_config:
                             logger.info("Loaded backup config for node selection")
 
-            # Determine target node
-            if not target_node:
-                # First priority: check if VM currently exists in cluster
-                if vm_name:
-                    existing_owner = self.cluster_api.get_vm_owner_node(vm_name)
-                    if existing_owner:
-                        target_node = existing_owner
-                        logger.info(
-                            f"VM '{vm_name}' exists on '{target_node}', "
-                            "will restore there"
-                        )
+            # Check if VM currently exists in cluster
+            existing_owner = None
+            if vm_name:
+                existing_owner = self.cluster_api.get_vm_owner_node(vm_name)
+                if existing_owner:
+                    logger.info(f"VM '{vm_name}' currently exists on '{existing_owner}'")
 
-                # Second priority: use original owner node from backup config
-                if not target_node and backup_config:
+            # Determine target node - user-specified takes priority
+            user_specified_node = target_node is not None
+            if not target_node:
+                # First priority: use original owner node from backup config
+                if backup_config:
                     cluster_info = backup_config.get("cluster", {})
                     original_owner = cluster_info.get("ownerNodeAtBackup")
                     if original_owner:
@@ -5078,6 +5185,11 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                                 f"Original owner '{original_owner}' is not online, "
                                 "will use another node"
                             )
+
+                # Second priority: use current owner if VM exists
+                if not target_node and existing_owner:
+                    target_node = existing_owner
+                    logger.info(f"Using current owner node: {target_node}")
 
                 # Fallback: use first available online node
                 if not target_node:
@@ -5102,25 +5214,77 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                     "target_node": target_node,
                 })
 
-            # Get connection to target node
-            node_api = self.cluster_api._get_or_create_node_connection(target_node)
-            node_backup_manager = HyperVBackupManager(node_api)
+            # For clustered VMs, we need special handling for in-place restore
+            # because the VM may exist on a different node than the target
+            use_cluster_inplace = False
+            if existing_owner and restore_mode in ("auto", "inplace"):
+                # VM exists in cluster - for in-place, use cluster-aware restore
+                use_cluster_inplace = True
+                logger.info(
+                    f"VM exists in cluster on '{existing_owner}', "
+                    "using cluster-aware in-place restore"
+                )
 
-            # Perform restore on target node
-            restore_result = node_backup_manager.restore_vm(
-                import_path=import_path,
-                vm_name=vm_name,
-                restore_path=restore_path,
-                vhd_destination_path=vhd_dest_path,
-                generate_new_id=generate_new_id,
-                start_after_restore=False,  # Don't start yet, add to cluster first
-                progress_callback=progress_callback,
-                smb_username=smb_username,
-                smb_password=smb_password,
-                smb_domain=smb_domain,
-                network_mapping=network_mapping,
-                restore_mode=restore_mode,
-            )
+            if use_cluster_inplace:
+                # Use cluster-aware in-place restore
+                # This handles the case where VM is on a different node than target
+                restore_result = self._cluster_inplace_restore(
+                    vm_name=vm_name,
+                    import_path=import_path,
+                    existing_owner=existing_owner,
+                    target_node=target_node,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
+                    progress_callback=progress_callback,
+                    backup_config=backup_config,
+                )
+
+                # If in-place failed and we're in auto mode, fall back to rebuild
+                if not restore_result.get("success") and restore_mode == "auto":
+                    logger.info("Cluster in-place restore failed, falling back to rebuild")
+                    restore_result["warnings"] = restore_result.get("warnings", [])
+                    restore_result["warnings"].append(
+                        f"In-place restore failed: {restore_result.get('errors', ['Unknown'])}, "
+                        "falling back to rebuild"
+                    )
+                    # Get connection to target node for rebuild
+                    node_api = self.cluster_api._get_or_create_node_connection(target_node)
+                    node_backup_manager = HyperVBackupManager(node_api)
+                    restore_result = node_backup_manager.restore_vm(
+                        import_path=import_path,
+                        vm_name=vm_name,
+                        restore_path=restore_path,
+                        vhd_destination_path=vhd_dest_path,
+                        generate_new_id=generate_new_id,
+                        start_after_restore=False,
+                        progress_callback=progress_callback,
+                        smb_username=smb_username,
+                        smb_password=smb_password,
+                        smb_domain=smb_domain,
+                        network_mapping=network_mapping,
+                        restore_mode="rebuild",
+                    )
+            else:
+                # Standard node-based restore (import, rebuild, or new VM)
+                node_api = self.cluster_api._get_or_create_node_connection(target_node)
+                node_backup_manager = HyperVBackupManager(node_api)
+
+                # Perform restore on target node
+                restore_result = node_backup_manager.restore_vm(
+                    import_path=import_path,
+                    vm_name=vm_name,
+                    restore_path=restore_path,
+                    vhd_destination_path=vhd_dest_path,
+                    generate_new_id=generate_new_id,
+                    start_after_restore=False,  # Don't start yet, add to cluster first
+                    progress_callback=progress_callback,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
+                    network_mapping=network_mapping,
+                    restore_mode=restore_mode,
+                )
 
             # Merge results
             result.update(restore_result)

@@ -583,6 +583,15 @@
                     <div class="form-hint">Warning: This will delete the existing VM/container</div>
                 </div>
 
+                <!-- Hyper-V Target Node (hidden for other hypervisors) -->
+                <div class="form-group" id="restoreTargetNodeGroup" style="display: none;">
+                    <label class="form-label">Target Cluster Node</label>
+                    <select id="restoreTargetNode" class="form-input">
+                        <option value="">Auto (original node or current location)</option>
+                    </select>
+                    <div class="form-hint">Select which cluster node to restore the VM to</div>
+                </div>
+
                 <!-- Hyper-V Restore Mode (hidden for other hypervisors) -->
                 <div class="form-group" id="restoreModeGroup" style="display: none;">
                     <label class="form-label">Restore Mode</label>
@@ -1737,6 +1746,9 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
     // Get restore mode group element
     const restoreModeGroup = document.getElementById('restoreModeGroup');
 
+    // Get target node group element
+    const targetNodeGroup = document.getElementById('restoreTargetNodeGroup');
+
     if (isHyperV) {
         document.getElementById('restoreGuestTypeLabel').textContent = 'Type: Hyper-V Virtual Machine';
         // Change VMID field to VM Name for Hyper-V
@@ -1753,6 +1765,8 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
             restoreModeGroup.style.display = 'block';
             document.getElementById('restoreMode').value = 'auto';  // Default to auto
         }
+        // Load cluster nodes for Hyper-V cluster type
+        loadClusterNodesForRestore(hvId, targetNodeGroup);
         // Show vTPM/BitLocker warning for Hyper-V
         let tpmWarning = document.getElementById('restoreTpmWarning');
         if (!tpmWarning) {
@@ -1770,6 +1784,8 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
         if (tpmWarning) tpmWarning.style.display = 'none';
         // Hide restore mode for non-Hyper-V
         if (restoreModeGroup) restoreModeGroup.style.display = 'none';
+        // Hide target node selector for non-Hyper-V
+        if (targetNodeGroup) targetNodeGroup.style.display = 'none';
         document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
         if (vmidLabel) vmidLabel.textContent = 'Restore as VMID';
         vmidInput.type = 'number';
@@ -1890,6 +1906,51 @@ async function loadRestoreStorages(hvId) {
     } catch (e) {}
 }
 
+async function loadClusterNodesForRestore(hvId, targetNodeGroup) {
+    const select = document.getElementById('restoreTargetNode');
+    select.innerHTML = '<option value="">Auto (original node or current location)</option>';
+
+    try {
+        // Check if this is a cluster hypervisor by fetching hypervisor info
+        const hvResponse = await fetch(`/api/v1/hypervisors/${hvId}`);
+        if (!hvResponse.ok) {
+            if (targetNodeGroup) targetNodeGroup.style.display = 'none';
+            return;
+        }
+        const hypervisor = await hvResponse.json();
+
+        // Only show node selector for cluster type
+        if (hypervisor.hypervisor_type !== 'hyperv-cluster') {
+            if (targetNodeGroup) targetNodeGroup.style.display = 'none';
+            return;
+        }
+
+        // Fetch cluster nodes
+        const nodesResponse = await fetch(`/api/v1/hypervisors/${hvId}/cluster-nodes`);
+        if (!nodesResponse.ok) {
+            if (targetNodeGroup) targetNodeGroup.style.display = 'none';
+            return;
+        }
+        const nodes = await nodesResponse.json();
+
+        if (Array.isArray(nodes) && nodes.length > 0) {
+            for (const node of nodes) {
+                const nodeName = node.Name || node.name;
+                const nodeState = node.State || node.state || 'Unknown';
+                const isOnline = nodeState === 'Up' || nodeState === 'Online';
+                const stateLabel = isOnline ? '' : ` (${nodeState})`;
+                select.innerHTML += `<option value="${escapeHtml(nodeName)}" ${isOnline ? '' : 'disabled'}>${escapeHtml(nodeName)}${stateLabel}</option>`;
+            }
+            if (targetNodeGroup) targetNodeGroup.style.display = 'block';
+        } else {
+            if (targetNodeGroup) targetNodeGroup.style.display = 'none';
+        }
+    } catch (e) {
+        console.error('Failed to load cluster nodes:', e);
+        if (targetNodeGroup) targetNodeGroup.style.display = 'none';
+    }
+}
+
 async function submitRestore(event) {
     event.preventDefault();
 
@@ -1916,9 +1977,13 @@ async function submitRestore(event) {
             start: document.getElementById('restoreStart').checked,
         };
 
-        // Add restore_mode for Hyper-V
+        // Add restore_mode and target_node for Hyper-V
         if (isHyperV) {
             data.restore_mode = document.getElementById('restoreMode').value || 'auto';
+            const targetNode = document.getElementById('restoreTargetNode').value;
+            if (targetNode) {
+                data.target_node = targetNode;
+            }
         }
 
         try {

@@ -6094,6 +6094,56 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.exception(f"Failed to list nodes for hypervisor {hypervisor_id}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/cluster-nodes")
+    def list_hyperv_cluster_nodes(
+        hypervisor_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> list[dict[str, Any]]:
+        """List nodes in a Hyper-V cluster.
+
+        Returns a list of cluster nodes with their status for node selection
+        during restore operations.
+        """
+        from backer.hypervisors.hyperv import HyperVClusterAPI
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        hypervisor_type = hypervisor.get("hypervisor_type")
+        if hypervisor_type != "hyperv-cluster":
+            raise HTTPException(
+                status_code=400,
+                detail="This endpoint is only for Hyper-V cluster hypervisors"
+            )
+
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Password not configured")
+
+        port = hypervisor.get("port", 5985)
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+        cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
+
+        try:
+            api = HyperVClusterAPI(
+                host=hypervisor["host"],
+                username=hypervisor.get("username", "Administrator"),
+                password=password,
+                cluster_name=cluster_name,
+                port=port,
+                use_ssl=port == 5986,
+                verify_ssl=hypervisor.get("verify_ssl", False),
+                domain=domain,
+            )
+
+            nodes = api.get_cluster_nodes()
+            return nodes
+
+        except Exception as e:
+            logger.exception(f"Failed to list cluster nodes for hypervisor {hypervisor_id}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/v1/hypervisors/{hypervisor_id}/storages")
     def list_hypervisor_storages(
         hypervisor_id: str,
@@ -9418,6 +9468,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         restore_mode = body.get("restore_mode", "auto")
         if restore_mode not in ("auto", "inplace", "import", "rebuild"):
             restore_mode = "auto"
+        # Get target node for cluster restore (optional)
+        target_node = body.get("target_node")
+        if target_node in (None, "", "null"):
+            target_node = None
 
         if not filename:
             raise HTTPException(status_code=400, detail="filename is required")
@@ -9496,16 +9550,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 task.message = f"Restoring VM from {import_path}"
                 task.progress = 10
 
-                result = backup_manager.restore_vm(
-                    import_path=import_path,
-                    vm_name=new_vm_name if new_vm_name else None,
-                    generate_new_id=True,
-                    smb_username=smb_username,
-                    smb_password=repo_password,
-                    smb_domain=smb_domain,
-                    restore_mode=restore_mode,  # Use mode selected by user
-                    start_after_restore=start_after,  # Let restore_vm handle VM start
-                )
+                # Build kwargs for restore - include target_node for cluster restores
+                restore_kwargs = {
+                    "import_path": import_path,
+                    "vm_name": new_vm_name if new_vm_name else None,
+                    "generate_new_id": True,
+                    "smb_username": smb_username,
+                    "smb_password": repo_password,
+                    "smb_domain": smb_domain,
+                    "restore_mode": restore_mode,
+                    "start_after_restore": start_after,
+                }
+                # Add target_node for cluster restores
+                if target_node:
+                    restore_kwargs["target_node"] = target_node
+
+                result = backup_manager.restore_vm(**restore_kwargs)
 
                 if result.get("success"):
                     restored_name = result.get("vm_name", vm_name)
