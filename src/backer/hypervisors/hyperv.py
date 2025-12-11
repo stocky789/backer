@@ -1163,7 +1163,7 @@ New-Item -ItemType Directory -Path $localExportPath -Force | Out-Null
 
 try {{
     # Ensure destination VM folder doesn't exist (handles edge cases with renamed VMs)
-    # Export-VM creates: $localExportPath\$vmName\Virtual Hard Disks\...
+    # Export-VM creates: $localExportPath/$vmName/Virtual Hard Disks/...
     # If VM was renamed but VHDX files kept old names, a prior failed export
     # could leave files that conflict with the new export
     $destVmFolder = Join-Path $localExportPath $vmName
@@ -1207,7 +1207,7 @@ try {{
     }}
 
     # Export VM to temp directory on local/SAN storage
-    # Note: Export-VM creates $localExportPath\$vmName\... structure
+    # Note: Export-VM creates $localExportPath/$vmName/... structure
     $exportError = $null
     try {{
         {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
