@@ -8437,6 +8437,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get repository password
         repo_password = storage.get_repository_password(repository_id)
 
+        # Check hypervisor type for type-specific backup listing
+        hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
+
+        # Handle Hyper-V backups (different folder structure)
+        if hypervisor_type == "hyperv":
+            return _get_hyperv_job_backups(
+                job=job,
+                hypervisor=hypervisor,
+                repository=repository,
+                repo_password=repo_password,
+                storage=storage,
+                job_guest_ids=job_guest_ids,
+            )
+
         # Handle NFS repositories
         if repo_type == "nfs" and server:
             nfs_export = repository.get("share") or repository.get("path", "")
@@ -8671,6 +8685,123 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 pass
 
         return backups[:50]
+
+    def _get_hyperv_job_backups(
+        job: dict,
+        hypervisor: dict,
+        repository: dict,
+        repo_password: str | None,
+        storage: Storage,
+        job_guest_ids: list,
+    ) -> list[dict[str, Any]]:
+        """Get Hyper-V backups by querying the Windows host via WinRM.
+
+        Hyper-V backups use a VM-centric folder structure:
+        {backup_path}/{vm_name}/{timestamp}/{vm_name}/Virtual Machines/*.vmcx
+        """
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+        repo_type = repository.get("repo_type", "").lower()
+        if repo_type != "smb":
+            logger.warning(f"Hyper-V backups require SMB repository, got: {repo_type}")
+            return []
+
+        # Get Hyper-V credentials
+        hv_password = storage.get_hypervisor_password(hypervisor["id"])
+
+        try:
+            # Get domain from hypervisor data
+            hv_domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+            api = HyperVAPI(
+                host=hypervisor["host"],
+                username=hypervisor.get("username", "Administrator"),
+                password=hv_password,
+                port=hypervisor.get("port", 5985),
+                use_ssl=hypervisor.get("port", 5985) == 5986,
+                verify_ssl=hypervisor.get("verify_ssl", False),
+                domain=hv_domain,
+            )
+
+            backup_manager = HyperVBackupManager(api)
+
+            # Build UNC path to backups
+            smb_server = repository.get("server", "")
+            smb_share = repository.get("share", "")
+            smb_path = repository.get("path", "")
+
+            backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+            if smb_path:
+                smb_path_win = smb_path.replace("/", "\\").strip("\\")
+                backup_base_path = f"{backup_base_path}\\{smb_path_win}"
+
+            # Add hypervisor subfolder
+            safe_hv_name = "".join(
+                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+            )
+            backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
+
+            # Get SMB credentials from repository
+            smb_username = repository.get("username", "")
+            smb_domain = repository.get("domain")
+
+            # List backups via WinRM
+            backups = backup_manager.list_backups(
+                backup_path=backup_base_path,
+                smb_username=smb_username,
+                smb_password=repo_password,
+                smb_domain=smb_domain,
+            )
+
+            # Convert to the format expected by the frontend
+            result = []
+            for backup in backups:
+                vm_name = backup.get("vm_name", "")
+                timestamp = backup.get("timestamp", "")
+
+                # Parse created_at to get ctime
+                created_at = backup.get("created_at", "")
+                ctime = 0
+                if created_at:
+                    try:
+                        # Handle ISO format with timezone
+                        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        ctime = dt.timestamp()
+                    except ValueError:
+                        pass
+
+                result.append({
+                    "filename": f"{vm_name}/{timestamp}",
+                    "volid": backup.get("path", ""),
+                    "vmid": vm_name,  # Hyper-V uses VM name as ID
+                    "vm_name": vm_name,
+                    "guest_type": "vm",
+                    "ctime": ctime,
+                    "size": backup.get("size_bytes", 0),
+                    "format": "vmcx",
+                    "node": hypervisor.get("name", "unknown"),
+                    "path": backup.get("path", ""),
+                    "timestamp": timestamp,
+                })
+
+            # Filter by job's guest_ids if specified (for Hyper-V, these are VM names or GUIDs)
+            if job_guest_ids:
+                # Convert guest_ids to strings for comparison
+                guest_id_strs = [str(gid) for gid in job_guest_ids]
+                result = [
+                    b for b in result
+                    if b.get("vm_name") in guest_id_strs or b.get("vmid") in guest_id_strs
+                ]
+
+            # Sort by ctime descending (newest first)
+            result.sort(key=lambda x: x.get("ctime", 0), reverse=True)
+
+            return result[:50]  # Limit to 50 most recent
+
+        except Exception as e:
+            logger.warning(f"Error listing Hyper-V backups: {e}")
+            # Fall back to local storage runs
+            return _get_job_backups_from_local_storage(storage, job["id"])
 
     def _get_job_backups_from_local_storage(storage: Storage, job_id: str) -> list[dict[str, Any]]:
         """Get backup history from local database for a hypervisor job."""
