@@ -1578,6 +1578,10 @@ try {{
     throw "Failed to connect to SMB share $smbUnc : $_"
 }}
 
+# Create local temp directory for import
+$tempId = [System.Guid]::NewGuid().ToString().Substring(0, 8)
+$localImportPath = "$env:TEMP\\BackerRestore_$tempId"
+
 try {{
     # Convert UNC path to mapped drive path
     $subPath = $importPath.Substring($smbUnc.Length).TrimStart('\\')
@@ -1588,8 +1592,28 @@ try {{
         throw "Backup path not found: $importPath"
     }}
 
-    # Find the .vmcx file
-    $vmFolder = Join-Path $mappedImportPath 'Virtual Machines'
+    # Copy backup to local temp (excluding .vmgs files which cause issues with shielded VM imports)
+    # The .vmgs file contains guest state for shielded VMs and often fails to copy/import
+    New-Item -ItemType Directory -Path $localImportPath -Force | Out-Null
+
+    # Copy everything except .vmgs files
+    Get-ChildItem -Path $mappedImportPath -Recurse | Where-Object {{
+        $_.Extension -ne '.vmgs'
+    }} | ForEach-Object {{
+        $destPath = $_.FullName.Replace($mappedImportPath, $localImportPath)
+        if ($_.PSIsContainer) {{
+            New-Item -ItemType Directory -Path $destPath -Force -ErrorAction SilentlyContinue | Out-Null
+        }} else {{
+            $destDir = Split-Path -Parent $destPath
+            if (-not (Test-Path $destDir)) {{
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+            }}
+            Copy-Item -Path $_.FullName -Destination $destPath -Force
+        }}
+    }}
+
+    # Find the .vmcx file in local copy
+    $vmFolder = Join-Path $localImportPath 'Virtual Machines'
     if (Test-Path $vmFolder) {{
         $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $vmcx) {{
@@ -1597,18 +1621,16 @@ try {{
         }}
         $vmcxPath = $vmcx.FullName
     }} else {{
-        # Try to find .vmcx anywhere in the folder
-        $vmcx = Get-ChildItem -Path $mappedImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
+        $vmcx = Get-ChildItem -Path $localImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
             | Select-Object -First 1
         if (-not $vmcx) {{
-            throw "No .vmcx file found in $mappedImportPath"
+            throw "No .vmcx file found in $localImportPath"
         }}
         $vmcxPath = $vmcx.FullName
     }}
 
-    # Import the VM - use -Copy to copy from network to local Hyper-V storage
-    # This ensures files are copied to local storage where Hyper-V can access them
-    $vm = Import-VM -Path $vmcxPath{import_params} -ErrorAction Stop
+    # Import the VM from local copy with -Copy to place in default Hyper-V storage
+    $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId -ErrorAction Stop
 
     if ($vm) {{
         @{{
@@ -1621,6 +1643,10 @@ try {{
     }}
 }} finally {{
     Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+    # Cleanup local temp
+    if (Test-Path $localImportPath) {{
+        Remove-Item -Path $localImportPath -Recurse -Force -ErrorAction SilentlyContinue
+    }}
 }}
 """
                     rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
