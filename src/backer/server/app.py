@@ -8361,6 +8361,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
 
             # Convert to the format expected by the frontend
+            logger.info(f"Raw backups from WinRM: {backups}")
             result = []
             for backup in backups:
                 vm_name = backup.get("vm_name", "")
@@ -8392,13 +8393,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 })
 
             # Filter by job's guest_ids if specified (for Hyper-V, these are VM names or GUIDs)
+            logger.info(f"Before filter: {len(result)} backups, job_guest_ids={job_guest_ids}")
             if job_guest_ids:
                 # Convert guest_ids to strings for comparison
                 guest_id_strs = [str(gid) for gid in job_guest_ids]
+                logger.info(f"Filtering by guest_id_strs={guest_id_strs}")
                 result = [
                     b for b in result
                     if b.get("vm_name") in guest_id_strs or b.get("vmid") in guest_id_strs
                 ]
+                logger.info(f"After filter: {len(result)} backups")
 
             # Sort by ctime descending (newest first)
             result.sort(key=lambda x: x.get("ctime", 0), reverse=True)
