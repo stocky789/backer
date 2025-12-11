@@ -2922,6 +2922,9 @@ try {{
     # Connect to SMB if needed
     if ($smbUnc) {{
         $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+        if ($LASTEXITCODE -ne 0) {{
+            throw "Failed to connect to SMB share ${{smbUnc}}: $netUseResult"
+        }}
     }}
 
     # Look for vm_full_config.json in the import path (timestamp folder)
@@ -3015,6 +3018,9 @@ try {{
     # Connect to SMB if needed
     if ($smbUnc) {{
         $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+        if ($LASTEXITCODE -ne 0) {{
+            throw "Failed to connect to SMB share ${{smbUnc}}: $netUseResult"
+        }}
     }}
 
     # Get existing VM
@@ -3147,6 +3153,9 @@ try {{
     # Connect to SMB if needed
     if ($smbUnc) {{
         $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+        if ($LASTEXITCODE -ne 0) {{
+            throw "Failed to connect to SMB share ${{smbUnc}}: $netUseResult"
+        }}
     }}
 
     # Find VM subfolder and .vmcx file
@@ -3318,6 +3327,9 @@ try {{
     # Connect to SMB if needed
     if ($smbUnc) {{
         $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+        if ($LASTEXITCODE -ne 0) {{
+            throw "Failed to connect to SMB share ${{smbUnc}}: $netUseResult"
+        }}
     }}
 
     # Get default paths
@@ -5363,11 +5375,14 @@ try {{
                 # If in-place failed and we're in auto mode, fall back to rebuild
                 if not restore_result.get("success") and restore_mode == "auto":
                     logger.info("Cluster in-place restore failed, falling back to rebuild")
-                    restore_result["warnings"] = restore_result.get("warnings", [])
-                    restore_result["warnings"].append(
-                        f"In-place restore failed: {restore_result.get('errors', ['Unknown'])}, "
+                    # Save context from failed in-place attempt
+                    inplace_warnings = restore_result.get("warnings", [])
+                    inplace_errors = restore_result.get("errors", [])
+                    fallback_msg = (
+                        f"In-place restore failed: {inplace_errors}, "
                         "falling back to rebuild"
                     )
+
                     # Get connection to target node for rebuild
                     node_api = self.cluster_api._get_or_create_node_connection(target_node)
                     node_backup_manager = HyperVBackupManager(node_api)
@@ -5385,6 +5400,11 @@ try {{
                         network_mapping=network_mapping,
                         restore_mode="rebuild",
                     )
+
+                    # Preserve context from the in-place failure in the result
+                    restore_result["warnings"] = restore_result.get("warnings", [])
+                    restore_result["warnings"].insert(0, fallback_msg)
+                    restore_result["warnings"].extend(inplace_warnings)
             else:
                 # Standard node-based restore (import, rebuild, or new VM)
                 node_api = self.cluster_api._get_or_create_node_connection(target_node)
@@ -5392,12 +5412,18 @@ try {{
 
                 # When VM doesn't exist in cluster, don't use in-place mode
                 # The base class might find leftover registrations on individual nodes
+                # Keep "auto" to allow fallback to rebuild if import fails
                 effective_restore_mode = restore_mode
-                if not existing_owner and restore_mode in ("auto", "inplace"):
-                    effective_restore_mode = "import"  # Use import for fresh restore
+                if not existing_owner and restore_mode == "inplace":
+                    # Only override if explicitly set to inplace (can't inplace a deleted VM)
+                    effective_restore_mode = "auto"
                     logger.info(
-                        f"VM not in cluster, using '{effective_restore_mode}' mode "
-                        f"instead of '{restore_mode}'"
+                        f"VM not in cluster, using 'auto' mode instead of 'inplace' "
+                        "(will try import, then rebuild if needed)"
+                    )
+                elif not existing_owner and restore_mode == "auto":
+                    logger.info(
+                        "VM not in cluster, using 'auto' mode (will try import, then rebuild)"
                     )
 
                 # Perform restore on target node
@@ -5461,7 +5487,14 @@ try {{
             ):
                 restored_vm_name = restore_result["vm_name"]
                 logger.info(f"Starting restored VM '{restored_vm_name}'")
-                self.cluster_api.start_vm(restored_vm_name)
+                start_success, start_msg = self.cluster_api.start_vm(restored_vm_name)
+                if not start_success:
+                    result["warnings"].append(
+                        f"VM restored but failed to start: {start_msg}"
+                    )
+                    logger.warning(
+                        f"Failed to start restored VM '{restored_vm_name}': {start_msg}"
+                    )
 
             ended_at = dt.now()
             result["duration_seconds"] = (ended_at - started_at).total_seconds()
