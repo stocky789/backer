@@ -2670,6 +2670,14 @@ Write-Output "SUCCESS"
         """
         from datetime import datetime as dt
 
+        # Helper to extract single value from potential array (PowerShell JSON quirk)
+        # When PowerShell's ConvertTo-Json gets a single-item array, it may serialize
+        # inconsistently, and cluster configs can have duplicated values
+        def _single_value(val: Any, default: Any = None) -> Any:
+            if isinstance(val, list):
+                return val[0] if val else default
+            return val if val is not None else default
+
         started_at = dt.now()
         result: dict[str, Any] = {
             "success": False,
@@ -2724,7 +2732,8 @@ Write-Output "SUCCESS"
             target_vm_name = vm_name
             if not target_vm_name:
                 if full_config and full_config.get("vm", {}).get("name"):
-                    target_vm_name = full_config["vm"]["name"]
+                    # Use _single_value in case config has array (PowerShell JSON quirk)
+                    target_vm_name = _single_value(full_config["vm"]["name"])
                 else:
                     # Extract from path - import_path is timestamp folder, VM name is subfolder
                     target_vm_name = self._get_vm_name_from_path(import_path)
@@ -3254,6 +3263,12 @@ try {{
         progress_callback: Any | None,
     ) -> tuple[bool, dict[str, Any]]:
         """Rebuild VM from VHDs and apply saved configuration."""
+        # Helper to extract single value from potential array (PowerShell JSON quirk)
+        def single_value(val: Any, default: Any) -> Any:
+            if isinstance(val, list):
+                return val[0] if val else default
+            return val if val is not None else default
+
         # Get settings from config or use defaults
         generation = 2
         memory_bytes = 4 * 1024 * 1024 * 1024  # 4GB
@@ -3262,13 +3277,13 @@ try {{
 
         if full_config:
             vm_settings = full_config.get("vm", {})
-            generation = vm_settings.get("generation", 2)
+            generation = single_value(vm_settings.get("generation"), 2)
 
             mem_settings = full_config.get("memory", {})
-            memory_bytes = mem_settings.get("startupBytes", memory_bytes)
+            memory_bytes = single_value(mem_settings.get("startupBytes"), memory_bytes)
 
             proc_settings = full_config.get("processor", {})
-            processor_count = proc_settings.get("count", processor_count)
+            processor_count = single_value(proc_settings.get("count"), processor_count)
 
         script = f"""
 $ErrorActionPreference = 'Stop'
