@@ -3740,71 +3740,45 @@ class HyperVClusterAPI(HyperVAPI):
 
         try:
             # Test basic connectivity and get cluster info
-            # Try with explicit cluster name first, fall back to local detection
-            script = f"""
+            # IMPORTANT: Run all cluster commands locally (no -Cluster parameter)
+            # to avoid Kerberos double-hop authentication issues with WinRM
+            script = """
 $ErrorActionPreference = 'Stop'
-try {{
-    # Try to get cluster - with name if provided, otherwise auto-detect
-    $cluster = $null
-    $clusterName = $null
+try {
+    # Get cluster info locally - this node must be a cluster member
+    # Don't use -Cluster parameter to avoid double-hop auth issues
+    $cluster = Get-Cluster -ErrorAction Stop
 
-    # First try with explicit cluster name if provided
-    $explicitName = "{self.cluster_name or ''}"
-    if ($explicitName) {{
-        try {{
-            $cluster = Get-Cluster -Name $explicitName -ErrorAction Stop
-            $clusterName = $cluster.Name
-        }} catch {{
-            # Explicit name failed, will try auto-detect
-        }}
-    }}
-
-    # If no explicit name or it failed, try auto-detect on local node
-    if (-not $cluster) {{
-        try {{
-            $cluster = Get-Cluster -ErrorAction Stop
-            $clusterName = $cluster.Name
-        }} catch {{
-            # Not a cluster node, try using the host as cluster name
-            try {{
-                $cluster = Get-Cluster -Name '{self.host}' -ErrorAction Stop
-                $clusterName = $cluster.Name
-            }} catch {{
-                throw "Could not detect cluster. Connect to a cluster node or specify cluster name."
-            }}
-        }}
-    }}
-
-    $nodes = Get-ClusterNode -Cluster $clusterName | Select-Object Name, State, Id
-    $vmGroups = Get-ClusterGroup -Cluster $clusterName |
-        Where-Object {{ $_.GroupType -eq 'VirtualMachine' }}
+    # Get nodes and VMs locally (no -Cluster param)
+    $nodes = Get-ClusterNode | Select-Object Name, State, Id
+    $vmGroups = Get-ClusterGroup | Where-Object { $_.GroupType -eq 'VirtualMachine' }
 
     $os = Get-CimInstance Win32_OperatingSystem
 
-    @{{
-        ClusterName = $clusterName
+    @{
+        ClusterName = $cluster.Name
         ClusterDomain = $cluster.Domain
-        Nodes = @($nodes | ForEach-Object {{
-            @{{
+        Nodes = @($nodes | ForEach-Object {
+            @{
                 Name = $_.Name
                 State = $_.State.ToString()
                 Id = $_.Id.ToString()
-            }}
-        }})
+            }
+        })
         TotalVMs = $vmGroups.Count
         OSVersion = $os.Caption
         OSBuild = $os.BuildNumber
-        QuorumType = if ($cluster.QuorumType) {{ $cluster.QuorumType.ToString() }} else {{ "Unknown" }}
-    }} | ConvertTo-Json -Depth 3
-}} catch {{
-    @{{
+        QuorumType = if ($cluster.QuorumType) { $cluster.QuorumType.ToString() } else { "Unknown" }
+    } | ConvertTo-Json -Depth 3
+} catch {
+    @{
         Error = $_.Exception.Message
         FullError = $_.ToString()
         ScriptStackTrace = $_.ScriptStackTrace
         Category = $_.CategoryInfo.Category.ToString()
         IsCluster = $false
-    }} | ConvertTo-Json
-}}
+    } | ConvertTo-Json
+}
 """
             rc, stdout, stderr = self._run_powershell(script)
 
@@ -3993,9 +3967,14 @@ if ($group -and $group.GroupType -eq 'VirtualMachine') {{
     def list_guests(self) -> list[HyperVGuest]:
         """List all VMs across the cluster with owner node info.
 
+        Uses a two-phase approach to avoid Kerberos double-hop:
+        1. Get cluster topology (VM names, IDs, owner nodes) from connected node
+        2. Query each owner node directly via separate WinRM connections
+
         Returns:
             List of HyperVGuest objects with cluster info populated
         """
+        # Phase 1: Get cluster VM topology (runs locally, no double-hop)
         script = """
 $ErrorActionPreference = 'Stop'
 $results = @()
@@ -4006,7 +3985,7 @@ $vmGroups = Get-ClusterGroup | Where-Object { $_.GroupType -eq 'VirtualMachine' 
 foreach ($group in $vmGroups) {
     $ownerNode = $group.OwnerNode.Name
 
-    # Get VM details from the owner node
+    # Get VM resource to find VmId
     $vmRes = Get-ClusterResource -InputObject $group |
         Where-Object { $_.ResourceType -eq 'Virtual Machine' }
 
@@ -4015,91 +3994,162 @@ foreach ($group in $vmGroups) {
             -ErrorAction SilentlyContinue).Value
 
         if ($vmId) {
-            # Query VM on its owner node
-            $vm = Invoke-Command -ComputerName $ownerNode -ScriptBlock {
-                param($id)
-                Get-VM -Id $id -ErrorAction SilentlyContinue |
-                    Select-Object Id, Name, State, ProcessorCount, MemoryAssigned,
-                        Uptime, Generation, Version, Path, DynamicMemoryEnabled,
-                        @{N='CheckpointsEnabled';E={$_.CheckpointType -ne 'Disabled'}},
-                        IsClustered
-            } -ArgumentList $vmId -ErrorAction SilentlyContinue
-
-            if ($vm) {
-                $results += @{
-                    Id = $vm.Id.ToString()
-                    Name = $vm.Name
-                    State = $vm.State.ToString()
-                    ProcessorCount = $vm.ProcessorCount
-                    MemoryAssigned = $vm.MemoryAssigned
-                    Uptime = @{
-                        TotalSeconds = $vm.Uptime.TotalSeconds
-                    }
-                    Generation = $vm.Generation
-                    Version = $vm.Version
-                    Path = $vm.Path
-                    DynamicMemoryEnabled = $vm.DynamicMemoryEnabled
-                    CheckpointsEnabled = $vm.CheckpointsEnabled
-                    IsClustered = $true
-                    OwnerNode = $ownerNode
-                    ClusterGroupName = $group.Name
-                }
+            $results += @{
+                VmId = $vmId.ToString()
+                VmName = $group.Name
+                OwnerNode = $ownerNode
+                ClusterGroupName = $group.Name
+                State = $group.State.ToString()
             }
         }
     }
 }
 
-$results | ConvertTo-Json -Depth 3 -Compress
+$results | ConvertTo-Json -Depth 2 -Compress
 """
-        rc, stdout, stderr = self._run_powershell(script, timeout=120)
+        rc, stdout, stderr = self._run_powershell(script, timeout=60)
 
         if rc != 0:
-            logger.error(f"Failed to list cluster VMs: {stderr}")
-            # Fall back to querying each node directly
+            logger.error(f"Failed to get cluster VM topology: {stderr}")
             return self._list_guests_fallback()
 
-        guests = []
         try:
             stdout = stdout.strip()
             if not stdout or stdout == "null" or stdout == "[]":
+                logger.info("No VMs found in cluster")
                 return []
 
-            data = json.loads(stdout)
-            if isinstance(data, dict):
-                data = [data]
+            topology = json.loads(stdout)
+            if isinstance(topology, dict):
+                topology = [topology]
 
-            for vm in data:
-                memory_bytes = vm.get("MemoryAssigned", 0) or 0
-                memory_mb = memory_bytes // (1024 * 1024)
-
-                uptime_seconds = 0
-                uptime = vm.get("Uptime")
-                if isinstance(uptime, dict):
-                    uptime_seconds = int(uptime.get("TotalSeconds", 0) or 0)
-
-                guest = HyperVGuest(
-                    vmid=str(vm.get("Id", "")),
-                    name=vm.get("Name", "Unknown"),
-                    state=str(vm.get("State", "Unknown")),
-                    cpus=vm.get("ProcessorCount", 0) or 0,
-                    memory_mb=memory_mb,
-                    uptime=uptime_seconds,
-                    generation=vm.get("Generation", 1) or 1,
-                    version=str(vm.get("Version", "")),
-                    path=vm.get("Path", "") or "",
-                    dynamic_memory=bool(vm.get("DynamicMemoryEnabled", False)),
-                    checkpoints_enabled=bool(vm.get("CheckpointsEnabled", True)),
-                    owner_node=vm.get("OwnerNode", ""),
-                    is_clustered=True,
-                )
-                guests.append(guest)
-
-            logger.info(f"Found {len(guests)} VMs in cluster")
+            logger.info(f"Found {len(topology)} VMs in cluster topology")
 
         except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse cluster VM list: {e}")
+            logger.warning(f"Failed to parse cluster topology: {e}")
             return self._list_guests_fallback()
 
+        # Phase 2: Group VMs by owner node and query each node directly
+        vms_by_node: dict[str, list[dict]] = {}
+        for vm in topology:
+            owner = vm.get("OwnerNode", "")
+            if owner:
+                # Build FQDN if needed
+                if "." not in owner and self._cluster_domain:
+                    owner = f"{owner}.{self._cluster_domain}"
+                if owner not in vms_by_node:
+                    vms_by_node[owner] = []
+                vms_by_node[owner].append(vm)
+
+        guests = []
+        for node_name, node_vms in vms_by_node.items():
+            logger.debug(f"Querying {len(node_vms)} VMs from node '{node_name}'")
+
+            # Get direct connection to this node
+            try:
+                node_api = self._get_or_create_node_connection(node_name)
+
+                # Query all VMs on this node
+                vm_ids = [vm["VmId"] for vm in node_vms]
+                vm_ids_json = json.dumps(vm_ids)
+
+                detail_script = f"""
+$ErrorActionPreference = 'Stop'
+$vmIds = '{vm_ids_json}' | ConvertFrom-Json
+$results = @()
+
+foreach ($id in $vmIds) {{
+    $vm = Get-VM -Id $id -ErrorAction SilentlyContinue
+    if ($vm) {{
+        $results += @{{
+            Id = $vm.Id.ToString()
+            Name = $vm.Name
+            State = $vm.State.ToString()
+            ProcessorCount = $vm.ProcessorCount
+            MemoryAssigned = $vm.MemoryAssigned
+            Uptime = @{{ TotalSeconds = $vm.Uptime.TotalSeconds }}
+            Generation = $vm.Generation
+            Version = $vm.Version
+            Path = $vm.Path
+            DynamicMemoryEnabled = $vm.DynamicMemoryEnabled
+            CheckpointsEnabled = ($vm.CheckpointType -ne 'Disabled')
+        }}
+    }}
+}}
+
+$results | ConvertTo-Json -Depth 3 -Compress
+"""
+                rc, stdout, stderr = node_api._run_powershell(
+                    detail_script, timeout=60
+                )
+
+                if rc == 0 and stdout.strip():
+                    try:
+                        vm_details = json.loads(stdout.strip())
+                        if isinstance(vm_details, dict):
+                            vm_details = [vm_details]
+
+                        for detail in vm_details:
+                            vm_id = detail.get("Id", "")
+
+                            memory_bytes = detail.get("MemoryAssigned", 0) or 0
+                            memory_mb = memory_bytes // (1024 * 1024)
+
+                            uptime_seconds = 0
+                            uptime = detail.get("Uptime")
+                            if isinstance(uptime, dict):
+                                uptime_seconds = int(
+                                    uptime.get("TotalSeconds", 0) or 0
+                                )
+
+                            guest = HyperVGuest(
+                                vmid=vm_id,
+                                name=detail.get("Name", "Unknown"),
+                                state=str(detail.get("State", "Unknown")),
+                                cpus=detail.get("ProcessorCount", 0) or 0,
+                                memory_mb=memory_mb,
+                                uptime=uptime_seconds,
+                                generation=detail.get("Generation", 1) or 1,
+                                version=str(detail.get("Version", "")),
+                                path=detail.get("Path", "") or "",
+                                dynamic_memory=bool(
+                                    detail.get("DynamicMemoryEnabled", False)
+                                ),
+                                checkpoints_enabled=bool(
+                                    detail.get("CheckpointsEnabled", True)
+                                ),
+                                owner_node=node_name,
+                                is_clustered=True,
+                            )
+                            guests.append(guest)
+
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            f"Failed to parse VM details from {node_name}: {e}"
+                        )
+
+            except Exception as e:
+                logger.warning(f"Failed to query node '{node_name}': {e}")
+                # Add basic info from topology for VMs we couldn't query
+                for vm in node_vms:
+                    guest = HyperVGuest(
+                        vmid=vm.get("VmId", ""),
+                        name=vm.get("VmName", "Unknown"),
+                        state=vm.get("State", "Unknown"),
+                        cpus=0,
+                        memory_mb=0,
+                        uptime=0,
+                        generation=1,
+                        version="",
+                        path="",
+                        dynamic_memory=False,
+                        checkpoints_enabled=True,
+                        owner_node=node_name,
+                        is_clustered=True,
+                    )
+                    guests.append(guest)
+
+        logger.info(f"Listed {len(guests)} VMs across cluster")
         return guests
 
     def _list_guests_fallback(self) -> list[HyperVGuest]:
