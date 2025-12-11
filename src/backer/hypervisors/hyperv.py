@@ -4030,13 +4030,28 @@ $results | ConvertTo-Json -Depth 2 -Compress
             return self._list_guests_fallback()
 
         # Phase 2: Group VMs by owner node and query each node directly
+        # Determine DNS domain for FQDN resolution if not already set
+        dns_domain = self._cluster_domain
+        if not dns_domain:
+            # Try to derive domain from various sources
+            if self.domain:
+                dns_domain = self.domain
+            elif "\\" in self.username:
+                dns_domain = self.username.split("\\")[0]
+            elif "." in self.host:
+                parts = self.host.split(".", 1)
+                if len(parts) > 1:
+                    dns_domain = parts[1]
+            if dns_domain:
+                logger.debug(f"Derived DNS domain for node FQDN: {dns_domain}")
+
         vms_by_node: dict[str, list[dict]] = {}
         for vm in topology:
             owner = vm.get("OwnerNode", "")
             if owner:
                 # Build FQDN if needed
-                if "." not in owner and self._cluster_domain:
-                    owner = f"{owner}.{self._cluster_domain}"
+                if "." not in owner and dns_domain:
+                    owner = f"{owner}.{dns_domain}"
                 if owner not in vms_by_node:
                     vms_by_node[owner] = []
                 vms_by_node[owner].append(vm)
