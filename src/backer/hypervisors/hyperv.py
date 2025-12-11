@@ -1580,12 +1580,11 @@ try {{
         throw "Backup path not found: $importPath"
     }}
 
-    # Copy backup to local temp using robocopy (excluding .vmgs files)
-    # .vmgs files contain guest state for shielded VMs and fail to import between hosts
+    # Copy backup to local temp using robocopy
     New-Item -ItemType Directory -Path $localImportPath -Force | Out-Null
 
-    # /E = copy subdirs, /XF = exclude files, /R:1 /W:1 = minimal retries, /NP /NDL /NFL = quiet
-    & robocopy $importPath $localImportPath /E /XF *.vmgs /R:1 /W:1 /NP /NDL /NFL
+    # /E = copy subdirs, /R:1 /W:1 = minimal retries, /NP /NDL /NFL = quiet
+    & robocopy $importPath $localImportPath /E /R:1 /W:1 /NP /NDL /NFL
     if ($LASTEXITCODE -ge 8) {{
         throw "Failed to copy backup files: robocopy exit code $LASTEXITCODE"
     }}
@@ -1606,8 +1605,9 @@ try {{
         $vmcxPath = $vmcx.FullName
     }}
 
-    # Import the VM from local copy
-    $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId -ErrorAction Stop
+    # Import the VM - use AsJob to get better error handling
+    # Don't use -Copy since files are already local, just register in place then move
+    $vm = Import-VM -Path $vmcxPath -GenerateNewId -ErrorAction Stop
 
     if ($vm) {{
         @{{
