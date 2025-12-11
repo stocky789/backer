@@ -557,6 +557,12 @@ ConvertTo-Json -Compress
         try:
             vm = json.loads(stdout.strip())
 
+            # Handle PowerShell returning array vs single object
+            if isinstance(vm, list):
+                if len(vm) == 0:
+                    return None
+                vm = vm[0]  # Take first VM if multiple returned
+
             memory_bytes = vm.get("MemoryAssigned", 0) or 0
             memory_mb = memory_bytes // (1024 * 1024)
 
@@ -607,6 +613,12 @@ ConvertTo-Json -Compress
 
         try:
             vm = json.loads(stdout.strip())
+
+            # Handle PowerShell returning array vs single object
+            if isinstance(vm, list):
+                if len(vm) == 0:
+                    return None
+                vm = vm[0]  # Take first VM if multiple returned
 
             memory_bytes = vm.get("MemoryAssigned", 0) or 0
             memory_mb = memory_bytes // (1024 * 1024)
@@ -3683,20 +3695,42 @@ class HyperVClusterAPI(HyperVAPI):
         self.cluster_name = cluster_name
         self._cluster_nodes: list[str] = []
         self._cluster_domain: str = ""
+        self._node_ip_map: dict[str, str] = {}  # Maps node name/FQDN to IP address
         self._node_connections: dict[str, HyperVAPI] = {}
 
-    def _get_or_create_node_connection(self, node_name: str) -> "HyperVAPI":
+    def _get_or_create_node_connection(self, node_name: str) -> HyperVAPI:
         """Get or create a WinRM connection to a specific cluster node.
 
+        Attempts connection by hostname/FQDN first, falls back to IP address
+        if DNS resolution fails. This provides redundancy when the Backer
+        server's DNS doesn't resolve the cluster domain.
+
         Args:
-            node_name: Cluster node hostname
+            node_name: Cluster node hostname (short name or FQDN)
 
         Returns:
             HyperVAPI instance connected to the specified node
+
+        Raises:
+            Exception: If connection fails by both hostname and IP
         """
-        if node_name not in self._node_connections:
-            self._node_connections[node_name] = HyperVAPI(
-                host=node_name,
+        if node_name in self._node_connections:
+            return self._node_connections[node_name]
+
+        # Determine the host to connect to
+        # Try hostname first, fall back to IP if we have it
+        connect_host = node_name
+        node_ip = self._node_ip_map.get(node_name)
+
+        # Also check short name in IP map if FQDN was provided
+        short_name = node_name.split(".")[0] if "." in node_name else node_name
+        if not node_ip and short_name in self._node_ip_map:
+            node_ip = self._node_ip_map[short_name]
+
+        # Try to create connection with hostname first
+        try:
+            api = HyperVAPI(
+                host=connect_host,
                 username=self.username,
                 password=self.password,
                 port=self.port,
@@ -3706,7 +3740,52 @@ class HyperVClusterAPI(HyperVAPI):
                 timeout=self.timeout,
                 domain=self.domain,
             )
-        return self._node_connections[node_name]
+            # Test the connection works (will fail fast on DNS issues)
+            api._run_powershell("$env:COMPUTERNAME", timeout=10)
+            self._node_connections[node_name] = api
+            logger.debug(f"Connected to node '{node_name}' via hostname")
+            return api
+
+        except Exception as e:
+            error_str = str(e).lower()
+            is_dns_error = (
+                "name resolution" in error_str
+                or "getaddrinfo" in error_str
+                or "resolve" in error_str
+                or "nodename nor servname" in error_str
+            )
+
+            if is_dns_error and node_ip:
+                logger.warning(
+                    f"DNS resolution failed for '{node_name}', "
+                    f"falling back to IP {node_ip}"
+                )
+                try:
+                    api = HyperVAPI(
+                        host=node_ip,
+                        username=self.username,
+                        password=self.password,
+                        port=self.port,
+                        use_ssl=self.use_ssl,
+                        auth_method=self.auth_method,
+                        verify_ssl=self.verify_ssl,
+                        timeout=self.timeout,
+                        domain=self.domain,
+                    )
+                    # Verify connection works
+                    api._run_powershell("$env:COMPUTERNAME", timeout=10)
+                    self._node_connections[node_name] = api
+                    logger.info(f"Connected to node '{node_name}' via IP {node_ip}")
+                    return api
+                except Exception as ip_error:
+                    logger.error(
+                        f"Failed to connect to node '{node_name}' "
+                        f"via IP {node_ip}: {ip_error}"
+                    )
+                    raise
+            else:
+                # Not a DNS error or no IP fallback available
+                raise
 
     def _run_powershell_on_node(
         self,
@@ -3749,8 +3828,41 @@ try {
     # Don't use -Cluster parameter to avoid double-hop auth issues
     $cluster = Get-Cluster -ErrorAction Stop
 
-    # Get nodes and VMs locally (no -Cluster param)
-    $nodes = Get-ClusterNode | Select-Object Name, State, Id
+    # Get nodes with their IPs from cluster network interfaces
+    # Get-ClusterNetworkInterface returns Ipv4Addresses property
+    $nodeList = @()
+    $clusterNodes = Get-ClusterNode
+
+    foreach ($node in $clusterNodes) {
+        $nodeInfo = @{
+            Name = $node.Name
+            State = $node.State.ToString()
+            Id = $node.Id.ToString()
+            Ipv4Addresses = @()
+        }
+
+        # Get network interfaces for this node
+        # Use the first IPv4 address from cluster networks
+        $netInterfaces = Get-ClusterNetworkInterface -Node $node.Name `
+            -ErrorAction SilentlyContinue
+
+        if ($netInterfaces) {
+            foreach ($nic in $netInterfaces) {
+                # Ipv4Addresses is an array property
+                if ($nic.Ipv4Addresses) {
+                    foreach ($ip in $nic.Ipv4Addresses) {
+                        if ($ip -and $ip -notlike "169.254.*") {
+                            # Skip APIPA addresses
+                            $nodeInfo.Ipv4Addresses += $ip
+                        }
+                    }
+                }
+            }
+        }
+
+        $nodeList += $nodeInfo
+    }
+
     $vmGroups = Get-ClusterGroup | Where-Object { $_.GroupType -eq 'VirtualMachine' }
 
     $os = Get-CimInstance Win32_OperatingSystem
@@ -3758,18 +3870,12 @@ try {
     @{
         ClusterName = $cluster.Name
         ClusterDomain = $cluster.Domain
-        Nodes = @($nodes | ForEach-Object {
-            @{
-                Name = $_.Name
-                State = $_.State.ToString()
-                Id = $_.Id.ToString()
-            }
-        })
+        Nodes = $nodeList
         TotalVMs = $vmGroups.Count
         OSVersion = $os.Caption
         OSBuild = $os.BuildNumber
         QuorumType = if ($cluster.QuorumType) { $cluster.QuorumType.ToString() } else { "Unknown" }
-    } | ConvertTo-Json -Depth 3
+    } | ConvertTo-Json -Depth 4
 } catch {
     @{
         Error = $_.Exception.Message
@@ -3832,10 +3938,12 @@ try {
 
                     self._cluster_domain = dns_domain
 
-                    # Build node names - append domain for FQDN resolution
+                    # Build node names and IP map for FQDN resolution and fallback
                     # Node names from cluster are often short names (e.g., "node1")
                     # but DNS may require FQDN (e.g., "node1.stockhome.local")
                     self._cluster_nodes = []
+                    self._node_ip_map = {}
+
                     for n in info.get("Nodes", []):
                         node_name = n["Name"]
                         # If node name doesn't contain a dot and we have a domain,
@@ -3845,7 +3953,24 @@ try {
                         else:
                             node_fqdn = node_name
                         self._cluster_nodes.append(node_fqdn)
-                        logger.debug(f"Cluster node: {node_name} -> {node_fqdn}")
+
+                        # Extract IP addresses for DNS fallback
+                        # Store mapping for both short name and FQDN
+                        ipv4_addresses = n.get("Ipv4Addresses", [])
+                        if ipv4_addresses and len(ipv4_addresses) > 0:
+                            # Use first non-empty IP address
+                            node_ip = ipv4_addresses[0]
+                            self._node_ip_map[node_name] = node_ip
+                            self._node_ip_map[node_fqdn] = node_ip
+                            logger.debug(
+                                f"Cluster node: {node_name} -> {node_fqdn} "
+                                f"(IP: {node_ip})"
+                            )
+                        else:
+                            logger.debug(
+                                f"Cluster node: {node_name} -> {node_fqdn} "
+                                "(no IP found)"
+                            )
 
                     self._version = info.get("OSVersion", "Unknown")
 
@@ -3862,6 +3987,8 @@ try {
                         f"{online_nodes}/{node_count} nodes online, {vm_count} VMs)"
                     )
                     logger.info(f"Cluster nodes: {self._cluster_nodes}")
+                    if self._node_ip_map:
+                        logger.info(f"Node IP map: {self._node_ip_map}")
                     return True, (
                         f"Connected to cluster '{self.cluster_name}' - "
                         f"{online_nodes}/{node_count} nodes online, {vm_count} VMs"
@@ -3991,10 +4118,12 @@ if ($group -and $group.GroupType -eq 'VirtualMachine') {{
         Returns:
             List of HyperVGuest objects with cluster info populated
         """
-        # Phase 1: Get cluster VM topology (runs locally, no double-hop)
+        # Phase 1: Get cluster VM topology AND node IPs (runs locally, no double-hop)
+        # Include node IPs in case _node_ip_map isn't populated from test_connection
         script = """
 $ErrorActionPreference = 'Stop'
-$results = @()
+$vmResults = @()
+$nodeInfo = @{}
 
 # Get all VM cluster groups with their owner nodes
 $vmGroups = Get-ClusterGroup | Where-Object { $_.GroupType -eq 'VirtualMachine' }
@@ -4011,7 +4140,7 @@ foreach ($group in $vmGroups) {
             -ErrorAction SilentlyContinue).Value
 
         if ($vmId) {
-            $results += @{
+            $vmResults += @{
                 VmId = $vmId.ToString()
                 VmName = $group.Name
                 OwnerNode = $ownerNode
@@ -4022,7 +4151,31 @@ foreach ($group in $vmGroups) {
     }
 }
 
-$results | ConvertTo-Json -Depth 2 -Compress
+# Get node IPs from cluster network interfaces
+$clusterNodes = Get-ClusterNode
+foreach ($node in $clusterNodes) {
+    $ips = @()
+    $netInterfaces = Get-ClusterNetworkInterface -Node $node.Name -ErrorAction SilentlyContinue
+    if ($netInterfaces) {
+        foreach ($nic in $netInterfaces) {
+            if ($nic.Ipv4Addresses) {
+                foreach ($ip in $nic.Ipv4Addresses) {
+                    if ($ip -and $ip -notlike "169.254.*") {
+                        $ips += $ip
+                    }
+                }
+            }
+        }
+    }
+    $nodeInfo[$node.Name] = @{
+        Ipv4Addresses = $ips
+    }
+}
+
+@{
+    VMs = $vmResults
+    Nodes = $nodeInfo
+} | ConvertTo-Json -Depth 3 -Compress
 """
         rc, stdout, stderr = self._run_powershell(script, timeout=60)
 
@@ -4032,15 +4185,29 @@ $results | ConvertTo-Json -Depth 2 -Compress
 
         try:
             stdout = stdout.strip()
-            if not stdout or stdout == "null" or stdout == "[]":
+            if not stdout or stdout == "null" or stdout == "[]" or stdout == "{}":
                 logger.info("No VMs found in cluster")
                 return []
 
-            topology = json.loads(stdout)
+            response = json.loads(stdout)
+
+            # Extract VMs and node info from response
+            topology = response.get("VMs", [])
+            node_info = response.get("Nodes", {})
+
             if isinstance(topology, dict):
                 topology = [topology]
 
             logger.info(f"Found {len(topology)} VMs in cluster topology")
+
+            # Update node IP map if we don't have it cached
+            if not self._node_ip_map and node_info:
+                logger.debug("Populating node IP map from list_guests response")
+                for node_name, info in node_info.items():
+                    ipv4_addresses = info.get("Ipv4Addresses", [])
+                    if ipv4_addresses and len(ipv4_addresses) > 0:
+                        self._node_ip_map[node_name] = ipv4_addresses[0]
+                        logger.debug(f"Node IP: {node_name} -> {ipv4_addresses[0]}")
 
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse cluster topology: {e}")
@@ -4061,6 +4228,8 @@ $results | ConvertTo-Json -Depth 2 -Compress
                     dns_domain = parts[1]
             if dns_domain:
                 logger.debug(f"Derived DNS domain for node FQDN: {dns_domain}")
+                # Also update _cluster_domain for future use
+                self._cluster_domain = dns_domain
 
         vms_by_node: dict[str, list[dict]] = {}
         for vm in topology:
