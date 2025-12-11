@@ -867,6 +867,840 @@ exit 1
         rc, stdout, stderr = self._run_powershell(script, timeout=timeout + 30)
         return rc == 0 and "SUCCESS" in stdout
 
+    def capture_vm_config(self, vm_name: str) -> dict[str, Any] | None:
+        """Capture comprehensive VM configuration for backup/restore.
+
+        Captures ALL VM settings including firmware, processor, memory,
+        network adapters, security, GPU assignments, and cluster status.
+        This config can be used to fully recreate a VM with identical settings.
+
+        Args:
+            vm_name: VM name to capture config from
+
+        Returns:
+            Dict with complete VM configuration, or None if capture fails
+        """
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$vmName = '{vm_name}'
+
+try {{
+    $vm = Get-VM -Name $vmName -ErrorAction Stop
+
+    # Build comprehensive config object
+    $config = @{{
+        capture_version = "2.0"
+        captured_at = (Get-Date).ToString('o')
+        source_host = $env:COMPUTERNAME
+    }}
+
+    # === VM Base Properties ===
+    $config.vm = @{{
+        id = $vm.Id.ToString()
+        name = $vm.Name
+        generation = $vm.Generation
+        version = $vm.Version
+        state = $vm.State.ToString()
+        path = $vm.Path
+        configurationLocation = $vm.ConfigurationLocation
+        snapshotFileLocation = $vm.SnapshotFileLocation
+        smartPagingFilePath = $vm.SmartPagingFilePath
+        checkpointType = $vm.CheckpointType.ToString()
+        automaticStartAction = $vm.AutomaticStartAction.ToString()
+        automaticStartDelay = $vm.AutomaticStartDelay
+        automaticStopAction = $vm.AutomaticStopAction.ToString()
+        automaticCriticalErrorAction = $vm.AutomaticCriticalErrorAction.ToString()
+        automaticCriticalErrorActionTimeout = $vm.AutomaticCriticalErrorActionTimeout
+        lockOnDisconnect = $vm.LockOnDisconnect.ToString()
+        notes = $vm.Notes
+        parentSnapshotId = if ($vm.ParentSnapshotId) {{ $vm.ParentSnapshotId.ToString() }} else {{ $null }}
+        parentSnapshotName = $vm.ParentSnapshotName
+    }}
+
+    # === Firmware Settings (Gen2 only) ===
+    $config.firmware = $null
+    if ($vm.Generation -eq 2) {{
+        try {{
+            $fw = Get-VMFirmware -VM $vm -ErrorAction Stop
+            $config.firmware = @{{
+                secureBootEnabled = $fw.SecureBoot -eq 'On'
+                secureBootTemplate = $fw.SecureBootTemplate
+                secureBootTemplateId = if ($fw.SecureBootTemplateId) {{ $fw.SecureBootTemplateId.ToString() }} else {{ $null }}
+                preferredNetworkBootProtocol = $fw.PreferredNetworkBootProtocol.ToString()
+                consoleMode = $fw.ConsoleMode.ToString()
+                pauseAfterBootFailure = $fw.PauseAfterBootFailure -eq 'On'
+                # Capture boot order as array of device types
+                bootOrder = @($fw.BootOrder | ForEach-Object {{
+                    @{{
+                        bootType = $_.BootType.ToString()
+                        device = if ($_.Device) {{ $_.Device.ToString() }} else {{ $null }}
+                    }}
+                }})
+            }}
+        }} catch {{
+            # Firmware query failed, leave as null
+        }}
+    }}
+
+    # === Processor Settings ===
+    $proc = Get-VMProcessor -VM $vm
+    $config.processor = @{{
+        count = $proc.Count
+        reserve = $proc.Reserve
+        maximum = $proc.Maximum
+        relativeWeight = $proc.RelativeWeight
+        compatibilityForMigrationEnabled = $proc.CompatibilityForMigrationEnabled
+        compatibilityForOlderOperatingSystemsEnabled = $proc.CompatibilityForOlderOperatingSystemsEnabled
+        exposeVirtualizationExtensions = $proc.ExposeVirtualizationExtensions
+        enableHostResourceProtection = $proc.EnableHostResourceProtection
+        hwThreadCountPerCore = $proc.HwThreadCountPerCore
+        maximumCountPerNumaNode = $proc.MaximumCountPerNumaNode
+        maximumCountPerNumaSocket = $proc.MaximumCountPerNumaSocket
+        resourcePoolName = $proc.ResourcePoolName
+    }}
+
+    # === Memory Settings ===
+    $mem = Get-VMMemory -VM $vm
+    $config.memory = @{{
+        dynamicMemoryEnabled = $mem.DynamicMemoryEnabled
+        startupBytes = $mem.Startup
+        minimumBytes = $mem.Minimum
+        maximumBytes = $mem.Maximum
+        buffer = $mem.Buffer
+        priority = $mem.Priority
+        maximumAmountPerNumaNodeBytes = $mem.MaximumAmountPerNumaNode
+        resourcePoolName = $mem.ResourcePoolName
+    }}
+
+    # === Network Adapters ===
+    $config.networkAdapters = @()
+    $nics = Get-VMNetworkAdapter -VM $vm
+    foreach ($nic in $nics) {{
+        $nicConfig = @{{
+            name = $nic.Name
+            id = $nic.Id
+            switchName = $nic.SwitchName
+            macAddress = $nic.MacAddress
+            dynamicMacAddressEnabled = $nic.DynamicMacAddressEnabled
+            isManagementOs = $nic.IsManagementOs
+            isLegacy = $nic.IsLegacy
+
+            # VLAN settings
+            vlanAccess = @{{
+                accessVlanId = $nic.VlanSetting.AccessVlanId
+                operationMode = if ($nic.VlanSetting.OperationMode) {{ $nic.VlanSetting.OperationMode.ToString() }} else {{ "Untagged" }}
+                nativeVlanId = $nic.VlanSetting.NativeVlanId
+                allowedVlanIdList = $nic.VlanSetting.AllowedVlanIdList
+            }}
+
+            # Bandwidth settings
+            bandwidth = @{{
+                maximumBandwidth = $nic.BandwidthSetting.MaximumBandwidth
+                minimumBandwidthAbsolute = $nic.BandwidthSetting.MinimumBandwidthAbsolute
+                minimumBandwidthWeight = $nic.BandwidthSetting.MinimumBandwidthWeight
+            }}
+
+            # Security settings
+            macAddressSpoofing = $nic.MacAddressSpoofing.ToString()
+            dhcpGuard = $nic.DhcpGuard.ToString()
+            routerGuard = $nic.RouterGuard.ToString()
+            allowTeaming = $nic.AllowTeaming.ToString()
+            portMirroring = $nic.PortMirroringMode.ToString()
+
+            # VMQ and IOV
+            vmqWeight = $nic.VmqWeight
+            iovWeight = $nic.IovWeight
+            iovInterruptModeration = if ($nic.IovInterruptModeration) {{ $nic.IovInterruptModeration.ToString() }} else {{ $null }}
+            iovQueuePairsRequested = $nic.IovQueuePairsRequested
+
+            # Other settings
+            ieeePriorityTag = $nic.IeeePriorityTag.ToString()
+            deviceNaming = $nic.DeviceNaming.ToString()
+        }}
+        $config.networkAdapters += $nicConfig
+    }}
+
+    # === Hard Disk Drives ===
+    $config.hardDrives = @()
+    $hdds = Get-VMHardDiskDrive -VM $vm
+    foreach ($hdd in $hdds) {{
+        $hddConfig = @{{
+            controllerType = $hdd.ControllerType.ToString()
+            controllerNumber = $hdd.ControllerNumber
+            controllerLocation = $hdd.ControllerLocation
+            path = $hdd.Path
+            diskNumber = $hdd.DiskNumber
+            supportPersistentReservations = $hdd.SupportPersistentReservations
+            maximumIOPS = $hdd.MaximumIOPS
+            minimumIOPS = $hdd.MinimumIOPS
+            qosPolicyID = if ($hdd.QosPolicyID) {{ $hdd.QosPolicyID.ToString() }} else {{ $null }}
+            # Get VHD info for size
+            vhdInfo = $null
+        }}
+        if ($hdd.Path -and (Test-Path $hdd.Path -ErrorAction SilentlyContinue)) {{
+            try {{
+                $vhd = Get-VHD -Path $hdd.Path -ErrorAction SilentlyContinue
+                if ($vhd) {{
+                    $hddConfig.vhdInfo = @{{
+                        vhdType = $vhd.VhdType.ToString()
+                        fileSize = $vhd.FileSize
+                        size = $vhd.Size
+                        blockSize = $vhd.BlockSize
+                        logicalSectorSize = $vhd.LogicalSectorSize
+                        physicalSectorSize = $vhd.PhysicalSectorSize
+                        parentPath = $vhd.ParentPath
+                    }}
+                }}
+            }} catch {{ }}
+        }}
+        $config.hardDrives += $hddConfig
+    }}
+
+    # === DVD Drives ===
+    $config.dvdDrives = @()
+    $dvds = Get-VMDvdDrive -VM $vm
+    foreach ($dvd in $dvds) {{
+        $config.dvdDrives += @{{
+            controllerType = $dvd.ControllerType.ToString()
+            controllerNumber = $dvd.ControllerNumber
+            controllerLocation = $dvd.ControllerLocation
+            path = $dvd.Path
+        }}
+    }}
+
+    # === SCSI Controllers ===
+    $config.scsiControllers = @()
+    $scsics = Get-VMScsiController -VM $vm
+    foreach ($scsi in $scsics) {{
+        $config.scsiControllers += @{{
+            controllerNumber = $scsi.ControllerNumber
+        }}
+    }}
+
+    # === Integration Services ===
+    $config.integrationServices = @{{}}
+    $intSvcs = Get-VMIntegrationService -VM $vm
+    foreach ($svc in $intSvcs) {{
+        $config.integrationServices[$svc.Name] = $svc.Enabled
+    }}
+
+    # === Security Settings ===
+    try {{
+        $sec = Get-VMSecurity -VM $vm -ErrorAction SilentlyContinue
+        $config.security = @{{
+            tpmEnabled = $sec.TpmEnabled
+            encryptStateAndVmMigrationTraffic = $sec.EncryptStateAndVmMigrationTraffic
+            virtualizationBasedSecurityOptOut = $sec.VirtualizationBasedSecurityOptOut
+            shieldingRequested = $sec.Shielded
+        }}
+    }} catch {{
+        $config.security = @{{
+            tpmEnabled = $false
+            encryptStateAndVmMigrationTraffic = $false
+            virtualizationBasedSecurityOptOut = $false
+            shieldingRequested = $false
+        }}
+    }}
+
+    # Check if vTPM is actually enabled
+    try {{
+        $tpm = Get-VMTPM -VM $vm -ErrorAction SilentlyContinue
+        if ($tpm) {{
+            $config.security.tpmEnabled = $true
+        }}
+    }} catch {{ }}
+
+    # === GPU Partition Adapters (GPU-P) ===
+    $config.gpuPartitions = @()
+    try {{
+        $gpus = Get-VMGpuPartitionAdapter -VM $vm -ErrorAction SilentlyContinue
+        foreach ($gpu in $gpus) {{
+            $config.gpuPartitions += @{{
+                instancePath = $gpu.InstancePath
+                minPartitionVRAM = $gpu.MinPartitionVRAM
+                maxPartitionVRAM = $gpu.MaxPartitionVRAM
+                optimalPartitionVRAM = $gpu.OptimalPartitionVRAM
+                minPartitionEncode = $gpu.MinPartitionEncode
+                maxPartitionEncode = $gpu.MaxPartitionEncode
+                optimalPartitionEncode = $gpu.OptimalPartitionEncode
+                minPartitionDecode = $gpu.MinPartitionDecode
+                maxPartitionDecode = $gpu.MaxPartitionDecode
+                optimalPartitionDecode = $gpu.OptimalPartitionDecode
+                minPartitionCompute = $gpu.MinPartitionCompute
+                maxPartitionCompute = $gpu.MaxPartitionCompute
+                optimalPartitionCompute = $gpu.OptimalPartitionCompute
+            }}
+        }}
+    }} catch {{ }}
+
+    # === Assignable Devices (DDA - GPU Passthrough) ===
+    $config.assignableDevices = @()
+    try {{
+        $devices = Get-VMAssignableDevice -VM $vm -ErrorAction SilentlyContinue
+        foreach ($dev in $devices) {{
+            $config.assignableDevices += @{{
+                instancePath = $dev.InstancePath
+                locationPath = $dev.LocationPath
+                resourcePoolName = $dev.ResourcePoolName
+            }}
+        }}
+    }} catch {{ }}
+
+    # === COM Ports ===
+    $config.comPorts = @()
+    try {{
+        $coms = Get-VMComPort -VM $vm -ErrorAction SilentlyContinue
+        foreach ($com in $coms) {{
+            $config.comPorts += @{{
+                number = $com.Number
+                path = $com.Path
+            }}
+        }}
+    }} catch {{ }}
+
+    # === Fibre Channel Adapters ===
+    $config.fibreChannelAdapters = @()
+    try {{
+        $fcas = Get-VMFibreChannelHba -VM $vm -ErrorAction SilentlyContinue
+        foreach ($fca in $fcas) {{
+            $config.fibreChannelAdapters += @{{
+                worldWideNodeName = $fca.WorldWideNodeName
+                worldWidePortNameSetA = $fca.WorldWidePortNameSetA
+                worldWidePortNameSetB = $fca.WorldWidePortNameSetB
+                sanName = $fca.SanName
+            }}
+        }}
+    }} catch {{ }}
+
+    # === Cluster Status ===
+    $config.cluster = @{{
+        isClustered = $vm.IsClustered
+        clusterName = $null
+        resourceGroupName = $null
+        preferredOwners = @()
+        possibleOwners = @()
+        antiAffinityClassNames = @()
+    }}
+
+    if ($vm.IsClustered) {{
+        try {{
+            $clusterRes = Get-ClusterResource -Name "Virtual Machine $($vm.Name)" -ErrorAction SilentlyContinue
+            if (-not $clusterRes) {{
+                $clusterRes = Get-ClusterResource | Where-Object {{
+                    $_.ResourceType -eq 'Virtual Machine' -and
+                    (Get-ClusterParameter -InputObject $_ -Name VmId -ErrorAction SilentlyContinue).Value -eq $vm.Id.ToString()
+                }} | Select-Object -First 1
+            }}
+
+            if ($clusterRes) {{
+                $config.cluster.clusterName = (Get-Cluster).Name
+                $config.cluster.resourceGroupName = $clusterRes.OwnerGroup.Name
+                $config.cluster.preferredOwners = @($clusterRes.OwnerGroup.PreferredOwnerNodes | ForEach-Object {{ $_.Name }})
+                $config.cluster.possibleOwners = @($clusterRes.OwnerNodes | ForEach-Object {{ $_.Name }})
+
+                # Get anti-affinity
+                $aaParam = Get-ClusterParameter -InputObject $clusterRes -Name AntiAffinityClassNames -ErrorAction SilentlyContinue
+                if ($aaParam -and $aaParam.Value) {{
+                    $config.cluster.antiAffinityClassNames = @($aaParam.Value -split ',')
+                }}
+            }}
+        }} catch {{ }}
+    }}
+
+    # === Replication Settings ===
+    $config.replication = @{{
+        enabled = $false
+        mode = $null
+        replicaServerName = $null
+        primaryServerName = $null
+    }}
+    try {{
+        $repl = Get-VMReplication -VM $vm -ErrorAction SilentlyContinue
+        if ($repl) {{
+            $config.replication = @{{
+                enabled = $true
+                mode = $repl.ReplicationMode.ToString()
+                replicaServerName = $repl.ReplicaServerName
+                primaryServerName = $repl.PrimaryServerName
+                replicationFrequencySec = $repl.ReplicationFrequencySec
+                replicationState = $repl.ReplicationState.ToString()
+            }}
+        }}
+    }} catch {{ }}
+
+    # === Resource Metering ===
+    $config.resourceMetering = @{{
+        enabled = $false
+    }}
+    try {{
+        $meter = Measure-VM -VM $vm -ErrorAction SilentlyContinue
+        if ($meter) {{
+            $config.resourceMetering.enabled = $true
+        }}
+    }} catch {{ }}
+
+    # Convert to JSON and output
+    $config | ConvertTo-Json -Depth 10 -Compress
+
+}} catch {{
+    @{{ Error = $_.Exception.Message }} | ConvertTo-Json -Compress
+    exit 1
+}}
+"""
+        rc, stdout, stderr = self._run_powershell_large(script, timeout=120)
+
+        if rc != 0:
+            logger.error(f"Failed to capture VM config for {vm_name}: {stderr}")
+            return None
+
+        try:
+            config = json.loads(stdout.strip())
+            if "Error" in config:
+                logger.error(f"VM config capture error: {config['Error']}")
+                return None
+            logger.info(f"Captured comprehensive config for VM: {vm_name}")
+            return config
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse VM config JSON: {e}")
+            logger.debug(f"Raw output: {stdout[:500]}")
+            return None
+
+    def apply_vm_config(
+        self,
+        vm_name: str,
+        config: dict[str, Any],
+        network_mapping: dict[str, str] | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Apply comprehensive configuration to an existing VM.
+
+        This method applies all captured settings from a vm_full_config.json
+        to an existing VM. The VM should already exist and be in Off state.
+
+        Settings are applied in the correct order to avoid conflicts.
+        Host-specific settings (GPU passthrough, etc.) are skipped with warnings.
+
+        Args:
+            vm_name: Name of the VM to configure
+            config: Configuration dict from capture_vm_config or vm_full_config.json
+            network_mapping: Optional dict mapping old switch names to new ones
+
+        Returns:
+            Tuple of (success, list of warnings/info messages)
+        """
+        if not config:
+            return False, ["No configuration provided"]
+
+        # Convert config to JSON for PowerShell
+        config_json = json.dumps(config)
+        # Escape for PowerShell here-string (replace single quotes)
+        safe_config_json = config_json.replace("'", "''")
+
+        # Build network mapping JSON
+        network_map_json = json.dumps(network_mapping or {})
+        safe_network_map = network_map_json.replace("'", "''")
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$vmName = '{vm_name}'
+$configJson = @'
+{safe_config_json}
+'@
+$networkMapJson = @'
+{safe_network_map}
+'@
+
+$warnings = @()
+$config = $configJson | ConvertFrom-Json
+$networkMap = $networkMapJson | ConvertFrom-Json
+
+try {{
+    $vm = Get-VM -Name $vmName -ErrorAction Stop
+
+    # Verify VM is off (required for most settings)
+    if ($vm.State -ne 'Off') {{
+        $warnings += "VM must be off to apply all settings. Current state: $($vm.State)"
+        # Try to apply what we can while running
+    }}
+
+    $isOff = $vm.State -eq 'Off'
+
+    # === Apply VM Base Settings ===
+    try {{
+        $setVmParams = @{{ VMName = $vmName }}
+
+        if ($config.vm.notes) {{
+            $setVmParams.Notes = $config.vm.notes
+        }}
+        if ($config.vm.checkpointType) {{
+            $setVmParams.CheckpointType = $config.vm.checkpointType
+        }}
+        if ($config.vm.automaticStartAction) {{
+            $setVmParams.AutomaticStartAction = $config.vm.automaticStartAction
+        }}
+        if ($null -ne $config.vm.automaticStartDelay) {{
+            $setVmParams.AutomaticStartDelay = $config.vm.automaticStartDelay
+        }}
+        if ($config.vm.automaticStopAction) {{
+            $setVmParams.AutomaticStopAction = $config.vm.automaticStopAction
+        }}
+        if ($config.vm.automaticCriticalErrorAction) {{
+            $setVmParams.AutomaticCriticalErrorAction = $config.vm.automaticCriticalErrorAction
+        }}
+        if ($null -ne $config.vm.automaticCriticalErrorActionTimeout) {{
+            $setVmParams.AutomaticCriticalErrorActionTimeout = $config.vm.automaticCriticalErrorActionTimeout
+        }}
+        if ($config.vm.lockOnDisconnect) {{
+            $setVmParams.LockOnDisconnect = $config.vm.lockOnDisconnect
+        }}
+
+        Set-VM @setVmParams -ErrorAction Stop
+    }} catch {{
+        $warnings += "Failed to apply VM base settings: $_"
+    }}
+
+    # === Apply Memory Settings ===
+    try {{
+        $memParams = @{{ VMName = $vmName }}
+
+        if ($null -ne $config.memory.dynamicMemoryEnabled) {{
+            $memParams.DynamicMemoryEnabled = $config.memory.dynamicMemoryEnabled
+        }}
+        if ($config.memory.startupBytes) {{
+            $memParams.StartupBytes = [long]$config.memory.startupBytes
+        }}
+        if ($config.memory.dynamicMemoryEnabled) {{
+            if ($config.memory.minimumBytes) {{
+                $memParams.MinimumBytes = [long]$config.memory.minimumBytes
+            }}
+            if ($config.memory.maximumBytes) {{
+                $memParams.MaximumBytes = [long]$config.memory.maximumBytes
+            }}
+            if ($null -ne $config.memory.buffer) {{
+                $memParams.Buffer = $config.memory.buffer
+            }}
+            if ($null -ne $config.memory.priority) {{
+                $memParams.Priority = $config.memory.priority
+            }}
+        }}
+
+        Set-VMMemory @memParams -ErrorAction Stop
+    }} catch {{
+        $warnings += "Failed to apply memory settings: $_"
+    }}
+
+    # === Apply Processor Settings ===
+    try {{
+        $procParams = @{{ VMName = $vmName }}
+
+        if ($config.processor.count) {{
+            $procParams.Count = $config.processor.count
+        }}
+        if ($null -ne $config.processor.reserve) {{
+            $procParams.Reserve = $config.processor.reserve
+        }}
+        if ($null -ne $config.processor.maximum) {{
+            $procParams.Maximum = $config.processor.maximum
+        }}
+        if ($null -ne $config.processor.relativeWeight) {{
+            $procParams.RelativeWeight = $config.processor.relativeWeight
+        }}
+        if ($null -ne $config.processor.compatibilityForMigrationEnabled) {{
+            $procParams.CompatibilityForMigrationEnabled = $config.processor.compatibilityForMigrationEnabled
+        }}
+        if ($null -ne $config.processor.compatibilityForOlderOperatingSystemsEnabled) {{
+            $procParams.CompatibilityForOlderOperatingSystemsEnabled = $config.processor.compatibilityForOlderOperatingSystemsEnabled
+        }}
+        # ExposeVirtualizationExtensions requires VM to be off
+        if ($isOff -and $null -ne $config.processor.exposeVirtualizationExtensions) {{
+            $procParams.ExposeVirtualizationExtensions = $config.processor.exposeVirtualizationExtensions
+        }}
+        if ($null -ne $config.processor.maximumCountPerNumaNode) {{
+            $procParams.MaximumCountPerNumaNode = $config.processor.maximumCountPerNumaNode
+        }}
+        if ($null -ne $config.processor.maximumCountPerNumaSocket) {{
+            $procParams.MaximumCountPerNumaSocket = $config.processor.maximumCountPerNumaSocket
+        }}
+
+        Set-VMProcessor @procParams -ErrorAction Stop
+    }} catch {{
+        $warnings += "Failed to apply processor settings: $_"
+    }}
+
+    # === Apply Firmware Settings (Gen2 only) ===
+    if ($vm.Generation -eq 2 -and $config.firmware) {{
+        try {{
+            $fwParams = @{{ VMName = $vmName }}
+
+            # Secure Boot
+            if ($null -ne $config.firmware.secureBootEnabled) {{
+                if ($config.firmware.secureBootEnabled) {{
+                    $fwParams.EnableSecureBoot = 'On'
+
+                    # Apply the correct Secure Boot template
+                    if ($config.firmware.secureBootTemplate) {{
+                        $fwParams.SecureBootTemplate = $config.firmware.secureBootTemplate
+                    }}
+                }} else {{
+                    $fwParams.EnableSecureBoot = 'Off'
+                }}
+            }}
+
+            if ($config.firmware.preferredNetworkBootProtocol) {{
+                $fwParams.PreferredNetworkBootProtocol = $config.firmware.preferredNetworkBootProtocol
+            }}
+
+            if ($config.firmware.consoleMode) {{
+                $fwParams.ConsoleMode = $config.firmware.consoleMode
+            }}
+
+            if ($null -ne $config.firmware.pauseAfterBootFailure) {{
+                if ($config.firmware.pauseAfterBootFailure) {{
+                    $fwParams.PauseAfterBootFailure = 'On'
+                }} else {{
+                    $fwParams.PauseAfterBootFailure = 'Off'
+                }}
+            }}
+
+            Set-VMFirmware @fwParams -ErrorAction Stop
+        }} catch {{
+            $warnings += "Failed to apply firmware settings: $_"
+        }}
+    }}
+
+    # === Configure Network Adapters ===
+    if ($config.networkAdapters -and $config.networkAdapters.Count -gt 0) {{
+        try {{
+            # Get current adapters
+            $currentAdapters = @(Get-VMNetworkAdapter -VM $vm)
+
+            # Remove all current adapters if VM is off (we'll recreate them)
+            if ($isOff) {{
+                foreach ($adapter in $currentAdapters) {{
+                    Remove-VMNetworkAdapter -VMNetworkAdapter $adapter -ErrorAction SilentlyContinue
+                }}
+            }}
+
+            # Add and configure adapters from config
+            foreach ($nicConfig in $config.networkAdapters) {{
+                $nicName = $nicConfig.name
+                if (-not $nicName) {{ $nicName = "Network Adapter" }}
+
+                # Determine switch name (apply mapping if provided)
+                $switchName = $nicConfig.switchName
+                if ($switchName -and $networkMap.$switchName) {{
+                    $switchName = $networkMap.$switchName
+                    $warnings += "Mapped switch '$($nicConfig.switchName)' to '$switchName'"
+                }}
+
+                # Check if switch exists
+                $switchExists = $false
+                if ($switchName) {{
+                    $switch = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue
+                    $switchExists = $null -ne $switch
+                    if (-not $switchExists) {{
+                        $warnings += "Virtual switch '$switchName' not found on this host"
+                        $switchName = $null
+                    }}
+                }}
+
+                if ($isOff) {{
+                    # Create new adapter
+                    $addParams = @{{
+                        VMName = $vmName
+                        Name = $nicName
+                    }}
+
+                    if ($switchName) {{
+                        $addParams.SwitchName = $switchName
+                    }}
+
+                    # Static MAC address
+                    if (-not $nicConfig.dynamicMacAddressEnabled -and $nicConfig.macAddress) {{
+                        $addParams.StaticMacAddress = $nicConfig.macAddress
+                    }}
+
+                    Add-VMNetworkAdapter @addParams -ErrorAction Stop
+                }}
+
+                # Configure adapter settings
+                $setParams = @{{
+                    VMName = $vmName
+                    Name = $nicName
+                }}
+
+                # MAC spoofing
+                if ($nicConfig.macAddressSpoofing) {{
+                    $setParams.MacAddressSpoofing = $nicConfig.macAddressSpoofing
+                }}
+
+                # DHCP Guard
+                if ($nicConfig.dhcpGuard) {{
+                    $setParams.DhcpGuard = $nicConfig.dhcpGuard
+                }}
+
+                # Router Guard
+                if ($nicConfig.routerGuard) {{
+                    $setParams.RouterGuard = $nicConfig.routerGuard
+                }}
+
+                # Allow Teaming
+                if ($nicConfig.allowTeaming) {{
+                    $setParams.AllowTeaming = $nicConfig.allowTeaming
+                }}
+
+                # VMQ Weight
+                if ($null -ne $nicConfig.vmqWeight) {{
+                    $setParams.VmqWeight = $nicConfig.vmqWeight
+                }}
+
+                # Bandwidth settings
+                if ($nicConfig.bandwidth) {{
+                    if ($nicConfig.bandwidth.maximumBandwidth) {{
+                        $setParams.MaximumBandwidth = $nicConfig.bandwidth.maximumBandwidth
+                    }}
+                    if ($nicConfig.bandwidth.minimumBandwidthWeight) {{
+                        $setParams.MinimumBandwidthWeight = $nicConfig.bandwidth.minimumBandwidthWeight
+                    }}
+                }}
+
+                try {{
+                    Set-VMNetworkAdapter @setParams -ErrorAction Stop
+                }} catch {{
+                    $warnings += "Failed to configure adapter '$nicName': $_"
+                }}
+
+                # Apply VLAN settings if configured
+                if ($nicConfig.vlanAccess -and $nicConfig.vlanAccess.accessVlanId) {{
+                    try {{
+                        Set-VMNetworkAdapterVlan -VMName $vmName -VMNetworkAdapterName $nicName `
+                            -Access -VlanId $nicConfig.vlanAccess.accessVlanId -ErrorAction Stop
+                    }} catch {{
+                        $warnings += "Failed to set VLAN for '$nicName': $_"
+                    }}
+                }}
+            }}
+        }} catch {{
+            $warnings += "Failed to configure network adapters: $_"
+        }}
+    }}
+
+    # === Apply Integration Services ===
+    if ($config.integrationServices) {{
+        try {{
+            $config.integrationServices.PSObject.Properties | ForEach-Object {{
+                $svcName = $_.Name
+                $enabled = $_.Value
+                try {{
+                    if ($enabled) {{
+                        Enable-VMIntegrationService -VMName $vmName -Name $svcName -ErrorAction Stop
+                    }} else {{
+                        Disable-VMIntegrationService -VMName $vmName -Name $svcName -ErrorAction Stop
+                    }}
+                }} catch {{
+                    # Service might not exist on this host
+                }}
+            }}
+        }} catch {{
+            $warnings += "Failed to apply integration services: $_"
+        }}
+    }}
+
+    # === Apply Security Settings ===
+    if ($config.security) {{
+        try {{
+            $secParams = @{{ VMName = $vmName }}
+
+            if ($null -ne $config.security.encryptStateAndVmMigrationTraffic) {{
+                $secParams.EncryptStateAndVmMigrationTraffic = $config.security.encryptStateAndVmMigrationTraffic
+            }}
+
+            # VBS opt-out requires VM to be off
+            if ($isOff -and $null -ne $config.security.virtualizationBasedSecurityOptOut) {{
+                $secParams.VirtualizationBasedSecurityOptOut = $config.security.virtualizationBasedSecurityOptOut
+            }}
+
+            Set-VMSecurity @secParams -ErrorAction SilentlyContinue
+        }} catch {{
+            $warnings += "Failed to apply security settings: $_"
+        }}
+
+        # Enable vTPM if it was enabled in original (with new local key protector)
+        if ($config.security.tpmEnabled -and $vm.Generation -eq 2 -and $isOff) {{
+            try {{
+                Set-VMKeyProtector -VMName $vmName -NewLocalKeyProtector -ErrorAction Stop
+                Enable-VMTPM -VMName $vmName -ErrorAction Stop
+                $warnings += "vTPM enabled with new local key protector (original keys cannot be migrated)"
+            }} catch {{
+                $warnings += "Failed to enable vTPM: $_"
+            }}
+        }}
+    }}
+
+    # === Handle GPU Partition Adapters (GPU-P) ===
+    if ($config.gpuPartitions -and $config.gpuPartitions.Count -gt 0) {{
+        $warnings += "GPU partitions detected in backup - these are host-specific and cannot be automatically restored"
+        $warnings += "Original GPU partitions: $($config.gpuPartitions.Count)"
+        # We don't attempt to restore these as the GPU instance paths are host-specific
+    }}
+
+    # === Handle Assignable Devices (DDA/GPU Passthrough) ===
+    if ($config.assignableDevices -and $config.assignableDevices.Count -gt 0) {{
+        $warnings += "GPU/Device passthrough (DDA) detected in backup - these are host-specific and cannot be automatically restored"
+        $warnings += "Original passthrough devices: $($config.assignableDevices.Count)"
+        foreach ($dev in $config.assignableDevices) {{
+            $warnings += "  - Device: $($dev.instancePath)"
+        }}
+        # We don't attempt to restore these as the device instance paths are host-specific
+    }}
+
+    # === Handle Cluster Settings ===
+    if ($config.cluster -and $config.cluster.isClustered) {{
+        $warnings += "Original VM was clustered - cluster configuration must be manually re-applied"
+        $warnings += "Original cluster: $($config.cluster.clusterName)"
+        $warnings += "Original resource group: $($config.cluster.resourceGroupName)"
+    }}
+
+    # === Handle Replication ===
+    if ($config.replication -and $config.replication.enabled) {{
+        $warnings += "Original VM had replication enabled - replication must be manually reconfigured"
+        $warnings += "Original replica server: $($config.replication.replicaServerName)"
+    }}
+
+    # Output result
+    @{{
+        Success = $true
+        Warnings = $warnings
+    }} | ConvertTo-Json -Compress
+
+}} catch {{
+    @{{
+        Success = $false
+        Error = $_.Exception.Message
+        Warnings = $warnings
+    }} | ConvertTo-Json -Compress
+}}
+"""
+        rc, stdout, stderr = self._run_powershell_large(script, timeout=300)
+
+        if rc != 0:
+            logger.error(f"Failed to apply VM config: {stderr}")
+            return False, [f"PowerShell error: {stderr}"]
+
+        try:
+            result = json.loads(stdout.strip())
+            warnings = result.get("Warnings", [])
+
+            if result.get("Success"):
+                logger.info(f"Applied config to VM {vm_name} with {len(warnings)} warnings")
+                return True, warnings
+            else:
+                error = result.get("Error", "Unknown error")
+                logger.error(f"Failed to apply VM config: {error}")
+                return False, [error] + warnings
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse apply config result: {e}")
+            return False, [f"Failed to parse result: {e}"]
+
     def export_vm(
         self,
         vm_name: str,
@@ -1544,6 +2378,23 @@ class HyperVBackupManager:
                     {"status": "starting", "vm": vm_name, "mode": backup_mode}
                 )
 
+            # Capture comprehensive VM configuration BEFORE any changes
+            # This ensures we capture the exact state including firmware, GPU, etc.
+            if progress_callback:
+                progress_callback(
+                    {"status": "capturing_config", "vm": vm_name}
+                )
+
+            vm_config = self.api.capture_vm_config(vm_name)
+            if vm_config:
+                result["vm_config"] = vm_config
+                logger.info(f"Captured comprehensive config for VM: {vm_name}")
+            else:
+                logger.warning(
+                    f"Failed to capture comprehensive config for VM: {vm_name}, "
+                    "backup will continue but restore may be limited"
+                )
+
             # Handle different backup modes
             checkpoint_id = None
 
@@ -1622,6 +2473,98 @@ if (Test-Path $path) {{
                     except ValueError:
                         pass
 
+                # Save comprehensive VM config to backup location
+                # This is saved alongside the VM export for full restore capability
+                if vm_config:
+                    if progress_callback:
+                        progress_callback({"status": "saving_config", "vm": vm_name})
+
+                    # Config goes in the timestamp folder (parent of VM export folder)
+                    # Structure: {backup_path}/{vm_name}/{timestamp}/vm_full_config.json
+                    #                                              /{vm_name}/Virtual Machines/...
+                    config_save_path = f"{vm_backup_path}\\vm_full_config.json"
+                    config_json = json.dumps(vm_config, indent=2)
+
+                    # Save config file via PowerShell (handles SMB auth)
+                    if is_smb_backup:
+                        # For SMB paths, use authenticated write
+                        unc_parts = backup_path.lstrip("\\").split("\\")
+                        if len(unc_parts) >= 2:
+                            smb_server = unc_parts[0]
+                            smb_share = unc_parts[1]
+                            smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                            safe_password = smb_password.replace("'", "''") if smb_password else ""
+                            full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
+
+                            # Escape the JSON for PowerShell
+                            safe_json = config_json.replace("'", "''")
+
+                            save_config_script = f"""
+$ErrorActionPreference = 'Stop'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+$configPath = '{config_save_path}'
+$configJson = @'
+{safe_json}
+'@
+
+# Authenticate to SMB
+$secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
+
+$driveName = "BackerCfg"
+if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+
+try {{
+    New-PSDrive -Name $driveName -PSProvider FileSystem -Root $smbUnc -Credential $cred -ErrorAction Stop | Out-Null
+
+    # Convert UNC path to mapped drive path
+    $subPath = $configPath.Substring($smbUnc.Length).TrimStart('\\')
+    $mappedPath = "${{driveName}}:\\$subPath"
+
+    # Write config file
+    $configJson | Out-File -FilePath $mappedPath -Encoding UTF8 -Force
+    Write-Output "SUCCESS"
+}} finally {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+"""
+                            rc, stdout, stderr = self.api._run_powershell_large(
+                                save_config_script, timeout=60
+                            )
+                            if rc == 0 and "SUCCESS" in stdout:
+                                result["config_saved"] = True
+                                result["config_path"] = config_save_path
+                                logger.info(f"Saved VM config to: {config_save_path}")
+                            else:
+                                logger.warning(
+                                    f"Failed to save VM config to SMB: {stderr}"
+                                )
+                    else:
+                        # Local path - direct write
+                        save_config_script = f"""
+$configPath = '{config_save_path}'
+$configJson = @'
+{config_json.replace("'", "''")}
+'@
+$configJson | Out-File -FilePath $configPath -Encoding UTF8 -Force
+Write-Output "SUCCESS"
+"""
+                        rc, stdout, stderr = self.api._run_powershell(
+                            save_config_script, timeout=60
+                        )
+                        if rc == 0 and "SUCCESS" in stdout:
+                            result["config_saved"] = True
+                            result["config_path"] = config_save_path
+                            logger.info(f"Saved VM config to: {config_save_path}")
+                        else:
+                            logger.warning(
+                                f"Failed to save VM config: {stderr}"
+                            )
+
             else:
                 result["errors"].append(f"Export failed: {export_result}")
 
@@ -1662,31 +2605,40 @@ if (Test-Path $path) {{
         smb_username: str | None = None,
         smb_password: str | None = None,
         smb_domain: str | None = None,
+        restore_mode: str = "auto",
+        network_mapping: dict[str, str] | None = None,
+        start_after_restore: bool = False,
     ) -> dict[str, Any]:
-        """Restore (import) a Hyper-V VM from an export.
+        """Restore a Hyper-V VM from a backup with comprehensive settings recovery.
 
-        Per Microsoft Import-VM documentation, this supports two modes:
-        - Register in-place: Uses -Path only (files stay where they are)
-        - Copy: Uses -Copy flag with optional destination paths
+        Supports multiple restore modes:
+        - auto: Try in-place if VM exists, then import, then rebuild (recommended)
+        - inplace: Replace VHD contents only, keep existing VM config (same host only)
+        - import: Use Import-VM with .vmcx file (preserves most settings)
+        - rebuild: Create new VM from VHDs and apply saved config (fallback)
 
-        For SMB/UNC paths, the backup files are first copied to local storage
-        before import, since Import-VM may have issues with network paths.
+        When a vm_full_config.json exists in the backup, it will be used to restore
+        all VM settings including firmware (Secure Boot), network adapters, memory,
+        processor settings, and more.
+
+        For SMB/UNC paths, backup files are copied to local storage before import.
 
         Args:
-            import_path: Path to the exported VM folder containing Virtual Machines subfolder
+            import_path: Path to the exported VM folder (timestamp folder containing VM export)
             vm_name: Optional new name for the VM after import
             restore_path: Optional destination path for VM configuration files
-                         (maps to -VirtualMachinePath parameter)
             vhd_destination_path: Optional destination for VHD files
-                                 (maps to -VhdDestinationPath parameter)
             generate_new_id: Generate new VM ID (required for duplicate imports)
             progress_callback: Optional callback for progress updates
             smb_username: SMB username for network path authentication
             smb_password: SMB password for network path authentication
             smb_domain: SMB domain for network path authentication
+            restore_mode: Restore strategy - auto, inplace, import, or rebuild
+            network_mapping: Dict mapping old virtual switch names to new ones
+            start_after_restore: Start the VM after successful restore
 
         Returns:
-            Dict with restore result info
+            Dict with restore result info including warnings about settings
         """
         from datetime import datetime as dt
 
@@ -1695,20 +2647,24 @@ if (Test-Path $path) {{
             "success": False,
             "import_path": import_path,
             "vm_name": vm_name,
+            "restore_mode": restore_mode,
             "errors": [],
+            "warnings": [],
             "duration_seconds": 0,
         }
 
         try:
             if progress_callback:
-                progress_callback({"status": "importing", "path": import_path})
+                progress_callback({"status": "initializing", "path": import_path})
 
             # Check if source is a UNC path (network share)
             is_unc_path = import_path.startswith("\\\\")
 
+            # Build SMB connection parameters
+            smb_unc = ""
+            full_username = ""
+            safe_password = ""
             if is_unc_path and smb_username and smb_password:
-                # For UNC paths, copy backup to local temp, then import
-                # This avoids authentication issues with Import-VM on network paths
                 unc_parts = import_path.lstrip("\\").split("\\")
                 if len(unc_parts) >= 2:
                     smb_server = unc_parts[0]
@@ -1716,324 +2672,185 @@ if (Test-Path $path) {{
                     smb_unc = f"\\\\{smb_server}\\{smb_share}"
                     safe_password = smb_password.replace("'", "''")
                     full_username = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
-
-                    # Build import parameters for the script
-                    import_params = ""
-                    if generate_new_id:
-                        import_params += " -Copy -GenerateNewId"
-                    if vhd_destination_path:
-                        import_params += f" -VhdDestinationPath '{vhd_destination_path}'"
-                    if restore_path:
-                        import_params += f" -VirtualMachinePath '{restore_path}'"
-
-                    script = f"""
-$ErrorActionPreference = 'Stop'
-$importPath = '{import_path}'
-$smbUnc = '{smb_unc}'
-$smbUser = '{full_username}'
-$smbPass = '{safe_password}'
-
-try {{
-    # Establish SMB connection with credentials
-    $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) {{
-        throw "Failed to connect to SMB share: $netUseResult"
-    }}
-
-    # Verify source exists
-    if (-not (Test-Path $importPath)) {{
-        throw "Backup path not found: $importPath"
-    }}
-
-    # Find the .vmcx file or vm_config.json (manual backup fallback)
-    $vmFolder = Join-Path $importPath 'Virtual Machines'
-    $vmcxPath = $null
-    $manualBackupConfig = $null
-
-    if (Test-Path $vmFolder) {{
-        $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue `
-            | Select-Object -First 1
-        if ($vmcx) {{
-            $vmcxPath = $vmcx.FullName
-        }} else {{
-            # Check for manual backup JSON config
-            $jsonConfig = Join-Path $vmFolder 'vm_config.json'
-            if (Test-Path $jsonConfig) {{
-                $manualBackupConfig = Get-Content $jsonConfig -Raw | ConvertFrom-Json
-            }} else {{
-                throw "No .vmcx file or vm_config.json found in $vmFolder"
-            }}
-        }}
-    }} else {{
-        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
-            | Select-Object -First 1
-        if ($vmcx) {{
-            $vmcxPath = $vmcx.FullName
-        }} else {{
-            # Check for manual backup JSON config
-            $jsonConfig = Get-ChildItem -Path $importPath -Filter 'vm_config.json' -Recurse `
-                -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($jsonConfig) {{
-                $manualBackupConfig = Get-Content $jsonConfig.FullName -Raw | ConvertFrom-Json
-            }} else {{
-                throw "No .vmcx file or vm_config.json found in $importPath"
-            }}
-        }}
-    }}
-
-    # Get default paths
-    $defaultVmPath = (Get-VMHost).VirtualMachinePath
-    $defaultVhdPath = (Get-VMHost).VirtualHardDiskPath
-
-    # Get VM name from backup folder
-    $vmName = Split-Path -Leaf $importPath
-
-    # Check if VM with this name exists and stop it
-    $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
-    if ($existingVm) {{
-        if ($existingVm.State -ne 'Off') {{
-            Stop-VM -Name $vmName -Force -TurnOff
-            # Wait for VM to fully stop
-            $timeout = 60
-            $waited = 0
-            while ((Get-VM -Name $vmName).State -ne 'Off' -and $waited -lt $timeout) {{
-                Start-Sleep -Seconds 2
-                $waited += 2
-            }}
-            if ((Get-VM -Name $vmName).State -ne 'Off') {{
-                throw "Timed out waiting for VM '$vmName' to stop"
-            }}
-        }}
-        # Remove the existing VM (but keep VHDs for safety)
-        Remove-VM -Name $vmName -Force
-    }}
-
-    # Helper function to create VM from VHDs (used for manual backups and vTPM fallback)
-    function New-VMFromVHDs {{
-        param(
-            [string]$VMName,
-            [string]$ImportPath,
-            [string]$DefaultVmPath,
-            [string]$DefaultVhdPath,
-            [int]$Generation = 2,
-            [long]$MemoryBytes = 4GB,
-            [int]$ProcessorCount = 2,
-            [bool]$EnableTPM = $true
-        )
-
-        # Find VHD files
-        $vhdFolder = Join-Path $ImportPath 'Virtual Hard Disks'
-        $vhds = @()
-        if (Test-Path $vhdFolder) {{
-            # Only get base VHDx files, skip AVHDX differencing disks
-            $vhds = Get-ChildItem -Path $vhdFolder -Include *.vhdx,*.vhd -Recurse |
-                Where-Object {{ $_.Extension -ne '.avhdx' }}
-        }}
-        if ($vhds.Count -eq 0) {{
-            throw "No VHD files found in backup for VM creation"
-        }}
-
-        # Copy VHDs to local storage
-        $localVhdPath = Join-Path $DefaultVhdPath $VMName
-        if (Test-Path $localVhdPath) {{
-            Remove-Item -Path $localVhdPath -Recurse -Force
-        }}
-        New-Item -ItemType Directory -Path $localVhdPath -Force | Out-Null
-
-        $localVhds = @()
-        foreach ($vhd in $vhds) {{
-            $destVhd = Join-Path $localVhdPath $vhd.Name
-            Copy-Item -Path $vhd.FullName -Destination $destVhd -Force
-            $localVhds += $destVhd
-        }}
-
-        # Create new VM with specified generation
-        $vm = New-VM -Name $VMName -Generation $Generation -MemoryStartupBytes $MemoryBytes `
-            -Path $DefaultVmPath -NoVHD
-
-        # Set processor count
-        Set-VMProcessor -VMName $VMName -Count $ProcessorCount
-
-        # Attach copied VHDs
-        foreach ($vhd in $localVhds) {{
-            Add-VMHardDiskDrive -VMName $VMName -Path $vhd -ControllerType SCSI
-        }}
-
-        # Enable vTPM with new local key protector (for Gen2 VMs only)
-        if ($EnableTPM -and $Generation -eq 2) {{
-            try {{
-                Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector
-                Enable-VMTPM -VMName $VMName
-            }} catch {{
-                # TPM setup may fail, continue without it
-                Write-Warning "Could not enable TPM: $_"
-            }}
-        }}
-
-        return $vm
-    }}
-
-    $vm = $null
-
-    # Check if this is a manual backup (vm_config.json instead of .vmcx)
-    if ($manualBackupConfig) {{
-        # Manual backup - create VM from VHDs using saved config
-        $generation = if ($manualBackupConfig.Generation) {{ $manualBackupConfig.Generation }} else {{ 2 }}
-        $memoryBytes = if ($manualBackupConfig.MemoryStartupBytes) {{
-            [long]$manualBackupConfig.MemoryStartupBytes
-        }} else {{ 4GB }}
-        $processorCount = if ($manualBackupConfig.ProcessorCount) {{
-            $manualBackupConfig.ProcessorCount
-        }} else {{ 2 }}
-
-        $vm = New-VMFromVHDs -VMName $vmName -ImportPath $importPath `
-            -DefaultVmPath $defaultVmPath -DefaultVhdPath $defaultVhdPath `
-            -Generation $generation -MemoryBytes $memoryBytes `
-            -ProcessorCount $processorCount -EnableTPM $true
-    }} else {{
-        # Standard backup with .vmcx - try Import-VM first
-        $importError = $null
-        try {{
-            $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId `
-                -VirtualMachinePath $defaultVmPath `
-                -VhdDestinationPath $defaultVhdPath `
-                -ErrorAction Stop
-        }} catch {{
-            $importError = $_
-        }}
-
-        # If import failed (likely vTPM issue), fall back to creating new VM from VHDs
-        if (-not $vm -and $importError) {{
-            # Check if it's a vTPM/vmgs related error
-            if ($importError.Exception.Message -match 'vmgs|0x80070032|not supported|used by another') {{
-                $vm = New-VMFromVHDs -VMName $vmName -ImportPath $importPath `
-                    -DefaultVmPath $defaultVmPath -DefaultVhdPath $defaultVhdPath `
-                    -Generation 2 -MemoryBytes 4GB -ProcessorCount 2 -EnableTPM $true
-            }} else {{
-                throw $importError
-            }}
-        }}
-    }}
-
-    if ($vm) {{
-        @{{
-            Success = $true
-            VMId = $vm.Id.ToString()
-            VMName = $vm.Name
-        }} | ConvertTo-Json
-    }} else {{
-        @{{ Success = $false; Error = "Import returned no VM" }} | ConvertTo-Json
-    }}
-}} finally {{
-    # Disconnect SMB
-    & net use $smbUnc /delete /y 2>&1 | Out-Null
-}}
-"""
-                    rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
                 else:
                     result["errors"].append("Invalid UNC path format")
                     return result
+
+            # Step 1: Load comprehensive config if available
+            if progress_callback:
+                progress_callback({"status": "loading_config", "path": import_path})
+
+            full_config = None
+            full_config = self._load_backup_config(
+                import_path, smb_unc, full_username, safe_password
+            )
+            if full_config:
+                logger.info(f"Loaded comprehensive config from backup (version {full_config.get('capture_version', '1.0')})")
+                result["config_loaded"] = True
             else:
-                # Local path - import directly
-                # First, find the .vmcx configuration file
-                find_vmcx_script = f"""
-$importPath = '{import_path}'
-if ($importPath -like '*.vmcx') {{
-    if (Test-Path $importPath) {{
-        $importPath
-    }} else {{
-        Write-Error "VMCX file not found: $importPath"
-        exit 1
-    }}
-}} else {{
-    $vmFolder = Join-Path $importPath 'Virtual Machines'
-    if (Test-Path $vmFolder) {{
-        $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($vmcx) {{
-            $vmcx.FullName
-        }} else {{
-            Write-Error "No .vmcx file found in $vmFolder"
-            exit 1
-        }}
-    }} else {{
-        $vmcx = Get-ChildItem -Path $importPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
-            | Select-Object -First 1
-        if ($vmcx) {{
-            $vmcx.FullName
-        }} else {{
-            Write-Error "No .vmcx file found in $importPath"
-            exit 1
-        }}
-    }}
-}}
-"""
-                rc, stdout, stderr = self.api._run_powershell(find_vmcx_script)
-                if rc != 0:
-                    result["errors"].append(f"Failed to find VM configuration: {stderr}")
+                logger.info("No vm_full_config.json found, will use limited restore")
+                result["config_loaded"] = False
+
+            # Get VM name from config or folder
+            target_vm_name = vm_name
+            if not target_vm_name:
+                if full_config and full_config.get("vm", {}).get("name"):
+                    target_vm_name = full_config["vm"]["name"]
+                else:
+                    # Extract from path - import_path is timestamp folder, VM name is subfolder
+                    target_vm_name = self._get_vm_name_from_path(import_path)
+
+            result["vm_name"] = target_vm_name
+
+            # Step 2: Check if VM already exists (for in-place restore)
+            existing_vm = self.api.get_guest(target_vm_name) if target_vm_name else None
+
+            # Determine actual restore mode
+            actual_mode = restore_mode
+            if restore_mode == "auto":
+                if existing_vm:
+                    # VM exists - try in-place first
+                    actual_mode = "inplace"
+                    logger.info(f"Auto mode: VM '{target_vm_name}' exists, trying in-place restore")
+                else:
+                    # VM doesn't exist - try import
+                    actual_mode = "import"
+                    logger.info(f"Auto mode: VM '{target_vm_name}' doesn't exist, trying import")
+
+            result["actual_mode"] = actual_mode
+
+            # Step 3: Execute restore based on mode
+            if actual_mode == "inplace":
+                # In-place restore: replace VHDs only, keep VM config
+                if not existing_vm:
+                    if restore_mode == "auto":
+                        # Fall back to import mode
+                        actual_mode = "import"
+                        result["actual_mode"] = actual_mode
+                        logger.info("In-place not possible (VM doesn't exist), falling back to import")
+                    else:
+                        result["errors"].append(f"VM '{target_vm_name}' not found for in-place restore")
+                        return result
+
+            if actual_mode == "inplace":
+                success, message = self._restore_inplace(
+                    target_vm_name,
+                    import_path,
+                    smb_unc,
+                    full_username,
+                    safe_password,
+                    progress_callback,
+                )
+                if success:
+                    result["success"] = True
+                    result["vm_id"] = existing_vm.vmid if existing_vm else None
+                    result["warnings"].append("In-place restore completed - VM configuration unchanged")
+                else:
+                    if restore_mode == "auto":
+                        # Fall back to rebuild
+                        actual_mode = "rebuild"
+                        result["actual_mode"] = actual_mode
+                        result["warnings"].append(f"In-place restore failed ({message}), falling back to rebuild")
+                    else:
+                        result["errors"].append(f"In-place restore failed: {message}")
+                        return result
+
+            if actual_mode == "import":
+                if progress_callback:
+                    progress_callback({"status": "importing", "vm": target_vm_name})
+
+                success, import_result = self._restore_import(
+                    import_path,
+                    target_vm_name,
+                    restore_path,
+                    vhd_destination_path,
+                    generate_new_id,
+                    smb_unc,
+                    full_username,
+                    safe_password,
+                    progress_callback,
+                )
+
+                if success:
+                    result["success"] = True
+                    result["vm_id"] = import_result.get("vm_id")
+                    result["vm_name"] = import_result.get("vm_name", target_vm_name)
+                    if import_result.get("warnings"):
+                        result["warnings"].extend(import_result["warnings"])
+                else:
+                    if restore_mode == "auto":
+                        # Fall back to rebuild
+                        actual_mode = "rebuild"
+                        result["actual_mode"] = actual_mode
+                        error_msg = import_result.get("error", "Unknown error")
+                        result["warnings"].append(f"Import failed ({error_msg}), falling back to rebuild")
+                        logger.info(f"Import failed, falling back to rebuild: {error_msg}")
+                    else:
+                        result["errors"].append(import_result.get("error", "Import failed"))
+                        return result
+
+            if actual_mode == "rebuild":
+                if progress_callback:
+                    progress_callback({"status": "rebuilding", "vm": target_vm_name})
+
+                success, rebuild_result = self._restore_rebuild(
+                    import_path,
+                    target_vm_name,
+                    full_config,
+                    restore_path,
+                    vhd_destination_path,
+                    smb_unc,
+                    full_username,
+                    safe_password,
+                    progress_callback,
+                )
+
+                if success:
+                    result["success"] = True
+                    result["vm_id"] = rebuild_result.get("vm_id")
+                    result["vm_name"] = rebuild_result.get("vm_name", target_vm_name)
+                    if rebuild_result.get("warnings"):
+                        result["warnings"].extend(rebuild_result["warnings"])
+                else:
+                    result["errors"].append(rebuild_result.get("error", "Rebuild failed"))
                     return result
 
-                vmcx_path = stdout.strip()
+            # Step 4: Apply comprehensive config if available and restore succeeded
+            if result["success"] and full_config and actual_mode in ("import", "rebuild"):
+                if progress_callback:
+                    progress_callback({"status": "applying_config", "vm": result["vm_name"]})
 
-                # Build import command per Microsoft docs
-                use_copy = generate_new_id or restore_path or vhd_destination_path
-                import_cmd = f"Import-VM -Path '{vmcx_path}'"
+                final_vm_name = result.get("vm_name", target_vm_name)
+                config_success, config_warnings = self.api.apply_vm_config(
+                    final_vm_name,
+                    full_config,
+                    network_mapping,
+                )
 
-                if use_copy:
-                    import_cmd += " -Copy"
-                    if generate_new_id:
-                        import_cmd += " -GenerateNewId"
-                    if vhd_destination_path:
-                        import_cmd += f" -VhdDestinationPath '{vhd_destination_path}'"
-                    if restore_path:
-                        import_cmd += f" -VirtualMachinePath '{restore_path}'"
+                if config_warnings:
+                    result["warnings"].extend(config_warnings)
 
-                script = f"""
-$vm = {import_cmd} -ErrorAction Stop
-if ($vm) {{
-    @{{
-        Success = $true
-        VMId = $vm.Id.ToString()
-        VMName = $vm.Name
-    }} | ConvertTo-Json
-}} else {{
-    @{{ Success = $false; Error = "Import returned no VM" }} | ConvertTo-Json
-}}
-"""
-                rc, stdout, stderr = self.api._run_powershell(script, timeout=86400)
+                if not config_success:
+                    result["warnings"].append("Some configuration settings could not be applied")
 
-            if rc != 0:
-                result["errors"].append(f"Import failed: {stderr}")
-                return result
+            # Step 5: Start VM if requested
+            if result["success"] and start_after_restore:
+                if progress_callback:
+                    progress_callback({"status": "starting_vm", "vm": result["vm_name"]})
 
-            try:
-                import_result = json.loads(stdout.strip())
-                if import_result.get("Success"):
-                    result["success"] = True
-                    result["vm_id"] = import_result.get("VMId")
-                    result["vm_name"] = import_result.get("VMName")
-
-                    # Rename if requested
-                    if vm_name and vm_name != import_result.get("VMName"):
-                        rename_script = f"""
-Rename-VM -VMName '{import_result.get("VMName")}' -NewName '{vm_name}' -ErrorAction Stop
-"""
-                        self.api._run_powershell(rename_script)
-                        result["vm_name"] = vm_name
+                final_vm_name = result.get("vm_name", target_vm_name)
+                if self.api.start_vm(final_vm_name):
+                    result["vm_started"] = True
                 else:
-                    result["errors"].append(
-                        import_result.get("Error", "Import failed")
-                    )
-            except json.JSONDecodeError:
-                result["errors"].append("Failed to parse import result")
+                    result["warnings"].append("Failed to start VM after restore")
+                    result["vm_started"] = False
 
             if progress_callback:
-                progress_callback(
-                    {
-                        "status": "completed",
-                        "success": result["success"],
-                        "vm_name": result.get("vm_name"),
-                    }
-                )
+                progress_callback({
+                    "status": "completed",
+                    "success": result["success"],
+                    "vm_name": result.get("vm_name"),
+                })
 
         except Exception as e:
             logger.exception(f"Restore failed for {import_path}")
@@ -2043,6 +2860,506 @@ Rename-VM -VMName '{import_result.get("VMName")}' -NewName '{vm_name}' -ErrorAct
             result["duration_seconds"] = (dt.now() - started_at).total_seconds()
 
         return result
+
+    def _load_backup_config(
+        self,
+        import_path: str,
+        smb_unc: str,
+        smb_user: str,
+        smb_pass: str,
+    ) -> dict[str, Any] | None:
+        """Load vm_full_config.json from backup path."""
+        # Config is in the timestamp folder (parent of VM export)
+        # Structure: {timestamp}/vm_full_config.json
+        #            {timestamp}/{vm_name}/Virtual Machines/...
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$importPath = '{import_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{smb_user}'
+$smbPass = '{smb_pass}'
+
+try {{
+    # Connect to SMB if needed
+    if ($smbUnc) {{
+        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+    }}
+
+    # Look for vm_full_config.json in the import path (timestamp folder)
+    $configPath = Join-Path $importPath 'vm_full_config.json'
+
+    if (Test-Path $configPath) {{
+        $content = Get-Content $configPath -Raw
+        Write-Output $content
+    }} else {{
+        # Also check parent folder in case import_path is the VM folder
+        $parentPath = Split-Path -Parent $importPath
+        $configPath = Join-Path $parentPath 'vm_full_config.json'
+        if (Test-Path $configPath) {{
+            $content = Get-Content $configPath -Raw
+            Write-Output $content
+        }} else {{
+            Write-Output "NOT_FOUND"
+        }}
+    }}
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=60)
+
+        if rc != 0 or not stdout.strip() or stdout.strip() == "NOT_FOUND":
+            return None
+
+        try:
+            return json.loads(stdout.strip())
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse vm_full_config.json")
+            return None
+
+    def _get_vm_name_from_path(self, import_path: str) -> str:
+        """Extract VM name from backup path structure."""
+        # Path structure: {backup_path}/{vm_name}/{timestamp}/{vm_name}/...
+        # Or: {backup_path}/{vm_name}/{timestamp}/ (import_path is timestamp folder)
+        parts = import_path.rstrip("\\").split("\\")
+
+        # If this is the timestamp folder, VM name is in parent
+        # Try to find a subfolder with Virtual Machines
+        script = f"""
+$importPath = '{import_path}'
+$subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+foreach ($folder in $subfolders) {{
+    $vmFolder = Join-Path $folder.FullName 'Virtual Machines'
+    if (Test-Path $vmFolder) {{
+        Write-Output $folder.Name
+        exit 0
+    }}
+}}
+# Fallback to parent folder name
+Write-Output (Split-Path -Leaf (Split-Path -Parent $importPath))
+"""
+        rc, stdout, stderr = self.api._run_powershell(script, timeout=30)
+        if rc == 0 and stdout.strip():
+            return stdout.strip()
+
+        # Last resort - use last non-timestamp looking part
+        for part in reversed(parts):
+            # Skip timestamp-looking parts (YYYYMMDD_HHMMSS)
+            if not (len(part) == 15 and part[8] == "_"):
+                return part
+        return parts[-1] if parts else "RestoredVM"
+
+    def _restore_inplace(
+        self,
+        vm_name: str,
+        import_path: str,
+        smb_unc: str,
+        smb_user: str,
+        smb_pass: str,
+        progress_callback: Any | None,
+    ) -> tuple[bool, str]:
+        """Restore by replacing VHD contents only, keeping VM configuration."""
+        if progress_callback:
+            progress_callback({"status": "inplace_restore", "vm": vm_name})
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$vmName = '{vm_name}'
+$importPath = '{import_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{smb_user}'
+$smbPass = '{smb_pass}'
+
+try {{
+    # Connect to SMB if needed
+    if ($smbUnc) {{
+        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+    }}
+
+    # Get existing VM
+    $vm = Get-VM -Name $vmName -ErrorAction Stop
+    $wasRunning = $vm.State -eq 'Running'
+
+    # Stop VM if running
+    if ($wasRunning) {{
+        Stop-VM -Name $vmName -Force -TurnOff -ErrorAction Stop
+        # Wait for stop
+        $timeout = 120
+        $waited = 0
+        while ((Get-VM -Name $vmName).State -ne 'Off' -and $waited -lt $timeout) {{
+            Start-Sleep -Seconds 2
+            $waited += 2
+        }}
+    }}
+
+    # Get current VHD paths
+    $currentVhds = Get-VMHardDiskDrive -VMName $vmName
+
+    # Find backup VHDs
+    # First find the VM subfolder in import path
+    $vmBackupFolder = $null
+    $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+    foreach ($folder in $subfolders) {{
+        $vmFolder = Join-Path $folder.FullName 'Virtual Hard Disks'
+        if (Test-Path $vmFolder) {{
+            $vmBackupFolder = $folder.FullName
+            break
+        }}
+    }}
+
+    if (-not $vmBackupFolder) {{
+        throw "Could not find VM backup folder with VHDs in $importPath"
+    }}
+
+    $backupVhdFolder = Join-Path $vmBackupFolder 'Virtual Hard Disks'
+    $backupVhds = Get-ChildItem -Path $backupVhdFolder -Include *.vhdx,*.vhd -Recurse |
+        Where-Object {{ $_.Extension -ne '.avhdx' }}
+
+    if ($backupVhds.Count -eq 0) {{
+        throw "No VHD files found in backup"
+    }}
+
+    # Match and replace VHDs
+    foreach ($currentVhd in $currentVhds) {{
+        $currentPath = $currentVhd.Path
+        $currentName = Split-Path -Leaf $currentPath
+
+        # Find matching backup VHD
+        $matchingBackup = $backupVhds | Where-Object {{ $_.Name -eq $currentName }} | Select-Object -First 1
+
+        if ($matchingBackup) {{
+            # Detach current VHD
+            Remove-VMHardDiskDrive -VMHardDiskDrive $currentVhd -ErrorAction Stop
+
+            # Copy backup VHD to original location
+            Copy-Item -Path $matchingBackup.FullName -Destination $currentPath -Force -ErrorAction Stop
+
+            # Re-attach VHD
+            Add-VMHardDiskDrive -VMName $vmName `
+                -ControllerType $currentVhd.ControllerType `
+                -ControllerNumber $currentVhd.ControllerNumber `
+                -ControllerLocation $currentVhd.ControllerLocation `
+                -Path $currentPath -ErrorAction Stop
+        }}
+    }}
+
+    # Start VM if it was running
+    if ($wasRunning) {{
+        Start-VM -Name $vmName -ErrorAction SilentlyContinue
+    }}
+
+    @{{ Success = $true; VMName = $vmName }} | ConvertTo-Json -Compress
+
+}} catch {{
+    @{{ Success = $false; Error = $_.Exception.Message }} | ConvertTo-Json -Compress
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
+
+        if rc != 0:
+            return False, stderr or "PowerShell error"
+
+        try:
+            result = json.loads(stdout.strip())
+            if result.get("Success"):
+                return True, "In-place restore completed"
+            return False, result.get("Error", "Unknown error")
+        except json.JSONDecodeError:
+            return False, "Failed to parse result"
+
+    def _restore_import(
+        self,
+        import_path: str,
+        vm_name: str | None,
+        restore_path: str | None,
+        vhd_destination_path: str | None,
+        generate_new_id: bool,
+        smb_unc: str,
+        smb_user: str,
+        smb_pass: str,
+        progress_callback: Any | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Restore using Import-VM with the .vmcx file."""
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$importPath = '{import_path}'
+$targetVmName = '{vm_name or ""}'
+$restorePath = '{restore_path or ""}'
+$vhdDestPath = '{vhd_destination_path or ""}'
+$generateNewId = ${str(generate_new_id).lower()}
+$smbUnc = '{smb_unc}'
+$smbUser = '{smb_user}'
+$smbPass = '{smb_pass}'
+
+$warnings = @()
+
+try {{
+    # Connect to SMB if needed
+    if ($smbUnc) {{
+        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+    }}
+
+    # Find VM subfolder and .vmcx file
+    $vmcxPath = $null
+    $vmBackupFolder = $null
+
+    # Check subfolders for VM export structure
+    $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+    foreach ($folder in $subfolders) {{
+        $vmFolder = Join-Path $folder.FullName 'Virtual Machines'
+        if (Test-Path $vmFolder) {{
+            $vmcx = Get-ChildItem -Path $vmFolder -Filter '*.vmcx' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($vmcx) {{
+                $vmcxPath = $vmcx.FullName
+                $vmBackupFolder = $folder.FullName
+                break
+            }}
+        }}
+    }}
+
+    if (-not $vmcxPath) {{
+        throw "No .vmcx file found in backup"
+    }}
+
+    # Get default paths if not specified
+    $defaultVmPath = if ($restorePath) {{ $restorePath }} else {{ (Get-VMHost).VirtualMachinePath }}
+    $defaultVhdPath = if ($vhdDestPath) {{ $vhdDestPath }} else {{ (Get-VMHost).VirtualHardDiskPath }}
+
+    # Get VM name from backup folder
+    $backupVmName = Split-Path -Leaf $vmBackupFolder
+    $finalVmName = if ($targetVmName) {{ $targetVmName }} else {{ $backupVmName }}
+
+    # Check if VM with this name exists
+    $existingVm = Get-VM -Name $finalVmName -ErrorAction SilentlyContinue
+    if ($existingVm) {{
+        if ($existingVm.State -ne 'Off') {{
+            Stop-VM -Name $finalVmName -Force -TurnOff -ErrorAction Stop
+            Start-Sleep -Seconds 5
+        }}
+        Remove-VM -Name $finalVmName -Force
+        $warnings += "Removed existing VM '$finalVmName' before import"
+    }}
+
+    # Import the VM
+    $importParams = @{{
+        Path = $vmcxPath
+        VirtualMachinePath = $defaultVmPath
+        VhdDestinationPath = $defaultVhdPath
+    }}
+
+    if ($generateNewId) {{
+        $importParams.Copy = $true
+        $importParams.GenerateNewId = $true
+    }}
+
+    $vm = Import-VM @importParams -ErrorAction Stop
+
+    # Rename if needed
+    if ($targetVmName -and $vm.Name -ne $targetVmName) {{
+        Rename-VM -VM $vm -NewName $targetVmName -ErrorAction Stop
+        $vm = Get-VM -Name $targetVmName
+    }}
+
+    @{{
+        Success = $true
+        VMId = $vm.Id.ToString()
+        VMName = $vm.Name
+        Warnings = $warnings
+    }} | ConvertTo-Json -Compress
+
+}} catch {{
+    @{{
+        Success = $false
+        Error = $_.Exception.Message
+        Warnings = $warnings
+    }} | ConvertTo-Json -Compress
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
+
+        if rc != 0:
+            return False, {"error": stderr or "PowerShell error"}
+
+        try:
+            result = json.loads(stdout.strip())
+            if result.get("Success"):
+                return True, {
+                    "vm_id": result.get("VMId"),
+                    "vm_name": result.get("VMName"),
+                    "warnings": result.get("Warnings", []),
+                }
+            return False, {
+                "error": result.get("Error", "Unknown error"),
+                "warnings": result.get("Warnings", []),
+            }
+        except json.JSONDecodeError:
+            return False, {"error": "Failed to parse result"}
+
+    def _restore_rebuild(
+        self,
+        import_path: str,
+        vm_name: str,
+        full_config: dict[str, Any] | None,
+        restore_path: str | None,
+        vhd_destination_path: str | None,
+        smb_unc: str,
+        smb_user: str,
+        smb_pass: str,
+        progress_callback: Any | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Rebuild VM from VHDs and apply saved configuration."""
+        # Get settings from config or use defaults
+        generation = 2
+        memory_bytes = 4 * 1024 * 1024 * 1024  # 4GB
+        processor_count = 2
+        enable_tpm = False  # Don't enable by default in rebuild, let apply_vm_config handle it
+
+        if full_config:
+            vm_settings = full_config.get("vm", {})
+            generation = vm_settings.get("generation", 2)
+
+            mem_settings = full_config.get("memory", {})
+            memory_bytes = mem_settings.get("startupBytes", memory_bytes)
+
+            proc_settings = full_config.get("processor", {})
+            processor_count = proc_settings.get("count", processor_count)
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$importPath = '{import_path}'
+$vmName = '{vm_name}'
+$generation = {generation}
+$memoryBytes = {memory_bytes}
+$processorCount = {processor_count}
+$restorePath = '{restore_path or ""}'
+$vhdDestPath = '{vhd_destination_path or ""}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{smb_user}'
+$smbPass = '{smb_pass}'
+
+$warnings = @()
+
+try {{
+    # Connect to SMB if needed
+    if ($smbUnc) {{
+        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+    }}
+
+    # Get default paths
+    $defaultVmPath = if ($restorePath) {{ $restorePath }} else {{ (Get-VMHost).VirtualMachinePath }}
+    $defaultVhdPath = if ($vhdDestPath) {{ $vhdDestPath }} else {{ (Get-VMHost).VirtualHardDiskPath }}
+
+    # Find VHD files in backup
+    $vmBackupFolder = $null
+    $subfolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+    foreach ($folder in $subfolders) {{
+        $vhdFolder = Join-Path $folder.FullName 'Virtual Hard Disks'
+        if (Test-Path $vhdFolder) {{
+            $vmBackupFolder = $folder.FullName
+            break
+        }}
+    }}
+
+    if (-not $vmBackupFolder) {{
+        throw "Could not find VM backup folder with VHDs"
+    }}
+
+    $vhdFolder = Join-Path $vmBackupFolder 'Virtual Hard Disks'
+    $backupVhds = Get-ChildItem -Path $vhdFolder -Include *.vhdx,*.vhd -Recurse |
+        Where-Object {{ $_.Extension -ne '.avhdx' }}
+
+    if ($backupVhds.Count -eq 0) {{
+        throw "No VHD files found in backup"
+    }}
+
+    # Check for existing VM
+    $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if ($existingVm) {{
+        if ($existingVm.State -ne 'Off') {{
+            Stop-VM -Name $vmName -Force -TurnOff -ErrorAction Stop
+            Start-Sleep -Seconds 5
+        }}
+        Remove-VM -Name $vmName -Force
+        $warnings += "Removed existing VM '$vmName' before rebuild"
+    }}
+
+    # Copy VHDs to local storage
+    $localVhdPath = Join-Path $defaultVhdPath $vmName
+    if (Test-Path $localVhdPath) {{
+        Remove-Item -Path $localVhdPath -Recurse -Force
+    }}
+    New-Item -ItemType Directory -Path $localVhdPath -Force | Out-Null
+
+    $localVhds = @()
+    foreach ($vhd in $backupVhds) {{
+        $destVhd = Join-Path $localVhdPath $vhd.Name
+        Copy-Item -Path $vhd.FullName -Destination $destVhd -Force
+        $localVhds += $destVhd
+    }}
+
+    # Create new VM
+    $vm = New-VM -Name $vmName -Generation $generation -MemoryStartupBytes $memoryBytes `
+        -Path $defaultVmPath -NoVHD
+
+    # Set processor count
+    Set-VMProcessor -VMName $vmName -Count $processorCount
+
+    # Attach VHDs
+    foreach ($vhd in $localVhds) {{
+        Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
+    }}
+
+    $warnings += "VM rebuilt from VHDs - configuration will be applied separately"
+
+    @{{
+        Success = $true
+        VMId = $vm.Id.ToString()
+        VMName = $vm.Name
+        Warnings = $warnings
+    }} | ConvertTo-Json -Compress
+
+}} catch {{
+    @{{
+        Success = $false
+        Error = $_.Exception.Message
+        Warnings = $warnings
+    }} | ConvertTo-Json -Compress
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=86400)
+
+        if rc != 0:
+            return False, {"error": stderr or "PowerShell error"}
+
+        try:
+            result = json.loads(stdout.strip())
+            if result.get("Success"):
+                return True, {
+                    "vm_id": result.get("VMId"),
+                    "vm_name": result.get("VMName"),
+                    "warnings": result.get("Warnings", []),
+                }
+            return False, {
+                "error": result.get("Error", "Unknown error"),
+                "warnings": result.get("Warnings", []),
+            }
+        except json.JSONDecodeError:
+            return False, {"error": "Failed to parse result"}
 
     def list_backups(
         self,

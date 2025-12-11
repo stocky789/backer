@@ -9001,6 +9001,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if new_vm_name in (None, "", "null"):
             new_vm_name = None
         start_after = body.get("start", False)
+        # Get restore mode from request (auto, inplace, import, rebuild)
+        restore_mode = body.get("restore_mode", "auto")
+        if restore_mode not in ("auto", "inplace", "import", "rebuild"):
+            restore_mode = "auto"
 
         if not filename:
             raise HTTPException(status_code=400, detail="filename is required")
@@ -9070,6 +9074,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     smb_username=smb_username,
                     smb_password=repo_password,
                     smb_domain=smb_domain,
+                    restore_mode=restore_mode,  # Use mode selected by user
+                    start_after_restore=start_after,  # Let restore_vm handle VM start
                 )
 
                 if result.get("success"):
@@ -9077,19 +9083,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     task.message = f"VM '{restored_name}' restored successfully"
                     task.progress = 90
 
-                    # Start VM if requested
-                    if start_after and restored_name:
-                        try:
-                            api.start_vm(restored_name)
-                            task.message = f"VM '{restored_name}' restored and started"
-                        except Exception as start_err:
-                            logger.warning(f"Failed to start VM after restore: {start_err}")
-
-                    return {
+                    # Build success response with warnings if any
+                    response = {
                         "success": True,
                         "vm_name": restored_name,
                         "message": f"VM '{restored_name}' restored successfully",
+                        "restore_mode": result.get("actual_mode", "unknown"),
+                        "config_applied": result.get("config_loaded", False),
                     }
+                    if result.get("warnings"):
+                        response["warnings"] = result["warnings"]
+                    return response
                 else:
                     errors = result.get("errors", ["Unknown error"])
                     raise Exception(f"Restore failed: {errors}")
@@ -9583,16 +9587,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     smb_username=smb_username,
                     smb_password=smb_password,
                     smb_domain=smb_domain,
+                    restore_mode="auto",  # Use auto mode for intelligent restore
+                    start_after_restore=start_after,  # Let restore_vm handle VM start
                 )
-
-                # Start VM if requested
-                if result.get("success") and start_after:
-                    task.message = "Starting VM..."
-                    task.progress = 95
-                    imported_name = result.get("vm_name")
-                    if imported_name:
-                        api.start_vm(imported_name)
-                        result["started"] = True
 
                 task.progress = 100
                 task.message = "Restore completed" if result.get("success") else "Restore failed"

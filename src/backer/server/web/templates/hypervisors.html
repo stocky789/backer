@@ -571,6 +571,23 @@
                     <div class="form-hint">Warning: This will delete the existing VM/container</div>
                 </div>
 
+                <!-- Hyper-V Restore Mode (hidden for other hypervisors) -->
+                <div class="form-group" id="restoreModeGroup" style="display: none;">
+                    <label class="form-label">Restore Mode</label>
+                    <select id="restoreMode" class="form-input">
+                        <option value="auto">Auto (Recommended)</option>
+                        <option value="inplace">In-Place (Replace VHDs only)</option>
+                        <option value="import">Import (Use VM configuration file)</option>
+                        <option value="rebuild">Rebuild (Create new VM from VHDs)</option>
+                    </select>
+                    <div class="form-hint" id="restoreModeHint">
+                        <strong>Auto:</strong> Intelligently chooses the best method<br>
+                        <strong>In-Place:</strong> VM must exist - only replaces disk contents, keeps all settings<br>
+                        <strong>Import:</strong> Uses original VM config file - preserves most settings<br>
+                        <strong>Rebuild:</strong> Creates new VM and applies saved settings - use if Import fails
+                    </div>
+                </div>
+
                 <div class="form-group">
                     <label class="checkbox-label">
                         <input type="checkbox" id="restoreStart">
@@ -1685,6 +1702,9 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
     const storageGroup = document.getElementById('restoreStorage').closest('.form-group');
     const forceGroup = document.getElementById('restoreForce').closest('.form-group');
 
+    // Get restore mode group element
+    const restoreModeGroup = document.getElementById('restoreModeGroup');
+
     if (isHyperV) {
         document.getElementById('restoreGuestTypeLabel').textContent = 'Type: Hyper-V Virtual Machine';
         // Change VMID field to VM Name for Hyper-V
@@ -1696,6 +1716,11 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
         if (storageGroup) storageGroup.style.display = 'none';
         // Hide force/overwrite option (Hyper-V always generates new ID)
         if (forceGroup) forceGroup.style.display = 'none';
+        // Show restore mode selector for Hyper-V
+        if (restoreModeGroup) {
+            restoreModeGroup.style.display = 'block';
+            document.getElementById('restoreMode').value = 'auto';  // Default to auto
+        }
         // Show vTPM/BitLocker warning for Hyper-V
         let tpmWarning = document.getElementById('restoreTpmWarning');
         if (!tpmWarning) {
@@ -1703,7 +1728,7 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
             tpmWarning.id = 'restoreTpmWarning';
             tpmWarning.className = 'form-hint';
             tpmWarning.style.cssText = 'background: var(--warning-bg, #fff3cd); color: var(--warning-text, #856404); padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 12px;';
-            tpmWarning.innerHTML = '<strong>Note:</strong> If this VM uses BitLocker with TPM, you will need the BitLocker recovery key on first boot after restore.';
+            tpmWarning.innerHTML = '<strong>Note:</strong> If this VM uses BitLocker with TPM, you will need the BitLocker recovery key on first boot after restore. All VM settings (Secure Boot, network adapters, etc.) will be restored from the backup configuration.';
             document.getElementById('restoreForm').insertBefore(tpmWarning, document.getElementById('restoreForm').firstChild);
         }
         tpmWarning.style.display = 'block';
@@ -1711,6 +1736,8 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
         // Hide vTPM warning for non-Hyper-V
         const tpmWarning = document.getElementById('restoreTpmWarning');
         if (tpmWarning) tpmWarning.style.display = 'none';
+        // Hide restore mode for non-Hyper-V
+        if (restoreModeGroup) restoreModeGroup.style.display = 'none';
         document.getElementById('restoreGuestTypeLabel').textContent = guestType === 'lxc' ? 'Type: LXC Container' : 'Type: QEMU Virtual Machine';
         if (vmidLabel) vmidLabel.textContent = 'Restore as VMID';
         vmidInput.type = 'number';
@@ -1856,6 +1883,11 @@ async function submitRestore(event) {
             force: document.getElementById('restoreForce').checked,
             start: document.getElementById('restoreStart').checked,
         };
+
+        // Add restore_mode for Hyper-V
+        if (isHyperV) {
+            data.restore_mode = document.getElementById('restoreMode').value || 'auto';
+        }
 
         try {
             const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}/restore`, {
