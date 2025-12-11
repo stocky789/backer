@@ -1127,12 +1127,36 @@ Get-ChildItem -Path $vmStoragePath -Directory -Filter 'BackerExport_*' -ErrorAct
         Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }}
 
+# Also clean up any orphaned VM-named folders in the VHD storage path that might conflict
+# This handles renamed VMs where the VHDX filename differs from VM name
+$vmFolderInStorage = Join-Path $vmStoragePath $vmName
+if (Test-Path $vmFolderInStorage) {{
+    # Check if this folder is NOT actively used by the VM we're exporting
+    $vmDisks = (Get-VM -Name $vmName -ErrorAction SilentlyContinue | Get-VMHardDiskDrive).Path
+    $folderInUse = $false
+    foreach ($disk in $vmDisks) {{
+        if ($disk -like "$vmFolderInStorage*") {{
+            $folderInUse = $true
+            break
+        }}
+    }}
+    if (-not $folderInUse) {{
+        Remove-Item -Path $vmFolderInStorage -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+}}
+
 # Create temp export directory
 $tempExportId = [System.Guid]::NewGuid().ToString()
 $localExportPath = Join-Path $vmStoragePath "BackerExport_$tempExportId"
 New-Item -ItemType Directory -Path $localExportPath -Force | Out-Null
 
 try {{
+    # Ensure destination VM folder doesn't exist (handles edge cases)
+    $destVmFolder = Join-Path $localExportPath $vmName
+    if (Test-Path $destVmFolder) {{
+        Remove-Item -Path $destVmFolder -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+
     # Export VM to temp directory on local/SAN storage
     {export_cmd_base} $localExportPath{capture_param} -ErrorAction Stop
 
