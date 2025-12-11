@@ -1597,6 +1597,29 @@ try {{
     $defaultVmPath = (Get-VMHost).VirtualMachinePath
     $defaultVhdPath = (Get-VMHost).VirtualHardDiskPath
 
+    # Get VM name from backup folder
+    $vmName = Split-Path -Leaf $importPath
+
+    # Check if VM with this name exists and stop it
+    $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if ($existingVm) {{
+        if ($existingVm.State -ne 'Off') {{
+            Stop-VM -Name $vmName -Force -TurnOff
+            # Wait for VM to fully stop
+            $timeout = 60
+            $waited = 0
+            while ((Get-VM -Name $vmName).State -ne 'Off' -and $waited -lt $timeout) {{
+                Start-Sleep -Seconds 2
+                $waited += 2
+            }}
+            if ((Get-VM -Name $vmName).State -ne 'Off') {{
+                throw "Timed out waiting for VM '$vmName' to stop"
+            }}
+        }}
+        # Remove the existing VM (but keep VHDs for safety)
+        Remove-VM -Name $vmName -Force
+    }}
+
     # Try standard import first
     $importError = $null
     try {{
@@ -1611,7 +1634,7 @@ try {{
     # If import failed (likely vTPM issue), fall back to creating new VM from VHDs
     if (-not $vm -and $importError) {{
         # Check if it's a vTPM/vmgs related error
-        if ($importError.Exception.Message -match 'vmgs|0x80070032|not supported') {{
+        if ($importError.Exception.Message -match 'vmgs|0x80070032|not supported|used by another') {{
             # Find VHD files
             $vhdFolder = Join-Path $importPath 'Virtual Hard Disks'
             $vhds = @()
@@ -1621,9 +1644,6 @@ try {{
             if ($vhds.Count -eq 0) {{
                 throw "Import failed and no VHD files found for fallback: $importError"
             }}
-
-            # Get VM name from folder
-            $vmName = Split-Path -Leaf $importPath
 
             # Copy VHDs to local storage
             $localVhdPath = Join-Path $defaultVhdPath $vmName
@@ -1641,14 +1661,8 @@ try {{
                 -Path $defaultVmPath -NoVHD
 
             # Attach copied VHDs
-            $first = $true
             foreach ($vhd in $localVhds) {{
-                if ($first) {{
-                    Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
-                    $first = $false
-                }} else {{
-                    Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
-                }}
+                Add-VMHardDiskDrive -VMName $vmName -Path $vhd -ControllerType SCSI
             }}
 
             # Enable vTPM with new local key protector (fresh, not tied to old host)
