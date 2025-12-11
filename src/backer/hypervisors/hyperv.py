@@ -1563,53 +1563,31 @@ $smbUnc = '{smb_unc}'
 $smbUser = '{full_username}'
 $smbPass = '{safe_password}'
 
-# Authenticate to SMB share using PSDrive
-$secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
-$cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
-
-$driveName = "BackerSMB"
-if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
-    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
-}}
-
-try {{
-    New-PSDrive -Name $driveName -PSProvider FileSystem -Root $smbUnc -Credential $cred -ErrorAction Stop | Out-Null
-}} catch {{
-    throw "Failed to connect to SMB share $smbUnc : $_"
-}}
-
 # Create local temp directory for import
 $tempId = [System.Guid]::NewGuid().ToString().Substring(0, 8)
 $localImportPath = "$env:TEMP\\BackerRestore_$tempId"
 
 try {{
-    # Convert UNC path to mapped drive path
-    $subPath = $importPath.Substring($smbUnc.Length).TrimStart('\\')
-    $mappedImportPath = "${{driveName}}:\\$subPath"
+    # First, establish SMB connection with net use (robocopy needs this, not PSDrive)
+    $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) {{
+        # Exit code 2 means already connected, which is fine
+        throw "Failed to connect to SMB share: $netUseResult"
+    }}
 
     # Verify source exists
-    if (-not (Test-Path $mappedImportPath)) {{
+    if (-not (Test-Path $importPath)) {{
         throw "Backup path not found: $importPath"
     }}
 
-    # Copy backup to local temp (excluding .vmgs files which cause issues with shielded VM imports)
-    # The .vmgs file contains guest state for shielded VMs and often fails to copy/import
+    # Copy backup to local temp using robocopy (excluding .vmgs files)
+    # .vmgs files contain guest state for shielded VMs and fail to import between hosts
     New-Item -ItemType Directory -Path $localImportPath -Force | Out-Null
 
-    # Copy everything except .vmgs files
-    Get-ChildItem -Path $mappedImportPath -Recurse | Where-Object {{
-        $_.Extension -ne '.vmgs'
-    }} | ForEach-Object {{
-        $destPath = $_.FullName.Replace($mappedImportPath, $localImportPath)
-        if ($_.PSIsContainer) {{
-            New-Item -ItemType Directory -Path $destPath -Force -ErrorAction SilentlyContinue | Out-Null
-        }} else {{
-            $destDir = Split-Path -Parent $destPath
-            if (-not (Test-Path $destDir)) {{
-                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-            }}
-            Copy-Item -Path $_.FullName -Destination $destPath -Force
-        }}
+    # /E = copy subdirs, /XF = exclude files, /R:1 /W:1 = minimal retries, /NP /NDL /NFL = quiet
+    & robocopy $importPath $localImportPath /E /XF *.vmgs /R:1 /W:1 /NP /NDL /NFL
+    if ($LASTEXITCODE -ge 8) {{
+        throw "Failed to copy backup files: robocopy exit code $LASTEXITCODE"
     }}
 
     # Find the .vmcx file in local copy
@@ -1621,15 +1599,14 @@ try {{
         }}
         $vmcxPath = $vmcx.FullName
     }} else {{
-        $vmcx = Get-ChildItem -Path $localImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue `
-            | Select-Object -First 1
+        $vmcx = Get-ChildItem -Path $localImportPath -Filter '*.vmcx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $vmcx) {{
             throw "No .vmcx file found in $localImportPath"
         }}
         $vmcxPath = $vmcx.FullName
     }}
 
-    # Import the VM from local copy with -Copy to place in default Hyper-V storage
+    # Import the VM from local copy
     $vm = Import-VM -Path $vmcxPath -Copy -GenerateNewId -ErrorAction Stop
 
     if ($vm) {{
@@ -1642,8 +1619,8 @@ try {{
         @{{ Success = $false; Error = "Import returned no VM" }} | ConvertTo-Json
     }}
 }} finally {{
-    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
-    # Cleanup local temp
+    # Cleanup
+    & net use $smbUnc /delete /y 2>&1 | Out-Null
     if (Test-Path $localImportPath) {{
         Remove-Item -Path $localImportPath -Recurse -Force -ErrorAction SilentlyContinue
     }}
