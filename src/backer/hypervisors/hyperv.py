@@ -3958,6 +3958,23 @@ if ($group -and $group.GroupType -eq 'VirtualMachine') {{
 
         if rc == 0 and stdout.strip():
             owner = stdout.strip()
+
+            # Convert short name to FQDN if needed
+            if "." not in owner:
+                dns_domain = self._cluster_domain
+                if not dns_domain:
+                    # Derive domain from available sources
+                    if self.domain:
+                        dns_domain = self.domain
+                    elif "\\" in self.username:
+                        dns_domain = self.username.split("\\")[0]
+                    elif "." in self.host:
+                        parts = self.host.split(".", 1)
+                        if len(parts) > 1:
+                            dns_domain = parts[1]
+                if dns_domain:
+                    owner = f"{owner}.{dns_domain}"
+
             logger.debug(f"VM '{vm_name}' is owned by node '{owner}'")
             return owner
 
