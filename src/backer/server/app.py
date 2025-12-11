@@ -4894,7 +4894,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             count += delete_path_recursive(entry_path, depth + 1)
                             # Try again to delete the directory
                             rc2, _, err2 = run_smb_command(cmd)
-                            if rc2 == 0 or "NT_STATUS_NO_SUCH_FILE" in err2 or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err2:
+                            not_found = "NT_STATUS_NO_SUCH_FILE" in err2 or "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err2
+                            if rc2 == 0 or not_found:
                                 logger.info(f"Deleted directory on retry: {entry_path}")
                                 count += 1
                             else:
@@ -4919,7 +4920,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             try:
                 # Start from the repository's subpath
                 base_path = subpath.strip("/") if subpath else ""
-                logger.info(f"Starting SMB wipe for repo {repo_id}: server={server}, share={share}, base_path='{base_path}'")
+                logger.info(
+                    f"Starting SMB wipe for repo {repo_id}: server={server}, "
+                    f"share={share}, base_path='{base_path}'"
+                )
                 deleted_items = delete_path_recursive(base_path)
 
                 if errors:
