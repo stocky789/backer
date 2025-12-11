@@ -4911,8 +4911,7 @@ class HyperVClusterBackupManager(HyperVBackupManager):
                 import_path=import_path,
                 vm_name=vm_name,
                 restore_path=restore_path,
-                vhd_dest_path=vhd_dest_path,
-                register_only=register_only,
+                vhd_destination_path=vhd_dest_path,
                 generate_new_id=generate_new_id,
                 start_after_restore=False,  # Don't start yet, add to cluster first
                 progress_callback=progress_callback,
