@@ -2084,6 +2084,40 @@ try {{
         $vm = Get-VM -Name $vmName -ErrorAction Stop
     }}
 
+    # Wait for VM to be in a stable state before exporting
+    # VM might be in a transitional state (Starting, Stopping, etc.) which prevents export
+    # Also check for ongoing export operations (another backup might be running)
+    $stableStates = @('Running', 'Off', 'Saved', 'Paused')
+    $stateWait = 0
+    $maxStateWait = 120  # Wait up to 2 minutes for stable state
+    while ($stateWait -lt $maxStateWait) {{
+        $vm = Get-VM -Name $vmName -ErrorAction Stop
+        $vmStatus = $vm.Status.ToString()
+
+        # Check if another export is in progress
+        if ($vmStatus -like '*Exporting*' -or $vmStatus -like '*export*') {{
+            # Another export is running, wait for it to complete
+            Start-Sleep -Seconds 5
+            $stateWait += 5
+            continue
+        }}
+
+        if ($stableStates -contains $vm.State.ToString()) {{
+            # Also check that no operations are pending
+            if ($vmStatus -eq 'Operating normally' -or $vmStatus -eq 'OK') {{
+                break
+            }}
+        }}
+        Start-Sleep -Seconds 2
+        $stateWait += 2
+    }}
+
+    # Final check - if VM is still being exported after waiting, fail with clear message
+    $vm = Get-VM -Name $vmName -ErrorAction Stop
+    if ($vm.Status -like '*Exporting*' -or $vm.Status -like '*export*') {{
+        throw "VM '$vmName' is currently being exported by another process. Please wait for that operation to complete."
+    }}
+
     # Export VM to temp directory on local/SAN storage
     # Note: Export-VM creates $localExportPath/$vmName/... structure
     $exportError = $null
