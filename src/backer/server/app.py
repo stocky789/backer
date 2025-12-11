@@ -8768,7 +8768,30 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if job_guest_ids:
                 # Convert guest_ids to lowercase strings for comparison
                 guest_id_strs = [str(gid).lower() for gid in job_guest_ids]
-                logger.info(f"Filtering by guest_id_strs={guest_id_strs}")
+
+                # Build a mapping of GUID -> VM name by listing VMs from the hypervisor
+                # This allows us to match backups by VM name when job stores GUIDs
+                guid_to_name: dict[str, str] = {}
+                name_to_guid: dict[str, str] = {}
+                try:
+                    guests = api.list_guests()
+                    for g in guests:
+                        if g.vmid and g.name:
+                            guid_to_name[g.vmid.lower()] = g.name.lower()
+                            name_to_guid[g.name.lower()] = g.vmid.lower()
+                    logger.debug(f"Built GUID->name map with {len(guid_to_name)} entries")
+                except Exception as e:
+                    logger.warning(f"Could not build GUID->name map: {e}")
+
+                # Expand guest_id_strs to include VM names for any GUIDs
+                expanded_ids = set(guest_id_strs)
+                for gid in guest_id_strs:
+                    if gid in guid_to_name:
+                        expanded_ids.add(guid_to_name[gid])
+                    if gid in name_to_guid:
+                        expanded_ids.add(name_to_guid[gid])
+
+                logger.info(f"Filtering by expanded guest_ids={expanded_ids}")
 
                 def backup_matches(b: dict) -> bool:
                     """Check if backup matches any of the job's guest IDs."""
@@ -8777,9 +8800,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # Also check vmcx_file which contains the VM GUID
                     vmcx = b.get("vmcx_file", "").lower().replace(".vmcx", "")
                     return (
-                        vm_name in guest_id_strs or
-                        vmid in guest_id_strs or
-                        vmcx in guest_id_strs
+                        vm_name in expanded_ids or
+                        vmid in expanded_ids or
+                        vmcx in expanded_ids
                     )
 
                 result = [b for b in result if backup_matches(b)]
