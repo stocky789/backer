@@ -4736,11 +4736,15 @@ try {{
         logger.info(f"Live migration of '{vm_name}' to '{target_node}' initiated")
         return True, f"Migration of '{vm_name}' to '{target_node}' initiated"
 
-    def add_vm_to_cluster(self, vm_name: str) -> tuple[bool, str]:
+    def add_vm_to_cluster(
+        self, vm_name: str, node: str | None = None
+    ) -> tuple[bool, str]:
         """Add a VM to the failover cluster for high availability.
 
         Args:
             vm_name: VM name to add to cluster
+            node: Optional node where the VM exists. If not provided,
+                  the command runs on the connection host.
 
         Returns:
             Tuple of (success, message)
@@ -4754,7 +4758,11 @@ try {{
     "ERROR: $($_.Exception.Message)"
 }}
 """
-        rc, stdout, stderr = self._run_powershell(script)
+        # Run on specific node if provided, otherwise use default connection
+        if node:
+            rc, stdout, stderr = self._run_powershell_on_node(node, script)
+        else:
+            rc, stdout, stderr = self._run_powershell(script)
 
         output = stdout.strip()
         if rc != 0 or output.startswith("ERROR:"):
@@ -4839,24 +4847,25 @@ try {{
             return False, f"Failed to stop VM '{vm_name}' on node '{owner_node}'"
         return False, f"Could not find owner node for VM '{vm_name}'"
 
-    def start_vm(self, vm_name: str) -> tuple[bool, str]:
+    def start_vm(self, vm_name: str, node: str | None = None) -> tuple[bool, str]:
         """Start a clustered VM.
 
-        Routes the command to the owner node.
+        Routes the command to the owner node, or specified node.
 
         Args:
             vm_name: VM name
+            node: Optional node to start VM on. If not provided, looks up owner.
 
         Returns:
             Tuple of (success, message)
         """
-        owner_node = self.get_vm_owner_node(vm_name)
-        if owner_node:
-            node_api = self._get_or_create_node_connection(owner_node)
+        target_node = node or self.get_vm_owner_node(vm_name)
+        if target_node:
+            node_api = self._get_or_create_node_connection(target_node)
             success = node_api.start_vm(vm_name)
             if success:
-                return True, f"VM '{vm_name}' started on node '{owner_node}'"
-            return False, f"Failed to start VM '{vm_name}' on node '{owner_node}'"
+                return True, f"VM '{vm_name}' started on node '{target_node}'"
+            return False, f"Failed to start VM '{vm_name}' on node '{target_node}'"
         return False, f"Could not find owner node for VM '{vm_name}'"
 
     def capture_vm_config(self, vm_name: str) -> dict[str, Any] | None:
@@ -5523,7 +5532,7 @@ try {{
                             })
 
                         success, msg = self.cluster_api.add_vm_to_cluster(
-                            restored_vm_name
+                            restored_vm_name, node=target_node
                         )
                         if success:
                             result["added_to_cluster"] = True
@@ -5547,7 +5556,10 @@ try {{
             ):
                 restored_vm_name = restore_result["vm_name"]
                 logger.info(f"Starting restored VM '{restored_vm_name}'")
-                start_success, start_msg = self.cluster_api.start_vm(restored_vm_name)
+                # Pass target_node in case VM is not yet visible in cluster
+                start_success, start_msg = self.cluster_api.start_vm(
+                    restored_vm_name, node=target_node
+                )
                 if not start_success:
                     result["warnings"].append(
                         f"VM restored but failed to start: {start_msg}"
