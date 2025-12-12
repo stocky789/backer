@@ -5096,11 +5096,28 @@ try {{
         $config = $content | ConvertFrom-Json
 
         # Add or update cluster info
-        if (-not $config.cluster) {{
-            $config | Add-Member -NotePropertyName 'cluster' -NotePropertyValue @{{}} -Force
+        # Create a new cluster object with the properties we need
+        $clusterInfo = [PSCustomObject]@{{
+            ownerNodeAtBackup = $ownerNode
+            isClustered = $true
         }}
-        $config.cluster.ownerNodeAtBackup = $ownerNode
-        $config.cluster.isClustered = $true
+
+        # If cluster property exists, preserve other properties and update
+        if ($config.cluster) {{
+            # Copy existing properties
+            $config.cluster.PSObject.Properties | ForEach-Object {{
+                if ($_.Name -notin @('ownerNodeAtBackup', 'isClustered')) {{
+                    $clusterInfo | Add-Member -NotePropertyName $_.Name -NotePropertyValue $_.Value -Force
+                }}
+            }}
+        }}
+
+        # Replace or add the cluster property
+        if ($config.PSObject.Properties['cluster']) {{
+            $config.cluster = $clusterInfo
+        }} else {{
+            $config | Add-Member -NotePropertyName 'cluster' -NotePropertyValue $clusterInfo -Force
+        }}
 
         # Save back
         $config | ConvertTo-Json -Depth 20 | Set-Content $configPath -Encoding UTF8
