@@ -5517,10 +5517,63 @@ try {{
                 node_api = self.cluster_api._get_or_create_node_connection(target_node)
                 node_backup_manager = HyperVBackupManager(node_api)
 
+                # When VM is not in cluster, check for orphaned local registrations
+                # This happens when a VM is deleted from cluster but local registration remains
+                effective_restore_mode = restore_mode
+                if not existing_owner and effective_vm_name:
+                    # Check if there's an orphaned local VM registration on the target node
+                    orphan_check_script = f"""
+$vm = Get-VM -Name '{effective_vm_name}' -ErrorAction SilentlyContinue
+if ($vm) {{
+    "ORPHAN_FOUND"
+}} else {{
+    "NO_ORPHAN"
+}}
+"""
+                    rc, stdout, stderr = self.cluster_api._run_powershell_on_node(
+                        target_node, orphan_check_script
+                    )
+                    if "ORPHAN_FOUND" in stdout:
+                        logger.warning(
+                            f"Found orphaned local VM registration for '{effective_vm_name}' "
+                            f"on node '{target_node}' - removing before restore"
+                        )
+                        # Remove the orphaned registration (but not the files)
+                        remove_script = f"""
+$ErrorActionPreference = 'Stop'
+try {{
+    $vm = Get-VM -Name '{effective_vm_name}' -ErrorAction Stop
+    # Only remove if it's not actually running
+    if ($vm.State -eq 'Off' -or $vm.State -eq 'Saved') {{
+        Remove-VM -Name '{effective_vm_name}' -Force
+        "REMOVED"
+    }} else {{
+        "RUNNING"
+    }}
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}}
+"""
+                        rc, stdout, stderr = self.cluster_api._run_powershell_on_node(
+                            target_node, remove_script
+                        )
+                        if "REMOVED" in stdout:
+                            logger.info(
+                                f"Removed orphaned VM registration for '{effective_vm_name}'"
+                            )
+                        elif "RUNNING" in stdout:
+                            logger.warning(
+                                f"Orphaned VM '{effective_vm_name}' is running - "
+                                "cannot remove, restore may fail"
+                            )
+                        else:
+                            logger.warning(
+                                f"Failed to remove orphaned VM: {stdout} {stderr}"
+                            )
+
                 # When VM doesn't exist in cluster, don't use in-place mode
                 # The base class might find leftover registrations on individual nodes
                 # Keep "auto" to allow fallback to rebuild if import fails
-                effective_restore_mode = restore_mode
                 if not existing_owner and restore_mode == "inplace":
                     # Only override if explicitly set to inplace (can't inplace a deleted VM)
                     effective_restore_mode = "auto"
