@@ -4749,13 +4749,24 @@ try {{
         Returns:
             Tuple of (success, message)
         """
+        # Add VM to cluster - if it fails, include path info for debugging
         script = f"""
 $ErrorActionPreference = 'Stop'
 try {{
     Add-ClusterVirtualMachineRole -VMName '{vm_name}'
     "VM added to cluster successfully"
 }} catch {{
-    "ERROR: $($_.Exception.Message)"
+    # On failure, gather path info to help diagnose storage issues
+    $pathInfo = ""
+    try {{
+        $vm = Get-VM -Name '{vm_name}' -ErrorAction SilentlyContinue
+        if ($vm) {{
+            $vmPath = $vm.Path
+            $vhdPaths = ($vm.HardDrives | ForEach-Object {{ $_.Path }}) -join ', '
+            $pathInfo = " (VM Path: $vmPath; VHDs: $vhdPaths)"
+        }}
+    }} catch {{ }}
+    "ERROR: $($_.Exception.Message)$pathInfo"
 }}
 """
         # Run on specific node if provided, otherwise use default connection
@@ -5452,14 +5463,41 @@ try {{
                         "falling back to rebuild"
                     )
 
+                    # Extract original paths from backup config for rebuild fallback
+                    fallback_restore_path = restore_path
+                    fallback_vhd_dest_path = vhd_dest_path
+                    if backup_config and add_to_cluster:
+                        vm_info = backup_config.get("vm", {})
+                        original_path = vm_info.get("path", "")
+                        if isinstance(original_path, list):
+                            original_path = original_path[0] if original_path else ""
+                        if original_path and not fallback_restore_path:
+                            fallback_restore_path = original_path
+                            logger.info(
+                                f"Using original path for rebuild fallback: {fallback_restore_path}"
+                            )
+                        if not fallback_vhd_dest_path:
+                            hard_drives = backup_config.get("hardDrives", [])
+                            if hard_drives:
+                                first_hd = hard_drives[0] if isinstance(hard_drives, list) else {}
+                                hd_path = first_hd.get("path", "")
+                                if isinstance(hd_path, list):
+                                    hd_path = hd_path[0] if hd_path else ""
+                                if hd_path:
+                                    import os
+                                    fallback_vhd_dest_path = os.path.dirname(hd_path)
+                                    logger.info(
+                                        f"Using original VHD path for rebuild fallback: {fallback_vhd_dest_path}"
+                                    )
+
                     # Get connection to target node for rebuild
                     node_api = self.cluster_api._get_or_create_node_connection(target_node)
                     node_backup_manager = HyperVBackupManager(node_api)
                     restore_result = node_backup_manager.restore_vm(
                         import_path=import_path,
                         vm_name=vm_name,
-                        restore_path=restore_path,
-                        vhd_destination_path=vhd_dest_path,
+                        restore_path=fallback_restore_path,
+                        vhd_destination_path=fallback_vhd_dest_path,
                         generate_new_id=generate_new_id,
                         start_after_restore=False,
                         progress_callback=progress_callback,
@@ -5495,12 +5533,49 @@ try {{
                         "VM not in cluster, using 'auto' mode (will try import, then rebuild)"
                     )
 
+                # For deleted VMs being restored to cluster, use original path from backup config
+                # This ensures VM is restored to the same location (clustered storage) it came from
+                effective_restore_path = restore_path
+                effective_vhd_dest_path = vhd_dest_path
+                if not existing_owner and backup_config and add_to_cluster:
+                    # VM doesn't exist - restore to original location for cluster compatibility
+                    vm_info = backup_config.get("vm", {})
+                    original_path = vm_info.get("path", "")
+                    # Handle PowerShell JSON array quirk
+                    if isinstance(original_path, list):
+                        original_path = original_path[0] if original_path else ""
+
+                    # Use original VM path from backup (where it was on clustered storage)
+                    if original_path and not effective_restore_path:
+                        effective_restore_path = original_path
+                        logger.info(
+                            f"Using original path for restore: {effective_restore_path}"
+                        )
+
+                    # Also extract VHD path from hard drives if not specified
+                    if not effective_vhd_dest_path:
+                        hard_drives = backup_config.get("hardDrives", [])
+                        if hard_drives:
+                            first_hd = hard_drives[0] if isinstance(hard_drives, list) else {}
+                            hd_path = first_hd.get("path", "")
+                            if isinstance(hd_path, list):
+                                hd_path = hd_path[0] if hd_path else ""
+                            if hd_path:
+                                # Extract parent directory of VHD for destination
+                                # e.g., \\storage\vms\VMName\Virtual Hard Disks\disk.vhdx
+                                # -> \\storage\vms\VMName\Virtual Hard Disks
+                                import os
+                                effective_vhd_dest_path = os.path.dirname(hd_path)
+                                logger.info(
+                                    f"Using original VHD path: {effective_vhd_dest_path}"
+                                )
+
                 # Perform restore on target node
                 restore_result = node_backup_manager.restore_vm(
                     import_path=import_path,
                     vm_name=vm_name,
-                    restore_path=restore_path,
-                    vhd_destination_path=vhd_dest_path,
+                    restore_path=effective_restore_path,
+                    vhd_destination_path=effective_vhd_dest_path,
                     generate_new_id=generate_new_id,
                     start_after_restore=False,  # Don't start yet, add to cluster first
                     progress_callback=progress_callback,
