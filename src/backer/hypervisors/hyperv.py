@@ -5659,8 +5659,11 @@ try {{
                                 "vm": restored_vm_name,
                             })
 
+                        # Don't pass node - run on default cluster connection
+                        # to avoid WinRM double-hop authentication issues
+                        # (Add-ClusterVirtualMachineRole needs cluster service access)
                         success, msg = self.cluster_api.add_vm_to_cluster(
-                            restored_vm_name, node=target_node
+                            restored_vm_name
                         )
                         if success:
                             result["added_to_cluster"] = True
