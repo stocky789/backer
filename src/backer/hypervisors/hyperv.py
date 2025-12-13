@@ -3488,7 +3488,9 @@ try {{
                     # Remove from cluster first if clustered
                     try {{
                         $grp = Get-ClusterGroup -Name $_.Name -ErrorAction SilentlyContinue
-                        if ($grp) {{ Remove-ClusterGroup -Name $_.Name -RemoveResources -Force -ErrorAction SilentlyContinue }}
+                        if ($grp) {{
+                            Remove-ClusterGroup -Name $_.Name -RemoveResources -Force -ErrorAction SilentlyContinue
+                        }}
                     }} catch {{ }}
                     if ($_.State -ne 'Off') {{ Stop-VM -VM $_ -Force -TurnOff -ErrorAction SilentlyContinue }}
                     Remove-VM -VM $_ -Force -ErrorAction SilentlyContinue
@@ -5398,7 +5400,6 @@ try {{
                     logger.info(f"VM '{effective_vm_name}' currently exists on '{existing_owner}'")
 
             # Determine target node - user-specified takes priority
-            user_specified_node = target_node is not None
             if not target_node:
                 # First priority: use original owner node from backup config
                 if backup_config:
@@ -5629,7 +5630,7 @@ try {{
                     # Only override if explicitly set to inplace (can't inplace a deleted VM)
                     effective_restore_mode = "auto"
                     logger.info(
-                        f"VM not in cluster, using 'auto' mode instead of 'inplace' "
+                        "VM not in cluster, using 'auto' mode instead of 'inplace' "
                         "(will try import, then rebuild if needed)"
                     )
                 elif not existing_owner and restore_mode == "auto":
