@@ -5565,14 +5565,38 @@ if ($vm) {{
                             f"Found orphaned local VM registration for '{effective_vm_name}' "
                             f"on node '{target_node}' - removing before restore"
                         )
-                        # Remove the orphaned registration (but not the files)
+                        # Remove the orphaned registration AND clean up VM files
+                        # to prevent "file in use" errors during rebuild
                         remove_script = f"""
 $ErrorActionPreference = 'Stop'
 try {{
     $vm = Get-VM -Name '{effective_vm_name}' -ErrorAction Stop
     # Only remove if it's not actually running
     if ($vm.State -eq 'Off' -or $vm.State -eq 'Saved') {{
+        # Capture paths before removing VM
+        $vmPath = $vm.Path
+        $configPath = $vm.ConfigurationLocation
+
+        # Remove VM registration
         Remove-VM -Name '{effective_vm_name}' -Force
+
+        # Wait for Hyper-V to release file handles
+        Start-Sleep -Seconds 3
+
+        # Clean up VM config files (Virtual Machines folder)
+        # This prevents "file in use" errors during rebuild
+        if ($vmPath -and (Test-Path $vmPath)) {{
+            $vmConfigFolder = Join-Path $vmPath "Virtual Machines"
+            if (Test-Path $vmConfigFolder) {{
+                try {{
+                    Remove-Item -Path $vmConfigFolder -Recurse -Force -ErrorAction Stop
+                }} catch {{
+                    # Fallback to cmd for stubborn files
+                    & cmd /c rd /s /q "$vmConfigFolder" 2>&1 | Out-Null
+                }}
+            }}
+        }}
+
         "REMOVED"
     }} else {{
         "RUNNING"
