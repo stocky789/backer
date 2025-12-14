@@ -5103,32 +5103,45 @@ try {{
             # Write a .bat file and execute it directly
             bat_filename = f"backer-cluster-add-{vm_name}.bat"
 
-            # Step 1: Create the batch file
-            create_bat = f"""
-$batPath = Join-Path $env:TEMP "{bat_filename}"
-$batContent = @"
-@echo off
-powershell.exe -Command "Import-Module FailoverClusters; Add-ClusterVirtualMachineRole -VMName '{vm_name}'"
-"@
-Set-Content -Path $batPath -Value $batContent -Force
-if (Test-Path $batPath) {{ "BAT_CREATED" }} else {{ "BAT_FAILED" }}
-"""
-            rc1, stdout1, stderr1 = node_api._run_powershell(create_bat, timeout=10)
-            if rc1 != 0 or "BAT_CREATED" not in stdout1:
-                return False, f"Failed to create batch file: {stderr1}"
+            # Create a PowerShell script file that properly captures errors
+            ps_filename = f"backer-cluster-add-{vm_name}.ps1"
 
-            # Step 2: Execute the batch file
-            execute_bat = f"""
-$batPath = Join-Path $env:TEMP "{bat_filename}"
-$output = cmd.exe /c "$batPath" 2>&1
-Remove-Item $batPath -Force -ErrorAction SilentlyContinue
-if ($LASTEXITCODE -eq 0) {{
-    "SUCCESS"
-}} else {{
-    "FAILED: $output"
+            # Step 1: Write PowerShell script to file
+            create_script = f"""
+$scriptPath = Join-Path $env:TEMP "{ps_filename}"
+$scriptContent = @'
+Import-Module FailoverClusters
+try {{
+    $result = Add-ClusterVirtualMachineRole -VMName "{vm_name}" -ErrorAction Stop
+    $clusterVM = Get-ClusterGroup -Name "{vm_name}" -ErrorAction Stop
+    Write-Output "SUCCESS: VM added (State: $($clusterVM.State), Owner: $($clusterVM.OwnerNode))"
+    exit 0
+}} catch {{
+    Write-Output "ERROR: $($_.Exception.Message)"
+    exit 1
 }}
+'@
+Set-Content -Path $scriptPath -Value $scriptContent -Force
+if (Test-Path $scriptPath) {{ "SCRIPT_CREATED:$scriptPath" }} else {{ "SCRIPT_FAILED" }}
 """
-            rc, stdout, stderr = node_api._run_powershell(execute_bat, timeout=30)
+            rc1, stdout1, stderr1 = node_api._run_powershell(create_script, timeout=10)
+            if rc1 != 0 or "SCRIPT_CREATED:" not in stdout1:
+                return False, f"Failed to create script file: {stderr1}"
+
+            script_path = stdout1.strip().split("SCRIPT_CREATED:")[1] if "SCRIPT_CREATED:" in stdout1 else f"$env:TEMP\\{ps_filename}"
+
+            # Step 2: Execute the script and capture output
+            execute_script = f"""
+$scriptPath = "{script_path.strip()}"
+$output = powershell.exe -ExecutionPolicy Bypass -File $scriptPath 2>&1 | Out-String
+$exitCode = $LASTEXITCODE
+Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+Write-Output $output
+if ($exitCode -ne 0) {{ exit 1 }}
+"""
+            rc, stdout, stderr = node_api._run_powershell(execute_script, timeout=30)
+
+            logger.info(f"Cluster add command output (rc={rc}): {stdout.strip()}")
         else:
             # No node specified - run on default connection
             script = f"""
