@@ -4379,6 +4379,7 @@ try {{
 }}
 """
                 rc, stdout, stderr = node_api._run_powershell(check_admin_script)
+                logger.info(f"Admin check for {node_name}: rc={rc}, stdout='{stdout.strip()}', stderr='{stderr.strip()}'")
                 is_local_admin = "IS_ADMIN" in stdout
 
                 node_result["is_local_admin"] = is_local_admin
