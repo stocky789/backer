@@ -2262,6 +2262,11 @@ async function checkClusterPermissions() {
 
         const result = await response.json();
 
+        // Check if response has an error (even if HTTP 200)
+        if (!response.ok || result.detail) {
+            throw new Error(result.detail || `HTTP ${response.status}: ${response.statusText}`);
+        }
+
         // Hide loading, show status
         document.getElementById('wizardLoading').style.display = 'none';
         document.getElementById('wizardStatus').style.display = 'block';
@@ -2335,6 +2340,12 @@ function displayPermissionStatus(result) {
 function generateNodeGrid(nodes) {
     let html = '<h3 style="margin-top: 25px; margin-bottom: 15px;">Cluster Nodes Status</h3>';
     html += '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px;">';
+
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+        html += '<div style="padding: 15px; background: #fff3cd; border-radius: 4px;">No cluster nodes found</div>';
+        html += '</div>';
+        return html;
+    }
 
     for (const node of nodes) {
         const statusIcon = node.configured
