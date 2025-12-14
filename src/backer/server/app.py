@@ -6177,21 +6177,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         username = request.get("username")
         password = request.get("password")
         domain = request.get("domain")
-        cluster_name = request.get("cluster_name")
+        cluster_name = request.get("cluster_name") or None  # Convert empty string to None
         port = request.get("port", 5985)
 
-        if not all([host, username, password, cluster_name]):
+        if not all([host, username, password]):
             raise HTTPException(
                 status_code=400,
-                detail="Missing required fields: host, username, password, cluster_name"
+                detail="Missing required fields: host, username, password"
             )
 
+        # If cluster_name is not provided, it will be auto-detected by HyperVClusterAPI
         try:
             api = HyperVClusterAPI(
                 host=host,
                 username=username,
                 password=password,
-                cluster_name=cluster_name,
+                cluster_name=cluster_name,  # Can be None for auto-detection
                 port=port,
                 use_ssl=port == 5986,
                 verify_ssl=False,
