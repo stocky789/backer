@@ -46,3 +46,6 @@ htmlcov/
 *.db
 *.db-journal
 .backer/
+
+# Claude instructions
+claude.md
