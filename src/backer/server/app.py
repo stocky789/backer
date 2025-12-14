@@ -9749,7 +9749,7 @@ try {{
                                         ]
                                         _storage.update_hypervisor_job(
                                             job["id"],
-                                            {"guest_ids": updated_guest_ids}
+                                            guest_ids=updated_guest_ids
                                         )
                                         logger.info(
                                             f"Updated job '{job['name']}': "
