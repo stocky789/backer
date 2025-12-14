@@ -311,18 +311,23 @@ info "Installing Python dependencies (this may take 1-2 minutes)..."
 pip install --upgrade pip > /dev/null 2>&1
 
 # Show progress while pip installs (can take a while due to pywinrm/cryptography)
+# Use process substitution to capture exit code correctly (avoid PIPESTATUS being overwritten by loop pipelines)
+set +e  # Temporarily disable exit on error to capture pip exit code
 pip install --no-cache-dir --force-reinstall -e "$INSTALL_DIR[server]" 2>&1 | while read -r line; do
     # Show package names as they're installed
     if [[ "$line" =~ "Successfully installed" ]]; then
         echo -e "  ${GREEN}✓${NC} Dependencies installed"
     elif [[ "$line" =~ "Collecting" ]]; then
-        pkg=$(echo "$line" | sed 's/Collecting \([^ ]*\).*/\1/')
+        # Use parameter expansion instead of sed pipeline to avoid overwriting PIPESTATUS
+        pkg="${line#Collecting }"
+        pkg="${pkg%% *}"
         echo -ne "\r  Installing: $pkg                              \r"
     elif [[ "$line" =~ "Building wheel" ]]; then
         echo -ne "\r  Building native extensions...                  \r"
     fi
 done
-PIP_EXIT=${PIPESTATUS[0]}
+PIP_EXIT=${PIPESTATUS[0]}  # Capture pip exit code immediately after pipeline
+set -e  # Re-enable exit on error
 echo -ne "\r                                                        \r"
 if [ $PIP_EXIT -ne 0 ]; then
     error "Failed to install Backer dependencies. Exit code: $PIP_EXIT"
