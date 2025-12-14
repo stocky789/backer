@@ -42,7 +42,7 @@ server = [
     "jinja2>=3.0",
     "python-multipart>=0.0.6",
     "cryptography>=41.0",
-    "pywinrm>=0.4.3",
+    "pywinrm[credssp]>=0.4.3",
 ]
 client = [
     "httpx>=0.24",

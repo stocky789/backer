@@ -2366,6 +2366,7 @@ function generateNodeGrid(nodes) {
                 <div style="font-size: 13px; color: ${textColor};">
                     <div>Cluster Access: ${node.has_cluster_access ? '✓' : '✗'}</div>
                     <div>Local Admin: ${node.is_local_admin ? '✓' : '✗'}</div>
+                    <div>CredSSP Enabled: ${node.has_credssp ? '✓' : '✗'}</div>
                 </div>
             </div>
         `;

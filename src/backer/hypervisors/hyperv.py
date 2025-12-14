@@ -133,6 +133,7 @@ class HyperVAPI:
         verify_ssl: bool = False,
         timeout: int = 60,
         domain: str | None = None,
+        use_credssp: bool = False,
     ):
         """Initialize Hyper-V API client.
 
@@ -146,6 +147,7 @@ class HyperVAPI:
             verify_ssl: Whether to verify SSL certificates
             timeout: Command timeout in seconds
             domain: Windows domain (optional, for domain accounts)
+            use_credssp: Use CredSSP for credential delegation (cluster support)
         """
         self.host = host.rstrip("/")
         self.port = port
@@ -156,6 +158,7 @@ class HyperVAPI:
         self.verify_ssl = verify_ssl
         self.timeout = timeout
         self.domain = domain
+        self.use_credssp = use_credssp
 
         # Build WinRM URL
         protocol = "https" if use_ssl else "http"
@@ -232,7 +235,11 @@ class HyperVAPI:
         logger.debug(f"Executing PowerShell on {self.host} as {full_username} via WinRM")
 
         # Map auth method to pywinrm transport
-        if self.auth_method == HyperVAuthMethod.BASIC:
+        # CredSSP takes priority if enabled (needed for cluster credential delegation)
+        if self.use_credssp:
+            transport = "credssp"
+            logger.debug("Using CredSSP transport for credential delegation")
+        elif self.auth_method == HyperVAuthMethod.BASIC:
             transport = "basic"
         elif self.auth_method == HyperVAuthMethod.KERBEROS:
             transport = "kerberos"
@@ -269,6 +276,17 @@ class HyperVAPI:
 
         except Exception as e:
             error_msg = str(e)
+
+            # Check for CredSSP-specific errors first
+            if self.use_credssp and ("credssp" in error_msg.lower() or "credential" in error_msg.lower()):
+                helpful_msg = (
+                    f"CredSSP authentication failed. Possible causes:\n"
+                    f"1. CredSSP server not enabled on {self.host}. Run: Enable-WSManCredSSP -Role Server -Force\n"
+                    f"2. pywinrm[credssp] package not installed. Run: pip install 'pywinrm[credssp]'\n"
+                    f"Error: {error_msg}"
+                )
+                logger.error(helpful_msg)
+                return 1, "", helpful_msg
 
             # Provide helpful error messages for common issues
             if "401" in error_msg or "Unauthorized" in error_msg:
@@ -3965,6 +3983,7 @@ class HyperVClusterAPI(HyperVAPI):
                         verify_ssl=self.verify_ssl,
                         timeout=self.timeout,
                         domain=self.domain,
+                        use_credssp=True,  # Enable CredSSP for cluster operations
                     )
                     # Verify connection works (use shorter timeout for quicker failure detection)
                     api._run_powershell("$env:COMPUTERNAME", timeout=5)
@@ -3990,6 +4009,7 @@ class HyperVClusterAPI(HyperVAPI):
                 verify_ssl=self.verify_ssl,
                 timeout=self.timeout,
                 domain=self.domain,
+                use_credssp=True,  # Enable CredSSP for cluster operations
             )
             # Test the connection works (will fail fast on DNS issues)
             api._run_powershell("$env:COMPUTERNAME", timeout=10)
@@ -4404,6 +4424,7 @@ try {{
                 "status": "checking",
                 "has_cluster_access": has_cluster_access,
                 "is_local_admin": False,
+                "has_credssp": False,
                 "message": "Checking permissions..."
             }
 
@@ -4473,8 +4494,26 @@ try {{
 
                 node_result["is_local_admin"] = is_local_admin
 
+                # Check CredSSP server configuration
+                check_credssp_script = """
+$ErrorActionPreference = 'SilentlyContinue'
+try {
+    $credsspConfig = Get-WSManCredSSP
+    if ($credsspConfig -match "This computer is configured to receive credentials") {
+        "CREDSSP_ENABLED"
+    } else {
+        "CREDSSP_DISABLED"
+    }
+} catch {
+    "CREDSSP_DISABLED"
+}
+"""
+                rc2, stdout2, stderr2 = node_api._run_powershell(check_credssp_script)
+                has_credssp = "CREDSSP_ENABLED" in stdout2
+                node_result["has_credssp"] = has_credssp
+
                 # Determine overall status
-                if has_cluster_access and is_local_admin:
+                if has_cluster_access and is_local_admin and has_credssp:
                     node_result["status"] = "ready"
                     node_result["message"] = "Configured correctly"
                 else:
@@ -4484,6 +4523,8 @@ try {{
                         missing.append("cluster access")
                     if not is_local_admin:
                         missing.append("local admin")
+                    if not has_credssp:
+                        missing.append("CredSSP")
                     node_result["message"] = f"Missing: {', '.join(missing)}"
                     all_configured = False
 
