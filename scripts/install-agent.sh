@@ -204,11 +204,11 @@ run_wizard() {
 
     echo
     step "Running setup wizard..."
-    echo
 
     # Set config dir for wizard
     export BACKER_CONFIG_DIR="$CONFIG_DIR"
     "$INSTALL_DIR/venv/bin/backer" agent setup
+    step_done "Setup wizard completed"
 
     # Start service if config exists
     if [[ -f "$CONFIG_DIR/agent.yaml" ]]; then

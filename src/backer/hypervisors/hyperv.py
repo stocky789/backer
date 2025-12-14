@@ -4258,6 +4258,231 @@ $nodes | ConvertTo-Json -Depth 2
             logger.error(f"Failed to parse cluster nodes: {e}")
             return []
 
+    def check_cluster_permissions(self) -> dict[str, Any]:
+        """Check if the current user has proper permissions on all cluster nodes.
+
+        This checks:
+        1. User has cluster access (via Get-ClusterAccess)
+        2. User is in local Administrators group on each node
+
+        Returns:
+            Dict with permission status for each node and overall configuration state
+        """
+        logger.info("Checking cluster permissions for user setup wizard...")
+
+        result = {
+            "configured": False,
+            "username": f"{self.domain}\\{self.username}" if self.domain else self.username,
+            "nodes": [],
+            "setup_script": ""
+        }
+
+        # Get all cluster nodes
+        nodes = self.get_cluster_nodes()
+        if not nodes:
+            return {
+                **result,
+                "error": "Could not retrieve cluster nodes"
+            }
+
+        all_configured = True
+
+        # Check cluster access first (cluster-level permission)
+        has_cluster_access = False
+        cluster_access_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+try {{
+    $access = Get-ClusterAccess | Where-Object {{ $_.IdentityReference -like '*{self.username}*' }}
+    if ($access) {{
+        "HAS_ACCESS"
+    }} else {{
+        "NO_ACCESS"
+    }}
+}} catch {{
+    "NO_ACCESS"
+}}
+"""
+        rc, stdout, stderr = self._run_powershell(cluster_access_script)
+        has_cluster_access = "HAS_ACCESS" in stdout
+
+        # Check each node
+        for node_info in nodes:
+            node_name = node_info["Name"]
+            node_state = node_info.get("State", "Unknown")
+
+            node_result = {
+                "name": node_name,
+                "status": "checking",
+                "has_cluster_access": has_cluster_access,
+                "is_local_admin": False,
+                "message": "Checking permissions..."
+            }
+
+            # Skip down nodes
+            if node_state != "Up":
+                node_result["status"] = "unreachable"
+                node_result["message"] = f"Node is {node_state}"
+                result["nodes"].append(node_result)
+                all_configured = False
+                continue
+
+            try:
+                # Connect to the node to check local admin membership
+                node_api = self._get_or_create_node_connection(node_name)
+
+                # Check if user is in local Administrators group
+                check_admin_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+try {{
+    $username = "{self.domain}\\{self.username}" -replace '\\\\\\\\', '\\\\'
+    $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
+    $members = $group.Invoke('Members') | ForEach-Object {{
+        $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+    }}
+
+    # Also check using Get-LocalGroupMember (newer method)
+    $isMember = $false
+    try {{
+        $localMembers = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
+        $isMember = $localMembers | Where-Object {{
+            $_.Name -like "*{self.username}" -or $_.Name -eq "{self.domain}\\{self.username}"
+        }}
+    }} catch {{ }}
+
+    if ($isMember -or ($members -contains "{self.username}")) {{
+        "IS_ADMIN"
+    }} else {{
+        "NOT_ADMIN"
+    }}
+}} catch {{
+    "NOT_ADMIN"
+}}
+"""
+                rc, stdout, stderr = node_api._run_powershell(check_admin_script)
+                is_local_admin = "IS_ADMIN" in stdout
+
+                node_result["is_local_admin"] = is_local_admin
+
+                # Determine overall status
+                if has_cluster_access and is_local_admin:
+                    node_result["status"] = "ready"
+                    node_result["message"] = "Configured correctly"
+                else:
+                    node_result["status"] = "missing_permissions"
+                    missing = []
+                    if not has_cluster_access:
+                        missing.append("cluster access")
+                    if not is_local_admin:
+                        missing.append("local admin")
+                    node_result["message"] = f"Missing: {', '.join(missing)}"
+                    all_configured = False
+
+            except Exception as e:
+                logger.error(f"Failed to check permissions on node {node_name}: {e}")
+                node_result["status"] = "error"
+                node_result["message"] = f"Connection error: {str(e)}"
+                all_configured = False
+
+            result["nodes"].append(node_result)
+
+        result["configured"] = all_configured
+
+        # Generate setup script
+        result["setup_script"] = self._generate_setup_script()
+
+        return result
+
+    def _generate_setup_script(self) -> str:
+        """Generate PowerShell script for cluster permission setup.
+
+        Returns:
+            PowerShell script as string
+        """
+        username_with_domain = f"{self.domain}\\{self.username}" if self.domain else self.username
+
+        script = f"""# Hyper-V Cluster Permission Setup for Backer
+# Run this script on ANY cluster node as Domain Administrator
+# This grants the required permissions for cluster VM management
+
+$ErrorActionPreference = 'Stop'
+
+Write-Host "=== Configuring Cluster Permissions ===" -ForegroundColor Cyan
+Write-Host ""
+
+$user = "{username_with_domain}"
+Write-Host "User account: $user" -ForegroundColor Yellow
+Write-Host ""
+
+# Step 1: Grant cluster access
+Write-Host "Step 1: Granting cluster access..." -ForegroundColor Yellow
+try {{
+    Grant-ClusterAccess -User $user -Full
+    Write-Host "  [OK] Cluster access granted" -ForegroundColor Green
+}} catch {{
+    if ($_.Exception.Message -like "*already*") {{
+        Write-Host "  [SKIP] User already has cluster access" -ForegroundColor Gray
+    }} else {{
+        Write-Host "  [ERROR] Failed: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }}
+}}
+
+# Step 2: Add to local Administrators on all nodes
+Write-Host ""
+Write-Host "Step 2: Adding to local Administrators on all cluster nodes..." -ForegroundColor Yellow
+
+Get-ClusterNode | ForEach-Object {{
+    $nodeName = $_.Name
+    Write-Host "  Configuring $nodeName..." -ForegroundColor Gray
+
+    try {{
+        Invoke-Command -ComputerName $nodeName -ScriptBlock {{
+            param($u)
+
+            # Try modern cmdlet first
+            try {{
+                Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction Stop
+                "ADDED"
+            }} catch {{
+                if ($_.Exception.Message -like "*already a member*") {{
+                    "ALREADY_MEMBER"
+                }} else {{
+                    # Fallback to ADSI method
+                    try {{
+                        $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
+                        $group.Add("WinNT://$u")
+                        "ADDED"
+                    }} catch {{
+                        if ($_.Exception.Message -like "*already a member*") {{
+                            "ALREADY_MEMBER"
+                        }} else {{
+                            throw
+                        }}
+                    }}
+                }}
+            }}
+        }} -ArgumentList $user
+
+        $output = $LASTEXITCODE
+        if ($output -eq "ADDED") {{
+            Write-Host "    [OK] Added to Administrators" -ForegroundColor Green
+        }} else {{
+            Write-Host "    [SKIP] Already a member" -ForegroundColor Gray
+        }}
+    }} catch {{
+        Write-Host "    [ERROR] Failed: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }}
+}}
+
+Write-Host ""
+Write-Host "=== Configuration Complete ===" -ForegroundColor Green
+Write-Host ""
+Write-Host "You can now return to Backer and complete the cluster setup." -ForegroundColor Cyan
+Write-Host ""
+"""
+        return script
+
     def get_vm_owner_node(self, vm_name: str) -> str | None:
         """Find which cluster node currently owns a VM.
 
@@ -4764,14 +4989,75 @@ try {{
                 logger.error(error_msg)
                 return False, error_msg
 
-            # Run Add-ClusterVirtualMachineRole on the node where VM exists
+            # WORKAROUND: Add-ClusterVirtualMachineRole requires CredSSP for remote execution
+            # per Microsoft docs: https://learn.microsoft.com/en-us/powershell/module/failoverclusters/add-clustervirtualmachinerole
+            #
+            # Solution: Use a scheduled task that runs LOCALLY on the node, bypassing WinRM
+            # credential delegation entirely. The task runs immediately, then self-deletes.
             script = f"""
 $ErrorActionPreference = 'Stop'
+$WarningPreference = 'SilentlyContinue'
 try {{
-    Add-ClusterVirtualMachineRole -VMName '{vm_name}'
-    "VM added to cluster successfully"
+    # Create a one-time scheduled task that runs as SYSTEM (has cluster permissions)
+    $taskName = "Backer-ClusterAdd-{vm_name}-$(Get-Random)"
+
+    # PowerShell script block that the task will run locally
+    $psScript = @'
+Import-Module FailoverClusters -ErrorAction SilentlyContinue
+$vm = Get-VM -Name "{vm_name}" -ErrorAction Stop
+Add-ClusterVirtualMachineRole -Cluster "{self.cluster_name}" -VMId $vm.VMId -ErrorAction Stop 3>&1 | Out-Null
+'@
+
+    # Create the task action (run PowerShell locally as SYSTEM)
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$psScript`""
+
+    # Run immediately
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)
+
+    # Run as SYSTEM with highest privileges
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+
+    # Create and register the task
+    $task = Register-ScheduledTask -TaskName $taskName -Action $action `
+        -Trigger $trigger -Principal $principal -Force
+
+    # Wait for task to complete (max 30 seconds)
+    $timeout = 30
+    $elapsed = 0
+    while ($elapsed -lt $timeout) {{
+        Start-Sleep -Milliseconds 500
+        $elapsed += 0.5
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($taskInfo.LastTaskResult -eq 0) {{
+            # Task succeeded
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+
+            # Verify it worked
+            $clusterVM = Get-ClusterGroup -Cluster '{self.cluster_name}' -Name '{vm_name}' -ErrorAction SilentlyContinue
+            if ($clusterVM) {{
+                "SUCCESS: VM added to cluster successfully"
+            }} else {{
+                "ERROR: VM was not added to cluster (verification failed)"
+            }}
+            exit 0
+        }} elseif ($taskInfo.LastTaskResult -ne 267009) {{
+            # Task failed (267009 means task has not run yet)
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            "ERROR: Scheduled task failed with code: $($taskInfo.LastTaskResult)"
+            exit 1
+        }}
+    }}
+
+    # Timeout
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    "ERROR: Timeout waiting for cluster add operation"
+
 }} catch {{
-    # On failure, gather path info to help diagnose storage issues
+    # Clean up task if it exists
+    try {{ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }} catch {{}}
+
+    # On failure, gather diagnostic info
     $pathInfo = ""
     try {{
         $vm = Get-VM -Name '{vm_name}' -ErrorAction SilentlyContinue
@@ -4784,8 +5070,8 @@ try {{
     "ERROR: $($_.Exception.Message)$pathInfo"
 }}
 """
-            # Run on the specific node
-            rc, stdout, stderr = node_api._run_powershell(script)
+            # Run on the specific node - creates scheduled task that runs LOCALLY
+            rc, stdout, stderr = node_api._run_powershell(script, timeout=60)
         else:
             # No node specified - run on default connection
             script = f"""
@@ -4810,9 +5096,35 @@ try {{
             rc, stdout, stderr = self._run_powershell(script)
 
         output = stdout.strip()
+
+        # Check for explicit success message first (new verification method)
+        if "SUCCESS:" in output:
+            logger.info(f"Added '{vm_name}' to failover cluster")
+            return True, f"VM '{vm_name}' added to cluster"
+
+        # Check for errors
         if rc != 0 or output.startswith("ERROR:"):
             error_msg = output.replace("ERROR: ", "") if output else stderr
             logger.error(f"Failed to add '{vm_name}' to cluster: {error_msg}")
+
+            # Provide helpful troubleshooting for common permission errors
+            if "Access is denied" in error_msg or "0x80070005" in error_msg:
+                troubleshooting_hint = (
+                    f"Failed to add VM to cluster: {error_msg}\n\n"
+                    "PERMISSION ERROR - This typically means:\n"
+                    "1. The user account needs to be in the 'Cluster Administrators' group\n"
+                    "2. The user needs to be a local administrator on ALL cluster nodes\n"
+                    "3. The Cluster Name Object (CNO) needs 'Create Computer Objects' permission in Active Directory\n\n"
+                    f"Current user: {self.domain}\\{self.username if self.domain else self.username}\n"
+                    f"Cluster: {self.cluster_name}\n"
+                    f"Target node: {node if node else 'default connection'}\n\n"
+                    "To fix, run this PowerShell script on any cluster node as Domain Administrator:\n"
+                    f"  Grant-ClusterAccess -User '{self.domain}\\{self.username}' -Full\n"
+                    "Or use the Fix-ClusterPermissions.ps1 script in /tmp/ for automated setup."
+                )
+                logger.error(troubleshooting_hint)
+                return False, troubleshooting_hint
+
             return False, f"Failed to add VM to cluster: {error_msg}"
 
         logger.info(f"Added '{vm_name}' to failover cluster")
@@ -5700,8 +6012,29 @@ try {{
             result.update(restore_result)
             result["target_node"] = target_node
 
-            # Add to cluster if restore succeeded and requested
+            # Add to cluster if restore succeeded and VM was originally clustered
+            # Check backup config to see if VM was clustered - only re-cluster if it was before
+            should_add_to_cluster = False
             if restore_result.get("success") and add_to_cluster:
+                # Check if VM was originally clustered from backup metadata
+                was_clustered = False
+                if backup_config and backup_config.get("cluster", {}).get("isClustered"):
+                    was_clustered = True
+                    logger.info("VM was originally clustered - will add back to cluster")
+                elif backup_config:
+                    logger.info("VM was NOT originally clustered - will not add to cluster")
+                else:
+                    # No backup config available - assume it should be clustered since
+                    # they're restoring to a cluster hypervisor and add_to_cluster=True
+                    logger.warning(
+                        "No backup config available - defaulting to add_to_cluster=True. "
+                        "To prevent this, ensure backup includes vm_config.json"
+                    )
+                    was_clustered = True
+
+                should_add_to_cluster = was_clustered
+
+            if should_add_to_cluster:
                 restored_vm_name = restore_result.get("vm_name", vm_name)
                 if restored_vm_name:
                     # Check if already in cluster
@@ -5717,8 +6050,7 @@ try {{
                             })
 
                         # Pass node so add_vm_to_cluster connects directly to that node
-                        # This avoids the WinRM double-hop issue by running
-                        # Add-ClusterVirtualMachineRole locally on the target node
+                        # Uses scheduled task workaround to bypass CredSSP requirement
                         success, msg = self.cluster_api.add_vm_to_cluster(
                             restored_vm_name, node=target_node
                         )
@@ -5726,15 +6058,30 @@ try {{
                             result["added_to_cluster"] = True
                             logger.info(f"VM '{restored_vm_name}' added to cluster")
                         else:
-                            result["warnings"].append(
-                                f"Failed to add VM to cluster: {msg}"
+                            # Cluster add failed but VM restore succeeded
+                            # This is not a fatal error - VM can be manually added to cluster later
+                            warning_msg = (
+                                f"VM restored successfully but not added to cluster: {msg}\n"
+                                "You can manually add it to the cluster in Failover Cluster Manager:\n"
+                                f"1. Open Failover Cluster Manager\n"
+                                f"2. Right-click 'Roles' → 'Configure Role'\n"
+                                f"3. Select 'Virtual Machine' → Choose '{restored_vm_name}'\n"
+                                "OR run: Add-ClusterVirtualMachineRole -VMName '{restored_vm_name}'"
                             )
+                            result["warnings"].append(warning_msg)
+                            logger.warning(warning_msg)
                     else:
                         result["added_to_cluster"] = True
                         logger.info(
                             f"VM '{restored_vm_name}' already in cluster "
                             f"on node '{owner}'"
                         )
+            elif restore_result.get("success"):
+                # VM restored successfully but was not originally clustered
+                logger.info(
+                    f"VM '{restore_result.get('vm_name', vm_name)}' restored successfully. "
+                    "Not adding to cluster (VM was not clustered in backup)."
+                )
 
             # Start VM if requested (after adding to cluster)
             if (

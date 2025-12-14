@@ -5495,11 +5495,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Hyper-V specific: domain for WinRM authentication
         domain = body.get("domain")
+        # Hyper-V Cluster specific: cluster name and permission status
+        cluster_name = body.get("cluster_name")
+        permissions_configured = body.get("permissions_configured", False)
 
         # Build config dict for type-specific settings
         config: dict[str, Any] = {}
         if domain:
             config["domain"] = domain
+        if cluster_name:
+            config["cluster_name"] = cluster_name
+        if hypervisor_type == "hyperv-cluster":
+            config["permissions_configured"] = permissions_configured
 
         # Validate
         validate_name(name, "name")
@@ -6142,6 +6149,60 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         except Exception as e:
             logger.exception(f"Failed to list cluster nodes for hypervisor {hypervisor_id}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/v1/hypervisors/cluster/check-permissions")
+    def check_cluster_permissions(
+        request: dict[str, Any],
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Check cluster permissions for setup wizard.
+
+        This endpoint is used during the cluster hypervisor setup wizard to verify
+        that the user has the required permissions on all cluster nodes.
+
+        Request body:
+            host: Cluster name or IP
+            username: Username
+            password: Password
+            domain: Domain (optional)
+            cluster_name: Cluster name
+
+        Returns:
+            Permission status for each node and setup script
+        """
+        from backer.hypervisors.hyperv import HyperVClusterAPI
+
+        host = request.get("host")
+        username = request.get("username")
+        password = request.get("password")
+        domain = request.get("domain")
+        cluster_name = request.get("cluster_name")
+        port = request.get("port", 5985)
+
+        if not all([host, username, password, cluster_name]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required fields: host, username, password, cluster_name"
+            )
+
+        try:
+            api = HyperVClusterAPI(
+                host=host,
+                username=username,
+                password=password,
+                cluster_name=cluster_name,
+                port=port,
+                use_ssl=port == 5986,
+                verify_ssl=False,
+                domain=domain,
+            )
+
+            result = api.check_cluster_permissions()
+            return result
+
+        except Exception as e:
+            logger.exception("Failed to check cluster permissions")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/v1/hypervisors/{hypervisor_id}/storages")
