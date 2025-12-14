@@ -4757,9 +4757,10 @@ try {{
         # Solution: Connect directly to Node4 where the VM exists
         if node:
             # Get connection to the specific node where VM exists
-            node_api = self._get_node_api(node)
-            if not node_api:
-                error_msg = f"Could not connect to node '{node}'"
+            try:
+                node_api = self._get_or_create_node_connection(node)
+            except Exception as e:
+                error_msg = f"Could not connect to node '{node}': {e}"
                 logger.error(error_msg)
                 return False, error_msg
 
@@ -5715,10 +5716,9 @@ try {{
                                 "vm": restored_vm_name,
                             })
 
-                        # Pass node so add_vm_to_cluster knows where to find the VM
-                        # The function uses Get-VM -ComputerName to get the VMId,
-                        # then runs Add-ClusterVirtualMachineRole on the default
-                        # connection to avoid WinRM double-hop issues
+                        # Pass node so add_vm_to_cluster connects directly to that node
+                        # This avoids the WinRM double-hop issue by running
+                        # Add-ClusterVirtualMachineRole locally on the target node
                         success, msg = self.cluster_api.add_vm_to_cluster(
                             restored_vm_name, node=target_node
                         )
