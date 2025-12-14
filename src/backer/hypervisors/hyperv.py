@@ -5111,16 +5111,18 @@ try {{
     # Create a one-time scheduled task that runs as SYSTEM (has cluster permissions)
     $taskName = "Backer-ClusterAdd-{vm_name}-$(Get-Random)"
 
-    # PowerShell script block that the task will run locally
+    # Write PowerShell script to temp file to avoid command line length limits
+    $scriptPath = "$env:TEMP\\Backer-ClusterAdd-{vm_name}-$(Get-Random).ps1"
     $psScript = @'
 Import-Module FailoverClusters -ErrorAction SilentlyContinue
 $vm = Get-VM -Name "{vm_name}" -ErrorAction Stop
 Add-ClusterVirtualMachineRole -Cluster "{self.cluster_name}" -VMId $vm.VMId -ErrorAction Stop 3>&1 | Out-Null
 '@
+    Set-Content -Path $scriptPath -Value $psScript -Force
 
-    # Create the task action (run PowerShell locally as SYSTEM)
+    # Create the task action (run PowerShell script file as SYSTEM)
     $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$psScript`""
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
 
     # Run immediately
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)
@@ -5140,8 +5142,9 @@ Add-ClusterVirtualMachineRole -Cluster "{self.cluster_name}" -VMId $vm.VMId -Err
         $elapsed += 0.5
         $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
         if ($taskInfo.LastTaskResult -eq 0) {{
-            # Task succeeded
+            # Task succeeded - clean up
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue
 
             # Verify it worked
             $clusterVM = Get-ClusterGroup -Cluster '{self.cluster_name}' -Name '{vm_name}' -ErrorAction SilentlyContinue
@@ -5157,18 +5160,21 @@ Add-ClusterVirtualMachineRole -Cluster "{self.cluster_name}" -VMId $vm.VMId -Err
             # 267011 (0x4001B) = SCHED_S_TASK_HAS_NOT_RUN
             # Both mean "task hasn't executed yet" - keep waiting
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue
             "ERROR: Scheduled task failed with code: $($taskInfo.LastTaskResult)"
             exit 1
         }}
     }}
 
-    # Timeout
+    # Timeout - clean up
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue
     "ERROR: Timeout waiting for cluster add operation"
 
 }} catch {{
-    # Clean up task if it exists
+    # Clean up task and script file if they exist
     try {{ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }} catch {{}}
+    try {{ Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue }} catch {{}}
 
     # On failure, gather diagnostic info
     $pathInfo = ""
