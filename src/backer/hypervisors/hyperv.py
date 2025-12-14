@@ -4218,7 +4218,7 @@ try {
         """Get all nodes in the failover cluster.
 
         Returns:
-            List of node info dicts with name, state, and VM count
+            List of node info dicts with name, state, VM count, and IP address
         """
         script = """
 $ErrorActionPreference = 'Stop'
@@ -4228,11 +4228,37 @@ $nodes = Get-ClusterNode | ForEach-Object {
         $_.GroupType -eq 'VirtualMachine' -and $_.OwnerNode.Name -eq $nodeName
     }).Count
 
+    # Get node IP address (try IPv4 first)
+    $nodeIp = $null
+    try {
+        # Get all IP addresses for the node
+        $ips = [System.Net.Dns]::GetHostAddresses($nodeName) | Where-Object {
+            $_.AddressFamily -eq 'InterNetwork'  # IPv4 only
+        }
+        if ($ips) {
+            $nodeIp = $ips[0].ToString()
+        }
+    } catch {
+        # If DNS fails, try to get from cluster network
+        try {
+            $clusterNet = Get-ClusterNetwork | Where-Object { $_.Role -eq 'ClusterAndClient' } | Select-Object -First 1
+            if ($clusterNet) {
+                $netInterface = Get-ClusterNetworkInterface | Where-Object {
+                    $_.Node -eq $nodeName -and $_.Network -eq $clusterNet.Name
+                }
+                if ($netInterface) {
+                    $nodeIp = $netInterface.Address
+                }
+            }
+        } catch {}
+    }
+
     @{
         Name = $_.Name
         State = $_.State.ToString()
         Id = $_.Id.ToString()
         VMCount = $vmCount
+        IPAddress = $nodeIp
     }
 }
 $nodes | ConvertTo-Json -Depth 2
@@ -4251,6 +4277,17 @@ $nodes | ConvertTo-Json -Depth 2
             data = json.loads(stdout)
             if isinstance(data, dict):
                 data = [data]
+
+            # Populate the IP map for DNS fallback
+            for node_info in data:
+                node_name = node_info.get("Name", "")
+                node_ip = node_info.get("IPAddress")
+                if node_name and node_ip:
+                    # Store both short name and FQDN if available
+                    short_name = node_name.split(".")[0] if "." in node_name else node_name
+                    self._node_ip_map[node_name] = node_ip
+                    self._node_ip_map[short_name] = node_ip
+                    logger.debug(f"Mapped node '{node_name}' (short: '{short_name}') to IP {node_ip}")
 
             return data
 
