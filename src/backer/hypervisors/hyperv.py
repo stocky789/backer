@@ -5099,13 +5099,17 @@ try {{
                 logger.error(error_msg)
                 return False, error_msg
 
-            # Run Add-ClusterVirtualMachineRole directly on the node where the VM exists
-            # This avoids CredSSP double-hop issues since we're connecting directly to the target node
+            # Use Invoke-Command with localhost to create a fresh local session
+            # This bypasses the WinRM credential hop issue
             script = f"""
 $ErrorActionPreference = 'Stop'
 try {{
-    $vm = Get-VM -Name '{vm_name}' -ErrorAction Stop
-    Add-ClusterVirtualMachineRole -Cluster '{self.cluster_name}' -VMId $vm.VMId -ErrorAction Stop
+    # Use Invoke-Command to localhost to get a fresh credential context
+    Invoke-Command -ComputerName localhost -ScriptBlock {{
+        param($vmName, $clusterName)
+        $vm = Get-VM -Name $vmName -ErrorAction Stop
+        Add-ClusterVirtualMachineRole -Cluster $clusterName -VMId $vm.VMId -ErrorAction Stop
+    }} -ArgumentList '{vm_name}', '{self.cluster_name}'
     "VM added to cluster successfully"
 }} catch {{
     # On failure, gather diagnostic info
