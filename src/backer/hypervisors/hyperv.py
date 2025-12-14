@@ -3385,8 +3385,42 @@ try {{
     }}
 
     # Get default paths
-    $defaultVmPath = if ($restorePath) {{ $restorePath }} else {{ (Get-VMHost).VirtualMachinePath }}
-    $defaultVhdPath = if ($vhdDestPath) {{ $vhdDestPath }} else {{ (Get-VMHost).VirtualHardDiskPath }}
+    # IMPORTANT: New-VM -Path automatically creates a subfolder with the VM name,
+    # so if restorePath already ends with the VM name (even multiple times due to
+    # repeated restores), we need to strip ALL repeated VM names to get back to the
+    # base path. This fixes the "backerrestore2\backerrestore2\backerrestore2\..." bug.
+    $defaultVmPath = if ($restorePath) {{
+        $cleanPath = $restorePath.TrimEnd('\\')
+        # Keep removing the VM name from the end until it's not there anymore
+        while (($cleanPath -ne '') -and ((Split-Path -Leaf $cleanPath) -eq $vmName)) {{
+            $cleanPath = Split-Path -Parent $cleanPath
+        }}
+        # If we stripped it all away (shouldn't happen), fallback to host default
+        if ([string]::IsNullOrEmpty($cleanPath)) {{
+            (Get-VMHost).VirtualMachinePath
+        }} else {{
+            $cleanPath
+        }}
+    }} else {{
+        (Get-VMHost).VirtualMachinePath
+    }}
+
+    # Same fix for VHD path - strip ALL repeated VM names
+    $defaultVhdPath = if ($vhdDestPath) {{
+        $cleanPath = $vhdDestPath.TrimEnd('\\')
+        # Keep removing the VM name from the end until it's not there anymore
+        while (($cleanPath -ne '') -and ((Split-Path -Leaf $cleanPath) -eq $vmName)) {{
+            $cleanPath = Split-Path -Parent $cleanPath
+        }}
+        # If we stripped it all away (shouldn't happen), fallback to host default
+        if ([string]::IsNullOrEmpty($cleanPath)) {{
+            (Get-VMHost).VirtualHardDiskPath
+        }} else {{
+            $cleanPath
+        }}
+    }} else {{
+        (Get-VMHost).VirtualHardDiskPath
+    }}
 
     # Find VHD files in backup
     # Check if Virtual Hard Disks exists directly in import path or in a subfolder
