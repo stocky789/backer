@@ -5101,16 +5101,17 @@ try {{
 
             # Use simple batch file approach to avoid command line limits
             # Write a .bat file and execute it directly
-            bat_path = f"%TEMP%\\backer-cluster-add-{vm_name}.bat"
+            bat_filename = f"backer-cluster-add-{vm_name}.bat"
 
             # Step 1: Create the batch file
             create_bat = f"""
+$batPath = Join-Path $env:TEMP "{bat_filename}"
 $batContent = @"
 @echo off
 powershell.exe -Command "Import-Module FailoverClusters; Add-ClusterVirtualMachineRole -VMName '{vm_name}'"
 "@
-Set-Content -Path "{bat_path}" -Value $batContent -Force
-if (Test-Path "{bat_path}") {{ "BAT_CREATED" }} else {{ "BAT_FAILED" }}
+Set-Content -Path $batPath -Value $batContent -Force
+if (Test-Path $batPath) {{ "BAT_CREATED" }} else {{ "BAT_FAILED" }}
 """
             rc1, stdout1, stderr1 = node_api._run_powershell(create_bat, timeout=10)
             if rc1 != 0 or "BAT_CREATED" not in stdout1:
@@ -5118,8 +5119,9 @@ if (Test-Path "{bat_path}") {{ "BAT_CREATED" }} else {{ "BAT_FAILED" }}
 
             # Step 2: Execute the batch file
             execute_bat = f"""
-$output = cmd.exe /c "{bat_path}" 2>&1
-Remove-Item "{bat_path}" -Force -ErrorAction SilentlyContinue
+$batPath = Join-Path $env:TEMP "{bat_filename}"
+$output = cmd.exe /c "$batPath" 2>&1
+Remove-Item $batPath -Force -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -eq 0) {{
     "SUCCESS"
 }} else {{
