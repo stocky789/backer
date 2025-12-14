@@ -5151,8 +5151,11 @@ Add-ClusterVirtualMachineRole -Cluster "{self.cluster_name}" -VMId $vm.VMId -Err
                 "ERROR: VM was not added to cluster (verification failed)"
             }}
             exit 0
-        }} elseif ($taskInfo.LastTaskResult -ne 267009) {{
-            # Task failed (267009 means task has not run yet)
+        }} elseif ($taskInfo.LastTaskResult -ne 267009 -and $taskInfo.LastTaskResult -ne 267011) {{
+            # Task failed
+            # 267009 (0x41301) = SCHED_S_TASK_HAS_NOT_STARTED
+            # 267011 (0x4001B) = SCHED_S_TASK_HAS_NOT_RUN
+            # Both mean "task hasn't executed yet" - keep waiting
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             "ERROR: Scheduled task failed with code: $($taskInfo.LastTaskResult)"
             exit 1
