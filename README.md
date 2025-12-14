@@ -25,6 +25,7 @@ docker run -d --name backer \
   -p 8420:8420 \
   -v backer-data:/data \
   --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
   ghcr.io/stocky789/backer:latest
 ```
 
