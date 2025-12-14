@@ -123,6 +123,7 @@ install_dependencies() {
                 python3 \
                 python3-venv \
                 python3-pip \
+                python3-dev \
                 git \
                 curl \
                 ca-certificates \
@@ -130,6 +131,8 @@ install_dependencies() {
                 smbclient \
                 sshpass \
                 nfs-common \
+                gcc \
+                libkrb5-dev \
                 > /dev/null 2>&1
             ;;
         fedora)
@@ -137,7 +140,7 @@ install_dependencies() {
             dnf install -y -q \
                 python3 \
                 python3-pip \
-                python3-virtualenv \
+                python3-devel \
                 git \
                 curl \
                 ca-certificates \
@@ -145,6 +148,8 @@ install_dependencies() {
                 samba-client \
                 sshpass \
                 nfs-utils \
+                gcc \
+                krb5-devel \
                 > /dev/null 2>&1
             ;;
         rhel|centos|rocky|almalinux)
@@ -156,6 +161,7 @@ install_dependencies() {
                 dnf install -y -q \
                     python3 \
                     python3-pip \
+                    python3-devel \
                     git \
                     curl \
                     ca-certificates \
@@ -163,12 +169,15 @@ install_dependencies() {
                     samba-client \
                     sshpass \
                     nfs-utils \
+                    gcc \
+                    krb5-devel \
                     > /dev/null 2>&1
             else
                 yum install -y -q epel-release 2>/dev/null || true
                 yum install -y -q \
                     python3 \
                     python3-pip \
+                    python3-devel \
                     git \
                     curl \
                     ca-certificates \
@@ -176,6 +185,8 @@ install_dependencies() {
                     samba-client \
                     sshpass \
                     nfs-utils \
+                    gcc \
+                    krb5-devel \
                     > /dev/null 2>&1
             fi
             ;;
@@ -192,6 +203,8 @@ install_dependencies() {
                 smbclient \
                 sshpass \
                 nfs-utils \
+                gcc \
+                krb5 \
                 > /dev/null 2>&1
             ;;
         opensuse*|sles)
@@ -200,6 +213,7 @@ install_dependencies() {
             zypper install -y \
                 python3 \
                 python3-pip \
+                python3-devel \
                 git \
                 curl \
                 ca-certificates \
@@ -207,26 +221,28 @@ install_dependencies() {
                 samba-client \
                 sshpass \
                 nfs-client \
+                gcc \
+                krb5-devel \
                 > /dev/null 2>&1 || true
             ;;
         *)
             warn "Unknown distro: $DISTRO_ID"
             warn "Attempting to continue - you may need to manually install:"
-            warn "  python3, python3-pip, python3-venv, git, curl"
-            warn "  cifs-utils, smbclient, sshpass, nfs-common/nfs-utils"
+            warn "  python3, python3-pip, python3-venv, python3-dev, git, curl, gcc"
+            warn "  cifs-utils, smbclient, sshpass, nfs-common/nfs-utils, libkrb5-dev/krb5-devel"
             echo ""
-            # Try to detect package manager
+            # Try to detect package manager and install dependencies including build tools
             if command -v apt-get &>/dev/null; then
                 apt-get update -qq
-                apt-get install -y -qq python3 python3-venv python3-pip git curl cifs-utils smbclient sshpass nfs-common 2>/dev/null || true
+                apt-get install -y -qq python3 python3-venv python3-pip python3-dev git curl cifs-utils smbclient sshpass nfs-common gcc libkrb5-dev 2>/dev/null || true
             elif command -v dnf &>/dev/null; then
-                dnf install -y -q python3 python3-pip git curl cifs-utils samba-client sshpass nfs-utils 2>/dev/null || true
+                dnf install -y -q python3 python3-pip python3-devel git curl cifs-utils samba-client sshpass nfs-utils gcc krb5-devel 2>/dev/null || true
             elif command -v yum &>/dev/null; then
-                yum install -y -q python3 python3-pip git curl cifs-utils samba-client sshpass nfs-utils 2>/dev/null || true
+                yum install -y -q python3 python3-pip python3-devel git curl cifs-utils samba-client sshpass nfs-utils gcc krb5-devel 2>/dev/null || true
             elif command -v pacman &>/dev/null; then
-                pacman -Sy --noconfirm --needed python python-pip git curl cifs-utils smbclient sshpass nfs-utils 2>/dev/null || true
+                pacman -Sy --noconfirm --needed python python-pip git curl cifs-utils smbclient sshpass nfs-utils gcc krb5 2>/dev/null || true
             elif command -v zypper &>/dev/null; then
-                zypper install -y -q python3 python3-pip git curl cifs-utils samba-client sshpass nfs-client 2>/dev/null || true
+                zypper install -y -q python3 python3-pip python3-devel git curl cifs-utils samba-client sshpass nfs-client gcc krb5-devel 2>/dev/null || true
             fi
             ;;
     esac
