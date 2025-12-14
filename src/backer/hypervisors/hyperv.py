@@ -4126,7 +4126,7 @@ try {
                     # Determine domain for FQDN resolution - try multiple sources:
                     # 1. Explicit domain parameter
                     # 2. Domain from username (DOMAIN\user format)
-                    # 3. Domain from host FQDN (node1.stockhome.local)
+                    # 3. Domain from host FQDN (e.g., node1.domain.local)
                     # 4. ClusterDomain from PowerShell
                     dns_domain = ""
                     if self.domain:
@@ -4137,7 +4137,7 @@ try {
                         dns_domain = self.username.split("\\")[0]
                         logger.debug(f"Extracted domain from username: {dns_domain}")
                     elif "." in self.host:
-                        # Extract domain from FQDN host (e.g., node1.stockhome.local)
+                        # Extract domain from FQDN host (e.g., node1.domain.local)
                         parts = self.host.split(".", 1)
                         if len(parts) > 1:
                             dns_domain = parts[1]
@@ -4150,7 +4150,7 @@ try {
 
                     # Build node names and IP map for FQDN resolution and fallback
                     # Node names from cluster are often short names (e.g., "node1")
-                    # but DNS may require FQDN (e.g., "node1.stockhome.local")
+                    # but DNS may require FQDN (e.g., "node1.domain.local")
                     self._cluster_nodes = []
                     self._node_ip_map = {}
 
@@ -4385,7 +4385,7 @@ try {{
     # Check if any member matches (case-insensitive, handles domain name variations)
     # Windows stores as DOMAIN\\Username where DOMAIN is the NetBIOS name (uppercase)
     $isMember = $members | Where-Object {{
-        # Match any domain\\username pattern (e.g., STOCKHOME\\Administrator or stockhome.local\\Administrator)
+        # Match any domain\\username pattern (handles both NetBIOS and FQDN formats)
         ($_.Name -like "*\\{self.username}") -or
         # Match local username
         ($_.Name -eq "{self.username}")
