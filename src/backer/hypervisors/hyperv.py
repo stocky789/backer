@@ -4331,31 +4331,42 @@ try {{
                 node_api = self._get_or_create_node_connection(node_name)
 
                 # Check if user is in local Administrators group
+                full_username = f"{self.domain}\\{self.username}" if self.domain else self.username
                 check_admin_script = f"""
 $ErrorActionPreference = 'SilentlyContinue'
 try {{
-    $username = "{self.domain}\\{self.username}" -replace '\\\\\\\\', '\\\\'
-    $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
-    $members = $group.Invoke('Members') | ForEach-Object {{
-        $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+    # Check using Get-LocalGroupMember (modern method)
+    $targetUser = "{full_username}"
+    $members = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
+
+    # Check if any member matches (handles different name formats)
+    $isMember = $members | Where-Object {{
+        $_.Name -eq $targetUser -or
+        $_.Name -like "*\\{self.username}" -or
+        $_.Name -eq "{self.username}"
     }}
 
-    # Also check using Get-LocalGroupMember (newer method)
-    $isMember = $false
-    try {{
-        $localMembers = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
-        $isMember = $localMembers | Where-Object {{
-            $_.Name -like "*{self.username}" -or $_.Name -eq "{self.domain}\\{self.username}"
-        }}
-    }} catch {{ }}
-
-    if ($isMember -or ($members -contains "{self.username}")) {{
+    if ($isMember) {{
         "IS_ADMIN"
     }} else {{
         "NOT_ADMIN"
     }}
 }} catch {{
-    "NOT_ADMIN"
+    # Fallback to ADSI method
+    try {{
+        $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
+        $members = @($group.Invoke('Members') | ForEach-Object {{
+            $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+        }})
+
+        if ($members -contains "{self.username}" -or $members -contains "{full_username}") {{
+            "IS_ADMIN"
+        }} else {{
+            "NOT_ADMIN"
+        }}
+    }} catch {{
+        "NOT_ADMIN"
+    }}
 }}
 """
                 rc, stdout, stderr = node_api._run_powershell(check_admin_script)
