@@ -3931,11 +3931,16 @@ class HyperVClusterAPI(HyperVAPI):
             connect_host = node_name
 
         # Get IP for fallback - check both short name and FQDN in the map
+        logger.info(f"Looking up IP for node '{node_name}' (short: '{short_name}', connect_host: '{connect_host}')")
+        logger.info(f"Current IP map: {self._node_ip_map}")
+
         node_ip = self._node_ip_map.get(node_name)
         if not node_ip and short_name in self._node_ip_map:
             node_ip = self._node_ip_map[short_name]
         if not node_ip and connect_host in self._node_ip_map:
             node_ip = self._node_ip_map[connect_host]
+
+        logger.info(f"Resolved IP for node '{node_name}': {node_ip}")
 
         # Try to create connection with FQDN/hostname first
         try:
