@@ -5099,34 +5099,34 @@ try {{
                 logger.error(error_msg)
                 return False, error_msg
 
-            # Use Invoke-Command with localhost to create a fresh local session
-            # This bypasses the WinRM credential hop issue
-            script = f"""
-$ErrorActionPreference = 'Stop'
-try {{
-    # Use Invoke-Command to localhost to get a fresh credential context
-    Invoke-Command -ComputerName localhost -ScriptBlock {{
-        param($vmName, $clusterName)
-        $vm = Get-VM -Name $vmName -ErrorAction Stop
-        Add-ClusterVirtualMachineRole -Cluster $clusterName -VMId $vm.VMId -ErrorAction Stop
-    }} -ArgumentList '{vm_name}', '{self.cluster_name}'
-    "VM added to cluster successfully"
-}} catch {{
-    # On failure, gather diagnostic info
-    $pathInfo = ""
-    try {{
-        $vm = Get-VM -Name '{vm_name}' -ErrorAction SilentlyContinue
-        if ($vm) {{
-            $vmPath = $vm.Path
-            $vhdPaths = ($vm.HardDrives | ForEach-Object {{ $_.Path }}) -join ', '
-            $pathInfo = " (VM Path: $vmPath; VHDs: $vhdPaths)"
-        }}
-    }} catch {{ }}
-    "ERROR: $($_.Exception.Message)$pathInfo"
+            # Use simple batch file approach to avoid command line limits
+            # Write a .bat file and execute it directly
+            bat_path = f"%TEMP%\\backer-cluster-add-{vm_name}.bat"
+
+            # Step 1: Create the batch file
+            create_bat = f"""
+$batContent = @"
+@echo off
+powershell.exe -Command "Import-Module FailoverClusters; Add-ClusterVirtualMachineRole -VMName '{vm_name}'"
+"@
+Set-Content -Path "{bat_path}" -Value $batContent -Force
+if (Test-Path "{bat_path}") {{ "BAT_CREATED" }} else {{ "BAT_FAILED" }}
+"""
+            rc1, stdout1, stderr1 = node_api._run_powershell(create_bat, timeout=10)
+            if rc1 != 0 or "BAT_CREATED" not in stdout1:
+                return False, f"Failed to create batch file: {stderr1}"
+
+            # Step 2: Execute the batch file
+            execute_bat = f"""
+$output = cmd.exe /c "{bat_path}" 2>&1
+Remove-Item "{bat_path}" -Force -ErrorAction SilentlyContinue
+if ($LASTEXITCODE -eq 0) {{
+    "SUCCESS"
+}} else {{
+    "FAILED: $output"
 }}
 """
-            # Run on the specific node
-            rc, stdout, stderr = node_api._run_powershell(script, timeout=60)
+            rc, stdout, stderr = node_api._run_powershell(execute_bat, timeout=30)
         else:
             # No node specified - run on default connection
             script = f"""
