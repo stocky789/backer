@@ -3942,7 +3942,35 @@ class HyperVClusterAPI(HyperVAPI):
 
         logger.info(f"Resolved IP for node '{node_name}': {node_ip}")
 
-        # Try to create connection with FQDN/hostname first
+        # If we have an IP address, use it directly to avoid DNS resolution issues
+        # This is critical when Backer server (Linux) is not domain-joined
+        if node_ip:
+            logger.info(f"Using IP address {node_ip} directly for node '{node_name}' (skipping DNS)")
+            try:
+                api = HyperVAPI(
+                    host=node_ip,
+                    username=self.username,
+                    password=self.password,
+                    port=self.port,
+                    use_ssl=self.use_ssl,
+                    auth_method=self.auth_method,
+                    verify_ssl=self.verify_ssl,
+                    timeout=self.timeout,
+                    domain=self.domain,
+                )
+                # Verify connection works
+                api._run_powershell("$env:COMPUTERNAME", timeout=10)
+                self._node_connections[node_name] = api
+                logger.info(f"✓ Connected to node '{node_name}' via IP {node_ip}")
+                return api
+            except Exception as ip_error:
+                logger.error(
+                    f"Failed to connect to node '{node_name}' via IP {node_ip}: {ip_error}. "
+                    f"Will try hostname as fallback..."
+                )
+                # Fall through to try hostname/FQDN
+
+        # Try to create connection with FQDN/hostname (fallback or when no IP available)
         try:
             api = HyperVAPI(
                 host=connect_host,
