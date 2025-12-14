@@ -2254,6 +2254,7 @@ async function showClusterPermissionWizard(formData) {
 
 async function checkClusterPermissions() {
     try {
+        console.log('Sending permission check with data:', wizardFormData);
         const response = await fetch('/api/v1/hypervisors/cluster/check-permissions', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -2261,6 +2262,7 @@ async function checkClusterPermissions() {
         });
 
         const result = await response.json();
+        console.log('Permission check response:', result);
 
         // Check if response has an error (even if HTTP 200)
         if (!response.ok || result.detail) {
