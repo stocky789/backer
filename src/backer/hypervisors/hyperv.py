@@ -3388,7 +3388,7 @@ try {{
     # IMPORTANT: New-VM -Path automatically creates a subfolder with the VM name,
     # so if restorePath already ends with the VM name (even multiple times due to
     # repeated restores), we need to strip ALL repeated VM names to get back to the
-    # base path. This fixes the "backerrestore2\backerrestore2\backerrestore2\..." bug.
+    # base path. This fixes the repeated path bug.
     $defaultVmPath = if ($restorePath) {{
         $cleanPath = $restorePath.TrimEnd('\\')
         # Keep removing the VM name from the end until it's not there anymore
