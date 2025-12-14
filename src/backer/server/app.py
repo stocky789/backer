@@ -9606,15 +9606,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             else:
                 temp_import_path = f"{backup_base_path}\\{filename}"
 
+            logger.info(f"Searching for VMCX file in: {temp_import_path}")
             list_script = f"""
 $importPath = '{temp_import_path}'
 Get-ChildItem -Path $importPath -Include *.vmcx -Recurse -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty BaseName
 """
             rc, stdout, stderr = api._run_powershell(list_script, timeout=30)
+            logger.info(f"VMCX search result: rc={rc}, stdout={stdout!r}, stderr={stderr!r}")
             if rc == 0 and stdout.strip():
                 old_vm_id = stdout.strip().lower()  # Store in lowercase for case-insensitive comparison
                 logger.info(f"Found old VM GUID in backup: {old_vm_id}")
+            else:
+                logger.warning(f"No VMCX file found or PowerShell failed (rc={rc})")
         except Exception as e:
             logger.warning(f"Could not extract old VM GUID from backup: {e}")
 
@@ -9680,6 +9684,12 @@ Get-ChildItem -Path $importPath -Include *.vmcx -Recurse -ErrorAction SilentlyCo
                     task.message = f"VM '{restored_name}' restored successfully"
                     task.progress = 90
 
+                    # Log GUID info for debugging
+                    logger.info(
+                        f"GUID update check: old_vm_id={old_vm_id!r}, new_vm_id={new_vm_id!r}, "
+                        f"will_update={bool(new_vm_id and old_vm_id)}"
+                    )
+
                     # Update backup jobs: replace old GUID with new GUID in guest_ids
                     # This handles the case where restore creates a new VM with a new GUID
                     if new_vm_id and old_vm_id:
@@ -9690,6 +9700,7 @@ Get-ChildItem -Path $importPath -Include *.vmcx -Recurse -ErrorAction SilentlyCo
                             )
                             # Get all hypervisor jobs for this hypervisor
                             all_jobs = _storage.list_hypervisor_jobs()
+                            updated_job_count = 0
                             for job in all_jobs:
                                 if job.get("hypervisor_id") == hypervisor_id:
                                     guest_ids = job.get("guest_ids", [])
@@ -9707,8 +9718,17 @@ Get-ChildItem -Path $importPath -Include *.vmcx -Recurse -ErrorAction SilentlyCo
                                         )
                                         logger.info(
                                             f"Updated job '{job['name']}': "
-                                            f"replaced {old_vm_id} with {new_vm_id}"
+                                            f"guest_ids changed from {guest_ids} to {updated_guest_ids}"
                                         )
+                                        updated_job_count += 1
+
+                            if updated_job_count > 0:
+                                logger.info(f"Successfully updated {updated_job_count} backup job(s) with new GUID")
+                            else:
+                                logger.warning(
+                                    f"No backup jobs contained old GUID {old_vm_id} - "
+                                    f"this VM may not be in any backup jobs"
+                                )
                         except Exception as e:
                             logger.warning(f"Failed to update backup jobs with new GUID: {e}")
 
