@@ -9574,13 +9574,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             backup_manager = HyperVBackupManager(api)
 
         # Get old VM GUID from the backup (for job update after restore)
-        # The backup folder name contains the VMCX file which has the old GUID
+        # Read it from the vm_full_config.json file which always contains the original VM ID
         old_vm_id = None
         hypervisor_id = hypervisor.get("id")
 
         try:
-            # Look for .vmcx file in the backup to get old GUID
-            # We'll use the import_path that gets built below, so we need to construct it first
             # Build UNC path components first
             smb_server = repository.get("server", "")
             smb_share = repository.get("share", "")
@@ -9597,30 +9595,67 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
             backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
 
-            # Build full path to the backup
+            # Build full path to the backup timestamp folder (contains vm_full_config.json)
             parts = filename.replace("/", "\\").split("\\")
             if len(parts) >= 2:
                 vm_name = parts[0]
                 timestamp = parts[1]
-                temp_import_path = f"{backup_base_path}\\{vm_name}\\{timestamp}\\{vm_name}"
+                timestamp_folder = f"{backup_base_path}\\{vm_name}\\{timestamp}"
             else:
-                temp_import_path = f"{backup_base_path}\\{filename}"
+                timestamp_folder = f"{backup_base_path}\\{filename}"
 
-            logger.info(f"Searching for VMCX file in: {temp_import_path}")
-            list_script = f"""
-$importPath = '{temp_import_path}'
-Get-ChildItem -Path "$importPath\\*" -Include *.vmcx -Recurse -ErrorAction SilentlyContinue |
-    Select-Object -First 1 -ExpandProperty BaseName
-"""
-            rc, stdout, stderr = api._run_powershell(list_script, timeout=30)
-            logger.info(f"VMCX search result: rc={rc}, stdout={stdout!r}, stderr={stderr!r}")
-            if rc == 0 and stdout.strip():
-                old_vm_id = stdout.strip().lower()  # Store in lowercase for case-insensitive comparison
-                logger.info(f"Found old VM GUID in backup: {old_vm_id}")
+            # Load vm_full_config.json from the timestamp folder
+            config_path = f"{timestamp_folder}\\vm_full_config.json"
+            logger.info(f"Loading backup config to extract old GUID from: {config_path}")
+
+            # Prepare SMB credentials
+            smb_username = repository.get("username", "")
+            smb_domain = repository.get("domain")
+            if smb_domain and smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
             else:
-                logger.warning(f"No VMCX file found or PowerShell failed (rc={rc})")
+                full_username = smb_username
+
+            config_script = f"""
+$ErrorActionPreference = 'Stop'
+$configPath = '{config_path}'
+$smbUnc = '{backup_base_path}'
+$smbUser = '{full_username}'
+$smbPass = '{repo_password}'
+
+try {{
+    # Connect to SMB if needed
+    if ($smbUnc -and $smbUser) {{
+        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Output "SMB_CONNECT_FAILED: $netUseResult"
+        }}
+    }}
+
+    if (Test-Path $configPath) {{
+        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        if ($config.vm -and $config.vm.id) {{
+            Write-Output $config.vm.id
+        }} else {{
+            Write-Output "NO_VM_ID_IN_CONFIG"
+        }}
+    }} else {{
+        Write-Output "CONFIG_FILE_NOT_FOUND"
+    }}
+}} catch {{
+    Write-Output "ERROR: $_"
+}}
+"""
+            rc, stdout, stderr = api._run_powershell(config_script, timeout=30)
+            output = stdout.strip()
+
+            if rc == 0 and output and not output.startswith("ERROR") and not output.startswith("CONFIG_FILE_NOT_FOUND") and not output.startswith("NO_VM_ID_IN_CONFIG"):
+                old_vm_id = output.lower()  # Store in lowercase for case-insensitive comparison
+                logger.info(f"Found old VM GUID from backup config: {old_vm_id}")
+            else:
+                logger.warning(f"Could not load old VM GUID from config: {output}")
         except Exception as e:
-            logger.warning(f"Could not extract old VM GUID from backup: {e}")
+            logger.warning(f"Could not extract old VM GUID from backup config: {e}")
 
         # Build UNC path to backup
         smb_server = repository.get("server", "")
