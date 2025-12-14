@@ -2427,15 +2427,58 @@ async function refreshPermissionCheck() {
 
 function copySetupScript() {
     const scriptContent = document.getElementById('setupScriptContent').textContent;
-    navigator.clipboard.writeText(scriptContent).then(() => {
-        const feedback = document.getElementById('copyFeedback');
-        feedback.style.display = 'block';
-        setTimeout(() => {
-            feedback.style.display = 'none';
-        }, 3000);
-    }).catch(err => {
-        alert('Failed to copy script: ' + err);
-    });
+
+    // Try modern clipboard API first
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(scriptContent).then(() => {
+            showCopyFeedback();
+        }).catch(err => {
+            // Fallback to legacy method
+            fallbackCopyTextToClipboard(scriptContent);
+        });
+    } else {
+        // Use fallback for browsers without clipboard API or non-HTTPS
+        fallbackCopyTextToClipboard(scriptContent);
+    }
+}
+
+function fallbackCopyTextToClipboard(text) {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.top = '0';
+    textArea.style.left = '0';
+    textArea.style.width = '2em';
+    textArea.style.height = '2em';
+    textArea.style.padding = '0';
+    textArea.style.border = 'none';
+    textArea.style.outline = 'none';
+    textArea.style.boxShadow = 'none';
+    textArea.style.background = 'transparent';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+
+    try {
+        const successful = document.execCommand('copy');
+        if (successful) {
+            showCopyFeedback();
+        } else {
+            alert('Failed to copy. Please manually select and copy the script.');
+        }
+    } catch (err) {
+        alert('Failed to copy. Please manually select and copy the script.');
+    }
+
+    document.body.removeChild(textArea);
+}
+
+function showCopyFeedback() {
+    const feedback = document.getElementById('copyFeedback');
+    feedback.style.display = 'block';
+    setTimeout(() => {
+        feedback.style.display = 'none';
+    }, 3000);
 }
 
 function showSkipModal() {
