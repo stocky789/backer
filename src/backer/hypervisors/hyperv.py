@@ -3945,30 +3945,38 @@ class HyperVClusterAPI(HyperVAPI):
         # If we have an IP address, use it directly to avoid DNS resolution issues
         # This is critical when Backer server (Linux) is not domain-joined
         if node_ip:
-            logger.info(f"Using IP address {node_ip} directly for node '{node_name}' (skipping DNS)")
-            try:
-                api = HyperVAPI(
-                    host=node_ip,
-                    username=self.username,
-                    password=self.password,
-                    port=self.port,
-                    use_ssl=self.use_ssl,
-                    auth_method=self.auth_method,
-                    verify_ssl=self.verify_ssl,
-                    timeout=self.timeout,
-                    domain=self.domain,
-                )
-                # Verify connection works
-                api._run_powershell("$env:COMPUTERNAME", timeout=10)
-                self._node_connections[node_name] = api
-                logger.info(f"✓ Connected to node '{node_name}' via IP {node_ip}")
-                return api
-            except Exception as ip_error:
-                logger.error(
-                    f"Failed to connect to node '{node_name}' via IP {node_ip}: {ip_error}. "
-                    f"Will try hostname as fallback..."
+            # Skip APIPA addresses (169.254.x.x) - these are not routable
+            if node_ip.startswith("169.254."):
+                logger.warning(
+                    f"Node '{node_name}' has APIPA address {node_ip} (no DHCP/static IP configured). "
+                    f"This is not routable - will try hostname instead."
                 )
                 # Fall through to try hostname/FQDN
+            else:
+                logger.info(f"Using IP address {node_ip} directly for node '{node_name}' (skipping DNS)")
+                try:
+                    api = HyperVAPI(
+                        host=node_ip,
+                        username=self.username,
+                        password=self.password,
+                        port=self.port,
+                        use_ssl=self.use_ssl,
+                        auth_method=self.auth_method,
+                        verify_ssl=self.verify_ssl,
+                        timeout=self.timeout,
+                        domain=self.domain,
+                    )
+                    # Verify connection works (use shorter timeout for quicker failure detection)
+                    api._run_powershell("$env:COMPUTERNAME", timeout=5)
+                    self._node_connections[node_name] = api
+                    logger.info(f"✓ Connected to node '{node_name}' via IP {node_ip}")
+                    return api
+                except Exception as ip_error:
+                    logger.error(
+                        f"Failed to connect to node '{node_name}' via IP {node_ip}: {ip_error}. "
+                        f"Will try hostname as fallback..."
+                    )
+                    # Fall through to try hostname/FQDN
 
         # Try to create connection with FQDN/hostname (fallback or when no IP available)
         try:
@@ -4261,25 +4269,28 @@ $nodes = Get-ClusterNode | ForEach-Object {
         $_.GroupType -eq 'VirtualMachine' -and $_.OwnerNode.Name -eq $nodeName
     }).Count
 
-    # Get node IP address (try IPv4 first)
+    # Get node IP address (prefer non-APIPA IPv4)
     $nodeIp = $null
     try {
-        # Get all IP addresses for the node
+        # Get all IPv4 addresses for the node, excluding APIPA (169.254.x.x)
         $ips = [System.Net.Dns]::GetHostAddresses($nodeName) | Where-Object {
-            $_.AddressFamily -eq 'InterNetwork'  # IPv4 only
+            $_.AddressFamily -eq 'InterNetwork' -and  # IPv4 only
+            -not $_.ToString().StartsWith('169.254.')  # Exclude APIPA
         }
         if ($ips) {
             $nodeIp = $ips[0].ToString()
         }
-    } catch {
-        # If DNS fails, try to get from cluster network
+    } catch {}
+
+    # If no valid IP from DNS, try cluster network interface
+    if (-not $nodeIp) {
         try {
             $clusterNet = Get-ClusterNetwork | Where-Object { $_.Role -eq 'ClusterAndClient' } | Select-Object -First 1
             if ($clusterNet) {
                 $netInterface = Get-ClusterNetworkInterface | Where-Object {
                     $_.Node -eq $nodeName -and $_.Network -eq $clusterNet.Name
                 }
-                if ($netInterface) {
+                if ($netInterface -and -not $netInterface.Address.StartsWith('169.254.')) {
                     $nodeIp = $netInterface.Address
                 }
             }
