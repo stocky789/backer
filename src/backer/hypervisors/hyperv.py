@@ -4274,21 +4274,29 @@ $nodes | ConvertTo-Json -Depth 2
             if not stdout or stdout == "null":
                 return []
 
+            logger.info(f"Raw cluster nodes output: {stdout[:500]}")  # Log first 500 chars
+
             data = json.loads(stdout)
             if isinstance(data, dict):
                 data = [data]
 
             # Populate the IP map for DNS fallback
+            logger.info(f"Processing {len(data)} cluster nodes for IP mapping...")
             for node_info in data:
                 node_name = node_info.get("Name", "")
                 node_ip = node_info.get("IPAddress")
+                logger.info(f"Node '{node_name}' has IPAddress='{node_ip}'")
+
                 if node_name and node_ip:
                     # Store both short name and FQDN if available
                     short_name = node_name.split(".")[0] if "." in node_name else node_name
                     self._node_ip_map[node_name] = node_ip
                     self._node_ip_map[short_name] = node_ip
-                    logger.debug(f"Mapped node '{node_name}' (short: '{short_name}') to IP {node_ip}")
+                    logger.info(f"✓ Mapped node '{node_name}' (short: '{short_name}') to IP {node_ip}")
+                else:
+                    logger.warning(f"✗ Node '{node_name}' missing IP address - DNS fallback will NOT work!")
 
+            logger.info(f"IP map now contains {len(self._node_ip_map)} entries: {self._node_ip_map}")
             return data
 
         except json.JSONDecodeError as e:
