@@ -9573,6 +9573,51 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
             backup_manager = HyperVBackupManager(api)
 
+        # Get old VM GUID from the backup (for job update after restore)
+        # The backup folder name contains the VMCX file which has the old GUID
+        old_vm_id = None
+        hypervisor_id = hypervisor.get("id")
+
+        try:
+            # Look for .vmcx file in the backup to get old GUID
+            # We'll use the import_path that gets built below, so we need to construct it first
+            # Build UNC path components first
+            smb_server = repository.get("server", "")
+            smb_share = repository.get("share", "")
+            smb_path = repository.get("path", "")
+
+            backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+            if smb_path:
+                smb_path_win = smb_path.replace("/", "\\").strip("\\")
+                backup_base_path = f"{backup_base_path}\\{smb_path_win}"
+
+            # Add hypervisor subfolder
+            safe_hv_name = "".join(
+                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+            )
+            backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
+
+            # Build full path to the backup
+            parts = filename.replace("/", "\\").split("\\")
+            if len(parts) >= 2:
+                vm_name = parts[0]
+                timestamp = parts[1]
+                temp_import_path = f"{backup_base_path}\\{vm_name}\\{timestamp}\\{vm_name}"
+            else:
+                temp_import_path = f"{backup_base_path}\\{filename}"
+
+            list_script = f"""
+$importPath = '{temp_import_path}'
+Get-ChildItem -Path $importPath -Include *.vmcx -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty BaseName
+"""
+            rc, stdout, stderr = api._run_powershell(list_script, timeout=30)
+            if rc == 0 and stdout.strip():
+                old_vm_id = stdout.strip().lower()  # Store in lowercase for case-insensitive comparison
+                logger.info(f"Found old VM GUID in backup: {old_vm_id}")
+        except Exception as e:
+            logger.warning(f"Could not extract old VM GUID from backup: {e}")
+
         # Build UNC path to backup
         smb_server = repository.get("server", "")
         smb_share = repository.get("share", "")
@@ -9631,13 +9676,47 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 if result.get("success"):
                     restored_name = result.get("vm_name", vm_name)
+                    new_vm_id = result.get("vm_id")  # New GUID after restore
                     task.message = f"VM '{restored_name}' restored successfully"
                     task.progress = 90
+
+                    # Update backup jobs: replace old GUID with new GUID in guest_ids
+                    # This handles the case where restore creates a new VM with a new GUID
+                    if new_vm_id and old_vm_id:
+                        try:
+                            logger.info(
+                                f"Updating backup jobs: replacing old GUID {old_vm_id} "
+                                f"with new GUID {new_vm_id} for VM '{restored_name}'"
+                            )
+                            # Get all hypervisor jobs for this hypervisor
+                            all_jobs = _storage.list_hypervisor_jobs()
+                            for job in all_jobs:
+                                if job.get("hypervisor_id") == hypervisor_id:
+                                    guest_ids = job.get("guest_ids", [])
+                                    # Replace old GUID with new GUID (case-insensitive comparison)
+                                    # Check if old_vm_id matches any guest_id (case-insensitive)
+                                    guest_ids_lower = [gid.lower() for gid in guest_ids]
+                                    if old_vm_id in guest_ids_lower:
+                                        updated_guest_ids = [
+                                            new_vm_id if gid.lower() == old_vm_id else gid
+                                            for gid in guest_ids
+                                        ]
+                                        _storage.update_hypervisor_job(
+                                            job["id"],
+                                            {"guest_ids": updated_guest_ids}
+                                        )
+                                        logger.info(
+                                            f"Updated job '{job['name']}': "
+                                            f"replaced {old_vm_id} with {new_vm_id}"
+                                        )
+                        except Exception as e:
+                            logger.warning(f"Failed to update backup jobs with new GUID: {e}")
 
                     # Build success response with warnings if any
                     response = {
                         "success": True,
                         "vm_name": restored_name,
+                        "vm_id": new_vm_id,
                         "message": f"VM '{restored_name}' restored successfully",
                         "restore_mode": result.get("actual_mode", "unknown"),
                         "config_applied": result.get("config_loaded", False),
