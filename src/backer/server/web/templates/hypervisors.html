@@ -1227,9 +1227,22 @@ async function submitAddHypervisorOrEdit(event) {
     event.preventDefault();
 
     const data = getHypervisorFormData();
+    console.log('submitAddHypervisorOrEdit called with data:', data);
+    console.log('Hypervisor type:', data.hypervisor_type);
+    console.log('Editing ID:', editingHypervisorId);
+
     const errorDiv = document.getElementById('addHypervisorError');
     errorDiv.style.display = 'none';
 
+    // If this is a NEW Hyper-V cluster (not editing), trigger the wizard instead of direct submission
+    if (!editingHypervisorId && data.hypervisor_type === 'hyperv-cluster') {
+        console.log('Triggering cluster permission wizard...');
+        hideAddHypervisorModal();
+        showClusterPermissionWizard(data);
+        return;
+    }
+
+    console.log('Proceeding with normal hypervisor add/edit...');
     const url = editingHypervisorId ? `/api/v1/hypervisors/${editingHypervisorId}` : '/api/v1/hypervisors';
     const method = editingHypervisorId ? 'PUT' : 'POST';
 
