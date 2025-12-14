@@ -9609,7 +9609,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.info(f"Searching for VMCX file in: {temp_import_path}")
             list_script = f"""
 $importPath = '{temp_import_path}'
-Get-ChildItem -Path $importPath -Include *.vmcx -Recurse -ErrorAction SilentlyContinue |
+Get-ChildItem -Path "$importPath\\*" -Include *.vmcx -Recurse -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty BaseName
 """
             rc, stdout, stderr = api._run_powershell(list_script, timeout=30)
