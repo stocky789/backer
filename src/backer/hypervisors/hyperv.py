@@ -4745,43 +4745,25 @@ try {{
 
         Args:
             vm_name: VM name to add to cluster
-            node: Optional node where the VM exists. If provided, uses
-                  Get-VM -ComputerName to find the VM on that node,
-                  then uses the VMId to add it to the cluster.
+            node: Optional node where the VM exists. If provided, connects
+                  directly to that node to run Add-ClusterVirtualMachineRole
+                  to avoid double-hop authentication issues.
 
         Returns:
             Tuple of (success, message)
         """
-        # If node is specified, we need to get the VM from that node and use VMId
-        # This avoids WinRM double-hop issues by running the cluster cmdlet locally
-        # but referencing the VM by its ID which the cluster can resolve
+        # If node is specified, connect directly to that node to avoid double-hop issues
+        # Double-hop issue: Backer -> Node1 -> Node4 requires CredSSP delegation
+        # Solution: Connect directly to Node4 where the VM exists
         if node:
-            # Get short node name for -ComputerName (works better than FQDN)
-            short_node = node.split(".")[0] if "." in node else node
-            script = f"""
-$ErrorActionPreference = 'Stop'
-try {{
-    # Get VM from specific node to get its ID
-    $vm = Get-VM -Name '{vm_name}' -ComputerName '{short_node}' -ErrorAction Stop
-    # Add to cluster using VMId - this works across nodes
-    Add-ClusterVirtualMachineRole -VMId $vm.VMId
-    "VM added to cluster successfully"
-}} catch {{
-    # On failure, gather path info to help diagnose storage issues
-    $pathInfo = ""
-    try {{
-        $vm = Get-VM -Name '{vm_name}' -ComputerName '{short_node}' -ErrorAction SilentlyContinue
-        if ($vm) {{
-            $vmPath = $vm.Path
-            $vhdPaths = ($vm.HardDrives | ForEach-Object {{ $_.Path }}) -join ', '
-            $pathInfo = " (VM Path: $vmPath; VHDs: $vhdPaths)"
-        }}
-    }} catch {{ }}
-    "ERROR: $($_.Exception.Message)$pathInfo"
-}}
-"""
-        else:
-            # No node specified - look for VM locally
+            # Get connection to the specific node where VM exists
+            node_api = self._get_node_api(node)
+            if not node_api:
+                error_msg = f"Could not connect to node '{node}'"
+                logger.error(error_msg)
+                return False, error_msg
+
+            # Run Add-ClusterVirtualMachineRole on the node where VM exists
             script = f"""
 $ErrorActionPreference = 'Stop'
 try {{
@@ -4801,8 +4783,30 @@ try {{
     "ERROR: $($_.Exception.Message)$pathInfo"
 }}
 """
-        # Always run on default connection - avoids double-hop issues
-        rc, stdout, stderr = self._run_powershell(script)
+            # Run on the specific node
+            rc, stdout, stderr = node_api._run_powershell(script)
+        else:
+            # No node specified - run on default connection
+            script = f"""
+$ErrorActionPreference = 'Stop'
+try {{
+    Add-ClusterVirtualMachineRole -VMName '{vm_name}'
+    "VM added to cluster successfully"
+}} catch {{
+    # On failure, gather path info to help diagnose storage issues
+    $pathInfo = ""
+    try {{
+        $vm = Get-VM -Name '{vm_name}' -ErrorAction SilentlyContinue
+        if ($vm) {{
+            $vmPath = $vm.Path
+            $vhdPaths = ($vm.HardDrives | ForEach-Object {{ $_.Path }}) -join ', '
+            $pathInfo = " (VM Path: $vmPath; VHDs: $vhdPaths)"
+        }}
+    }} catch {{ }}
+    "ERROR: $($_.Exception.Message)$pathInfo"
+}}
+"""
+            rc, stdout, stderr = self._run_powershell(script)
 
         output = stdout.strip()
         if rc != 0 or output.startswith("ERROR:"):
