@@ -1119,16 +1119,21 @@ async function submitAddHypervisor(event) {
     event.preventDefault();
 
     const data = getHypervisorFormData();
+    console.log('submitAddHypervisor called with data:', data);
+    console.log('Hypervisor type:', data.hypervisor_type);
+
     const errorDiv = document.getElementById('addHypervisorError');
     errorDiv.style.display = 'none';
 
     // If this is a Hyper-V cluster, trigger the wizard instead of direct submission
     if (data.hypervisor_type === 'hyperv-cluster') {
+        console.log('Triggering cluster permission wizard...');
         hideAddHypervisorModal();
         showClusterPermissionWizard(data);
         return;
     }
 
+    console.log('Proceeding with normal hypervisor add...');
     try {
         const response = await fetch('/api/v1/hypervisors', {
             method: 'POST',
