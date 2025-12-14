@@ -4331,19 +4331,19 @@ try {{
                 node_api = self._get_or_create_node_connection(node_name)
 
                 # Check if user is in local Administrators group
-                full_username = f"{self.domain}\\{self.username}" if self.domain else self.username
                 check_admin_script = f"""
 $ErrorActionPreference = 'SilentlyContinue'
 try {{
     # Check using Get-LocalGroupMember (modern method)
-    $targetUser = "{full_username}"
     $members = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
 
-    # Check if any member matches (handles different name formats)
+    # Check if any member matches (case-insensitive, handles domain name variations)
+    # Windows stores as DOMAIN\\Username where DOMAIN is the NetBIOS name (uppercase)
     $isMember = $members | Where-Object {{
-        $_.Name -eq $targetUser -or
-        $_.Name -like "*\\{self.username}" -or
-        $_.Name -eq "{self.username}"
+        # Match any domain\\username pattern (e.g., STOCKHOME\\Administrator or stockhome.local\\Administrator)
+        ($_.Name -like "*\\{self.username}") -or
+        # Match local username
+        ($_.Name -eq "{self.username}")
     }}
 
     if ($isMember) {{
@@ -4352,14 +4352,23 @@ try {{
         "NOT_ADMIN"
     }}
 }} catch {{
-    # Fallback to ADSI method
+    # Fallback to ADSI method for older Windows
     try {{
         $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
         $members = @($group.Invoke('Members') | ForEach-Object {{
             $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
         }})
 
-        if ($members -contains "{self.username}" -or $members -contains "{full_username}") {{
+        $foundMatch = $false
+        foreach ($member in $members) {{
+            # Case-insensitive check for username (with or without domain)
+            if ($member -eq "{self.username}" -or $member -like "*\\{self.username}") {{
+                $foundMatch = $true
+                break
+            }}
+        }}
+
+        if ($foundMatch) {{
             "IS_ADMIN"
         }} else {{
             "NOT_ADMIN"
