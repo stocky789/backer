@@ -322,7 +322,11 @@ pip install --no-cache-dir --force-reinstall -e "$INSTALL_DIR[server]" 2>&1 | wh
         echo -ne "\r  Building native extensions...                  \r"
     fi
 done
+PIP_EXIT=${PIPESTATUS[0]}
 echo -ne "\r                                                        \r"
+if [ $PIP_EXIT -ne 0 ]; then
+    error "Failed to install Backer dependencies. Exit code: $PIP_EXIT"
+fi
 success "Backer installed"
 
 # Download backup tools (rclone + restic)
@@ -399,7 +403,7 @@ done
 echo -ne "\r"  # Clear the progress line
 
 # Check if running
-if curl -s -o /dev/null http://127.0.0.1:8420/health 2>/dev/null; then
+if curl -s -f -o /dev/null http://127.0.0.1:8420/health 2>/dev/null; then
     success "Backer service is running and ready"
 elif systemctl is-active --quiet backer; then
     warn "Service is running but API not responding yet. It may need more time to initialize."
