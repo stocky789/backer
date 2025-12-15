@@ -10379,6 +10379,284 @@ try {{
             "message": f"Restore started from {import_path}",
         }
 
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/hyperv-restore/preflight")
+    async def preflight_hyperv_restore(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Run preflight checks before Hyper-V VM restore.
+
+        Validates all prerequisites are met before attempting a restore:
+        - Source backup exists and is accessible
+        - VHD files exist and are readable
+        - vm_full_config.json is loadable
+        - Target storage has sufficient free space
+        - Required virtual switches exist on the host
+        - SMB/network connectivity is working
+        """
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") not in ("hyperv", "hyperv-cluster"):
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
+
+        body = await request.json()
+        import_path = body.get("import_path")
+        if not import_path:
+            raise HTTPException(status_code=400, detail="import_path is required")
+
+        vm_name = body.get("vm_name")
+        restore_path = body.get("restore_path")
+        vhd_destination_path = body.get("vhd_destination_path")
+        repository_id = body.get("repository_id")
+
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Hypervisor password not configured")
+
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if repository_id:
+            repository = storage.get_repository(repository_id)
+            if repository and repository.get("repo_type") == "smb":
+                smb_username = repository.get("username", "")
+                smb_password = storage.get_repository_password(repository_id)
+                smb_domain = repository.get("domain", "")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        manager = HyperVBackupManager(api)
+        result = manager.preflight_restore(
+            import_path=import_path,
+            vm_name=vm_name,
+            restore_path=restore_path,
+            vhd_destination_path=vhd_destination_path,
+            smb_username=smb_username,
+            smb_password=smb_password,
+            smb_domain=smb_domain,
+        )
+
+        return result
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/hyperv-restore/dry-run")
+    async def dry_run_hyperv_restore(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Perform a dry-run restore simulation.
+
+        Shows exactly what the restore would do without executing:
+        - Files that would be copied
+        - VM settings that would be applied
+        - Switches required (and which are missing)
+        - Estimated duration and space needed
+        """
+        from backer.hypervisors.hyperv import HyperVAPI, HyperVBackupManager
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") not in ("hyperv", "hyperv-cluster"):
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
+
+        body = await request.json()
+        import_path = body.get("import_path")
+        if not import_path:
+            raise HTTPException(status_code=400, detail="import_path is required")
+
+        vm_name = body.get("vm_name")
+        restore_path = body.get("restore_path")
+        vhd_destination_path = body.get("vhd_destination_path")
+        repository_id = body.get("repository_id")
+        network_mapping = body.get("network_mapping")
+        start_after = body.get("start", False)
+
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Hypervisor password not configured")
+
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if repository_id:
+            repository = storage.get_repository(repository_id)
+            if repository and repository.get("repo_type") == "smb":
+                smb_username = repository.get("username", "")
+                smb_password = storage.get_repository_password(repository_id)
+                smb_domain = repository.get("domain", "")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        manager = HyperVBackupManager(api)
+        result = manager.restore_vm(
+            import_path=import_path,
+            vm_name=vm_name,
+            restore_path=restore_path,
+            vhd_destination_path=vhd_destination_path,
+            smb_username=smb_username,
+            smb_password=smb_password,
+            smb_domain=smb_domain,
+            network_mapping=network_mapping,
+            start_after_restore=start_after,
+            dry_run=True,
+        )
+
+        return result
+
+    @app.get("/api/v1/hypervisors/{hypervisor_id}/catalog")
+    async def get_hyperv_catalog(
+        hypervisor_id: str,
+        backup_path: str,
+        repository_id: str | None = None,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Read the backup catalog from a Hyper-V backup repository.
+
+        The catalog contains information about all VMs backed up to this path,
+        their backup timestamps, sizes, and verification status.
+        """
+        from backer.hypervisors.hyperv import BackupCatalog, HyperVAPI
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") not in ("hyperv", "hyperv-cluster"):
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
+
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Hypervisor password not configured")
+
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if repository_id:
+            repository = storage.get_repository(repository_id)
+            if repository and repository.get("repo_type") == "smb":
+                smb_username = repository.get("username", "")
+                smb_password = storage.get_repository_password(repository_id)
+                smb_domain = repository.get("domain", "")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        catalog = BackupCatalog(api)
+        result = catalog.read_catalog(
+            backup_path=backup_path,
+            smb_username=smb_username,
+            smb_password=smb_password,
+            smb_domain=smb_domain,
+        )
+
+        if result is None:
+            return {"version": None, "vms": {}, "message": "No catalog found at this path"}
+
+        return result
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/catalog/rebuild")
+    async def rebuild_hyperv_catalog(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Rebuild the backup catalog by scanning all backups in the repository.
+
+        This is useful if the catalog was corrupted or if backups were
+        manually added to the repository.
+        """
+        from backer.hypervisors.hyperv import BackupCatalog, HyperVAPI
+
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        if hypervisor.get("hypervisor_type") not in ("hyperv", "hyperv-cluster"):
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V hypervisors")
+
+        body = await request.json()
+        backup_path = body.get("backup_path")
+        if not backup_path:
+            raise HTTPException(status_code=400, detail="backup_path is required")
+
+        repository_id = body.get("repository_id")
+
+        password = storage.get_hypervisor_password(hypervisor_id)
+        if not password:
+            raise HTTPException(status_code=400, detail="Hypervisor password not configured")
+
+        domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
+
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if repository_id:
+            repository = storage.get_repository(repository_id)
+            if repository and repository.get("repo_type") == "smb":
+                smb_username = repository.get("username", "")
+                smb_password = storage.get_repository_password(repository_id)
+                smb_domain = repository.get("domain", "")
+
+        api = HyperVAPI(
+            host=hypervisor["host"],
+            username=hypervisor.get("username", "Administrator"),
+            password=password,
+            port=hypervisor.get("port", 5985),
+            use_ssl=hypervisor.get("port", 5985) == 5986,
+            verify_ssl=hypervisor.get("verify_ssl", False),
+            domain=domain,
+        )
+
+        catalog = BackupCatalog(api)
+        result = catalog.rebuild_catalog(
+            backup_path=backup_path,
+            smb_username=smb_username,
+            smb_password=smb_password,
+            smb_domain=smb_domain,
+        )
+
+        return result
+
     @app.get("/api/v1/hypervisors/{hypervisor_id}/hyperv-backups")
     async def list_hyperv_backups(
         hypervisor_id: str,

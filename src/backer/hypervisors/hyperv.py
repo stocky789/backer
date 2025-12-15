@@ -2426,6 +2426,485 @@ if (Test-Path $vmExportPath) {{
             return True, f"{export_path}/{vm_name}"
 
 
+class BackupCatalog:
+    """Manages the backup catalog/manifest for a repository.
+
+    The catalog is a JSON file stored at {backup_path}/.backer/catalog.json
+    that provides a central record of all backups in the repository.
+    This enables restore operations even without the Backer server.
+    """
+
+    CATALOG_VERSION = "1.0"
+    CATALOG_DIR = ".backer"
+    CATALOG_FILE = "catalog.json"
+
+    def __init__(self, api: "HyperVAPI"):
+        """Initialize catalog manager.
+
+        Args:
+            api: HyperVAPI instance for PowerShell execution
+        """
+        self.api = api
+
+    def read_catalog(
+        self,
+        backup_path: str,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read existing catalog from repository.
+
+        Args:
+            backup_path: Root backup repository path
+            smb_username: SMB username for network share authentication
+            smb_password: SMB password for network share authentication
+            smb_domain: SMB domain for network share authentication
+
+        Returns:
+            Catalog dict if exists and valid, None otherwise
+        """
+        smb_unc = ""
+        full_username = smb_username or ""
+        safe_password = (smb_password or "").replace("'", "''")
+
+        if backup_path.startswith("\\\\"):
+            parts = backup_path.replace("\\\\", "").split("\\")
+            if len(parts) >= 2:
+                smb_unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if smb_domain and smb_username and "\\" not in smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$backupPath = '{backup_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+try {{
+    if ($smbUnc) {{
+        & net use $smbUnc /user:$smbUser $smbPass 2>&1 | Out-Null
+    }}
+
+    $catalogPath = Join-Path $backupPath "{self.CATALOG_DIR}"
+    $catalogPath = Join-Path $catalogPath "{self.CATALOG_FILE}"
+
+    if (Test-Path $catalogPath) {{
+        Get-Content -Path $catalogPath -Raw
+    }} else {{
+        "NOT_FOUND"
+    }}
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell(script, timeout=60)
+
+        if rc != 0 or not stdout.strip() or stdout.strip() == "NOT_FOUND":
+            return None
+
+        if stdout.strip().startswith("ERROR:"):
+            logger.warning(f"Failed to read catalog: {stdout.strip()}")
+            return None
+
+        try:
+            return json.loads(stdout.strip())
+        except json.JSONDecodeError:
+            logger.warning("Catalog file exists but is not valid JSON")
+            return None
+
+    def update_catalog(
+        self,
+        backup_path: str,
+        vm_name: str,
+        vm_guid: str,
+        backup_timestamp: str,
+        backup_info: dict[str, Any],
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> bool:
+        """Update catalog after a successful backup.
+
+        Uses atomic write (temp file + rename) for safety.
+
+        Args:
+            backup_path: Root backup repository path
+            vm_name: Name of the VM that was backed up
+            vm_guid: GUID of the VM
+            backup_timestamp: Timestamp string (YYYYMMDD_HHMMSS)
+            backup_info: Dict with backup details (size_bytes, vhd_files, verified, etc.)
+            smb_username: SMB username
+            smb_password: SMB password
+            smb_domain: SMB domain
+
+        Returns:
+            True if catalog was updated successfully
+        """
+        from datetime import datetime as dt
+
+        # Read existing catalog or create new one
+        existing_catalog = self.read_catalog(
+            backup_path, smb_username, smb_password, smb_domain
+        )
+
+        if existing_catalog is None:
+            existing_catalog = {
+                "version": self.CATALOG_VERSION,
+                "generated_at": dt.now().isoformat(),
+                "repository_path": backup_path,
+                "vms": {},
+            }
+
+        # Update or add VM entry
+        if vm_guid not in existing_catalog.get("vms", {}):
+            existing_catalog["vms"][vm_guid] = {
+                "name": vm_name,
+                "guid": vm_guid,
+                "last_backup": backup_timestamp,
+                "total_backups": 0,
+                "total_size_bytes": 0,
+                "backups": [],
+            }
+
+        vm_entry = existing_catalog["vms"][vm_guid]
+        vm_entry["name"] = vm_name  # Update name in case it changed
+        vm_entry["last_backup"] = backup_timestamp
+
+        # Create backup entry
+        backup_entry = {
+            "timestamp": backup_timestamp,
+            "path": f"{vm_name}/{backup_timestamp}",
+            "size_bytes": backup_info.get("size_bytes", 0),
+            "created_at": dt.now().isoformat(),
+            "has_config": backup_info.get("config_saved", False),
+            "has_runbook": backup_info.get("has_runbook", backup_info.get("runbook_saved", False)),
+            "vhd_files": backup_info.get("vhd_files", []),
+            "verified": backup_info.get("verification_status") == "passed",
+        }
+
+        # Add to backups list (avoid duplicates)
+        existing_timestamps = [b["timestamp"] for b in vm_entry["backups"]]
+        if backup_timestamp not in existing_timestamps:
+            vm_entry["backups"].append(backup_entry)
+            vm_entry["total_backups"] = len(vm_entry["backups"])
+            vm_entry["total_size_bytes"] = sum(
+                b.get("size_bytes", 0) for b in vm_entry["backups"]
+            )
+
+        # Update catalog timestamp
+        existing_catalog["generated_at"] = dt.now().isoformat()
+
+        # Write catalog atomically
+        catalog_json = json.dumps(existing_catalog, indent=2)
+        safe_catalog_json = catalog_json.replace("'", "''")
+
+        smb_unc = ""
+        full_username = smb_username or ""
+        safe_password = (smb_password or "").replace("'", "''")
+
+        if backup_path.startswith("\\\\"):
+            parts = backup_path.replace("\\\\", "").split("\\")
+            if len(parts) >= 2:
+                smb_unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if smb_domain and smb_username and "\\" not in smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$backupPath = '{backup_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+try {{
+    if ($smbUnc) {{
+        & net use $smbUnc /user:$smbUser $smbPass 2>&1 | Out-Null
+    }}
+
+    # Ensure .backer directory exists
+    $catalogDir = Join-Path $backupPath "{self.CATALOG_DIR}"
+    if (-not (Test-Path $catalogDir)) {{
+        New-Item -ItemType Directory -Path $catalogDir -Force | Out-Null
+    }}
+
+    $catalogPath = Join-Path $catalogDir "{self.CATALOG_FILE}"
+    $tempPath = "$catalogPath.tmp"
+
+    # Write to temp file
+    $catalogContent = @'
+{safe_catalog_json}
+'@
+    $catalogContent | Out-File -FilePath $tempPath -Encoding UTF8 -Force
+
+    # Atomic rename
+    if (Test-Path $catalogPath) {{
+        Remove-Item -Path $catalogPath -Force
+    }}
+    Move-Item -Path $tempPath -Destination $catalogPath -Force
+
+    "SUCCESS"
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=60)
+
+        if "SUCCESS" in stdout:
+            logger.info(f"Updated backup catalog for {vm_name}")
+            return True
+
+        logger.warning(f"Failed to update catalog: {stdout} {stderr}")
+        return False
+
+    def rebuild_catalog(
+        self,
+        backup_path: str,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """Rebuild catalog by scanning all backups in repository.
+
+        Scans the repository for all VM backups and builds a fresh catalog.
+
+        Args:
+            backup_path: Root backup repository path
+            smb_username: SMB username
+            smb_password: SMB password
+            smb_domain: SMB domain
+
+        Returns:
+            Rebuilt catalog dict
+        """
+        from datetime import datetime as dt
+
+        smb_unc = ""
+        full_username = smb_username or ""
+        safe_password = (smb_password or "").replace("'", "''")
+
+        if backup_path.startswith("\\\\"):
+            parts = backup_path.replace("\\\\", "").split("\\")
+            if len(parts) >= 2:
+                smb_unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if smb_domain and smb_username and "\\" not in smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
+
+        script = f"""
+$ErrorActionPreference = 'Continue'
+$backupPath = '{backup_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+$catalog = @{{
+    version = "{self.CATALOG_VERSION}"
+    generated_at = (Get-Date).ToString('o')
+    repository_path = $backupPath
+    vms = @{{}}
+}}
+
+try {{
+    if ($smbUnc) {{
+        & net use $smbUnc /user:$smbUser $smbPass 2>&1 | Out-Null
+    }}
+
+    # Scan for VM folders (first level directories that aren't .backer)
+    $vmFolders = Get-ChildItem -Path $backupPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object {{ $_.Name -ne "{self.CATALOG_DIR}" }}
+
+    foreach ($vmFolder in $vmFolders) {{
+        $vmName = $vmFolder.Name
+
+        # Scan for timestamp folders
+        $timestampFolders = Get-ChildItem -Path $vmFolder.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.Name -match '^\d{{8}}_\d{{6}}$' }}
+
+        if ($timestampFolders.Count -eq 0) {{ continue }}
+
+        $vmGuid = $null
+        $backups = @()
+
+        foreach ($tsFolder in $timestampFolders) {{
+            $timestamp = $tsFolder.Name
+            $backupPath = "$vmName/$timestamp"
+
+            # Check for vm_full_config.json
+            $configPath = Join-Path $tsFolder.FullName "vm_full_config.json"
+            $hasConfig = Test-Path $configPath
+            $hasRunbook = Test-Path (Join-Path $tsFolder.FullName "recovery_runbook.ps1")
+
+            # Try to get VM GUID from config
+            if ($hasConfig -and -not $vmGuid) {{
+                try {{
+                    $config = Get-Content $configPath -Raw | ConvertFrom-Json
+                    $vmGuid = $config.vm.id
+                }} catch {{ }}
+            }}
+
+            # Find VHD files
+            $vhdFiles = @()
+            $vhdFolder = Join-Path $tsFolder.FullName "$vmName/Virtual Hard Disks"
+            if (-not (Test-Path $vhdFolder)) {{
+                $vhdFolder = Join-Path $tsFolder.FullName "Virtual Hard Disks"
+            }}
+            if (Test-Path $vhdFolder) {{
+                $vhds = Get-ChildItem -Path $vhdFolder -Include "*.vhdx","*.vhd" -Recurse -ErrorAction SilentlyContinue
+                $vhdFiles = @($vhds | ForEach-Object {{ $_.Name }})
+            }}
+
+            # Calculate size
+            $sizeBytes = 0
+            try {{
+                $sizeBytes = (Get-ChildItem -Path $tsFolder.FullName -Recurse -ErrorAction SilentlyContinue |
+                    Measure-Object -Property Length -Sum).Sum
+            }} catch {{ }}
+
+            $backups += @{{
+                timestamp = $timestamp
+                path = $backupPath
+                size_bytes = $sizeBytes
+                created_at = $tsFolder.CreationTime.ToString('o')
+                has_config = $hasConfig
+                has_runbook = $hasRunbook
+                vhd_files = $vhdFiles
+                verified = $false  # Can't know verification status from scan
+            }}
+        }}
+
+        if ($backups.Count -gt 0) {{
+            if (-not $vmGuid) {{ $vmGuid = [guid]::NewGuid().ToString() }}
+
+            # Sort backups by timestamp descending
+            $backups = $backups | Sort-Object -Property timestamp -Descending
+
+            $totalSize = ($backups | Measure-Object -Property size_bytes -Sum).Sum
+
+            $catalog.vms[$vmGuid] = @{{
+                name = $vmName
+                guid = $vmGuid
+                last_backup = $backups[0].timestamp
+                total_backups = $backups.Count
+                total_size_bytes = $totalSize
+                backups = $backups
+            }}
+        }}
+    }}
+
+}} catch {{
+    $catalog.error = $_.Exception.Message
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+
+$catalog | ConvertTo-Json -Depth 10 -Compress
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=300)
+
+        if rc != 0:
+            return {
+                "version": self.CATALOG_VERSION,
+                "generated_at": dt.now().isoformat(),
+                "repository_path": backup_path,
+                "vms": {},
+                "error": f"Failed to scan repository: {stderr}",
+            }
+
+        try:
+            catalog = json.loads(stdout.strip())
+
+            # Save the rebuilt catalog
+            self._save_catalog_direct(
+                backup_path, catalog, smb_username, smb_password, smb_domain
+            )
+
+            return catalog
+        except json.JSONDecodeError:
+            return {
+                "version": self.CATALOG_VERSION,
+                "generated_at": dt.now().isoformat(),
+                "repository_path": backup_path,
+                "vms": {},
+                "error": f"Failed to parse scan results: {stdout[:500]}",
+            }
+
+    def _save_catalog_direct(
+        self,
+        backup_path: str,
+        catalog: dict[str, Any],
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> bool:
+        """Save catalog directly without reading existing (used by rebuild)."""
+        catalog_json = json.dumps(catalog, indent=2)
+        safe_catalog_json = catalog_json.replace("'", "''")
+
+        smb_unc = ""
+        full_username = smb_username or ""
+        safe_password = (smb_password or "").replace("'", "''")
+
+        if backup_path.startswith("\\\\"):
+            parts = backup_path.replace("\\\\", "").split("\\")
+            if len(parts) >= 2:
+                smb_unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if smb_domain and smb_username and "\\" not in smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$backupPath = '{backup_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+try {{
+    if ($smbUnc) {{
+        & net use $smbUnc /user:$smbUser $smbPass 2>&1 | Out-Null
+    }}
+
+    $catalogDir = Join-Path $backupPath "{self.CATALOG_DIR}"
+    if (-not (Test-Path $catalogDir)) {{
+        New-Item -ItemType Directory -Path $catalogDir -Force | Out-Null
+    }}
+
+    $catalogPath = Join-Path $catalogDir "{self.CATALOG_FILE}"
+    $tempPath = "$catalogPath.tmp"
+
+    $catalogContent = @'
+{safe_catalog_json}
+'@
+    $catalogContent | Out-File -FilePath $tempPath -Encoding UTF8 -Force
+
+    if (Test-Path $catalogPath) {{
+        Remove-Item -Path $catalogPath -Force
+    }}
+    Move-Item -Path $tempPath -Destination $catalogPath -Force
+
+    "SUCCESS"
+}} catch {{
+    "ERROR: $($_.Exception.Message)"
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=60)
+        return "SUCCESS" in stdout
+
+
 class HyperVBackupManager:
     """High-level backup orchestration for Hyper-V.
 
@@ -2474,6 +2953,1388 @@ class HyperVBackupManager:
 
         return guests
 
+    def verify_backup(
+        self,
+        backup_path: str,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """Verify a backup's integrity.
+
+        Checks:
+        1. VHD files exist and are readable
+        2. VHD headers are valid (via Get-VHD cmdlet)
+        3. vm_full_config.json exists and is valid JSON
+        4. Required folder structure exists (Virtual Machines, Virtual Hard Disks)
+
+        Args:
+            backup_path: Path to the backup timestamp folder (e.g., VMName/20250115_103000)
+            smb_username: Username for SMB authentication
+            smb_password: Password for SMB authentication
+            smb_domain: Domain for SMB authentication
+
+        Returns:
+            Dict with verification results:
+            - success: bool - Overall verification passed
+            - vhd_files_valid: bool - All VHD files are valid
+            - config_valid: bool - vm_full_config.json is valid
+            - structure_valid: bool - Required folders exist
+            - errors: list[str] - Fatal errors
+            - warnings: list[str] - Non-fatal issues
+            - checked_files: list[dict] - Details of each file checked
+            - duration_seconds: float - Time taken to verify
+        """
+        # Build SMB credentials
+        smb_unc = ""
+        full_username = smb_username or ""
+        safe_password = (smb_password or "").replace("'", "''")
+
+        if backup_path.startswith("\\\\"):
+            # Extract UNC server/share for authentication
+            parts = backup_path.replace("\\\\", "").split("\\")
+            if len(parts) >= 2:
+                smb_unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if smb_domain and smb_username and "\\" not in smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
+
+        script = f"""
+$ErrorActionPreference = 'Continue'
+$backupPath = '{backup_path}'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+$result = @{{
+    success = $true
+    vhd_files_valid = $true
+    config_valid = $true
+    structure_valid = $true
+    errors = @()
+    warnings = @()
+    checked_files = @()
+    start_time = Get-Date
+}}
+
+try {{
+    # Connect to SMB if needed
+    if ($smbUnc) {{
+        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+        if ($LASTEXITCODE -ne 0) {{
+            $result.errors += "Failed to connect to SMB share: $netUseResult"
+            $result.success = $false
+            $result | ConvertTo-Json -Depth 10 -Compress
+            exit
+        }}
+    }}
+
+    # Check if backup path exists
+    if (-not (Test-Path $backupPath)) {{
+        $result.errors += "Backup path does not exist: $backupPath"
+        $result.success = $false
+        $result | ConvertTo-Json -Depth 10 -Compress
+        exit
+    }}
+
+    # Check for vm_full_config.json
+    $configPath = Join-Path $backupPath "vm_full_config.json"
+    if (Test-Path $configPath) {{
+        try {{
+            $configContent = Get-Content -Path $configPath -Raw -ErrorAction Stop
+            $config = $configContent | ConvertFrom-Json -ErrorAction Stop
+            $result.checked_files += @{{
+                path = $configPath
+                type = "config"
+                exists = $true
+                valid = $true
+                size_bytes = (Get-Item $configPath).Length
+            }}
+        }} catch {{
+            $result.config_valid = $false
+            $result.errors += "vm_full_config.json is invalid JSON: $_"
+            $result.checked_files += @{{
+                path = $configPath
+                type = "config"
+                exists = $true
+                valid = $false
+                error = $_.Exception.Message
+            }}
+        }}
+    }} else {{
+        $result.config_valid = $false
+        $result.warnings += "vm_full_config.json not found (older backup format)"
+        $result.checked_files += @{{
+            path = $configPath
+            type = "config"
+            exists = $false
+            valid = $false
+        }}
+    }}
+
+    # Find VM export folder (may be nested under VM name)
+    $vmFolders = Get-ChildItem -Path $backupPath -Directory -ErrorAction SilentlyContinue
+    $vmExportPath = $null
+
+    foreach ($folder in $vmFolders) {{
+        $vhdFolder = Join-Path $folder.FullName "Virtual Hard Disks"
+        $vmFolder = Join-Path $folder.FullName "Virtual Machines"
+        if ((Test-Path $vhdFolder) -or (Test-Path $vmFolder)) {{
+            $vmExportPath = $folder.FullName
+            break
+        }}
+    }}
+
+    # Also check if VHDs are directly in backup path
+    $directVhdPath = Join-Path $backupPath "Virtual Hard Disks"
+    $directVmPath = Join-Path $backupPath "Virtual Machines"
+    if ((Test-Path $directVhdPath) -or (Test-Path $directVmPath)) {{
+        $vmExportPath = $backupPath
+    }}
+
+    if (-not $vmExportPath) {{
+        $result.structure_valid = $false
+        $result.errors += "No VM export structure found (missing Virtual Hard Disks/Virtual Machines folders)"
+        $result.success = $false
+    }} else {{
+        # Check Virtual Machines folder
+        $vmConfigPath = Join-Path $vmExportPath "Virtual Machines"
+        if (Test-Path $vmConfigPath) {{
+            $vmcxFiles = Get-ChildItem -Path $vmConfigPath -Filter "*.vmcx" -ErrorAction SilentlyContinue
+            if ($vmcxFiles.Count -eq 0) {{
+                $result.warnings += "No .vmcx files found in Virtual Machines folder"
+            }} else {{
+                foreach ($vmcx in $vmcxFiles) {{
+                    $result.checked_files += @{{
+                        path = $vmcx.FullName
+                        type = "vmcx"
+                        exists = $true
+                        size_bytes = $vmcx.Length
+                    }}
+                }}
+            }}
+        }} else {{
+            $result.warnings += "Virtual Machines folder not found"
+        }}
+
+        # Check and validate VHD files
+        $vhdPath = Join-Path $vmExportPath "Virtual Hard Disks"
+        if (Test-Path $vhdPath) {{
+            $vhdFiles = Get-ChildItem -Path $vhdPath -Include "*.vhdx","*.vhd" -Recurse -ErrorAction SilentlyContinue |
+                Where-Object {{ $_.Extension -ne ".avhdx" }}
+
+            if ($vhdFiles.Count -eq 0) {{
+                $result.warnings += "No VHD files found in Virtual Hard Disks folder"
+            }}
+
+            foreach ($vhd in $vhdFiles) {{
+                $vhdInfo = @{{
+                    path = $vhd.FullName
+                    type = "vhd"
+                    exists = $true
+                    size_bytes = $vhd.Length
+                    valid = $false
+                }}
+
+                try {{
+                    # Validate VHD header using Get-VHD
+                    $vhdDetails = Get-VHD -Path $vhd.FullName -ErrorAction Stop
+                    $vhdInfo.valid = $true
+                    $vhdInfo.vhd_type = $vhdDetails.VhdType.ToString()
+                    $vhdInfo.vhd_format = $vhdDetails.VhdFormat.ToString()
+                    $vhdInfo.virtual_size_bytes = $vhdDetails.Size
+                    $vhdInfo.block_size = $vhdDetails.BlockSize
+                }} catch {{
+                    $vhdInfo.valid = $false
+                    $vhdInfo.error = $_.Exception.Message
+                    $result.vhd_files_valid = $false
+                    $result.errors += "VHD validation failed for $($vhd.Name): $($_.Exception.Message)"
+                }}
+
+                $result.checked_files += $vhdInfo
+            }}
+        }} else {{
+            $result.structure_valid = $false
+            $result.errors += "Virtual Hard Disks folder not found"
+        }}
+    }}
+
+    # Calculate overall success
+    $result.success = ($result.errors.Count -eq 0)
+
+}} catch {{
+    $result.success = $false
+    $result.errors += "Verification failed: $($_.Exception.Message)"
+}} finally {{
+    $result.duration_seconds = ((Get-Date) - $result.start_time).TotalSeconds
+    $result.Remove('start_time')
+
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+
+$result | ConvertTo-Json -Depth 10 -Compress
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=300)
+
+        if rc != 0:
+            return {
+                "success": False,
+                "vhd_files_valid": False,
+                "config_valid": False,
+                "structure_valid": False,
+                "errors": [f"PowerShell error: {stderr or 'Unknown error'}"],
+                "warnings": [],
+                "checked_files": [],
+                "duration_seconds": 0,
+            }
+
+        try:
+            result = json.loads(stdout.strip())
+            return result
+        except json.JSONDecodeError:
+            return {
+                "success": False,
+                "vhd_files_valid": False,
+                "config_valid": False,
+                "structure_valid": False,
+                "errors": [f"Failed to parse verification result: {stdout[:500]}"],
+                "warnings": [],
+                "checked_files": [],
+                "duration_seconds": 0,
+            }
+
+    def preflight_restore(
+        self,
+        import_path: str,
+        vm_name: str | None = None,
+        restore_path: str | None = None,
+        vhd_destination_path: str | None = None,
+        smb_username: str | None = None,
+        smb_password: str | None = None,
+        smb_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """Run preflight checks before restore operation.
+
+        Validates all prerequisites are met before attempting a restore:
+        - Source backup exists and is accessible
+        - VHD files exist and are readable
+        - vm_full_config.json is loadable
+        - Target storage has sufficient free space
+        - Required virtual switches exist on the host
+        - SMB/network connectivity is working
+
+        Args:
+            import_path: Path to the backup timestamp folder
+            vm_name: Optional new VM name (for space calculations)
+            restore_path: Optional restore path (for space check)
+            vhd_destination_path: Optional VHD destination (for space check)
+            smb_username: SMB username for network share authentication
+            smb_password: SMB password for network share authentication
+            smb_domain: SMB domain for network share authentication
+
+        Returns:
+            Dict with preflight results:
+            - all_passed: bool - All critical checks passed
+            - checks: list[dict] - Individual check results
+            - warnings: list[str] - Non-critical issues
+            - errors: list[str] - Critical failures
+            - backup_size_bytes: int - Total backup size
+            - required_switches: list[str] - Virtual switches needed
+            - missing_switches: list[str] - Switches not found on host
+        """
+        result: dict[str, Any] = {
+            "all_passed": True,
+            "checks": [],
+            "warnings": [],
+            "errors": [],
+            "backup_size_bytes": 0,
+            "required_switches": [],
+            "missing_switches": [],
+            "vm_config": None,
+        }
+
+        # Build SMB credentials
+        smb_unc = ""
+        full_username = smb_username or ""
+        safe_password = (smb_password or "").replace("'", "''")
+
+        if import_path.startswith("\\\\"):
+            parts = import_path.replace("\\\\", "").split("\\")
+            if len(parts) >= 2:
+                smb_unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if smb_domain and smb_username and "\\" not in smb_username:
+                full_username = f"{smb_domain}\\{smb_username}"
+
+        # Use host defaults if paths not specified
+        restore_path_ps = f"'{restore_path}'" if restore_path else "$null"
+        vhd_path_ps = f"'{vhd_destination_path}'" if vhd_destination_path else "$null"
+
+        script = f"""
+$ErrorActionPreference = 'Continue'
+$importPath = '{import_path}'
+$restorePath = {restore_path_ps}
+$vhdDestPath = {vhd_path_ps}
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username}'
+$smbPass = '{safe_password}'
+
+$result = @{{
+    all_passed = $true
+    checks = @()
+    warnings = @()
+    errors = @()
+    backup_size_bytes = 0
+    required_switches = @()
+    missing_switches = @()
+    vm_config = $null
+}}
+
+function Add-Check {{
+    param($name, $passed, $message, $severity, $details)
+    $result.checks += @{{
+        name = $name
+        passed = $passed
+        message = $message
+        severity = $severity
+        details = $details
+    }}
+    if (-not $passed -and $severity -eq "error") {{
+        $result.all_passed = $false
+        $result.errors += $message
+    }}
+    if (-not $passed -and $severity -eq "warning") {{
+        $result.warnings += $message
+    }}
+}}
+
+try {{
+    # === Check 1: SMB Connectivity ===
+    if ($smbUnc) {{
+        try {{
+            $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
+            if ($LASTEXITCODE -eq 0) {{
+                Add-Check -name "smb_connectivity" -passed $true `
+                    -message "SMB connection successful" -severity "error" -details @{{share = $smbUnc}}
+            }} else {{
+                Add-Check -name "smb_connectivity" -passed $false `
+                    -message "Failed to connect to SMB share: $netUseResult" -severity "error" -details @{{share = $smbUnc}}
+            }}
+        }} catch {{
+            Add-Check -name "smb_connectivity" -passed $false `
+                -message "SMB connection error: $_" -severity "error" -details @{{share = $smbUnc}}
+        }}
+    }} else {{
+        Add-Check -name "smb_connectivity" -passed $true `
+            -message "Local path - no SMB authentication needed" -severity "info" -details $null
+    }}
+
+    # === Check 2: Backup Path Exists ===
+    if (Test-Path $importPath) {{
+        Add-Check -name "backup_path_exists" -passed $true `
+            -message "Backup path exists" -severity "error" -details @{{path = $importPath}}
+    }} else {{
+        Add-Check -name "backup_path_exists" -passed $false `
+            -message "Backup path does not exist: $importPath" -severity "error" -details @{{path = $importPath}}
+    }}
+
+    # === Check 3: VM Config File ===
+    $configPath = Join-Path $importPath "vm_full_config.json"
+    if (Test-Path $configPath) {{
+        try {{
+            $configContent = Get-Content -Path $configPath -Raw -ErrorAction Stop
+            $vmConfig = $configContent | ConvertFrom-Json -ErrorAction Stop
+            $result.vm_config = $vmConfig
+            Add-Check -name "config_file_valid" -passed $true `
+                -message "vm_full_config.json is valid" -severity "error" -details @{{path = $configPath}}
+        }} catch {{
+            Add-Check -name "config_file_valid" -passed $false `
+                -message "vm_full_config.json is invalid: $_" -severity "error" -details @{{path = $configPath}}
+        }}
+    }} else {{
+        Add-Check -name "config_file_valid" -passed $false `
+            -message "vm_full_config.json not found (limited restore options)" -severity "warning" -details @{{path = $configPath}}
+    }}
+
+    # === Check 4: VHD Files Exist ===
+    $vmExportPath = $null
+    $vmFolders = Get-ChildItem -Path $importPath -Directory -ErrorAction SilentlyContinue
+    foreach ($folder in $vmFolders) {{
+        $vhdFolder = Join-Path $folder.FullName "Virtual Hard Disks"
+        if (Test-Path $vhdFolder) {{
+            $vmExportPath = $folder.FullName
+            break
+        }}
+    }}
+    if (-not $vmExportPath) {{
+        $directVhd = Join-Path $importPath "Virtual Hard Disks"
+        if (Test-Path $directVhd) {{ $vmExportPath = $importPath }}
+    }}
+
+    if ($vmExportPath) {{
+        $vhdFolder = Join-Path $vmExportPath "Virtual Hard Disks"
+        $vhdFiles = Get-ChildItem -Path $vhdFolder -Include "*.vhdx","*.vhd" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.Extension -ne ".avhdx" }}
+
+        if ($vhdFiles.Count -gt 0) {{
+            $totalSize = ($vhdFiles | Measure-Object -Property Length -Sum).Sum
+            $result.backup_size_bytes = $totalSize
+            Add-Check -name "vhd_files_exist" -passed $true `
+                -message "Found $($vhdFiles.Count) VHD file(s), total size: $([math]::Round($totalSize/1GB, 2)) GB" `
+                -severity "error" -details @{{count = $vhdFiles.Count; size_bytes = $totalSize}}
+        }} else {{
+            Add-Check -name "vhd_files_exist" -passed $false `
+                -message "No VHD files found in backup" -severity "error" -details @{{path = $vhdFolder}}
+        }}
+    }} else {{
+        Add-Check -name "vhd_files_exist" -passed $false `
+            -message "No VM export structure found in backup" -severity "error" -details $null
+    }}
+
+    # === Check 5: Target Storage Space ===
+    $targetPath = $restorePath
+    if (-not $targetPath) {{
+        $targetPath = (Get-VMHost).VirtualMachinePath
+    }}
+    if ($targetPath) {{
+        try {{
+            $drive = (Get-Item $targetPath -ErrorAction Stop).PSDrive
+            $freeSpace = (Get-PSDrive $drive.Name).Free
+            $requiredSpace = $result.backup_size_bytes * 1.2  # 20% buffer
+
+            if ($freeSpace -gt $requiredSpace) {{
+                Add-Check -name "storage_space" -passed $true `
+                    -message "Sufficient space: $([math]::Round($freeSpace/1GB, 2)) GB free, $([math]::Round($requiredSpace/1GB, 2)) GB needed" `
+                    -severity "error" -details @{{free_bytes = $freeSpace; required_bytes = $requiredSpace}}
+            }} else {{
+                Add-Check -name "storage_space" -passed $false `
+                    -message "Insufficient space: $([math]::Round($freeSpace/1GB, 2)) GB free, $([math]::Round($requiredSpace/1GB, 2)) GB needed" `
+                    -severity "error" -details @{{free_bytes = $freeSpace; required_bytes = $requiredSpace}}
+            }}
+        }} catch {{
+            Add-Check -name "storage_space" -passed $false `
+                -message "Could not check storage space: $_" -severity "warning" -details @{{path = $targetPath}}
+        }}
+    }} else {{
+        Add-Check -name "storage_space" -passed $false `
+            -message "Could not determine target storage path" -severity "warning" -details $null
+    }}
+
+    # === Check 6: Virtual Switches ===
+    if ($result.vm_config -and $result.vm_config.networkAdapters) {{
+        $hostSwitches = Get-VMSwitch -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+
+        foreach ($nic in $result.vm_config.networkAdapters) {{
+            $switchName = $nic.switchName
+            if ($switchName) {{
+                $result.required_switches += $switchName
+                if ($hostSwitches -notcontains $switchName) {{
+                    $result.missing_switches += $switchName
+                }}
+            }}
+        }}
+
+        $result.required_switches = @($result.required_switches | Select-Object -Unique)
+        $result.missing_switches = @($result.missing_switches | Select-Object -Unique)
+
+        if ($result.missing_switches.Count -eq 0) {{
+            Add-Check -name "virtual_switches" -passed $true `
+                -message "All required virtual switches exist" -severity "warning" `
+                -details @{{required = $result.required_switches}}
+        }} else {{
+            Add-Check -name "virtual_switches" -passed $false `
+                -message "Missing virtual switches: $($result.missing_switches -join ', ')" -severity "warning" `
+                -details @{{required = $result.required_switches; missing = $result.missing_switches}}
+        }}
+    }} else {{
+        Add-Check -name "virtual_switches" -passed $true `
+            -message "No network adapter configuration found - switches not checked" -severity "info" -details $null
+    }}
+
+    # === Check 7: VMCX File (for import mode) ===
+    $vmcxPath = Get-ChildItem -Path $importPath -Filter "*.vmcx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($vmcxPath) {{
+        Add-Check -name "vmcx_file" -passed $true `
+            -message "VMCX file found (Import-VM method available)" -severity "info" `
+            -details @{{path = $vmcxPath.FullName}}
+    }} else {{
+        Add-Check -name "vmcx_file" -passed $false `
+            -message "No VMCX file found (will use rebuild method)" -severity "info" -details $null
+    }}
+
+}} catch {{
+    $result.all_passed = $false
+    $result.errors += "Preflight check failed: $($_.Exception.Message)"
+}} finally {{
+    if ($smbUnc) {{
+        & net use $smbUnc /delete /y 2>&1 | Out-Null
+    }}
+}}
+
+# Don't include full vm_config in JSON output (too large)
+$result.vm_config = $null
+$result | ConvertTo-Json -Depth 10 -Compress
+"""
+        rc, stdout, stderr = self.api._run_powershell_large(script, timeout=120)
+
+        if rc != 0:
+            return {
+                "all_passed": False,
+                "checks": [],
+                "warnings": [],
+                "errors": [f"Preflight check failed: {stderr or 'Unknown error'}"],
+                "backup_size_bytes": 0,
+                "required_switches": [],
+                "missing_switches": [],
+            }
+
+        try:
+            result = json.loads(stdout.strip())
+            return result
+        except json.JSONDecodeError:
+            return {
+                "all_passed": False,
+                "checks": [],
+                "warnings": [],
+                "errors": [f"Failed to parse preflight results: {stdout[:500]}"],
+                "backup_size_bytes": 0,
+                "required_switches": [],
+                "missing_switches": [],
+            }
+
+    def _generate_dry_run_result(
+        self,
+        import_path: str,
+        target_vm_name: str,
+        actual_mode: str,
+        restore_path: str | None,
+        vhd_destination_path: str | None,
+        full_config: dict[str, Any] | None,
+        existing_vm: Any | None,
+        smb_unc: str,
+        full_username: str,
+        safe_password: str,
+        network_mapping: dict[str, str] | None,
+        start_after_restore: bool,
+    ) -> dict[str, Any]:
+        """Generate a dry-run result showing what restore would do without executing.
+
+        Returns a comprehensive plan of all operations that would be performed,
+        files that would be copied, settings that would be applied, and potential
+        issues that might occur.
+
+        Args:
+            import_path: Path to backup timestamp folder
+            target_vm_name: Name for the restored VM
+            actual_mode: Determined restore mode (inplace, import, rebuild)
+            restore_path: Optional VM configuration destination
+            vhd_destination_path: Optional VHD file destination
+            full_config: Loaded VM configuration from backup
+            existing_vm: Existing VM object if found
+            smb_unc: SMB UNC path for authentication
+            full_username: SMB username with domain
+            safe_password: Escaped SMB password
+            network_mapping: Network switch mapping
+            start_after_restore: Whether VM would be started
+
+        Returns:
+            Dict with dry-run analysis including:
+            - would_succeed: bool - Likely success based on checks
+            - restore_mode: str - The restore mode that would be used
+            - operations: list[dict] - Ordered list of operations
+            - files_to_copy: list[dict] - Files that would be copied
+            - settings_to_apply: dict - VM settings that would be configured
+            - storage_required_bytes: int - Estimated storage needed
+            - warnings: list[str] - Potential issues
+            - errors: list[str] - Blocking problems
+        """
+        result: dict[str, Any] = {
+            "would_succeed": True,
+            "restore_mode": actual_mode,
+            "vm_name": target_vm_name,
+            "import_path": import_path,
+            "operations": [],
+            "files_to_copy": [],
+            "settings_to_apply": {},
+            "storage_required_bytes": 0,
+            "warnings": [],
+            "errors": [],
+            "network_switches": {
+                "required": [],
+                "available": [],
+                "missing": [],
+                "mapped": {},
+            },
+        }
+
+        # Run preflight checks to get baseline info
+        # Extract username/domain from full_username if present
+        preflight_username = None
+        preflight_domain = None
+        preflight_password = None
+
+        if full_username:
+            if "\\" in full_username:
+                preflight_domain = full_username.split("\\")[0]
+                preflight_username = full_username.split("\\")[-1]
+            else:
+                preflight_username = full_username
+            # Unescape the password
+            preflight_password = safe_password.replace("''", "'") if safe_password else None
+
+        preflight = self.preflight_restore(
+            import_path=import_path,
+            vm_name=target_vm_name,
+            restore_path=restore_path,
+            vhd_destination_path=vhd_destination_path,
+            smb_username=preflight_username,
+            smb_password=preflight_password,
+            smb_domain=preflight_domain,
+        )
+
+        result["preflight_checks"] = preflight.get("checks", [])
+        result["storage_required_bytes"] = preflight.get("backup_size_bytes", 0)
+
+        # Inherit errors/warnings from preflight
+        if preflight.get("errors"):
+            result["errors"].extend(preflight["errors"])
+            result["would_succeed"] = False
+        if preflight.get("warnings"):
+            result["warnings"].extend(preflight["warnings"])
+
+        # Network switch analysis
+        result["network_switches"]["required"] = preflight.get("required_switches", [])
+        result["network_switches"]["missing"] = preflight.get("missing_switches", [])
+
+        # Build list of operations that would be performed
+        operations = []
+        op_num = 1
+
+        # Operation 1: SMB authentication (if needed)
+        if smb_unc:
+            operations.append({
+                "step": op_num,
+                "action": "smb_connect",
+                "description": f"Authenticate to SMB share {smb_unc}",
+                "target": smb_unc,
+                "details": f"Using credentials for user: {full_username}",
+            })
+            op_num += 1
+
+        # Mode-specific operations
+        if actual_mode == "inplace":
+            if existing_vm:
+                operations.append({
+                    "step": op_num,
+                    "action": "stop_vm",
+                    "description": f"Stop VM '{target_vm_name}' if running",
+                    "target": target_vm_name,
+                    "details": "VM must be stopped for VHD replacement",
+                })
+                op_num += 1
+
+                operations.append({
+                    "step": op_num,
+                    "action": "copy_vhds",
+                    "description": "Copy VHD files from backup to existing VM storage",
+                    "target": "VHD files",
+                    "details": "Replaces current VHDs with backup versions",
+                })
+                op_num += 1
+
+                operations.append({
+                    "step": op_num,
+                    "action": "verify_vhds",
+                    "description": "Verify restored VHD file integrity",
+                    "target": "VHD files",
+                    "details": "Run Get-VHD to validate VHD headers",
+                })
+                op_num += 1
+            else:
+                result["errors"].append(f"In-place restore requires existing VM '{target_vm_name}'")
+                result["would_succeed"] = False
+
+        elif actual_mode == "import":
+            # Copy files to local storage first (for SMB)
+            if smb_unc:
+                operations.append({
+                    "step": op_num,
+                    "action": "copy_to_local",
+                    "description": "Copy backup files from network share to local storage",
+                    "target": import_path,
+                    "details": "Required for Import-VM which cannot directly access SMB",
+                })
+                op_num += 1
+
+            operations.append({
+                "step": op_num,
+                "action": "import_vm",
+                "description": f"Import VM using Import-VM cmdlet",
+                "target": target_vm_name,
+                "details": "Uses .vmcx configuration file for full VM restore",
+            })
+            op_num += 1
+
+            if existing_vm:
+                result["warnings"].append(
+                    f"VM '{target_vm_name}' already exists - will generate new ID"
+                )
+
+        elif actual_mode == "rebuild":
+            # Rebuild is most complex
+            if smb_unc:
+                operations.append({
+                    "step": op_num,
+                    "action": "copy_to_local",
+                    "description": "Copy VHD files from network share to local storage",
+                    "target": import_path,
+                    "details": "VHDs must be local for New-VM",
+                })
+                op_num += 1
+
+            operations.append({
+                "step": op_num,
+                "action": "create_vm",
+                "description": f"Create new VM '{target_vm_name}' using New-VM",
+                "target": target_vm_name,
+                "details": "Creates VM shell without disks",
+            })
+            op_num += 1
+
+            operations.append({
+                "step": op_num,
+                "action": "attach_vhds",
+                "description": "Attach VHD files to new VM",
+                "target": "VHD files",
+                "details": "Connect all virtual disks from backup",
+            })
+            op_num += 1
+
+            if full_config:
+                operations.append({
+                    "step": op_num,
+                    "action": "apply_config",
+                    "description": "Apply VM configuration from vm_full_config.json",
+                    "target": target_vm_name,
+                    "details": "Restores memory, CPU, network, firmware settings",
+                })
+                op_num += 1
+
+        # Apply network mapping if provided
+        if network_mapping:
+            operations.append({
+                "step": op_num,
+                "action": "map_networks",
+                "description": "Apply network switch mappings",
+                "target": "Network adapters",
+                "details": f"Mappings: {network_mapping}",
+            })
+            result["network_switches"]["mapped"] = network_mapping
+            op_num += 1
+
+        # Start VM if requested
+        if start_after_restore:
+            operations.append({
+                "step": op_num,
+                "action": "start_vm",
+                "description": f"Start VM '{target_vm_name}'",
+                "target": target_vm_name,
+                "details": "Power on the restored VM",
+            })
+            op_num += 1
+
+        # Cleanup operations (for SMB)
+        if smb_unc:
+            operations.append({
+                "step": op_num,
+                "action": "cleanup",
+                "description": "Clean up temporary files and disconnect SMB",
+                "target": "Temporary storage",
+                "details": "Remove local copies of backup files",
+            })
+            op_num += 1
+
+        result["operations"] = operations
+
+        # Extract files that would be copied from preflight
+        if preflight.get("vm_config"):
+            config = preflight["vm_config"]
+            files_to_copy = []
+
+            # VHD files
+            vhds = config.get("hardDrives", [])
+            for vhd in vhds:
+                vhd_path = vhd.get("path", "")
+                if vhd_path:
+                    files_to_copy.append({
+                        "type": "vhd",
+                        "source": vhd_path,
+                        "destination": vhd_destination_path or restore_path or "default Hyper-V path",
+                        "controller": f"{vhd.get('controllerType', 'Unknown')} {vhd.get('controllerNumber', 0)}:{vhd.get('controllerLocation', 0)}",
+                    })
+
+            # Config file
+            files_to_copy.append({
+                "type": "config",
+                "source": f"{import_path}\\vm_full_config.json",
+                "destination": "Used for settings restoration",
+                "controller": None,
+            })
+
+            result["files_to_copy"] = files_to_copy
+
+        # Extract settings that would be applied
+        if full_config:
+            vm_settings = full_config.get("vm", {})
+            result["settings_to_apply"] = {
+                "name": target_vm_name,
+                "generation": vm_settings.get("generation", 2),
+                "memory_mb": vm_settings.get("memoryStartupBytes", 0) // (1024 * 1024) if vm_settings.get("memoryStartupBytes") else "unknown",
+                "processors": vm_settings.get("processorCount", "unknown"),
+                "dynamic_memory": vm_settings.get("dynamicMemoryEnabled", False),
+                "secure_boot": full_config.get("firmware", {}).get("secureBootEnabled", "unknown"),
+                "network_adapters": len(full_config.get("networkAdapters", [])),
+                "hard_drives": len(full_config.get("hardDrives", [])),
+            }
+
+            # Check for network switch issues
+            for nic in full_config.get("networkAdapters", []):
+                switch_name = nic.get("switchName")
+                if switch_name:
+                    if switch_name not in result["network_switches"]["required"]:
+                        result["network_switches"]["required"].append(switch_name)
+
+        # Final assessment
+        if result["network_switches"]["missing"] and not network_mapping:
+            missing = result["network_switches"]["missing"]
+            result["warnings"].append(
+                f"Missing virtual switches: {missing}. Use network_mapping to specify alternatives."
+            )
+
+        if not result["errors"]:
+            result["would_succeed"] = preflight.get("all_passed", False)
+
+        return result
+
+    def generate_recovery_runbook(
+        self,
+        vm_name: str,
+        backup_path: str,
+        vm_config: dict[str, Any],
+        timestamp: str | None = None,
+    ) -> str:
+        """Generate a self-contained PowerShell recovery script for manual VM restore.
+
+        Creates a recovery_runbook.ps1 that can restore the VM without Backer,
+        useful for disaster recovery scenarios where the Backer server is unavailable.
+
+        The generated script includes:
+        - Prerequisites validation (Hyper-V module, admin rights)
+        - SMB authentication template (commented)
+        - Import-VM method (primary restore path)
+        - New-VM rebuild method (fallback)
+        - Full VM configuration application
+        - Network adapter setup with switch validation
+        - Validation and startup instructions
+
+        Args:
+            vm_name: Name of the VM being backed up
+            backup_path: Full path to the backup timestamp folder
+            vm_config: VM configuration dict from capture_vm_config()
+            timestamp: Optional backup timestamp for documentation
+
+        Returns:
+            str: Complete PowerShell script content
+        """
+        from datetime import datetime as dt
+
+        if not timestamp:
+            timestamp = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Extract key configuration values
+        vm_settings = vm_config.get("vm", {})
+        firmware = vm_config.get("firmware", {})
+        network_adapters = vm_config.get("networkAdapters", [])
+        hard_drives = vm_config.get("hardDrives", [])
+        memory = vm_config.get("memory", {})
+
+        # Get VM generation (important for firmware settings)
+        generation = vm_settings.get("generation", 2)
+
+        # Get memory settings
+        mem_startup_bytes = vm_settings.get("memoryStartupBytes", 1073741824)
+        mem_startup_mb = mem_startup_bytes // (1024 * 1024) if mem_startup_bytes else 1024
+        dynamic_memory = vm_settings.get("dynamicMemoryEnabled", False)
+        mem_min_mb = (memory.get("minimumBytes", mem_startup_bytes) or mem_startup_bytes) // (1024 * 1024)
+        mem_max_mb = (memory.get("maximumBytes", mem_startup_bytes) or mem_startup_bytes) // (1024 * 1024)
+
+        # Get processor settings
+        processor_count = vm_settings.get("processorCount", 2)
+
+        # Get secure boot settings
+        secure_boot_enabled = firmware.get("secureBootEnabled", True) if generation == 2 else False
+        secure_boot_template = firmware.get("secureBootTemplate", "MicrosoftWindows")
+
+        # Build VHD attachments section
+        vhd_lines = []
+        for i, vhd in enumerate(hard_drives):
+            vhd_path = vhd.get("path", "")
+            controller_type = vhd.get("controllerType", "SCSI")
+            controller_num = vhd.get("controllerNumber", 0)
+            controller_loc = vhd.get("controllerLocation", i)
+
+            if vhd_path:
+                # Extract just the filename for the relative path
+                vhd_filename = vhd_path.split("\\")[-1] if "\\" in vhd_path else vhd_path
+                vhd_lines.append(f'''
+    # Attach VHD: {vhd_filename}
+    $vhdPath = Join-Path $vmVhdFolder "{vhd_filename}"
+    if (Test-Path $vhdPath) {{
+        Add-VMHardDiskDrive -VMName $NewVmName -Path $vhdPath `
+            -ControllerType {controller_type} `
+            -ControllerNumber {controller_num} `
+            -ControllerLocation {controller_loc}
+        Write-Host "  Attached: $vhdPath" -ForegroundColor Green
+    }} else {{
+        Write-Warning "VHD not found: $vhdPath"
+    }}''')
+
+        vhd_section = "\n".join(vhd_lines) if vhd_lines else "    # No VHD files found in configuration"
+
+        # Build network adapter section
+        nic_lines = []
+        switch_names = set()
+        for nic in network_adapters:
+            switch_name = nic.get("switchName", "")
+            nic_name = nic.get("name", "Network Adapter")
+            mac_address = nic.get("macAddress", "")
+            dynamic_mac = nic.get("dynamicMacAddressEnabled", True)
+            vlan_id = nic.get("vlanAccess", {}).get("accessVlanId") if nic.get("vlanAccess") else None
+
+            if switch_name:
+                switch_names.add(switch_name)
+
+            # Build the NIC configuration PowerShell block
+            mac_clean = mac_address.replace("-", "").replace(":", "") if mac_address else ""
+            static_mac_line = f'\n        Set-VMNetworkAdapter -VMNetworkAdapter $nic -StaticMacAddress "{mac_clean}"' if (not dynamic_mac and mac_clean) else ""
+            vlan_line = f"\n        Set-VMNetworkAdapterVlan -VMNetworkAdapter $nic -Access -VlanId {vlan_id}" if vlan_id else ""
+
+            nic_config = f'''
+    # Network Adapter: {nic_name}
+    $switchName = "{switch_name}"
+    if ($NetworkMapping -and $NetworkMapping.ContainsKey($switchName)) {{
+        $switchName = $NetworkMapping[$switchName]
+    }}
+
+    $switch = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue
+    if ($switch) {{
+        $nic = Add-VMNetworkAdapter -VMName $NewVmName -SwitchName $switchName -Name "{nic_name}" -PassThru{static_mac_line}{vlan_line}
+        Write-Host "  Added NIC: {nic_name} -> $switchName" -ForegroundColor Green
+    }} else {{
+        Write-Warning "Virtual switch not found: {switch_name}"
+        Add-VMNetworkAdapter -VMName $NewVmName -Name "{nic_name}"
+        Write-Host "  Added NIC without switch: {nic_name}" -ForegroundColor Yellow
+    }}'''
+
+            nic_lines.append(nic_config)
+
+        nic_section = "\n".join(nic_lines) if nic_lines else "    # No network adapters in configuration"
+        switches_list = ", ".join(f'"{s}"' for s in switch_names) if switch_names else '"Default Switch"'
+
+        # Dynamic memory config string
+        dynamic_mem_str = "true" if dynamic_memory else "false"
+
+        # Build the complete runbook script
+        script = f'''<#
+.SYNOPSIS
+    Recovery Runbook for VM: {vm_name}
+    Generated by Backer - {timestamp}
+
+.DESCRIPTION
+    This script restores the Hyper-V VM "{vm_name}" from backup.
+    It can be run on any Hyper-V host without requiring Backer.
+
+    The script attempts two restore methods:
+    1. Import-VM: Uses the .vmcx file if available (preserves most settings)
+    2. New-VM Rebuild: Creates a new VM and attaches VHDs (fallback method)
+
+.PARAMETER BackupPath
+    Path to the backup folder containing the VM export.
+    Defaults to the script's directory.
+
+.PARAMETER NewVmName
+    Name for the restored VM. Defaults to original name: {vm_name}
+
+.PARAMETER RestorePath
+    Path where VM configuration files will be stored.
+    Defaults to Hyper-V default location.
+
+.PARAMETER VhdDestinationPath
+    Path where VHD files will be copied/stored.
+    Defaults to Hyper-V default VHD location.
+
+.PARAMETER NetworkMapping
+    Hashtable mapping original switch names to new ones.
+    Example: @{{"OriginalSwitch" = "NewSwitch"}}
+
+.PARAMETER SkipImport
+    Skip the Import-VM method and go straight to rebuild.
+
+.PARAMETER StartAfterRestore
+    Start the VM after successful restore.
+
+.EXAMPLE
+    .\\recovery_runbook.ps1
+    Restore VM using defaults from the backup folder.
+
+.EXAMPLE
+    .\\recovery_runbook.ps1 -BackupPath "D:\\Backups\\{vm_name}\\20250115_103000"
+    Restore from a specific backup path.
+
+.EXAMPLE
+    .\\recovery_runbook.ps1 -NetworkMapping @{{"OldSwitch" = "NewSwitch"}} -StartAfterRestore
+    Restore with network remapping and start the VM.
+
+.NOTES
+    Original VM Configuration:
+    - Generation: {generation}
+    - Memory: {mem_startup_mb} MB (Dynamic: {dynamic_mem_str})
+    - Processors: {processor_count}
+    - Secure Boot: {"true" if secure_boot_enabled else "false"}
+    - Network Adapters: {len(network_adapters)}
+    - Hard Drives: {len(hard_drives)}
+
+    Required Virtual Switches: {switches_list}
+#>
+
+[CmdletBinding()]
+param(
+    [string]$BackupPath = $PSScriptRoot,
+    [string]$NewVmName = "{vm_name}",
+    [string]$RestorePath,
+    [string]$VhdDestinationPath,
+    [hashtable]$NetworkMapping = @{{}},
+    [switch]$SkipImport,
+    [switch]$StartAfterRestore
+)
+
+$ErrorActionPreference = "Stop"
+
+# ============================================================================
+# PREREQUISITES CHECK
+# ============================================================================
+Write-Host ("=" * 70) -ForegroundColor Cyan
+Write-Host "Backer Recovery Runbook - {vm_name}" -ForegroundColor Cyan
+Write-Host ("=" * 70) -ForegroundColor Cyan
+Write-Host ""
+
+# Check for admin rights
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {{
+    Write-Error "This script must be run as Administrator"
+    exit 1
+}}
+
+# Check Hyper-V module
+if (-not (Get-Module -ListAvailable -Name Hyper-V)) {{
+    Write-Error "Hyper-V PowerShell module not found. Install the Hyper-V role."
+    exit 1
+}}
+Import-Module Hyper-V
+
+Write-Host "[OK] Prerequisites validated" -ForegroundColor Green
+Write-Host ""
+
+# ============================================================================
+# SMB AUTHENTICATION (Uncomment and configure if backup is on network share)
+# ============================================================================
+<#
+$smbServer = "your-server"
+$smbShare = "your-share"
+$smbUser = "domain\\username"
+$smbPass = "password"
+
+$smbPath = "\\\\$smbServer\\$smbShare"
+$secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
+
+try {{
+    New-PSDrive -Name "BackupDrive" -PSProvider FileSystem -Root $smbPath -Credential $cred -ErrorAction Stop
+    $BackupPath = "BackupDrive:\\path\\to\\backup"
+    Write-Host "[OK] Connected to SMB share" -ForegroundColor Green
+}} catch {{
+    Write-Error "Failed to connect to SMB share: $_"
+    exit 1
+}}
+#>
+
+# ============================================================================
+# VALIDATE BACKUP PATH
+# ============================================================================
+Write-Host "Validating backup at: $BackupPath" -ForegroundColor Yellow
+
+if (-not (Test-Path $BackupPath)) {{
+    Write-Error "Backup path not found: $BackupPath"
+    exit 1
+}}
+
+# Look for VM export folder structure
+$vmFolder = Get-ChildItem -Path $BackupPath -Directory | Where-Object {{
+    Test-Path (Join-Path $_.FullName "Virtual Machines")
+}} | Select-Object -First 1
+
+if (-not $vmFolder) {{
+    $vmFolder = Get-ChildItem -Path $BackupPath -Directory -Filter "{vm_name}" | Select-Object -First 1
+}}
+
+if ($vmFolder) {{
+    $VmExportPath = $vmFolder.FullName
+    $VhdSourcePath = Join-Path $VmExportPath "Virtual Hard Disks"
+    Write-Host "[OK] Found VM export at: $VmExportPath" -ForegroundColor Green
+}} else {{
+    # Assume flat structure
+    $VmExportPath = $BackupPath
+    $VhdSourcePath = Join-Path $BackupPath "Virtual Hard Disks"
+    if (-not (Test-Path $VhdSourcePath)) {{
+        $VhdSourcePath = $BackupPath  # VHDs might be in root
+    }}
+    Write-Host "[INFO] Using backup path directly: $VmExportPath" -ForegroundColor Yellow
+}}
+
+# Check for .vmcx file
+$vmcxFile = Get-ChildItem -Path $BackupPath -Recurse -Filter "*.vmcx" -ErrorAction SilentlyContinue | Select-Object -First 1
+$hasVmcx = $null -ne $vmcxFile
+
+Write-Host ""
+Write-Host "Backup Analysis:" -ForegroundColor Yellow
+Write-Host "  VM Export Path: $VmExportPath"
+Write-Host "  VHD Source: $VhdSourcePath"
+Write-Host "  Has .vmcx file: $hasVmcx"
+Write-Host ""
+
+# ============================================================================
+# CHECK FOR EXISTING VM
+# ============================================================================
+$existingVm = Get-VM -Name $NewVmName -ErrorAction SilentlyContinue
+if ($existingVm) {{
+    Write-Warning "VM '$NewVmName' already exists!"
+    $response = Read-Host "Delete existing VM and continue? (y/N)"
+    if ($response -eq 'y' -or $response -eq 'Y') {{
+        Write-Host "Removing existing VM..." -ForegroundColor Yellow
+        if ($existingVm.State -eq 'Running') {{
+            Stop-VM -Name $NewVmName -Force -TurnOff
+        }}
+        Remove-VM -Name $NewVmName -Force
+        Write-Host "[OK] Existing VM removed" -ForegroundColor Green
+    }} else {{
+        Write-Error "Cannot proceed with existing VM"
+        exit 1
+    }}
+}}
+
+# ============================================================================
+# METHOD 1: IMPORT-VM (Recommended)
+# ============================================================================
+$restoreSuccess = $false
+
+if (-not $SkipImport -and $hasVmcx) {{
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host "Method 1: Import-VM" -ForegroundColor Cyan
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+
+    try {{
+        $importParams = @{{
+            Path = $vmcxFile.FullName
+            GenerateNewId = $true
+            Copy = $true
+        }}
+
+        if ($RestorePath) {{
+            $importParams.VirtualMachinePath = $RestorePath
+        }}
+        if ($VhdDestinationPath) {{
+            $importParams.VhdDestinationPath = $VhdDestinationPath
+        }}
+
+        Write-Host "Importing VM from: $($vmcxFile.FullName)" -ForegroundColor Yellow
+        $importedVm = Import-VM @importParams
+
+        if ($importedVm.Name -ne $NewVmName) {{
+            Rename-VM -VM $importedVm -NewName $NewVmName
+        }}
+
+        Write-Host "[OK] VM imported successfully" -ForegroundColor Green
+        $restoreSuccess = $true
+
+    }} catch {{
+        Write-Warning "Import-VM failed: $_"
+        Write-Host "Falling back to rebuild method..." -ForegroundColor Yellow
+    }}
+}}
+
+# ============================================================================
+# METHOD 2: NEW-VM REBUILD (Fallback)
+# ============================================================================
+if (-not $restoreSuccess) {{
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host "Method 2: New-VM Rebuild" -ForegroundColor Cyan
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+
+    $vmHost = Get-VMHost
+    $targetVmPath = if ($RestorePath) {{ $RestorePath }} else {{ $vmHost.VirtualMachinePath }}
+    $targetVhdPath = if ($VhdDestinationPath) {{ $VhdDestinationPath }} else {{ $vmHost.VirtualHardDiskPath }}
+
+    Write-Host "Creating VM with configuration:" -ForegroundColor Yellow
+    Write-Host "  Name: $NewVmName"
+    Write-Host "  Generation: {generation}"
+    Write-Host "  Memory: {mem_startup_mb} MB"
+    Write-Host "  Processors: {processor_count}"
+    Write-Host "  VM Path: $targetVmPath"
+    Write-Host "  VHD Path: $targetVhdPath"
+    Write-Host ""
+
+    try {{
+        $newVmParams = @{{
+            Name = $NewVmName
+            Generation = {generation}
+            MemoryStartupBytes = {mem_startup_bytes}
+            NoVHD = $true
+            Path = $targetVmPath
+        }}
+
+        $vm = New-VM @newVmParams
+        Write-Host "[OK] VM created" -ForegroundColor Green
+
+        # Configure memory
+        Write-Host "Configuring memory..." -ForegroundColor Yellow
+        if (${dynamic_mem_str}) {{
+            Set-VMMemory -VMName $NewVmName `
+                -DynamicMemoryEnabled $true `
+                -MinimumBytes {mem_min_mb}MB `
+                -MaximumBytes {mem_max_mb}MB `
+                -StartupBytes {mem_startup_mb}MB
+        }} else {{
+            Set-VMMemory -VMName $NewVmName -DynamicMemoryEnabled $false -StartupBytes {mem_startup_mb}MB
+        }}
+        Write-Host "[OK] Memory configured" -ForegroundColor Green
+
+        # Configure processor
+        Write-Host "Configuring processor..." -ForegroundColor Yellow
+        Set-VMProcessor -VMName $NewVmName -Count {processor_count}
+        Write-Host "[OK] Processor configured" -ForegroundColor Green
+
+        # Configure firmware (Gen 2 only)
+        if ({generation} -eq 2) {{
+            Write-Host "Configuring firmware..." -ForegroundColor Yellow
+            if (${"true" if secure_boot_enabled else "false"}) {{
+                Set-VMFirmware -VMName $NewVmName -EnableSecureBoot On -SecureBootTemplate "{secure_boot_template}"
+            }} else {{
+                Set-VMFirmware -VMName $NewVmName -EnableSecureBoot Off
+            }}
+            Write-Host "[OK] Firmware configured" -ForegroundColor Green
+        }}
+
+        # Remove default network adapter
+        Get-VMNetworkAdapter -VMName $NewVmName | Remove-VMNetworkAdapter
+
+        # Copy VHD files
+        Write-Host "Copying and attaching VHD files..." -ForegroundColor Yellow
+        $vmVhdFolder = Join-Path $targetVhdPath $NewVmName
+        if (-not (Test-Path $vmVhdFolder)) {{
+            New-Item -ItemType Directory -Path $vmVhdFolder -Force | Out-Null
+        }}
+
+        $vhdFiles = Get-ChildItem -Path $VhdSourcePath -Filter "*.vhdx" -ErrorAction SilentlyContinue
+        if (-not $vhdFiles) {{
+            $vhdFiles = Get-ChildItem -Path $VhdSourcePath -Filter "*.vhd" -ErrorAction SilentlyContinue
+        }}
+
+        foreach ($vhd in $vhdFiles) {{
+            $destPath = Join-Path $vmVhdFolder $vhd.Name
+            Write-Host "  Copying: $($vhd.Name)..." -ForegroundColor Gray
+            Copy-Item -Path $vhd.FullName -Destination $destPath -Force
+            Write-Host "  [OK] Copied to: $destPath" -ForegroundColor Green
+        }}
+
+        # Attach VHDs
+{vhd_section}
+
+        Write-Host "[OK] VHDs attached" -ForegroundColor Green
+
+        # Configure network adapters
+        Write-Host "Configuring network adapters..." -ForegroundColor Yellow
+{nic_section}
+
+        Write-Host "[OK] Network adapters configured" -ForegroundColor Green
+
+        $restoreSuccess = $true
+        Write-Host ""
+        Write-Host "[OK] VM rebuild completed successfully" -ForegroundColor Green
+
+    }} catch {{
+        Write-Error "VM rebuild failed: $_"
+        exit 1
+    }}
+}}
+
+# ============================================================================
+# POST-RESTORE VALIDATION
+# ============================================================================
+Write-Host ""
+Write-Host ("=" * 70) -ForegroundColor Cyan
+Write-Host "Post-Restore Validation" -ForegroundColor Cyan
+Write-Host ("=" * 70) -ForegroundColor Cyan
+
+$restoredVm = Get-VM -Name $NewVmName -ErrorAction SilentlyContinue
+if ($restoredVm) {{
+    Write-Host "VM Status:" -ForegroundColor Yellow
+    Write-Host "  Name: $($restoredVm.Name)"
+    Write-Host "  State: $($restoredVm.State)"
+    Write-Host "  Generation: $($restoredVm.Generation)"
+    Write-Host "  Memory: $([math]::Round($restoredVm.MemoryStartup / 1MB)) MB"
+    Write-Host "  Processors: $($restoredVm.ProcessorCount)"
+
+    $nics = Get-VMNetworkAdapter -VMName $NewVmName
+    Write-Host "  Network Adapters: $($nics.Count)"
+    foreach ($nic in $nics) {{
+        Write-Host "    - $($nic.Name): $($nic.SwitchName)"
+    }}
+
+    $vhds = Get-VMHardDiskDrive -VMName $NewVmName
+    Write-Host "  Hard Drives: $($vhds.Count)"
+    foreach ($vhd in $vhds) {{
+        Write-Host "    - $($vhd.Path)"
+    }}
+
+    Write-Host ""
+    Write-Host "[OK] Restore completed successfully!" -ForegroundColor Green
+}} else {{
+    Write-Error "VM not found after restore - something went wrong"
+    exit 1
+}}
+
+# Start VM if requested
+if ($StartAfterRestore -and $restoredVm) {{
+    Write-Host ""
+    Write-Host "Starting VM..." -ForegroundColor Yellow
+    try {{
+        Start-VM -Name $NewVmName
+        Write-Host "[OK] VM started" -ForegroundColor Green
+    }} catch {{
+        Write-Warning "Failed to start VM: $_"
+    }}
+}}
+
+Write-Host ""
+Write-Host ("=" * 70) -ForegroundColor Cyan
+Write-Host "Recovery Complete" -ForegroundColor Cyan
+Write-Host ("=" * 70) -ForegroundColor Cyan
+'''
+
+        return script
+
     def backup_vm(
         self,
         vm_name: str,
@@ -2483,6 +4344,9 @@ class HyperVBackupManager:
         smb_username: str | None = None,
         smb_password: str | None = None,
         smb_domain: str | None = None,
+        verify_backup: bool = False,
+        verification_fail_action: str = "warn",
+        update_catalog: bool = True,
     ) -> dict[str, Any]:
         """Backup a Hyper-V VM.
 
@@ -2494,9 +4358,14 @@ class HyperVBackupManager:
             smb_username: SMB username for network share authentication
             smb_password: SMB password for network share authentication
             smb_domain: SMB domain for network share authentication
+            verify_backup: If True, verify backup integrity after completion
+            verification_fail_action: What to do if verification fails:
+                - "warn": Log warning but report backup as successful (default)
+                - "fail": Report backup as failed if verification fails
+            update_catalog: If True, update the backup catalog after completion
 
         Returns:
-            Dict with backup result info
+            Dict with backup result info including verification_result if verify_backup=True
         """
         from datetime import datetime as dt
 
@@ -2714,6 +4583,88 @@ Write-Output "SUCCESS"
                                 f"Failed to save VM config: {stderr}"
                             )
 
+                    # Generate and save recovery runbook alongside config
+                    if result.get("config_saved") and vm_config:
+                        runbook_path = f"{vm_backup_path}\\recovery_runbook.ps1"
+                        runbook_content = self.generate_recovery_runbook(
+                            vm_name=vm_name,
+                            backup_path=vm_backup_path,
+                            vm_config=vm_config,
+                            timestamp=timestamp,
+                        )
+
+                        # Escape for PowerShell here-string
+                        safe_runbook = runbook_content.replace("'", "''")
+
+                        if is_smb_backup:
+                            # For SMB paths, use authenticated write
+                            unc_parts = backup_path.lstrip("\\").split("\\")
+                            if len(unc_parts) >= 2:
+                                smb_server = unc_parts[0]
+                                smb_share = unc_parts[1]
+                                smb_unc = f"\\\\{smb_server}\\{smb_share}"
+                                safe_password_rb = smb_password.replace("'", "''") if smb_password else ""
+                                full_username_rb = f"{smb_domain}\\{smb_username}" if smb_domain else smb_username
+
+                                save_runbook_script = f"""
+$ErrorActionPreference = 'Stop'
+$smbUnc = '{smb_unc}'
+$smbUser = '{full_username_rb}'
+$smbPass = '{safe_password_rb}'
+$runbookPath = '{runbook_path}'
+$runbookContent = @'
+{safe_runbook}
+'@
+
+$secPass = ConvertTo-SecureString $smbPass -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($smbUser, $secPass)
+
+$driveName = "BackerRB"
+if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+
+try {{
+    New-PSDrive -Name $driveName -PSProvider FileSystem -Root $smbUnc -Credential $cred -ErrorAction Stop | Out-Null
+    $subPath = $runbookPath.Substring($smbUnc.Length).TrimStart('\\')
+    $mappedPath = "${{driveName}}:\\$subPath"
+    $runbookContent | Out-File -FilePath $mappedPath -Encoding UTF8 -Force
+    Write-Output "SUCCESS"
+}} finally {{
+    Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+}}
+"""
+                                rc_rb, stdout_rb, stderr_rb = self.api._run_powershell_large(
+                                    save_runbook_script, timeout=60
+                                )
+                                if rc_rb == 0 and "SUCCESS" in stdout_rb:
+                                    result["runbook_path"] = runbook_path
+                                    result["has_runbook"] = True
+                                    logger.info(f"Saved recovery runbook to: {runbook_path}")
+                                else:
+                                    logger.warning(f"Failed to save runbook to SMB: {stderr_rb}")
+                                    result["has_runbook"] = False
+                        else:
+                            # Local path - direct write
+                            save_runbook_script = f"""
+$runbookPath = '{runbook_path}'
+$runbookContent = @'
+{safe_runbook}
+'@
+$runbookContent | Out-File -FilePath $runbookPath -Encoding UTF8 -Force
+Write-Output "SUCCESS"
+"""
+                            rc_rb, stdout_rb, stderr_rb = self.api._run_powershell(
+                                save_runbook_script, timeout=60
+                            )
+                            if rc_rb == 0 and "SUCCESS" in stdout_rb:
+                                result["runbook_path"] = runbook_path
+                                result["has_runbook"] = True
+                                logger.info(f"Saved recovery runbook to: {runbook_path}")
+                            else:
+                                logger.warning(f"Failed to save runbook: {stderr_rb}")
+                                result["has_runbook"] = False
+
             else:
                 result["errors"].append(f"Export failed: {export_result}")
 
@@ -2728,6 +4679,121 @@ Write-Output "SUCCESS"
                 if progress_callback:
                     progress_callback({"status": "starting_vm", "vm": vm_name})
                 self.api.start_vm(vm_name)
+
+            # Run verification if requested and backup succeeded
+            if verify_backup and result["success"]:
+                if progress_callback:
+                    progress_callback({"status": "verifying", "vm": vm_name})
+
+                # Get the timestamp path where backup was stored
+                verify_path = result.get("config_path", "")
+                if verify_path:
+                    # config_path is like: path/vm/timestamp/vm_full_config.json
+                    # We need: path/vm/timestamp
+                    import os
+                    verify_path = os.path.dirname(verify_path)
+                elif result.get("export_path"):
+                    verify_path = result["export_path"]
+
+                if verify_path:
+                    logger.info(f"Verifying backup at: {verify_path}")
+                    verification_result = self.verify_backup(
+                        backup_path=verify_path,
+                        smb_username=smb_username,
+                        smb_password=smb_password,
+                        smb_domain=smb_domain,
+                    )
+                    result["verification_result"] = verification_result
+                    result["verification_status"] = (
+                        "passed" if verification_result["success"] else "failed"
+                    )
+
+                    if not verification_result["success"]:
+                        logger.warning(
+                            f"Backup verification failed for {vm_name}: "
+                            f"{verification_result.get('errors', [])}"
+                        )
+                        if verification_fail_action == "fail":
+                            result["success"] = False
+                            result["errors"].append(
+                                "Backup verification failed: "
+                                + "; ".join(verification_result.get("errors", []))
+                            )
+                    else:
+                        logger.info(f"Backup verification passed for {vm_name}")
+                else:
+                    result["verification_status"] = "skipped"
+                    result["verification_result"] = {
+                        "success": False,
+                        "errors": ["Could not determine backup path for verification"],
+                        "warnings": [],
+                    }
+            elif verify_backup:
+                result["verification_status"] = "skipped"
+
+            # Update backup catalog if requested and backup succeeded
+            if update_catalog and result["success"]:
+                if progress_callback:
+                    progress_callback({"status": "updating_catalog", "vm": vm_name})
+
+                try:
+                    # Get VM GUID from captured config
+                    vm_guid = ""
+                    if result.get("vm_config"):
+                        vm_info = result["vm_config"].get("vm", {})
+                        vm_guid = vm_info.get("id", "")
+                        if isinstance(vm_guid, list):
+                            vm_guid = vm_guid[0] if vm_guid else ""
+
+                    if not vm_guid:
+                        # Fallback: try to get from current VM
+                        vm_info_script = f"(Get-VM -Name '{vm_name}').Id.ToString()"
+                        rc, stdout, stderr = self.api._run_powershell(
+                            vm_info_script, timeout=30
+                        )
+                        if rc == 0 and stdout.strip():
+                            vm_guid = stdout.strip()
+
+                    if vm_guid:
+                        # Extract timestamp from config_path or export_path
+                        backup_timestamp = ""
+                        config_path = result.get("config_path", "")
+                        if config_path:
+                            # config_path is like: path/vm/YYYYMMDD_HHMMSS/vm_full_config.json
+                            import os
+                            parent = os.path.dirname(config_path)
+                            backup_timestamp = os.path.basename(parent)
+
+                        if backup_timestamp:
+                            catalog = BackupCatalog(self.api)
+                            catalog_updated = catalog.update_catalog(
+                                backup_path=backup_path,
+                                vm_name=vm_name,
+                                vm_guid=vm_guid,
+                                backup_timestamp=backup_timestamp,
+                                backup_info=result,
+                                smb_username=smb_username,
+                                smb_password=smb_password,
+                                smb_domain=smb_domain,
+                            )
+                            result["catalog_updated"] = catalog_updated
+                            if catalog_updated:
+                                logger.info(f"Updated backup catalog for {vm_name}")
+                            else:
+                                logger.warning(
+                                    f"Failed to update backup catalog for {vm_name}"
+                                )
+                        else:
+                            result["catalog_updated"] = False
+                            logger.warning(
+                                "Could not determine backup timestamp for catalog update"
+                            )
+                    else:
+                        result["catalog_updated"] = False
+                        logger.warning("Could not determine VM GUID for catalog update")
+                except Exception as catalog_error:
+                    result["catalog_updated"] = False
+                    logger.warning(f"Failed to update catalog: {catalog_error}")
 
             if progress_callback:
                 progress_callback(
@@ -2757,6 +4823,8 @@ Write-Output "SUCCESS"
         restore_mode: str = "auto",
         network_mapping: dict[str, str] | None = None,
         start_after_restore: bool = False,
+        dry_run: bool = False,
+        preflight_only: bool = False,
     ) -> dict[str, Any]:
         """Restore a Hyper-V VM from a backup with comprehensive settings recovery.
 
@@ -2785,9 +4853,13 @@ Write-Output "SUCCESS"
             restore_mode: Restore strategy - auto, inplace, import, or rebuild
             network_mapping: Dict mapping old virtual switch names to new ones
             start_after_restore: Start the VM after successful restore
+            dry_run: If True, simulate restore and return plan without executing
+            preflight_only: If True, run preflight checks only and return results
 
         Returns:
-            Dict with restore result info including warnings about settings
+            Dict with restore result info including warnings about settings.
+            For dry_run=True, returns detailed plan of what would be executed.
+            For preflight_only=True, returns preflight check results.
         """
         from datetime import datetime as dt
 
@@ -2861,6 +4933,21 @@ Write-Output "SUCCESS"
 
             result["vm_name"] = target_vm_name
 
+            # Handle preflight_only mode - just run checks and return
+            if preflight_only:
+                preflight_result = self.preflight_restore(
+                    import_path=import_path,
+                    vm_name=target_vm_name,
+                    restore_path=restore_path,
+                    vhd_destination_path=vhd_destination_path,
+                    smb_username=smb_username,
+                    smb_password=smb_password,
+                    smb_domain=smb_domain,
+                )
+                preflight_result["mode"] = "preflight_only"
+                preflight_result["duration_seconds"] = (dt.now() - started_at).total_seconds()
+                return preflight_result
+
             # Step 2: Check if VM already exists (for in-place restore)
             existing_vm = self.api.get_guest(target_vm_name) if target_vm_name else None
 
@@ -2877,6 +4964,26 @@ Write-Output "SUCCESS"
                     logger.info(f"Auto mode: VM '{target_vm_name}' doesn't exist, trying import")
 
             result["actual_mode"] = actual_mode
+
+            # Handle dry_run mode - show what would happen without executing
+            if dry_run:
+                dry_run_result = self._generate_dry_run_result(
+                    import_path=import_path,
+                    target_vm_name=target_vm_name,
+                    actual_mode=actual_mode,
+                    restore_path=restore_path,
+                    vhd_destination_path=vhd_destination_path,
+                    full_config=full_config,
+                    existing_vm=existing_vm,
+                    smb_unc=smb_unc,
+                    full_username=full_username,
+                    safe_password=safe_password,
+                    network_mapping=network_mapping,
+                    start_after_restore=start_after_restore,
+                )
+                dry_run_result["mode"] = "dry_run"
+                dry_run_result["duration_seconds"] = (dt.now() - started_at).total_seconds()
+                return dry_run_result
 
             # Step 3: Execute restore based on mode
             if actual_mode == "inplace":

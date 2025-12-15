@@ -296,6 +296,24 @@ class Storage:
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
+            # Migration: Add verify_backup column to hypervisor_jobs
+            try:
+                conn.execute(
+                    "ALTER TABLE hypervisor_jobs ADD COLUMN verify_backup "
+                    "INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            # Migration: Add verification_status column to hypervisor_runs
+            try:
+                conn.execute(
+                    "ALTER TABLE hypervisor_runs ADD COLUMN verification_status "
+                    "TEXT DEFAULT NULL"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         """Get a database connection."""
@@ -1449,6 +1467,7 @@ class Storage:
         retention: dict[str, int] | None = None,
         enabled: bool = True,
         copies_to_keep: int = 0,
+        verify_backup: bool = False,
     ) -> None:
         """Add a new hypervisor backup job."""
         now = datetime.now().isoformat()
@@ -1458,8 +1477,8 @@ class Storage:
                 INSERT INTO hypervisor_jobs (
                     id, name, hypervisor_id, guest_ids, repository_id,
                     backup_mode, compression, schedule_cron, retention,
-                    enabled, copies_to_keep, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, copies_to_keep, verify_backup, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -1473,6 +1492,7 @@ class Storage:
                     json.dumps(retention or {}),
                     1 if enabled else 0,
                     copies_to_keep,
+                    1 if verify_backup else 0,
                     now,
                     now,
                 ),
@@ -1490,6 +1510,7 @@ class Storage:
         retention: dict[str, int] | None = None,
         enabled: bool | None = None,
         copies_to_keep: int | None = None,
+        verify_backup: bool | None = None,
     ) -> bool:
         """Update a hypervisor job."""
         updates = ["updated_at = ?"]
@@ -1522,6 +1543,9 @@ class Storage:
         if copies_to_keep is not None:
             updates.append("copies_to_keep = ?")
             params.append(copies_to_keep)
+        if verify_backup is not None:
+            updates.append("verify_backup = ?")
+            params.append(1 if verify_backup else 0)
 
         params.append(job_id)
 
@@ -1596,6 +1620,7 @@ class Storage:
             "retention": json.loads(row["retention"]) if row["retention"] else {},
             "enabled": row["enabled"] == 1,
             "copies_to_keep": row["copies_to_keep"] if "copies_to_keep" in keys else 0,
+            "verify_backup": row["verify_backup"] == 1 if "verify_backup" in keys else False,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1622,6 +1647,7 @@ class Storage:
         backup_filename: str | None = None,
         exit_status: str | None = None,
         errors: list[str] | None = None,
+        verification_status: str | None = None,
     ) -> None:
         """Save or update a hypervisor backup run."""
         started = (started_at or datetime.now()).isoformat()
@@ -1640,7 +1666,7 @@ class Storage:
                     UPDATE hypervisor_runs SET
                         status = ?, upid = ?, finished_at = ?,
                         duration_seconds = ?, backup_size = ?, backup_filename = ?,
-                        exit_status = ?, errors = ?
+                        exit_status = ?, errors = ?, verification_status = ?
                     WHERE run_id = ? AND guest_id = ?
                     """,
                     (
@@ -1652,6 +1678,7 @@ class Storage:
                         backup_filename,
                         exit_status,
                         json.dumps(errors or []),
+                        verification_status,
                         run_id,
                         guest_id,
                     ),
@@ -1663,8 +1690,9 @@ class Storage:
                     INSERT INTO hypervisor_runs (
                         run_id, job_id, job_name, hypervisor_id, guest_id,
                         guest_name, guest_type, status, upid, started_at, finished_at,
-                        duration_seconds, backup_size, backup_filename, exit_status, errors
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        duration_seconds, backup_size, backup_filename, exit_status, errors,
+                        verification_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -1683,6 +1711,7 @@ class Storage:
                         backup_filename,
                         exit_status,
                         json.dumps(errors or []),
+                        verification_status,
                     ),
                 )
 
@@ -1763,6 +1792,7 @@ class Storage:
             "backup_filename": row["backup_filename"] if "backup_filename" in keys else None,
             "exit_status": row["exit_status"],
             "errors": json.loads(row["errors"]) if row["errors"] else [],
+            "verification_status": row["verification_status"] if "verification_status" in keys else None,
         }
 
     # =========================================================================
