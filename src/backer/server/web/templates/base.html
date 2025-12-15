@@ -617,11 +617,17 @@
         confirmModalExpectedValue = null;
     }
 
-    function executeConfirmAction() {
+    async function executeConfirmAction() {
         if (confirmModalCallback) {
-            confirmModalCallback();
+            // Hide modal first to prevent double-clicks
+            const callback = confirmModalCallback;
+            hideConfirmModal();
+
+            // Execute the callback (may be async)
+            await callback();
+        } else {
+            hideConfirmModal();
         }
-        hideConfirmModal();
     }
 
     document.getElementById('confirmModal')?.addEventListener('click', function(e) {
