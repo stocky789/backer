@@ -6578,6 +6578,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 NOTE: We get a fresh Storage instance here to avoid SQLite threading issues.
                 """
+                import gc
                 from pathlib import Path
 
                 from backer.server.storage import Storage
@@ -6624,6 +6625,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 except Exception as e:
                     logger.warning(f"Failed to clean up metadata files: {e}")
                     cleanup_errors.append(f"Metadata: {e}")
+
+                # Explicitly close the thread's storage connection to release SQLite lock
+                del thread_storage
+                gc.collect()  # Force garbage collection to close database connection immediately
 
                 result: dict[str, Any] = {
                     "id": job_id,
