@@ -1982,17 +1982,32 @@ function deleteHypervisorJob(jobId, jobName) {
         confirmText: 'Delete Job',
         onConfirm: async () => {
             try {
-                const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`, { method: 'DELETE' });
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+                const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`, {
+                    method: 'DELETE',
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
                 const result = await response.json();
 
                 if (response.ok) {
-                    // Redirect immediately - don't wait
-                    window.location.replace('/hypervisors');
+                    Toast.success('Job deleted. Refreshing...');
+                    // Small delay before redirect to ensure cleanup starts
+                    setTimeout(() => {
+                        window.location.href = '/hypervisors';
+                    }, 500);
                 } else {
                     Toast.error('Failed to delete: ' + (result.detail || result.message || `HTTP ${response.status}`));
                 }
             } catch (e) {
-                Toast.error('Delete failed: ' + e.message);
+                if (e.name === 'AbortError') {
+                    Toast.error('Delete request timed out');
+                } else {
+                    Toast.error('Delete failed: ' + e.message);
+                }
             }
         }
     });

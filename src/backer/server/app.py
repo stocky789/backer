@@ -6578,14 +6578,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 NOTE: We get a fresh Storage instance here to avoid SQLite threading issues.
                 """
-                from backer.server.storage import get_storage_instance
+                from backer.server.storage import Storage
+                from pathlib import Path
 
                 cleanup_errors = []
                 task.message = f"Cleaning up backup data for job '{job_name}'"
                 task.progress = 10
 
                 # Get a fresh storage instance for this thread
-                thread_storage = get_storage_instance()
+                # Use the same database path as the main storage
+                db_path = Path.home() / ".backer" / "backer.db"
+                thread_storage = Storage(db_path)
 
                 # Clean up backup files
                 try:
