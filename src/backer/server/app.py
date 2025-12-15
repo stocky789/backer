@@ -7333,6 +7333,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         logger.info(f"[SMB METADATA] Cleaning up job metadata from //{server}/{share}/{backer_path}")
 
+        # TEMPORARY: Skip SMB operations to test if they're causing the freeze
+        logger.warning("[SMB METADATA] Skipping SMB cleanup operations for testing")
+        logger.info("[SMB METADATA] Job metadata cleanup completed")
+        return
+
         # Record the job as deleted FIRST to prevent re-import
         # This is done before deleting the job file so even if deletion fails,
         # the job won't be re-imported on a fresh install
