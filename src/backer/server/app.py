@@ -6563,11 +6563,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Delete local database records immediately
         storage.delete_hypervisor_job(job_id)
 
-        # TEMPORARY: Skip background cleanup entirely to test if task system is causing freeze
-        logger.warning(f"[DEBUG] Skipping background cleanup task for job {job_id}")
-
         # Run cleanup in background if we have repository data
-        if False and repository and hypervisor:
+        if repository and hypervisor:
             # Make copies of the data to avoid threading issues with SQLite
             job_copy = dict(job)
             repository_copy = dict(repository)

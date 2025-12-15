@@ -930,8 +930,6 @@
 
 {% block scripts %}
 <script>
-console.log('[HYPERVISORS PAGE] Script block loaded at', new Date().toISOString());
-
 let currentHypervisorId = null;
 let editingJobId = null;
 let currentJobId = null;
@@ -1970,7 +1968,6 @@ async function toggleHypervisorJob(jobId) {
 }
 
 function deleteHypervisorJob(jobId, jobName) {
-    console.log('[DELETE] deleteHypervisorJob called for:', jobId, jobName);
     showConfirmModal({
         type: 'danger',
         title: `Delete Job: ${jobName}`,
@@ -1984,36 +1981,26 @@ function deleteHypervisorJob(jobId, jobName) {
         inputLabel: `Type "${jobName}" to confirm deletion:`,
         confirmText: 'Delete Job',
         onConfirm: async () => {
-            console.log('[DELETE] onConfirm callback executing');
-            console.log('[DELETE] Starting delete request');
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
-                console.log('[DELETE] Sending DELETE request');
                 const response = await fetch(`/api/v1/hypervisor-jobs/${jobId}`, {
                     method: 'DELETE',
                     signal: controller.signal
                 });
                 clearTimeout(timeoutId);
-                console.log('[DELETE] Got response, status:', response.status);
 
                 const result = await response.json();
-                console.log('[DELETE] Parsed JSON result:', result);
 
                 if (response.ok) {
-                    console.log('[DELETE] Response OK, showing toast');
                     Toast.success('Job deleted. Refreshing...');
-                    console.log('[DELETE] Toast shown, about to redirect');
-
                     // Redirect immediately without setTimeout
                     window.location = '/hypervisors?deleted=' + Date.now();
                 } else {
-                    console.log('[DELETE] Response not OK');
                     Toast.error('Failed to delete: ' + (result.detail || result.message || `HTTP ${response.status}`));
                 }
             } catch (e) {
-                console.error('[DELETE] Exception:', e);
                 if (e.name === 'AbortError') {
                     Toast.error('Delete request timed out');
                 } else {

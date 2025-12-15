@@ -250,31 +250,10 @@ async def agents_page(request: Request):
 @router.get("/hypervisors", response_class=HTMLResponse)
 async def hypervisors_page(request: Request):
     """Hypervisors management page."""
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(f"[HYPERVISORS PAGE] START - URL: {request.url}")
-    logger.info(f"[HYPERVISORS PAGE] Query string: {request.url.query}")
-
-    # TEMPORARY: Return minimal HTML IMMEDIATELY to test if database queries are causing freeze
-    if "deleted=" in str(request.url.query):
-        logger.warning("[HYPERVISORS PAGE] Detected deleted= in query, returning minimal HTML BEFORE any operations")
-        from fastapi.responses import HTMLResponse
-        # Even simpler - no JavaScript at all
-        minimal_html = "<html><body><h1>Job deleted - test page</h1></body></html>"
-        logger.info("[HYPERVISORS PAGE] Created minimal HTML, about to return it")
-        response = HTMLResponse(content=minimal_html)
-        logger.info("[HYPERVISORS PAGE] HTMLResponse object created, returning it NOW")
-        return response
-
-    logger.info("[HYPERVISORS PAGE] No deleted= query param, proceeding with normal page load")
-
     storage = get_storage(request)
-    logger.info("[HYPERVISORS PAGE] Got storage instance")
 
     # Get hypervisors
-    logger.info("[HYPERVISORS PAGE] Listing hypervisors...")
     hypervisors_raw = storage.list_hypervisors()
-    logger.info(f"[HYPERVISORS PAGE] Found {len(hypervisors_raw)} hypervisors")
     hypervisors = []
 
     for hv in hypervisors_raw:
@@ -284,13 +263,10 @@ async def hypervisors_page(request: Request):
         })
 
     # Get hypervisor jobs with additional info
-    logger.info("[HYPERVISORS PAGE] Listing hypervisor jobs...")
     jobs_raw = storage.list_hypervisor_jobs()
-    logger.info(f"[HYPERVISORS PAGE] Found {len(jobs_raw)} jobs")
     jobs = []
 
-    for idx, job in enumerate(jobs_raw):
-        logger.info(f"[HYPERVISORS PAGE] Processing job {idx+1}/{len(jobs_raw)}: {job.get('name')}")
+    for job in jobs_raw:
         # Get latest run
         latest = storage.get_latest_hypervisor_run(job["id"])
 
@@ -309,8 +285,6 @@ async def hypervisors_page(request: Request):
             "last_status": latest["status"] if latest else None,
             "last_run_ago": time_ago(latest.get("started_at")) if latest else None,
         })
-
-    logger.info("[HYPERVISORS PAGE] Rendering template...")
 
     return templates.TemplateResponse("hypervisors.html", {
         "request": request,
