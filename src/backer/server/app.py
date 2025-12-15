@@ -6564,8 +6564,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Delete local database records immediately
         storage.delete_hypervisor_job(job_id)
 
+        # TEMPORARY: Skip background cleanup entirely to test if task system is causing freeze
+        logger.warning(f"[DEBUG] Skipping background cleanup task for job {job_id}")
+
         # Run cleanup in background if we have repository data
-        if repository and hypervisor:
+        if False and repository and hypervisor:
             # Make copies of the data to avoid threading issues with SQLite
             job_copy = dict(job)
             repository_copy = dict(repository)
@@ -7332,11 +7335,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             backer_path = f"Hypervisors/{safe_hv_name}/.backer"
 
         logger.info(f"[SMB METADATA] Cleaning up job metadata from //{server}/{share}/{backer_path}")
-
-        # TEMPORARY: Skip SMB operations to test if they're causing the freeze
-        logger.warning("[SMB METADATA] Skipping SMB cleanup operations for testing")
-        logger.info("[SMB METADATA] Job metadata cleanup completed")
-        return
 
         # Record the job as deleted FIRST to prevent re-import
         # This is done before deleting the job file so even if deletion fails,
