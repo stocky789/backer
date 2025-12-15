@@ -250,10 +250,17 @@ async def agents_page(request: Request):
 @router.get("/hypervisors", response_class=HTMLResponse)
 async def hypervisors_page(request: Request):
     """Hypervisors management page."""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("[HYPERVISORS PAGE] START loading hypervisors page")
+
     storage = get_storage(request)
+    logger.info("[HYPERVISORS PAGE] Got storage instance")
 
     # Get hypervisors
+    logger.info("[HYPERVISORS PAGE] Listing hypervisors...")
     hypervisors_raw = storage.list_hypervisors()
+    logger.info(f"[HYPERVISORS PAGE] Found {len(hypervisors_raw)} hypervisors")
     hypervisors = []
 
     for hv in hypervisors_raw:
@@ -263,10 +270,13 @@ async def hypervisors_page(request: Request):
         })
 
     # Get hypervisor jobs with additional info
+    logger.info("[HYPERVISORS PAGE] Listing hypervisor jobs...")
     jobs_raw = storage.list_hypervisor_jobs()
+    logger.info(f"[HYPERVISORS PAGE] Found {len(jobs_raw)} jobs")
     jobs = []
 
-    for job in jobs_raw:
+    for idx, job in enumerate(jobs_raw):
+        logger.info(f"[HYPERVISORS PAGE] Processing job {idx+1}/{len(jobs_raw)}: {job.get('name')}")
         # Get latest run
         latest = storage.get_latest_hypervisor_run(job["id"])
 
@@ -286,6 +296,7 @@ async def hypervisors_page(request: Request):
             "last_run_ago": time_ago(latest.get("started_at")) if latest else None,
         })
 
+    logger.info("[HYPERVISORS PAGE] Rendering template...")
     return templates.TemplateResponse("hypervisors.html", {
         "request": request,
         "active": "hypervisors",
