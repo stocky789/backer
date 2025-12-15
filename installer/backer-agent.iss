@@ -10,7 +10,7 @@
 ;   iscc backer-agent.iss
 
 #define MyAppName "Backer Agent"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "Backer"
 #define MyAppURL "https://github.com/stocky789/backer"
 #define MyAppExeName "backer-agent.exe"
