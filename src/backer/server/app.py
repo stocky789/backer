@@ -7737,7 +7737,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.info(f"[SMB CLEANUP] Processing {len(timestamp_fallback)} legacy timestamp matches")
 
             # List files in dump directory for timestamp matching
-            ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
+            # Use cd + ls instead of ls with wildcard to avoid smbclient hanging on quoted paths with spaces
+            ok, output = run_smb_cmd(f'cd "{dump_path}"; ls')
             if not ok:
                 logger.debug(f"[SMB CLEANUP] Could not list SMB dump path: {output}")
             else:
