@@ -6540,57 +6540,99 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         This permanently deletes the job configuration, all backup files,
         and all metadata from the repository. This prevents conflicts when
         creating new jobs with the same names or VMIDs.
+
+        The cleanup runs in the background to avoid blocking the API.
         """
         job = storage.get_hypervisor_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        cleanup_errors = []
-
-        # Always clean up repository data to prevent conflicts
+        # Get repository and hypervisor info before deleting
         repository_id = job.get("repository_id")
         hypervisor_id = job.get("hypervisor_id")
+        job_name = job.get("name", "Unknown")
+
+        # Store these for the background task
+        _storage = storage
+        repository = None
+        hypervisor = None
 
         if repository_id and hypervisor_id:
             repository = storage.get_repository(repository_id)
             hypervisor = storage.get_hypervisor(hypervisor_id)
 
-            if repository and hypervisor:
-                # Clean up backup files first
+        # Delete local database records immediately
+        storage.delete_hypervisor_job(job_id)
+
+        # Run cleanup in background if we have repository data
+        if repository and hypervisor:
+            def cleanup_job_data(task: Task) -> dict[str, Any]:
+                """Background task to clean up job data from repository."""
+                cleanup_errors = []
+                task.message = f"Cleaning up backup data for job '{job_name}'"
+                task.progress = 10
+
+                # Clean up backup files
                 try:
+                    task.message = f"Deleting backup files for '{job_name}'"
+                    task.progress = 30
                     _cleanup_hypervisor_job_data(
                         repository=repository,
                         hypervisor=hypervisor,
                         job=job,
-                        storage=storage,
+                        storage=_storage,
                         repository_id=repository_id,
                     )
                     logger.info(f"Cleaned up backup files for job {job_id}")
+                    task.progress = 60
                 except Exception as e:
                     logger.warning(f"Failed to clean up backup files: {e}")
                     cleanup_errors.append(f"Backup files: {e}")
 
-                # Clean up metadata files (job config and run records)
+                # Clean up metadata files
                 try:
+                    task.message = f"Cleaning up metadata for '{job_name}'"
+                    task.progress = 80
                     _cleanup_hypervisor_job_metadata(
                         repository=repository,
                         hypervisor=hypervisor,
                         job=job,
-                        storage=storage,
+                        storage=_storage,
                         repository_id=repository_id,
                     )
                     logger.info(f"Cleaned up metadata files for job {job_id}")
+                    task.progress = 100
                 except Exception as e:
                     logger.warning(f"Failed to clean up metadata files: {e}")
                     cleanup_errors.append(f"Metadata: {e}")
 
-        # Delete local database records
-        storage.delete_hypervisor_job(job_id)
+                result: dict[str, Any] = {
+                    "id": job_id,
+                    "status": "cleanup_complete",
+                    "success": len(cleanup_errors) == 0,
+                }
+                if cleanup_errors:
+                    result["cleanup_warnings"] = cleanup_errors
 
-        result: dict[str, Any] = {"id": job_id, "status": "deleted"}
-        if cleanup_errors:
-            result["cleanup_warnings"] = cleanup_errors
-        return result
+                task.message = f"Cleanup complete for '{job_name}'"
+                return result
+
+            task_manager = get_task_manager()
+            task = task_manager.submit(
+                task_type="delete_hypervisor_job",
+                description=f"Deleting backup data for job '{job_name}'",
+                func=cleanup_job_data,
+            )
+
+            return {
+                "id": job_id,
+                "status": "deleted",
+                "cleanup_task_id": task.id,
+                "message": "Job deleted. Cleanup running in background.",
+            }
+
+        # No repository data to clean up
+        return {"id": job_id, "status": "deleted"}
 
 
     def _auto_import_hypervisor_jobs(
@@ -7498,8 +7540,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except Exception as e:
                 return False, str(e)
 
-        def delete_folder_recursive(smb_path: str) -> bool:
-            """Recursively delete a folder and all its contents."""
+        def delete_folder_recursive(smb_path: str, depth: int = 0, max_depth: int = 50) -> bool:
+            """Recursively delete a folder and all its contents.
+
+            Args:
+                smb_path: Path to delete
+                depth: Current recursion depth
+                max_depth: Maximum recursion depth to prevent stack overflow
+            """
+            if depth > max_depth:
+                logger.warning(f"[HYPERV CLEANUP] Max recursion depth ({max_depth}) reached at {smb_path}")
+                return False
+
             # List directory contents using SMBBrowser for proper file type detection
             success, entries = SMBBrowser.list_directory(
                 server, share, smb_path, username, password, domain
@@ -7514,7 +7566,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     continue
                 entry_path = f"{smb_path}/{entry.name}"
                 if entry.is_dir:
-                    delete_folder_recursive(entry_path)
+                    delete_folder_recursive(entry_path, depth + 1, max_depth)
                     run_smb_cmd(f'rmdir "{entry_path}"')
                 else:
                     run_smb_cmd(f'del "{entry_path}"')
