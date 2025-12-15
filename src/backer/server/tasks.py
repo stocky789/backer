@@ -195,8 +195,10 @@ class TaskManager:
         try:
             self._run_task(task)
         finally:
+            logger.info(f"[TASKS] Task {task.id} wrapper acquiring lock to decrement count")
             with self._lock:
                 self._running_count -= 1
+                logger.info(f"[TASKS] Task {task.id} running count decremented to {self._running_count}")
 
     def _run_task(self, task: Task) -> None:
         """Execute a single task."""
