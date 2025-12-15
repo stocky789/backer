@@ -302,7 +302,11 @@ async def hypervisors_page(request: Request):
     if "deleted=" in str(request.url.query):
         logger.warning("[HYPERVISORS PAGE] Returning minimal response for deleted redirect")
         from fastapi.responses import HTMLResponse
-        minimal_html = "<html><body><h1>Job deleted</h1><script>setTimeout(() => window.location='/hypervisors', 1000);</script></body></html>"
+        minimal_html = (
+            "<html><body><h1>Job deleted</h1>"
+            "<script>setTimeout(() => window.location='/hypervisors', 1000);</script>"
+            "</body></html>"
+        )
         logger.info("[HYPERVISORS PAGE] About to return minimal HTML response")
         response = HTMLResponse(content=minimal_html)
         logger.info("[HYPERVISORS PAGE] Minimal HTML response created, returning now")

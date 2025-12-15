@@ -6555,7 +6555,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get all data we need before starting background task
         repository = None
         hypervisor = None
-        repo_password = None
 
         if repository_id and hypervisor_id:
             repository = storage.get_repository(repository_id)
