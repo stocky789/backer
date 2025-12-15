@@ -1397,6 +1397,24 @@ try {{
         if ($config.vm.lockOnDisconnect) {{
             $setVmParams.LockOnDisconnect = $config.vm.lockOnDisconnect
         }}
+        # Smart paging file path (only if path exists on target)
+        if ($config.vm.smartPagingFilePath) {{
+            $smartPath = $config.vm.smartPagingFilePath
+            if (Test-Path (Split-Path $smartPath -Parent) -ErrorAction SilentlyContinue) {{
+                $setVmParams.SmartPagingFilePath = $smartPath
+            }} else {{
+                $warnings += "Smart paging path parent not found: $smartPath"
+            }}
+        }}
+        # Snapshot file location (only if path exists on target)
+        if ($config.vm.snapshotFileLocation) {{
+            $snapPath = $config.vm.snapshotFileLocation
+            if (Test-Path (Split-Path $snapPath -Parent) -ErrorAction SilentlyContinue) {{
+                $setVmParams.SnapshotFileLocation = $snapPath
+            }} else {{
+                $warnings += "Snapshot location parent not found: $snapPath"
+            }}
+        }}
 
         Set-VM @setVmParams -ErrorAction Stop
     }} catch {{
@@ -1465,6 +1483,14 @@ try {{
         }}
         if ($null -ne $config.processor.maximumCountPerNumaSocket) {{
             $procParams.MaximumCountPerNumaSocket = $config.processor.maximumCountPerNumaSocket
+        }}
+        # Host Resource Protection
+        if ($null -ne $config.processor.enableHostResourceProtection) {{
+            $procParams.EnableHostResourceProtection = $config.processor.enableHostResourceProtection
+        }}
+        # Hardware thread count per core (SMT/Hyperthreading)
+        if ($null -ne $config.processor.hwThreadCountPerCore) {{
+            $procParams.HwThreadCountPerCore = $config.processor.hwThreadCountPerCore
         }}
 
         Set-VMProcessor @procParams -ErrorAction Stop
@@ -1560,9 +1586,16 @@ try {{
                         $addParams.SwitchName = $switchName
                     }}
 
-                    # Static MAC address
-                    if (-not $nicConfig.dynamicMacAddressEnabled -and $nicConfig.macAddress) {{
-                        $addParams.StaticMacAddress = $nicConfig.macAddress
+                    # Static MAC address - must explicitly check for $false since JSON bool can be tricky
+                    # Also ensure MAC is in valid format (12 hex chars, no separators for Hyper-V)
+                    $isDynamic = $nicConfig.dynamicMacAddressEnabled
+                    if ($isDynamic -eq $false -and $nicConfig.macAddress) {{
+                        $mac = $nicConfig.macAddress -replace '[:-]', ''
+                        if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
+                            $addParams.StaticMacAddress = $mac
+                        }} else {{
+                            $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress)"
+                        }}
                     }}
 
                     Add-VMNetworkAdapter @addParams -ErrorAction Stop
@@ -1607,6 +1640,29 @@ try {{
                     if ($nicConfig.bandwidth.minimumBandwidthWeight) {{
                         $setParams.MinimumBandwidthWeight = $nicConfig.bandwidth.minimumBandwidthWeight
                     }}
+                    if ($nicConfig.bandwidth.minimumBandwidthAbsolute) {{
+                        $setParams.MinimumBandwidthAbsolute = $nicConfig.bandwidth.minimumBandwidthAbsolute
+                    }}
+                }}
+
+                # Port Mirroring
+                if ($nicConfig.portMirroring) {{
+                    $setParams.PortMirroring = $nicConfig.portMirroring
+                }}
+
+                # IEEE Priority Tag
+                if ($nicConfig.ieeePriorityTag) {{
+                    $setParams.IeeePriorityTag = $nicConfig.ieeePriorityTag
+                }}
+
+                # Device Naming
+                if ($nicConfig.deviceNaming) {{
+                    $setParams.DeviceNaming = $nicConfig.deviceNaming
+                }}
+
+                # IOV Weight (SR-IOV)
+                if ($null -ne $nicConfig.iovWeight) {{
+                    $setParams.IovWeight = $nicConfig.iovWeight
                 }}
 
                 try {{
@@ -1679,6 +1735,19 @@ try {{
             }} catch {{
                 $warnings += "Failed to enable vTPM: $_"
             }}
+        }}
+    }}
+
+    # === Apply COM Port Settings ===
+    if ($config.comPorts -and $config.comPorts.Count -gt 0) {{
+        try {{
+            foreach ($comConfig in $config.comPorts) {{
+                if ($comConfig.path) {{
+                    Set-VMComPort -VMName $vmName -Number $comConfig.number -Path $comConfig.path -ErrorAction Stop
+                }}
+            }}
+        }} catch {{
+            $warnings += "Failed to configure COM ports: $_"
         }}
     }}
 
