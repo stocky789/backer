@@ -6423,29 +6423,32 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if storage.get_hypervisor_job_by_name(name):
             raise HTTPException(status_code=400, detail="Job with this name already exists")
 
+        # TEMPORARY: Disable auto-import to test if it causes the 5-minute freeze
         # Auto-import any existing jobs from repository metadata for this hypervisor
         # This enables disaster recovery - if reinstalling backer, jobs are auto-recovered
-        imported_jobs = _auto_import_hypervisor_jobs(
-            storage=storage,
-            repository=repository,
-            repository_id=repository_id,
-            hypervisor=hypervisor,
-            hypervisor_id=hypervisor_id,
-        )
-        if imported_jobs > 0:
-            logger.info(f"Auto-imported {imported_jobs} existing jobs from repository metadata")
-            # Check if the job we're trying to create was just imported
-            existing_by_name = storage.get_hypervisor_job_by_name(name)
-            if existing_by_name:
-                # Job was imported, return it instead of creating duplicate
-                return {
-                    "id": existing_by_name["id"],
-                    "name": name,
-                    "status": "imported",
-                    "message": f"Job '{name}' was auto-imported from repository metadata "
-                               f"along with {imported_jobs} other job(s)",
-                    "imported_count": imported_jobs,
-                }
+        logger.warning("[TESTING] Auto-import temporarily disabled for freeze investigation")
+        if False:
+            imported_jobs = _auto_import_hypervisor_jobs(
+                storage=storage,
+                repository=repository,
+                repository_id=repository_id,
+                hypervisor=hypervisor,
+                hypervisor_id=hypervisor_id,
+            )
+            if imported_jobs > 0:
+                logger.info(f"Auto-imported {imported_jobs} existing jobs from repository metadata")
+                # Check if the job we're trying to create was just imported
+                existing_by_name = storage.get_hypervisor_job_by_name(name)
+                if existing_by_name:
+                    # Job was imported, return it instead of creating duplicate
+                    return {
+                        "id": existing_by_name["id"],
+                        "name": name,
+                        "status": "imported",
+                        "message": f"Job '{name}' was auto-imported from repository metadata "
+                                   f"along with {imported_jobs} other job(s)",
+                        "imported_count": imported_jobs,
+                    }
 
         job_id = str(uuid4())
 
