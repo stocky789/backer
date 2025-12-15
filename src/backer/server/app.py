@@ -6560,8 +6560,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if repository_id and hypervisor_id:
             repository = storage.get_repository(repository_id)
             hypervisor = storage.get_hypervisor(hypervisor_id)
-            if repository:
-                repo_password = storage.get_repository_password(repository_id)
 
         # Delete local database records immediately
         storage.delete_hypervisor_job(job_id)
@@ -6578,8 +6576,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 NOTE: We get a fresh Storage instance here to avoid SQLite threading issues.
                 """
-                from backer.server.storage import Storage
                 from pathlib import Path
+
+                from backer.server.storage import Storage
 
                 cleanup_errors = []
                 task.message = f"Cleaning up backup data for job '{job_name}'"
@@ -9719,7 +9718,13 @@ try {{
             rc, stdout, stderr = api._run_powershell(config_script, timeout=30)
             output = stdout.strip()
 
-            if rc == 0 and output and not output.startswith("ERROR") and not output.startswith("CONFIG_FILE_NOT_FOUND") and not output.startswith("NO_VM_ID_IN_CONFIG"):
+            if (
+                rc == 0
+                and output
+                and not output.startswith("ERROR")
+                and not output.startswith("CONFIG_FILE_NOT_FOUND")
+                and not output.startswith("NO_VM_ID_IN_CONFIG")
+            ):
                 old_vm_id = output.lower()  # Store in lowercase for case-insensitive comparison
                 logger.info(f"Found old VM GUID from backup config: {old_vm_id}")
             else:

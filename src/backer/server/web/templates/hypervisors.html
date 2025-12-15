@@ -930,6 +930,8 @@
 
 {% block scripts %}
 <script>
+console.log('[HYPERVISORS PAGE] Script block loaded at', new Date().toISOString());
+
 let currentHypervisorId = null;
 let editingJobId = null;
 let currentJobId = null;
@@ -1968,6 +1970,7 @@ async function toggleHypervisorJob(jobId) {
 }
 
 function deleteHypervisorJob(jobId, jobName) {
+    console.log('[DELETE] deleteHypervisorJob called for:', jobId, jobName);
     showConfirmModal({
         type: 'danger',
         title: `Delete Job: ${jobName}`,
@@ -1981,6 +1984,7 @@ function deleteHypervisorJob(jobId, jobName) {
         inputLabel: `Type "${jobName}" to confirm deletion:`,
         confirmText: 'Delete Job',
         onConfirm: async () => {
+            console.log('[DELETE] onConfirm callback executing');
             console.log('[DELETE] Starting delete request');
             try {
                 const controller = new AbortController();

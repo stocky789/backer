@@ -4523,7 +4523,10 @@ try {{
 }}
 """
                 rc, stdout, stderr = node_api._run_powershell(check_admin_script)
-                logger.info(f"Admin check for {node_name}: rc={rc}, stdout='{stdout.strip()}', stderr='{stderr.strip()}'")
+                logger.info(
+                    f"Admin check for {node_name}: rc={rc}, "
+                    f"stdout='{stdout.strip()}', stderr='{stderr.strip()}'"
+                )
                 is_local_admin = "IS_ADMIN" in stdout
 
                 node_result["is_local_admin"] = is_local_admin
@@ -5174,10 +5177,6 @@ try {{
                 logger.error(error_msg)
                 return False, error_msg
 
-            # Use simple batch file approach to avoid command line limits
-            # Write a .bat file and execute it directly
-            bat_filename = f"backer-cluster-add-{vm_name}.bat"
-
             # Create a PowerShell script file that properly captures errors
             ps_filename = f"backer-cluster-add-{vm_name}.ps1"
 
@@ -5203,7 +5202,11 @@ if (Test-Path $scriptPath) {{ "SCRIPT_CREATED:$scriptPath" }} else {{ "SCRIPT_FA
             if rc1 != 0 or "SCRIPT_CREATED:" not in stdout1:
                 return False, f"Failed to create script file: {stderr1}"
 
-            script_path = stdout1.strip().split("SCRIPT_CREATED:")[1] if "SCRIPT_CREATED:" in stdout1 else f"$env:TEMP\\{ps_filename}"
+            script_path = (
+                stdout1.strip().split("SCRIPT_CREATED:")[1]
+                if "SCRIPT_CREATED:" in stdout1
+                else f"$env:TEMP\\{ps_filename}"
+            )
 
             # Step 2: Execute the script and capture output
             execute_script = f"""
