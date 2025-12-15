@@ -252,7 +252,21 @@ async def hypervisors_page(request: Request):
     """Hypervisors management page."""
     import logging
     logger = logging.getLogger(__name__)
-    logger.info("[HYPERVISORS PAGE] START loading hypervisors page")
+    logger.info(f"[HYPERVISORS PAGE] START - URL: {request.url}")
+    logger.info(f"[HYPERVISORS PAGE] Query string: {request.url.query}")
+
+    # TEMPORARY: Return minimal HTML IMMEDIATELY to test if database queries are causing freeze
+    if "deleted=" in str(request.url.query):
+        logger.warning("[HYPERVISORS PAGE] Detected deleted= in query, returning minimal HTML BEFORE any operations")
+        from fastapi.responses import HTMLResponse
+        # Even simpler - no JavaScript at all
+        minimal_html = "<html><body><h1>Job deleted - test page</h1></body></html>"
+        logger.info("[HYPERVISORS PAGE] Created minimal HTML, about to return it")
+        response = HTMLResponse(content=minimal_html)
+        logger.info("[HYPERVISORS PAGE] HTMLResponse object created, returning it NOW")
+        return response
+
+    logger.info("[HYPERVISORS PAGE] No deleted= query param, proceeding with normal page load")
 
     storage = get_storage(request)
     logger.info("[HYPERVISORS PAGE] Got storage instance")
@@ -297,20 +311,6 @@ async def hypervisors_page(request: Request):
         })
 
     logger.info("[HYPERVISORS PAGE] Rendering template...")
-
-    # TEMPORARY: Return minimal HTML to test if template rendering is causing freeze
-    if "deleted=" in str(request.url.query):
-        logger.warning("[HYPERVISORS PAGE] Returning minimal response for deleted redirect")
-        from fastapi.responses import HTMLResponse
-        minimal_html = (
-            "<html><body><h1>Job deleted</h1>"
-            "<script>setTimeout(() => window.location='/hypervisors', 1000);</script>"
-            "</body></html>"
-        )
-        logger.info("[HYPERVISORS PAGE] About to return minimal HTML response")
-        response = HTMLResponse(content=minimal_html)
-        logger.info("[HYPERVISORS PAGE] Minimal HTML response created, returning now")
-        return response
 
     return templates.TemplateResponse("hypervisors.html", {
         "request": request,
