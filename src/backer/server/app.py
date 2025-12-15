@@ -10406,23 +10406,42 @@ try {{
 
         body = await request.json()
         import_path = body.get("import_path")
+        job_id = body.get("job_id")
+        filename = body.get("filename")
+
+        # Support both direct import_path and job_id + filename approach
+        repository_id = body.get("repository_id")
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if job_id and filename and not import_path:
+            # Build import_path from job and filename
+            job = storage.get_hypervisor_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found")
+            repository_id = job.get("repository_id")
+            if not repository_id:
+                raise HTTPException(status_code=400, detail="Job has no repository configured")
+            repository = storage.get_repository(repository_id)
+            if not repository:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            # Build import_path: repo_path / filename
+            repo_path = repository.get("path", "")
+            import_path = f"{repo_path.rstrip('/')}/{filename}"
+
         if not import_path:
-            raise HTTPException(status_code=400, detail="import_path is required")
+            raise HTTPException(status_code=400, detail="import_path or (job_id + filename) is required")
 
         vm_name = body.get("vm_name")
         restore_path = body.get("restore_path")
         vhd_destination_path = body.get("vhd_destination_path")
-        repository_id = body.get("repository_id")
 
         password = storage.get_hypervisor_password(hypervisor_id)
         if not password:
             raise HTTPException(status_code=400, detail="Hypervisor password not configured")
 
         domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
-
-        smb_username: str | None = None
-        smb_password: str | None = None
-        smb_domain: str | None = None
 
         if repository_id:
             repository = storage.get_repository(repository_id)
@@ -10479,25 +10498,44 @@ try {{
 
         body = await request.json()
         import_path = body.get("import_path")
+        job_id = body.get("job_id")
+        filename = body.get("filename")
+
+        # Support both direct import_path and job_id + filename approach
+        repository_id = body.get("repository_id")
+        smb_username: str | None = None
+        smb_password: str | None = None
+        smb_domain: str | None = None
+
+        if job_id and filename and not import_path:
+            # Build import_path from job and filename
+            job = storage.get_hypervisor_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found")
+            repository_id = job.get("repository_id")
+            if not repository_id:
+                raise HTTPException(status_code=400, detail="Job has no repository configured")
+            repository = storage.get_repository(repository_id)
+            if not repository:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            # Build import_path: repo_path / filename
+            repo_path = repository.get("path", "")
+            import_path = f"{repo_path.rstrip('/')}/{filename}"
+
         if not import_path:
-            raise HTTPException(status_code=400, detail="import_path is required")
+            raise HTTPException(status_code=400, detail="import_path or (job_id + filename) is required")
 
         vm_name = body.get("vm_name")
         restore_path = body.get("restore_path")
         vhd_destination_path = body.get("vhd_destination_path")
-        repository_id = body.get("repository_id")
         network_mapping = body.get("network_mapping")
-        start_after = body.get("start", False)
+        start_after = body.get("start_after", body.get("start", False))
 
         password = storage.get_hypervisor_password(hypervisor_id)
         if not password:
             raise HTTPException(status_code=400, detail="Hypervisor password not configured")
 
         domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
-
-        smb_username: str | None = None
-        smb_password: str | None = None
-        smb_domain: str | None = None
 
         if repository_id:
             repository = storage.get_repository(repository_id)

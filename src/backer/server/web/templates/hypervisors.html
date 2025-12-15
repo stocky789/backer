@@ -643,6 +643,30 @@
                     </label>
                 </div>
 
+                <!-- Hyper-V DR Hardening Options -->
+                <details class="form-details" id="drHardeningDetails" style="display: none;">
+                    <summary>Disaster Recovery Options</summary>
+                    <div class="form-details-content">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="jobVerifyBackup">
+                                <span>Verify Backup After Completion</span>
+                            </label>
+                            <div class="form-hint">
+                                Automatically verify VHD files and configuration after each backup completes.
+                                This ensures backups are restorable before marking them as successful.
+                            </div>
+                        </div>
+                        <div class="form-hint" style="margin-top: 12px; padding: 10px; background: var(--bg-tertiary); border-radius: 4px;">
+                            <strong>Note:</strong> Each backup also generates:
+                            <ul style="margin: 8px 0 0 20px;">
+                                <li><strong>Recovery Runbook</strong> - PowerShell script for manual restore without Backer</li>
+                                <li><strong>Backup Catalog</strong> - Central manifest of all backups for this repository</li>
+                            </ul>
+                        </div>
+                    </div>
+                </details>
+
                 <div id="jobError" class="error-msg" style="display: none;"></div>
 
                 <div class="modal-footer">
@@ -734,7 +758,36 @@
 
                 <div id="restoreError" class="error-msg" style="display: none;"></div>
 
+                <!-- Preflight Results (hidden by default) -->
+                <div id="preflightResults" class="preflight-results" style="display: none;">
+                    <div class="preflight-header">
+                        <strong>Pre-flight Check Results</strong>
+                        <span id="preflightSummary" class="status-badge"></span>
+                    </div>
+                    <div id="preflightChecks" class="preflight-checks"></div>
+                </div>
+
+                <!-- Dry-run Results (hidden by default) -->
+                <div id="dryRunResults" class="dryrun-results" style="display: none;">
+                    <div class="dryrun-header">
+                        <strong>Dry-Run Results</strong>
+                        <span id="dryRunSummary" class="status-badge"></span>
+                    </div>
+                    <div id="dryRunDetails" class="dryrun-details"></div>
+                </div>
+
                 <div class="modal-footer">
+                    <!-- Hyper-V specific buttons (shown only for Hyper-V) -->
+                    <div id="hypervRestoreButtons" style="display: none; margin-right: auto;">
+                        <button type="button" class="btn btn-secondary" onclick="runPreflightCheck()" title="Check prerequisites before restore">
+                            <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; margin-right: 4px;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke="currentColor" fill="none" stroke-width="2"/><polyline points="22 4 12 14.01 9 11.01" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+                            Preflight
+                        </button>
+                        <button type="button" class="btn btn-secondary" onclick="runDryRun()" title="Preview what will happen without making changes">
+                            <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; margin-right: 4px;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" fill="none" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+                            Dry Run
+                        </button>
+                    </div>
                     <button type="submit" class="btn btn-primary">Start Restore</button>
                     <button type="button" class="btn btn-secondary" onclick="hideRestoreModal()">Cancel</button>
                 </div>
@@ -763,6 +816,92 @@
     padding: 24px;
     color: var(--text-muted);
     font-size: 12px;
+}
+
+/* Preflight Results */
+.preflight-results, .dryrun-results {
+    margin-top: 16px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+.preflight-header, .dryrun-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+.preflight-checks {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.preflight-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    font-size: 12px;
+}
+.preflight-check.passed {
+    border-left: 3px solid var(--success);
+}
+.preflight-check.failed {
+    border-left: 3px solid var(--danger);
+}
+.preflight-check.warning {
+    border-left: 3px solid var(--warning);
+}
+.preflight-check .check-icon {
+    width: 16px;
+    height: 16px;
+}
+.preflight-check .check-name {
+    font-weight: 500;
+    min-width: 120px;
+}
+.preflight-check .check-message {
+    color: var(--text-muted);
+    flex: 1;
+}
+.dryrun-details {
+    font-size: 12px;
+}
+.dryrun-section {
+    margin-bottom: 12px;
+}
+.dryrun-section:last-child {
+    margin-bottom: 0;
+}
+.dryrun-section h4 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+.dryrun-item {
+    padding: 4px 0;
+    display: flex;
+    gap: 8px;
+}
+.dryrun-item .label {
+    color: var(--text-muted);
+    min-width: 100px;
+}
+.dryrun-files {
+    max-height: 150px;
+    overflow-y: auto;
+    background: var(--bg-primary);
+    padding: 8px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 11px;
 }
 
 /* Modal Tabs */
@@ -1604,6 +1743,9 @@ async function onJobHypervisorChange() {
     const jobModeSelect = document.getElementById('jobMode');
     const compressionGroup = document.getElementById('jobCompressionGroup');
 
+    // Show/hide DR hardening options based on hypervisor type
+    const drHardeningDetails = document.getElementById('drHardeningDetails');
+
     if (hvType === 'hyperv' || hvType === 'hyperv-cluster') {
         // Hyper-V: different backup modes, no compression
         jobModeSelect.innerHTML = `
@@ -1612,6 +1754,7 @@ async function onJobHypervisorChange() {
             <option value="checkpoint">Checkpoint</option>
         `;
         compressionGroup.style.display = 'none';
+        drHardeningDetails.style.display = '';  // Show DR options for Hyper-V
     } else {
         // Proxmox/Unraid: standard options
         jobModeSelect.innerHTML = `
@@ -1620,6 +1763,7 @@ async function onJobHypervisorChange() {
             <option value="stop">Stop</option>
         `;
         compressionGroup.style.display = '';
+        drHardeningDetails.style.display = 'none';  // Hide DR options for non-Hyper-V
     }
 
     const guestsContainer = document.getElementById('jobGuestsList');
@@ -1719,6 +1863,7 @@ async function submitJob(event) {
         schedule_cron: document.getElementById('jobSchedule').value || null,
         enabled: document.getElementById('jobEnabled').checked,
         copies_to_keep: parseInt(document.getElementById('jobCopiesToKeep').value) || 0,
+        verify_backup: document.getElementById('jobVerifyBackup').checked,
     };
 
     const url = editingJobId ? `/api/v1/hypervisor-jobs/${editingJobId}` : '/api/v1/hypervisor-jobs';
@@ -1764,9 +1909,15 @@ async function editHypervisorJob(jobId) {
         document.getElementById('jobRepository').value = job.repository_id || '';
         document.getElementById('jobCopiesToKeep').value = job.copies_to_keep || 0;
         document.getElementById('jobCompression').value = job.compression || job.compress || 'zstd';
+        document.getElementById('jobVerifyBackup').checked = job.verify_backup || false;
 
         if (job.copies_to_keep && job.copies_to_keep > 0) {
             document.getElementById('storageDetails').open = true;
+        }
+
+        // Open DR hardening details if verify_backup is enabled
+        if (job.verify_backup) {
+            document.getElementById('drHardeningDetails').open = true;
         }
 
         // Update form based on hypervisor type first, then set the mode
@@ -1890,7 +2041,15 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
     // Get target node group element
     const targetNodeGroup = document.getElementById('restoreTargetNodeGroup');
 
+    // Show/hide Hyper-V specific buttons and reset results
+    const hypervRestoreButtons = document.getElementById('hypervRestoreButtons');
+    document.getElementById('preflightResults').style.display = 'none';
+    document.getElementById('dryRunResults').style.display = 'none';
+
     if (isHyperV) {
+        // Show Hyper-V specific buttons (preflight, dry-run)
+        if (hypervRestoreButtons) hypervRestoreButtons.style.display = 'flex';
+
         document.getElementById('restoreGuestTypeLabel').textContent = 'Type: Hyper-V Virtual Machine';
         // Change VMID field to VM Name for Hyper-V
         if (vmidLabel) vmidLabel.textContent = 'Restore as VM Name';
@@ -1920,6 +2079,8 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
         }
         tpmWarning.style.display = 'block';
     } else {
+        // Hide Hyper-V specific buttons for non-Hyper-V
+        if (hypervRestoreButtons) hypervRestoreButtons.style.display = 'none';
         // Hide vTPM warning for non-Hyper-V
         const tpmWarning = document.getElementById('restoreTpmWarning');
         if (tpmWarning) tpmWarning.style.display = 'none';
@@ -2200,6 +2361,218 @@ async function submitRestore(event) {
 document.getElementById('restoreModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideRestoreModal();
 });
+
+// ========== Hyper-V DR Hardening Functions ==========
+
+async function runPreflightCheck() {
+    const hvId = document.getElementById('restoreHypervisorId').value;
+    const form = document.getElementById('restoreForm');
+    const jobId = form.dataset.jobId;
+    const filename = document.getElementById('restoreArchive').value;
+    const restoreMode = document.getElementById('restoreMode').value || 'auto';
+    const targetNode = document.getElementById('restoreTargetNode').value || null;
+    const vmName = document.getElementById('restoreVmid').value || null;
+
+    const resultsDiv = document.getElementById('preflightResults');
+    const checksDiv = document.getElementById('preflightChecks');
+    const summarySpan = document.getElementById('preflightSummary');
+
+    // Hide dry-run results if showing
+    document.getElementById('dryRunResults').style.display = 'none';
+
+    // Show loading state
+    checksDiv.innerHTML = '<div class="loading-state">Running pre-flight checks...</div>';
+    resultsDiv.style.display = 'block';
+    summarySpan.className = 'status-badge running';
+    summarySpan.textContent = 'Checking...';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/hyperv-restore/preflight`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                filename: filename,
+                restore_mode: restoreMode,
+                target_node: targetNode,
+                vm_name: vmName,
+                job_id: jobId
+            })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            checksDiv.innerHTML = `<div class="error-msg">${escapeHtml(result.detail || 'Preflight check failed')}</div>`;
+            summarySpan.className = 'status-badge error';
+            summarySpan.textContent = 'Error';
+            return;
+        }
+
+        // Render check results
+        let html = '';
+        const checks = result.checks || [];
+        for (const check of checks) {
+            const statusClass = check.passed ? 'passed' : (check.severity === 'warning' ? 'warning' : 'failed');
+            const icon = check.passed
+                ? '<svg viewBox="0 0 24 24" class="check-icon" style="color: var(--success);"><polyline points="20 6 9 17 4 12" stroke="currentColor" fill="none" stroke-width="2"/></svg>'
+                : (check.severity === 'warning'
+                    ? '<svg viewBox="0 0 24 24" class="check-icon" style="color: var(--warning);"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" stroke="currentColor" fill="none" stroke-width="2"/><line x1="12" y1="9" x2="12" y2="13" stroke="currentColor" stroke-width="2"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="currentColor" stroke-width="2"/></svg>'
+                    : '<svg viewBox="0 0 24 24" class="check-icon" style="color: var(--danger);"><circle cx="12" cy="12" r="10" stroke="currentColor" fill="none" stroke-width="2"/><line x1="15" y1="9" x2="9" y2="15" stroke="currentColor" stroke-width="2"/><line x1="9" y1="9" x2="15" y2="15" stroke="currentColor" stroke-width="2"/></svg>');
+
+            html += `<div class="preflight-check ${statusClass}">
+                ${icon}
+                <span class="check-name">${escapeHtml(check.name)}</span>
+                <span class="check-message">${escapeHtml(check.message)}</span>
+            </div>`;
+        }
+        checksDiv.innerHTML = html || '<div class="loading-state">No checks returned</div>';
+
+        // Update summary
+        if (result.all_passed) {
+            summarySpan.className = 'status-badge success';
+            summarySpan.textContent = 'All Passed';
+        } else if (result.errors && result.errors.length > 0) {
+            summarySpan.className = 'status-badge error';
+            summarySpan.textContent = `${result.errors.length} Failed`;
+        } else if (result.warnings && result.warnings.length > 0) {
+            summarySpan.className = 'status-badge warning';
+            summarySpan.textContent = `${result.warnings.length} Warnings`;
+        } else {
+            summarySpan.className = 'status-badge muted';
+            summarySpan.textContent = 'Unknown';
+        }
+
+    } catch (e) {
+        checksDiv.innerHTML = `<div class="error-msg">Error: ${escapeHtml(e.message)}</div>`;
+        summarySpan.className = 'status-badge error';
+        summarySpan.textContent = 'Error';
+    }
+}
+
+async function runDryRun() {
+    const hvId = document.getElementById('restoreHypervisorId').value;
+    const form = document.getElementById('restoreForm');
+    const jobId = form.dataset.jobId;
+    const filename = document.getElementById('restoreArchive').value;
+    const restoreMode = document.getElementById('restoreMode').value || 'auto';
+    const targetNode = document.getElementById('restoreTargetNode').value || null;
+    const vmName = document.getElementById('restoreVmid').value || null;
+    const startAfter = document.getElementById('restoreStart').checked;
+
+    const resultsDiv = document.getElementById('dryRunResults');
+    const detailsDiv = document.getElementById('dryRunDetails');
+    const summarySpan = document.getElementById('dryRunSummary');
+
+    // Hide preflight results if showing
+    document.getElementById('preflightResults').style.display = 'none';
+
+    // Show loading state
+    detailsDiv.innerHTML = '<div class="loading-state">Running dry-run analysis...</div>';
+    resultsDiv.style.display = 'block';
+    summarySpan.className = 'status-badge running';
+    summarySpan.textContent = 'Analyzing...';
+
+    try {
+        const response = await fetch(`/api/v1/hypervisors/${hvId}/hyperv-restore/dry-run`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                filename: filename,
+                restore_mode: restoreMode,
+                target_node: targetNode,
+                vm_name: vmName,
+                start_after: startAfter,
+                job_id: jobId
+            })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            detailsDiv.innerHTML = `<div class="error-msg">${escapeHtml(result.detail || 'Dry-run failed')}</div>`;
+            summarySpan.className = 'status-badge error';
+            summarySpan.textContent = 'Error';
+            return;
+        }
+
+        // Render dry-run details
+        let html = '';
+
+        // Summary section
+        html += `<div class="dryrun-section">
+            <h4>Restore Summary</h4>
+            <div class="dryrun-item"><span class="label">Would Succeed:</span> <span class="${result.would_succeed ? 'success' : 'error'}">${result.would_succeed ? 'Yes' : 'No'}</span></div>
+            <div class="dryrun-item"><span class="label">Restore Method:</span> ${escapeHtml(result.restore_method || 'Unknown')}</div>
+            <div class="dryrun-item"><span class="label">Target Host:</span> ${escapeHtml(result.target_host || 'Auto')}</div>
+            <div class="dryrun-item"><span class="label">VM Name:</span> ${escapeHtml(result.vm_name || 'Original')}</div>
+        </div>`;
+
+        // Space requirements
+        if (result.space_required_gb || result.space_available_gb) {
+            html += `<div class="dryrun-section">
+                <h4>Storage</h4>
+                <div class="dryrun-item"><span class="label">Required:</span> ${result.space_required_gb?.toFixed(2) || '?'} GB</div>
+                <div class="dryrun-item"><span class="label">Available:</span> ${result.space_available_gb?.toFixed(2) || '?'} GB</div>
+            </div>`;
+        }
+
+        // Files to copy
+        if (result.files_to_copy && result.files_to_copy.length > 0) {
+            html += `<div class="dryrun-section">
+                <h4>Files to Copy (${result.files_to_copy.length})</h4>
+                <div class="dryrun-files">${result.files_to_copy.map(f => escapeHtml(f)).join('\n')}</div>
+            </div>`;
+        }
+
+        // Settings to apply
+        if (result.settings_to_apply && Object.keys(result.settings_to_apply).length > 0) {
+            html += `<div class="dryrun-section">
+                <h4>Settings to Apply</h4>`;
+            for (const [key, value] of Object.entries(result.settings_to_apply)) {
+                html += `<div class="dryrun-item"><span class="label">${escapeHtml(key)}:</span> ${escapeHtml(String(value))}</div>`;
+            }
+            html += `</div>`;
+        }
+
+        // Operations
+        if (result.operations && result.operations.length > 0) {
+            html += `<div class="dryrun-section">
+                <h4>Operations</h4>
+                <ol style="margin: 0; padding-left: 20px;">`;
+            for (const op of result.operations) {
+                html += `<li style="margin: 4px 0;">${escapeHtml(op)}</li>`;
+            }
+            html += `</ol></div>`;
+        }
+
+        // Warnings
+        if (result.warnings && result.warnings.length > 0) {
+            html += `<div class="dryrun-section">
+                <h4 style="color: var(--warning);">Warnings</h4>
+                <ul style="margin: 0; padding-left: 20px;">`;
+            for (const warn of result.warnings) {
+                html += `<li style="margin: 4px 0; color: var(--warning);">${escapeHtml(warn)}</li>`;
+            }
+            html += `</ul></div>`;
+        }
+
+        detailsDiv.innerHTML = html || '<div class="loading-state">No details returned</div>';
+
+        // Update summary
+        if (result.would_succeed) {
+            summarySpan.className = 'status-badge success';
+            summarySpan.textContent = 'Ready';
+        } else {
+            summarySpan.className = 'status-badge error';
+            summarySpan.textContent = 'Would Fail';
+        }
+
+    } catch (e) {
+        detailsDiv.innerHTML = `<div class="error-msg">Error: ${escapeHtml(e.message)}</div>`;
+        summarySpan.className = 'status-badge error';
+        summarySpan.textContent = 'Error';
+    }
+}
 
 // Live update handler for job statuses
 document.addEventListener('liveUpdate', async function() {

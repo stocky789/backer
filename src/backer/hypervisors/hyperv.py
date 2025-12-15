@@ -2727,7 +2727,7 @@ try {{
 
         # Scan for timestamp folders
         $timestampFolders = Get-ChildItem -Path $vmFolder.FullName -Directory -ErrorAction SilentlyContinue |
-            Where-Object {{ $_.Name -match '^\d{{8}}_\d{{6}}$' }}
+            Where-Object {{ $_.Name -match '^\\d{{8}}_\\d{{6}}$' }}
 
         if ($timestampFolders.Count -eq 0) {{ continue }}
 
