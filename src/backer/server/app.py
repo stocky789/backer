@@ -6552,35 +6552,50 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hypervisor_id = job.get("hypervisor_id")
         job_name = job.get("name", "Unknown")
 
-        # Store these for the background task
-        _storage = storage
+        # Get all data we need before starting background task
         repository = None
         hypervisor = None
+        repo_password = None
 
         if repository_id and hypervisor_id:
             repository = storage.get_repository(repository_id)
             hypervisor = storage.get_hypervisor(hypervisor_id)
+            if repository:
+                repo_password = storage.get_repository_password(repository_id)
 
         # Delete local database records immediately
         storage.delete_hypervisor_job(job_id)
 
         # Run cleanup in background if we have repository data
         if repository and hypervisor:
+            # Make copies of the data to avoid threading issues with SQLite
+            job_copy = dict(job)
+            repository_copy = dict(repository)
+            hypervisor_copy = dict(hypervisor)
+
             def cleanup_job_data(task: Task) -> dict[str, Any]:
-                """Background task to clean up job data from repository."""
+                """Background task to clean up job data from repository.
+
+                NOTE: We get a fresh Storage instance here to avoid SQLite threading issues.
+                """
+                from backer.server.storage import get_storage_instance
+
                 cleanup_errors = []
                 task.message = f"Cleaning up backup data for job '{job_name}'"
                 task.progress = 10
+
+                # Get a fresh storage instance for this thread
+                thread_storage = get_storage_instance()
 
                 # Clean up backup files
                 try:
                     task.message = f"Deleting backup files for '{job_name}'"
                     task.progress = 30
                     _cleanup_hypervisor_job_data(
-                        repository=repository,
-                        hypervisor=hypervisor,
-                        job=job,
-                        storage=_storage,
+                        repository=repository_copy,
+                        hypervisor=hypervisor_copy,
+                        job=job_copy,
+                        storage=thread_storage,
                         repository_id=repository_id,
                     )
                     logger.info(f"Cleaned up backup files for job {job_id}")
@@ -6594,10 +6609,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     task.message = f"Cleaning up metadata for '{job_name}'"
                     task.progress = 80
                     _cleanup_hypervisor_job_metadata(
-                        repository=repository,
-                        hypervisor=hypervisor,
-                        job=job,
-                        storage=_storage,
+                        repository=repository_copy,
+                        hypervisor=hypervisor_copy,
+                        job=job_copy,
+                        storage=thread_storage,
                         repository_id=repository_id,
                     )
                     logger.info(f"Cleaned up metadata files for job {job_id}")

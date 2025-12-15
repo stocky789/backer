@@ -299,8 +299,10 @@ class Storage:
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         """Get a database connection."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)  # 30 second timeout for locks
         conn.row_factory = sqlite3.Row
+        # Enable Write-Ahead Logging for better concurrent access
+        conn.execute("PRAGMA journal_mode=WAL")
         try:
             yield conn
             conn.commit()
