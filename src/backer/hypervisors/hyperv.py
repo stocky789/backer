@@ -6053,6 +6053,112 @@ try {{
                                         f"Using original VHD path for rebuild fallback: {fallback_vhd_dest_path}"
                                     )
 
+                    # Before rebuild on target node, we must remove the VM from cluster
+                    # and from its current owner node to release file locks on .vmcx
+                    if existing_owner and effective_vm_name:
+                        logger.info(
+                            f"Removing VM '{effective_vm_name}' from cluster and owner node "
+                            f"'{existing_owner}' before rebuild on '{target_node}'"
+                        )
+                        # First remove from cluster
+                        remove_cluster_script = f"""
+$ErrorActionPreference = 'Continue'
+$vmName = '{effective_vm_name}'
+$warnings = @()
+
+# Remove from cluster group first
+try {{
+    $clusterGroup = Get-ClusterGroup -Name $vmName -ErrorAction SilentlyContinue
+    if ($clusterGroup) {{
+        # Take offline first
+        Stop-ClusterGroup -Name $vmName -ErrorAction SilentlyContinue | Out-Null
+        Start-Sleep -Seconds 2
+        # Remove from cluster
+        Remove-ClusterGroup -Name $vmName -RemoveResources -Force -ErrorAction Stop
+        $warnings += "Removed '$vmName' from cluster"
+        Start-Sleep -Seconds 3
+    }}
+}} catch {{
+    $warnings += "Cluster removal warning: $_"
+}}
+
+@{{ Warnings = $warnings }} | ConvertTo-Json -Compress
+"""
+                        rc, stdout, stderr = self.cluster_api.api._run_powershell(
+                            remove_cluster_script, timeout=60
+                        )
+                        if stdout:
+                            try:
+                                cluster_result = json.loads(stdout.strip())
+                                for warn in cluster_result.get("Warnings", []):
+                                    logger.info(f"Cluster removal: {warn}")
+                            except json.JSONDecodeError:
+                                pass
+
+                        # Now remove VM registration from the owner node
+                        owner_api = self.cluster_api._get_or_create_node_connection(existing_owner)
+                        remove_vm_script = f"""
+$ErrorActionPreference = 'Continue'
+$vmName = '{effective_vm_name}'
+$warnings = @()
+
+try {{
+    $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if ($vm) {{
+        # Stop VM if running
+        if ($vm.State -ne 'Off') {{
+            Stop-VM -Name $vmName -Force -TurnOff -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+        }}
+
+        # Capture the VM path for cleanup
+        $vmPath = $vm.Path
+
+        # Remove VM registration
+        Remove-VM -Name $vmName -Force -ErrorAction Stop
+        $warnings += "Removed VM '$vmName' from node"
+
+        # Wait for Hyper-V to release file handles
+        Start-Sleep -Seconds 5
+
+        # Clean up the Virtual Machines folder to release .vmcx locks
+        if ($vmPath) {{
+            $vmConfigFolder = Join-Path $vmPath "Virtual Machines"
+            if (Test-Path $vmConfigFolder) {{
+                try {{
+                    Remove-Item -Path $vmConfigFolder -Recurse -Force -ErrorAction Stop
+                    $warnings += "Cleaned up VM config folder"
+                }} catch {{
+                    # Fallback to cmd for stubborn files
+                    & cmd /c rd /s /q "$vmConfigFolder" 2>&1 | Out-Null
+                    $warnings += "Used fallback cleanup for VM config folder"
+                }}
+            }}
+        }}
+    }} else {{
+        $warnings += "VM '$vmName' not found on this node"
+    }}
+}} catch {{
+    $warnings += "VM removal warning: $_"
+}}
+
+@{{ Warnings = $warnings }} | ConvertTo-Json -Compress
+"""
+                        rc, stdout, stderr = owner_api._run_powershell(
+                            remove_vm_script, timeout=60
+                        )
+                        if stdout:
+                            try:
+                                vm_result = json.loads(stdout.strip())
+                                for warn in vm_result.get("Warnings", []):
+                                    logger.info(f"VM removal from {existing_owner}: {warn}")
+                            except json.JSONDecodeError:
+                                pass
+
+                        # Additional wait for file system to settle
+                        import time
+                        time.sleep(3)
+
                     # Get connection to target node for rebuild
                     node_api = self.cluster_api._get_or_create_node_connection(target_node)
                     node_backup_manager = HyperVBackupManager(node_api)
@@ -6079,6 +6185,62 @@ try {{
                 # Standard node-based restore (import, rebuild, or new VM)
                 node_api = self.cluster_api._get_or_create_node_connection(target_node)
                 node_backup_manager = HyperVBackupManager(node_api)
+
+                # If VM exists in cluster but we're using explicit rebuild/import mode,
+                # we need to remove it first to release file locks
+                if existing_owner and effective_vm_name and restore_mode in ("rebuild", "import"):
+                    logger.info(
+                        f"VM '{effective_vm_name}' exists in cluster on '{existing_owner}', "
+                        f"removing before {restore_mode} on '{target_node}'"
+                    )
+                    # Remove from cluster
+                    remove_cluster_script = f"""
+$ErrorActionPreference = 'Continue'
+$vmName = '{effective_vm_name}'
+try {{
+    $clusterGroup = Get-ClusterGroup -Name $vmName -ErrorAction SilentlyContinue
+    if ($clusterGroup) {{
+        Stop-ClusterGroup -Name $vmName -ErrorAction SilentlyContinue | Out-Null
+        Start-Sleep -Seconds 2
+        Remove-ClusterGroup -Name $vmName -RemoveResources -Force -ErrorAction Stop
+        Start-Sleep -Seconds 3
+    }}
+}} catch {{ }}
+"DONE"
+"""
+                    self.cluster_api.api._run_powershell(remove_cluster_script, timeout=60)
+
+                    # Remove VM from owner node
+                    owner_api = self.cluster_api._get_or_create_node_connection(existing_owner)
+                    remove_vm_script = f"""
+$ErrorActionPreference = 'Continue'
+$vmName = '{effective_vm_name}'
+try {{
+    $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+    if ($vm) {{
+        if ($vm.State -ne 'Off') {{
+            Stop-VM -Name $vmName -Force -TurnOff -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+        }}
+        $vmPath = $vm.Path
+        Remove-VM -Name $vmName -Force -ErrorAction Stop
+        Start-Sleep -Seconds 5
+        if ($vmPath) {{
+            $vmConfigFolder = Join-Path $vmPath "Virtual Machines"
+            if (Test-Path $vmConfigFolder) {{
+                try {{ Remove-Item -Path $vmConfigFolder -Recurse -Force }} catch {{
+                    & cmd /c rd /s /q "$vmConfigFolder" 2>&1 | Out-Null
+                }}
+            }}
+        }}
+    }}
+}} catch {{ }}
+"DONE"
+"""
+                    owner_api._run_powershell(remove_vm_script, timeout=60)
+                    import time
+                    time.sleep(3)
+                    logger.info(f"Removed VM '{effective_vm_name}' from cluster before {restore_mode}")
 
                 # When VM is not in cluster, check for orphaned local registrations
                 # This happens when a VM is deleted from cluster but local registration remains
