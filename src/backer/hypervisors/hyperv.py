@@ -312,13 +312,12 @@ class HyperVAPI:
     def _run_powershell_large(
         self, script: str, timeout: int | None = None
     ) -> tuple[int, str, str]:
-        """Execute a large PowerShell script using environment variables.
+        """Execute a large PowerShell script by writing to a temp file in chunks.
 
-        This avoids command line length limits by passing the script via
-        environment variables when opening the WinRM shell, then executing
-        it with Invoke-Expression.
-
-        Based on workaround from: https://github.com/diyan/pywinrm/issues/184
+        This avoids command line length limits (~8KB) by:
+        1. Writing the script to a temp file on the remote host in chunks
+        2. Executing the temp file
+        3. Cleaning up the temp file
 
         Args:
             script: PowerShell script to execute
@@ -336,7 +335,10 @@ class HyperVAPI:
         full_username = self._get_full_username()
 
         # Map auth method to pywinrm transport
-        if self.auth_method == HyperVAuthMethod.BASIC:
+        # CredSSP takes priority if enabled (needed for cluster credential delegation)
+        if self.use_credssp:
+            transport = "credssp"
+        elif self.auth_method == HyperVAuthMethod.BASIC:
             transport = "basic"
         elif self.auth_method == HyperVAuthMethod.KERBEROS:
             transport = "kerberos"
@@ -344,41 +346,115 @@ class HyperVAPI:
             transport = "ntlm"
 
         try:
-            # Use Protocol directly to access open_shell with env_vars
-            protocol = winrm.Protocol(
-                endpoint=self.winrm_url,
+            # Create WinRM session
+            session = winrm.Session(
+                target=self.winrm_url,
+                auth=(full_username, self.password),
                 transport=transport,
-                username=full_username,
-                password=self.password,
                 server_cert_validation="ignore" if not self.verify_ssl else "validate",
                 operation_timeout_sec=effective_timeout,
                 read_timeout_sec=effective_timeout + 10,
             )
 
-            # Small command that loads and executes the script from env var
-            loader_cmd = ". ([ScriptBlock]::Create($Env:BACKER_SCRIPT))"
-            encoded_cmd = b64encode(loader_cmd.encode("utf_16_le")).decode("ascii")
+            # Base64 encode the script content for safe transmission
+            script_bytes = script.encode("utf-8")
+            script_b64 = b64encode(script_bytes).decode("ascii")
 
-            # Open shell with script in environment variable
-            shell_id = protocol.open_shell(env_vars={"BACKER_SCRIPT": script})
+            # Generate a unique temp file name
+            import uuid
+            temp_filename = f"backer_script_{uuid.uuid4().hex[:8]}.ps1"
 
-            try:
-                # Run the loader command
-                command_id = protocol.run_command(
-                    shell_id, f"powershell -EncodedCommand {encoded_cmd}"
-                )
-                stdout_bytes, stderr_bytes, return_code = protocol.get_command_output(
-                    shell_id, command_id
-                )
-                protocol.cleanup_command(shell_id, command_id)
+            # For small scripts, use single command approach
+            # For large scripts, write in chunks to avoid command line limits
+            # pywinrm base64 encodes again, so ~2KB of base64 data is safe
+            chunk_size = 2000
 
-                stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-                stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+            if len(script_b64) <= chunk_size:
+                # Small script - single command
+                wrapper_script = f'''
+$ErrorActionPreference = "Stop"
+$tempPath = Join-Path $env:TEMP "{temp_filename}"
+try {{
+    $scriptB64 = "{script_b64}"
+    $scriptBytes = [System.Convert]::FromBase64String($scriptB64)
+    [System.IO.File]::WriteAllBytes($tempPath, $scriptBytes)
+    $ErrorActionPreference = "Continue"
+    & $tempPath
+    $scriptExitCode = $LASTEXITCODE
+    if ($null -eq $scriptExitCode) {{ $scriptExitCode = 0 }}
+}} catch {{
+    Write-Error $_.Exception.Message
+    $scriptExitCode = 1
+}} finally {{
+    if (Test-Path $tempPath) {{ Remove-Item $tempPath -Force -ErrorAction SilentlyContinue }}
+}}
+exit $scriptExitCode
+'''
+                result = session.run_ps(wrapper_script)
+                stdout = result.std_out.decode("utf-8", errors="replace") if result.std_out else ""
+                stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+                return result.status_code, stdout, stderr
 
-                return return_code, stdout, stderr
+            # Large script - write in chunks
+            # First, create the temp file path
+            init_script = f'''
+$tempPath = Join-Path $env:TEMP "{temp_filename}"
+if (Test-Path $tempPath) {{ Remove-Item $tempPath -Force }}
+$tempPath
+'''
+            result = session.run_ps(init_script)
+            if result.status_code != 0:
+                stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+                return result.status_code, "", f"Failed to initialize temp file: {stderr}"
 
-            finally:
-                protocol.close_shell(shell_id)
+            temp_path = result.std_out.decode("utf-8", errors="replace").strip() if result.std_out else ""
+            if not temp_path:
+                return 1, "", "Failed to get temp file path"
+
+            # Write script in chunks by appending base64 data
+            chunks = [script_b64[i:i + chunk_size] for i in range(0, len(script_b64), chunk_size)]
+            accumulated_b64 = ""
+
+            for i, chunk in enumerate(chunks):
+                accumulated_b64 += chunk
+                # Every 10 chunks or on the last chunk, flush to file
+                if (i + 1) % 10 == 0 or i == len(chunks) - 1:
+                    append_script = f'''
+$b64 = "{accumulated_b64}"
+$bytes = [System.Convert]::FromBase64String($b64)
+$tempPath = "{temp_path}"
+[System.IO.File]::AppendAllText($tempPath, [System.Text.Encoding]::UTF8.GetString($bytes))
+"OK"
+'''
+                    result = session.run_ps(append_script)
+                    if result.status_code != 0:
+                        # Cleanup on error
+                        session.run_ps(f'Remove-Item "{temp_path}" -Force -ErrorAction SilentlyContinue')
+                        stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+                        return result.status_code, "", f"Failed to write script chunk: {stderr}"
+                    accumulated_b64 = ""
+
+            # Execute the script
+            exec_script = f'''
+$ErrorActionPreference = "Continue"
+$tempPath = "{temp_path}"
+try {{
+    & $tempPath
+    $scriptExitCode = $LASTEXITCODE
+    if ($null -eq $scriptExitCode) {{ $scriptExitCode = 0 }}
+}} catch {{
+    Write-Error $_.Exception.Message
+    $scriptExitCode = 1
+}} finally {{
+    if (Test-Path $tempPath) {{ Remove-Item $tempPath -Force -ErrorAction SilentlyContinue }}
+}}
+exit $scriptExitCode
+'''
+            result = session.run_ps(exec_script)
+            stdout = result.std_out.decode("utf-8", errors="replace") if result.std_out else ""
+            stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+
+            return result.status_code, stdout, stderr
 
         except Exception as e:
             error_msg = str(e)
