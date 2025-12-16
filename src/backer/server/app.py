@@ -9650,14 +9650,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
             backup_manager = HyperVBackupManager(api)
 
-        # Get old VM GUID from the job's current guest_ids (for job update after restore)
-        # We need to find which GUID in the job's guest_ids corresponds to this VM.
-        # After a restore, the VM gets a new GUID, so we need to update the job.
-        # The backup config contains the original GUID from when backup was taken, but
-        # the job may have been updated with a newer GUID from previous restores.
-        # So we need to find the current GUID by looking up the VM name in the hypervisor
-        # and matching it against the job's guest_ids.
-        old_vm_id = None
+        # Store info needed for GUID lookup in background task
         hypervisor_id = hypervisor.get("id")
 
         # Extract VM name from filename (e.g., "testwin11/20251211_123556" -> "testwin11")
@@ -9666,124 +9659,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get the job's current guest_ids - one of these is the current GUID for this VM
         job_guest_ids = job.get("guest_ids", [])
-
-        # Strategy: List all VMs in the hypervisor and find which one matches
-        # a guest_id from the job AND has a name matching our backup
-        try:
-            all_guests = backup_manager.list_all_guests()
-            guest_by_id = {g["vmid"].lower(): g for g in all_guests}
-            guest_by_name = {g["name"].lower(): g for g in all_guests}
-
-            # First try: find a VM in the job that matches our VM name
-            for gid in job_guest_ids:
-                guest = guest_by_id.get(gid.lower())
-                if guest and guest["name"].lower() == vm_name_from_path.lower():
-                    old_vm_id = gid.lower()
-                    logger.info(f"Found current VM GUID from job: {old_vm_id} (matches VM name '{vm_name_from_path}')")
-                    break
-
-            # Second try: if VM doesn't exist yet (deleted), the job still has the GUID
-            # In this case, we can't match by name, so we check if job only has one guest_id
-            if not old_vm_id and len(job_guest_ids) == 1:
-                # Single-VM job - use its guest_id
-                old_vm_id = job_guest_ids[0].lower()
-                logger.info(f"Using single guest_id from job as old_vm_id: {old_vm_id}")
-            elif not old_vm_id and vm_name_from_path:
-                # Try to find by VM name in the current VM list
-                guest = guest_by_name.get(vm_name_from_path.lower())
-                if guest and guest["vmid"].lower() in [gid.lower() for gid in job_guest_ids]:
-                    old_vm_id = guest["vmid"].lower()
-                    logger.info(f"Found current VM GUID by name lookup: {old_vm_id}")
-        except Exception as e:
-            logger.warning(f"Could not determine current VM GUID from job: {e}")
-
-        # Fallback: if we couldn't determine old_vm_id from job, try backup config
-        # This handles edge cases like brand new VMs or corrupted job data
-        if not old_vm_id:
-            try:
-                # Build UNC path components first
-                smb_server = repository.get("server", "")
-                smb_share = repository.get("share", "")
-                smb_path = repository.get("path", "")
-
-                backup_base_path = f"\\\\{smb_server}\\{smb_share}"
-                if smb_path:
-                    smb_path_win = smb_path.replace("/", "\\").strip("\\")
-                    backup_base_path = f"{backup_base_path}\\{smb_path_win}"
-
-                # Add hypervisor subfolder
-                safe_hv_name = "".join(
-                    c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
-                )
-                backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
-
-                # Build full path to the backup timestamp folder (contains vm_full_config.json)
-                backup_parts = filename.replace("/", "\\").split("\\")
-                if len(backup_parts) >= 2:
-                    vm_name = backup_parts[0]
-                    timestamp = backup_parts[1]
-                    timestamp_folder = f"{backup_base_path}\\{vm_name}\\{timestamp}"
-                else:
-                    timestamp_folder = f"{backup_base_path}\\{filename}"
-
-                # Load vm_full_config.json from the timestamp folder
-                config_path = f"{timestamp_folder}\\vm_full_config.json"
-                logger.info(f"Fallback: Loading backup config to extract old GUID from: {config_path}")
-
-                # Prepare SMB credentials
-                smb_username = repository.get("username", "")
-                smb_domain = repository.get("domain")
-                if smb_domain and smb_username:
-                    full_username = f"{smb_domain}\\{smb_username}"
-                else:
-                    full_username = smb_username
-
-                config_script = f"""
-$ErrorActionPreference = 'Stop'
-$configPath = '{config_path}'
-$smbUnc = '{backup_base_path}'
-$smbUser = '{full_username}'
-$smbPass = '{repo_password}'
-
-try {{
-    # Connect to SMB if needed
-    if ($smbUnc -and $smbUser) {{
-        $netUseResult = & net use $smbUnc /user:$smbUser $smbPass 2>&1
-        if ($LASTEXITCODE -ne 0) {{
-            Write-Output "SMB_CONNECT_FAILED: $netUseResult"
-        }}
-    }}
-
-    if (Test-Path $configPath) {{
-        $config = Get-Content $configPath -Raw | ConvertFrom-Json
-        if ($config.vm -and $config.vm.id) {{
-            Write-Output $config.vm.id
-        }} else {{
-            Write-Output "NO_VM_ID_IN_CONFIG"
-        }}
-    }} else {{
-        Write-Output "CONFIG_FILE_NOT_FOUND"
-    }}
-}} catch {{
-    Write-Output "ERROR: $_"
-}}
-"""
-                rc, stdout, stderr = api._run_powershell(config_script, timeout=30)
-                output = stdout.strip()
-
-                if (
-                    rc == 0
-                    and output
-                    and not output.startswith("ERROR")
-                    and not output.startswith("CONFIG_FILE_NOT_FOUND")
-                    and not output.startswith("NO_VM_ID_IN_CONFIG")
-                ):
-                    old_vm_id = output.lower()  # Store in lowercase for case-insensitive comparison
-                    logger.info(f"Fallback: Found old VM GUID from backup config: {old_vm_id}")
-                else:
-                    logger.warning(f"Could not load old VM GUID from config: {output}")
-            except Exception as e:
-                logger.warning(f"Could not extract old VM GUID from backup config: {e}")
 
         # Build UNC path to backup
         smb_server = repository.get("server", "")
@@ -9821,6 +9696,40 @@ try {{
 
         def run_hyperv_restore(task: Task) -> dict[str, Any]:
             try:
+                task.message = f"Preparing restore for {vm_name_from_path or 'VM'}..."
+                task.progress = 5
+
+                # Determine old_vm_id for GUID update (runs in background to avoid blocking GUI)
+                # This finds the current GUID in the job that corresponds to this VM
+                old_vm_id = None
+                try:
+                    all_guests = backup_manager.list_all_guests()
+                    guest_by_id = {g["vmid"].lower(): g for g in all_guests}
+                    guest_by_name = {g["name"].lower(): g for g in all_guests}
+
+                    # First try: find a VM in the job that matches our VM name
+                    for gid in job_guest_ids:
+                        guest = guest_by_id.get(gid.lower())
+                        if guest and vm_name_from_path and guest["name"].lower() == vm_name_from_path.lower():
+                            old_vm_id = gid.lower()
+                            logger.info(f"Found current VM GUID from job: {old_vm_id} (matches VM name '{vm_name_from_path}')")
+                            break
+
+                    # Second try: if VM doesn't exist yet (deleted), the job still has the GUID
+                    # In this case, we can't match by name, so we check if job only has one guest_id
+                    if not old_vm_id and len(job_guest_ids) == 1:
+                        # Single-VM job - use its guest_id
+                        old_vm_id = job_guest_ids[0].lower()
+                        logger.info(f"Using single guest_id from job as old_vm_id: {old_vm_id}")
+                    elif not old_vm_id and vm_name_from_path:
+                        # Try to find by VM name in the current VM list
+                        guest = guest_by_name.get(vm_name_from_path.lower())
+                        if guest and guest["vmid"].lower() in [gid.lower() for gid in job_guest_ids]:
+                            old_vm_id = guest["vmid"].lower()
+                            logger.info(f"Found current VM GUID by name lookup: {old_vm_id}")
+                except Exception as e:
+                    logger.warning(f"Could not determine current VM GUID from job: {e}")
+
                 task.message = f"Restoring VM from {import_path}"
                 task.progress = 10
 
