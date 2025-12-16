@@ -7941,7 +7941,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # First, recursively delete contents of dump/ folder
         dump_path = f"{hypervisor_path}/dump"
-        ok, output = run_smb_cmd(f'ls "{dump_path}/*"')
+        # Use cd + ls instead of ls with wildcard to avoid smbclient hanging on quoted paths with spaces
+        ok, output = run_smb_cmd(f'cd "{dump_path}"; ls')
         if ok:
             # Delete all files in dump/
             for line in output.split("\n"):
