@@ -2537,10 +2537,13 @@ async function runDryRun() {
         // Operations
         if (result.operations && result.operations.length > 0) {
             html += `<div class="dryrun-section">
-                <h4>Operations</h4>
+                <h4>OPERATIONS</h4>
                 <ol style="margin: 0; padding-left: 20px;">`;
             for (const op of result.operations) {
-                html += `<li style="margin: 4px 0;">${escapeHtml(op)}</li>`;
+                // op is an object with: step, action, description, target, details
+                const desc = op.description || op.action || String(op);
+                const details = op.details ? ` <span style="color: var(--text-muted); font-size: 0.9em;">(${escapeHtml(op.details)})</span>` : '';
+                html += `<li style="margin: 4px 0;">${escapeHtml(desc)}${details}</li>`;
             }
             html += `</ol></div>`;
         }
