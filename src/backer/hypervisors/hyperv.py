@@ -1593,9 +1593,12 @@ try {{
                         $mac = $nicConfig.macAddress -replace '[:-]', ''
                         if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
                             $addParams.StaticMacAddress = $mac
+                            $warnings += "Will create '$nicName' with static MAC: $mac"
                         }} else {{
                             $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress)"
                         }}
+                    }} else {{
+                        $warnings += "NIC '$nicName' will use dynamic MAC (dynamicEnabled=$isDynamic, mac=$($nicConfig.macAddress))"
                     }}
 
                     Add-VMNetworkAdapter @addParams -ErrorAction Stop
@@ -1679,12 +1682,15 @@ try {{
                         if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
                             try {{
                                 Set-VMNetworkAdapter -VMName $vmName -Name $nicName -StaticMacAddress $mac -ErrorAction Stop
+                                $warnings += "Set static MAC address for '$nicName': $mac"
                             }} catch {{
                                 $warnings += "Failed to set static MAC address for '$nicName': $_"
                             }}
                         }} else {{
                             $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress)"
                         }}
+                    }} else {{
+                        $warnings += "NIC '$nicName': dynamicMacAddressEnabled=$isDynamic, macAddress=$($nicConfig.macAddress)"
                     }}
                 }}
 
@@ -5113,9 +5119,13 @@ Write-Output "SUCCESS"
 
                 if config_warnings:
                     result["warnings"].extend(config_warnings)
+                    # Log each warning individually for debugging
+                    for warning in config_warnings:
+                        logger.warning(f"Config application warning: {warning}")
 
                 if not config_success:
                     result["warnings"].append("Some configuration settings could not be applied")
+                    logger.error("Failed to apply VM configuration")
 
             # Step 5: Start VM if requested
             if result["success"] and start_after_restore:
