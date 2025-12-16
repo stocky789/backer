@@ -8191,7 +8191,7 @@ try {{
 
 @{{ Warnings = $warnings }} | ConvertTo-Json -Compress
 """
-                        rc, stdout, stderr = self.cluster_api.api._run_powershell(
+                        rc, stdout, stderr = self.cluster_api._run_powershell(
                             remove_cluster_script, timeout=60
                         )
                         if stdout:
@@ -8315,7 +8315,7 @@ try {{
 }} catch {{ }}
 "DONE"
 """
-                    self.cluster_api.api._run_powershell(remove_cluster_script, timeout=60)
+                    self.cluster_api._run_powershell(remove_cluster_script, timeout=60)
 
                     # Remove VM from owner node
                     owner_api = self.cluster_api._get_or_create_node_connection(existing_owner)
