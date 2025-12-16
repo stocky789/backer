@@ -5738,72 +5738,139 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         - The hypervisor configuration
 
         After deletion, the repository will be clean with no trace of this hypervisor.
+        The cleanup runs in the background to avoid blocking the API.
         """
         hypervisor = storage.get_hypervisor(hypervisor_id)
         if not hypervisor:
             raise HTTPException(status_code=404, detail="Hypervisor not found")
 
-        cleanup_errors: list[str] = []
-        jobs_cleaned = 0
-        repos_cleaned = set()
+        hypervisor_name = hypervisor.get("name", "Unknown")
 
-        # Get all jobs for this hypervisor
+        # Get all jobs for this hypervisor and collect repository data
         all_jobs = storage.list_hypervisor_jobs()
         hypervisor_jobs = [j for j in all_jobs if j.get("hypervisor_id") == hypervisor_id]
 
-        logger.info(f"Deleting hypervisor '{hypervisor.get('name')}' with {len(hypervisor_jobs)} jobs")
+        logger.info(f"Deleting hypervisor '{hypervisor_name}' with {len(hypervisor_jobs)} jobs")
 
-        # Clean up each job's backup data
+        # Collect all data needed for cleanup before deleting from database
+        cleanup_data = []
+        repos_to_cleanup = {}
+
         for job in hypervisor_jobs:
             repository_id = job.get("repository_id")
             if repository_id:
                 repository = storage.get_repository(repository_id)
                 if repository:
-                    try:
-                        _cleanup_hypervisor_job_data(
-                            repository=repository,
-                            hypervisor=hypervisor,
-                            job=job,
-                            storage=storage,
-                            repository_id=repository_id,
-                        )
-                        jobs_cleaned += 1
-                        repos_cleaned.add(repository_id)
-                        logger.info(f"Cleaned up job '{job.get('name')}' data from repository")
-                    except Exception as e:
-                        logger.warning(f"Failed to clean up job '{job.get('name')}': {e}")
-                        cleanup_errors.append(f"Job {job.get('name')}: {e}")
+                    # Make copies to avoid threading issues
+                    cleanup_data.append({
+                        "job": dict(job),
+                        "repository": dict(repository),
+                        "repository_id": repository_id,
+                    })
+                    # Track unique repositories for folder cleanup
+                    if repository_id not in repos_to_cleanup:
+                        repos_to_cleanup[repository_id] = dict(repository)
 
-        # Clean up the hypervisor folder entirely from each repository
-        # This removes the Hypervisors/{hv_name} folder and all its contents
-        for repository_id in repos_cleaned:
-            repository = storage.get_repository(repository_id)
-            if repository:
-                try:
-                    _cleanup_hypervisor_folder(
-                        repository=repository,
-                        hypervisor=hypervisor,
-                        storage=storage,
-                        repository_id=repository_id,
-                    )
-                    logger.info(f"Cleaned up hypervisor folder from repository '{repository.get('name')}'")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up hypervisor folder: {e}")
-                    cleanup_errors.append(f"Hypervisor folder cleanup: {e}")
-
-        # Delete from database (this also deletes jobs and runs)
+        # Delete from database immediately (this also deletes jobs and runs)
         storage.delete_hypervisor(hypervisor_id)
 
-        result: dict[str, Any] = {
-            "id": hypervisor_id,
-            "status": "deleted",
-            "jobs_cleaned": jobs_cleaned,
-            "repositories_cleaned": len(repos_cleaned),
-        }
-        if cleanup_errors:
-            result["cleanup_warnings"] = cleanup_errors
+        # Run cleanup in background if there's data to clean
+        if cleanup_data or repos_to_cleanup:
+            # Make a copy of hypervisor data for the thread
+            hypervisor_copy = dict(hypervisor)
 
-        return result
+            def cleanup_hypervisor_data(task: Task) -> dict[str, Any]:
+                """Background task to clean up hypervisor data from repositories.
+
+                NOTE: We get a fresh Storage instance here to avoid SQLite threading issues.
+                """
+                import gc
+                from pathlib import Path
+
+                from backer.server.storage import Storage
+
+                cleanup_errors = []
+                jobs_cleaned = 0
+                task.message = f"Cleaning up backup data for hypervisor '{hypervisor_name}'"
+                task.progress = 10
+
+                # Get a fresh storage instance for this thread
+                db_path = Path.home() / ".backer" / "backer.db"
+                thread_storage = Storage(db_path)
+
+                # Clean up each job's backup data
+                total_jobs = len(cleanup_data)
+                for idx, data in enumerate(cleanup_data):
+                    try:
+                        job_name = data["job"].get("name", "Unknown")
+                        task.message = f"Cleaning up job '{job_name}'"
+                        task.progress = 10 + int(60 * (idx / max(total_jobs, 1)))
+
+                        _cleanup_hypervisor_job_data(
+                            repository=data["repository"],
+                            hypervisor=hypervisor_copy,
+                            job=data["job"],
+                            storage=thread_storage,
+                            repository_id=data["repository_id"],
+                        )
+                        jobs_cleaned += 1
+                        logger.info(f"Cleaned up job '{job_name}' data from repository")
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up job '{data['job'].get('name')}': {e}")
+                        cleanup_errors.append(f"Job {data['job'].get('name')}: {e}")
+
+                # Clean up hypervisor folders
+                task.message = f"Cleaning up hypervisor folders"
+                task.progress = 70
+
+                for repository_id, repository in repos_to_cleanup.items():
+                    try:
+                        _cleanup_hypervisor_folder(
+                            repository=repository,
+                            hypervisor=hypervisor_copy,
+                            storage=thread_storage,
+                            repository_id=repository_id,
+                        )
+                        logger.info(f"Cleaned up hypervisor folder from repository '{repository.get('name')}'")
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up hypervisor folder: {e}")
+                        cleanup_errors.append(f"Hypervisor folder cleanup: {e}")
+
+                task.progress = 100
+
+                # Explicitly close the thread's storage connection to release SQLite lock
+                del thread_storage
+                gc.collect()  # Force garbage collection to close database connection immediately
+
+                result: dict[str, Any] = {
+                    "id": hypervisor_id,
+                    "status": "cleanup_complete",
+                    "jobs_cleaned": jobs_cleaned,
+                    "repositories_cleaned": len(repos_to_cleanup),
+                    "success": len(cleanup_errors) == 0,
+                }
+                if cleanup_errors:
+                    result["cleanup_warnings"] = cleanup_errors
+
+                task.message = f"Cleanup complete for '{hypervisor_name}'"
+                return result
+
+            task_manager = get_task_manager()
+            task = task_manager.submit(
+                task_type="delete_hypervisor",
+                description=f"Deleting backup data for hypervisor '{hypervisor_name}'",
+                func=cleanup_hypervisor_data,
+            )
+
+            return {
+                "id": hypervisor_id,
+                "status": "deleted",
+                "cleanup_task_id": task.id,
+                "message": "Hypervisor deleted. Cleanup running in background.",
+            }
+
+        # No repository data to clean up
+        return {"id": hypervisor_id, "status": "deleted"}
 
     @app.post("/api/v1/hypervisors/{hypervisor_id}/test")
     def test_hypervisor_connection(
