@@ -312,12 +312,13 @@ class HyperVAPI:
     def _run_powershell_large(
         self, script: str, timeout: int | None = None
     ) -> tuple[int, str, str]:
-        """Execute a large PowerShell script by writing to a temp file in chunks.
+        """Execute a large PowerShell script by writing chunks to a temp file.
 
         This avoids command line length limits (~8KB) by:
-        1. Writing the script to a temp file on the remote host in chunks
-        2. Executing the temp file
-        3. Cleaning up the temp file
+        1. Writing base64 chunks to a temp file using Add-Content
+        2. Decoding the base64 file to a .ps1 script
+        3. Executing the script
+        4. Cleaning up
 
         Args:
             script: PowerShell script to execute
@@ -356,24 +357,22 @@ class HyperVAPI:
                 read_timeout_sec=effective_timeout + 10,
             )
 
-            # Base64 encode the script content for safe transmission
+            # Base64 encode the script
             script_bytes = script.encode("utf-8")
             script_b64 = b64encode(script_bytes).decode("ascii")
 
-            # Generate a unique temp file name
+            # Generate unique temp file names
             import uuid
-            temp_filename = f"backer_script_{uuid.uuid4().hex[:8]}.ps1"
+            file_id = uuid.uuid4().hex[:8]
+            b64_filename = f"backer_b64_{file_id}.txt"
+            script_filename = f"backer_script_{file_id}.ps1"
 
-            # For small scripts, use single command approach
-            # For large scripts, write in chunks to avoid command line limits
-            # pywinrm base64 encodes again, so ~2KB of base64 data is safe
-            chunk_size = 2000
-
-            if len(script_b64) <= chunk_size:
-                # Small script - single command
+            # For small scripts that fit in command line, use direct approach
+            # pywinrm base64 encodes again, so ~1500 chars of our b64 is safe
+            if len(script_b64) <= 1500:
                 wrapper_script = f'''
 $ErrorActionPreference = "Stop"
-$tempPath = Join-Path $env:TEMP "{temp_filename}"
+$tempPath = Join-Path $env:TEMP "{script_filename}"
 try {{
     $scriptB64 = "{script_b64}"
     $scriptBytes = [System.Convert]::FromBase64String($scriptB64)
@@ -395,58 +394,56 @@ exit $scriptExitCode
                 stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
                 return result.status_code, stdout, stderr
 
-            # Large script - write in chunks
-            # First, create the temp file path
-            init_script = f'''
-$tempPath = Join-Path $env:TEMP "{temp_filename}"
-if (Test-Path $tempPath) {{ Remove-Item $tempPath -Force }}
-$tempPath
-'''
-            result = session.run_ps(init_script)
+            # Large script - write base64 chunks to file, then decode and execute
+            # Get temp path first
+            result = session.run_ps("$env:TEMP")
             if result.status_code != 0:
-                stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
-                return result.status_code, "", f"Failed to initialize temp file: {stderr}"
+                return result.status_code, "", "Failed to get remote temp path"
+            remote_temp = result.std_out.decode("utf-8", errors="replace").strip()
+            b64_path = f"{remote_temp}\\{b64_filename}"
+            script_path = f"{remote_temp}\\{script_filename}"
 
-            temp_path = result.std_out.decode("utf-8", errors="replace").strip() if result.std_out else ""
-            if not temp_path:
-                return 1, "", "Failed to get temp file path"
+            # Clear any existing file
+            result = session.run_ps(f'if (Test-Path "{b64_path}") {{ Remove-Item "{b64_path}" -Force }}')
 
-            # Write script in chunks by appending base64 data
+            # Write base64 in chunks using cmd echo (avoids PowerShell encoding)
+            # Each chunk must be small enough that after pywinrm's encoding it fits
+            chunk_size = 1000  # Safe size for base64 chunk
             chunks = [script_b64[i:i + chunk_size] for i in range(0, len(script_b64), chunk_size)]
-            accumulated_b64 = ""
 
             for i, chunk in enumerate(chunks):
-                accumulated_b64 += chunk
-                # Every 10 chunks or on the last chunk, flush to file
-                if (i + 1) % 10 == 0 or i == len(chunks) - 1:
-                    append_script = f'''
-$b64 = "{accumulated_b64}"
-$bytes = [System.Convert]::FromBase64String($b64)
-$tempPath = "{temp_path}"
-[System.IO.File]::AppendAllText($tempPath, [System.Text.Encoding]::UTF8.GetString($bytes))
-"OK"
-'''
-                    result = session.run_ps(append_script)
-                    if result.status_code != 0:
-                        # Cleanup on error
-                        session.run_ps(f'Remove-Item "{temp_path}" -Force -ErrorAction SilentlyContinue')
-                        stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
-                        return result.status_code, "", f"Failed to write script chunk: {stderr}"
-                    accumulated_b64 = ""
+                # Use cmd.exe echo to append, avoiding PowerShell encoding issues
+                # The >> operator appends to file
+                append_cmd = f'cmd /c "echo {chunk}>>"{b64_path}""'
+                result = session.run_cmd(append_cmd)
+                if result.status_code != 0:
+                    # Cleanup and return error
+                    session.run_ps(f'Remove-Item "{b64_path}" -Force -ErrorAction SilentlyContinue')
+                    stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+                    return result.status_code, "", f"Failed to write chunk {i}: {stderr}"
 
-            # Execute the script
+            # Decode the base64 file and execute the script
             exec_script = f'''
 $ErrorActionPreference = "Continue"
-$tempPath = "{temp_path}"
+$b64Path = "{b64_path}"
+$scriptPath = "{script_path}"
 try {{
-    & $tempPath
+    # Read base64 content (may have line breaks from echo)
+    $b64Content = (Get-Content -Path $b64Path -Raw) -replace "`r`n|`n|`r",""
+    $scriptBytes = [System.Convert]::FromBase64String($b64Content)
+    [System.IO.File]::WriteAllBytes($scriptPath, $scriptBytes)
+
+    # Execute the script
+    & $scriptPath
     $scriptExitCode = $LASTEXITCODE
     if ($null -eq $scriptExitCode) {{ $scriptExitCode = 0 }}
 }} catch {{
     Write-Error $_.Exception.Message
     $scriptExitCode = 1
 }} finally {{
-    if (Test-Path $tempPath) {{ Remove-Item $tempPath -Force -ErrorAction SilentlyContinue }}
+    # Cleanup temp files
+    if (Test-Path $b64Path) {{ Remove-Item $b64Path -Force -ErrorAction SilentlyContinue }}
+    if (Test-Path $scriptPath) {{ Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue }}
 }}
 exit $scriptExitCode
 '''
