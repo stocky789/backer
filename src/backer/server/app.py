@@ -10380,9 +10380,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if not repository:
                 raise HTTPException(status_code=404, detail="Repository not found")
-            # Build import_path: repo_path / filename
-            repo_path = repository.get("path", "")
-            import_path = f"{repo_path.rstrip('/')}/{filename}"
+
+            # Build full UNC path to backup (same logic as restore endpoint)
+            smb_server = repository.get("server", "")
+            smb_share = repository.get("share", "")
+            smb_path = repository.get("path", "")
+
+            backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+            if smb_path:
+                smb_path_win = smb_path.replace("/", "\\").strip("\\")
+                backup_base_path = f"{backup_base_path}\\{smb_path_win}"
+
+            # Add hypervisor subfolder
+            safe_hv_name = "".join(
+                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+            )
+            backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
+
+            # Build full path to the backup
+            # filename is like "vmname/timestamp"
+            # Full path: \\server\share\path\Hypervisors\hvname\vmname\timestamp\vmname
+            parts = filename.replace("/", "\\").split("\\")
+            if len(parts) >= 2:
+                vm_name_from_path = parts[0]
+                timestamp = parts[1]
+                import_path = f"{backup_base_path}\\{vm_name_from_path}\\{timestamp}\\{vm_name_from_path}"
+            else:
+                import_path = f"{backup_base_path}\\{filename}"
 
         if not import_path:
             raise HTTPException(status_code=400, detail="import_path or (job_id + filename) is required")
@@ -10472,9 +10496,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if not repository:
                 raise HTTPException(status_code=404, detail="Repository not found")
-            # Build import_path: repo_path / filename
-            repo_path = repository.get("path", "")
-            import_path = f"{repo_path.rstrip('/')}/{filename}"
+
+            # Build full UNC path to backup (same logic as restore endpoint)
+            smb_server = repository.get("server", "")
+            smb_share = repository.get("share", "")
+            smb_path = repository.get("path", "")
+
+            backup_base_path = f"\\\\{smb_server}\\{smb_share}"
+            if smb_path:
+                smb_path_win = smb_path.replace("/", "\\").strip("\\")
+                backup_base_path = f"{backup_base_path}\\{smb_path_win}"
+
+            # Add hypervisor subfolder
+            safe_hv_name = "".join(
+                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
+            )
+            backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
+
+            # Build full path to the backup
+            # filename is like "vmname/timestamp"
+            # Full path: \\server\share\path\Hypervisors\hvname\vmname\timestamp\vmname
+            parts = filename.replace("/", "\\").split("\\")
+            if len(parts) >= 2:
+                vm_name_from_path = parts[0]
+                timestamp = parts[1]
+                import_path = f"{backup_base_path}\\{vm_name_from_path}\\{timestamp}\\{vm_name_from_path}"
+            else:
+                import_path = f"{backup_base_path}\\{filename}"
 
         if not import_path:
             raise HTTPException(status_code=400, detail="import_path or (job_id + filename) is required")
