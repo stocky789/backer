@@ -9712,7 +9712,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         guest = guest_by_id.get(gid.lower())
                         if guest and vm_name_from_path and guest["name"].lower() == vm_name_from_path.lower():
                             old_vm_id = gid.lower()
-                            logger.info(f"Found current VM GUID from job: {old_vm_id} (matches VM name '{vm_name_from_path}')")
+                            logger.info(
+                                f"Found current VM GUID from job: {old_vm_id} "
+                                f"(matches VM name '{vm_name_from_path}')"
+                            )
                             break
 
                     # Second try: if VM doesn't exist yet (deleted), the job still has the GUID

@@ -1668,7 +1668,7 @@ try {{
                             $addParams.StaticMacAddress = $mac
                             $warnings += "Restoring '$nicName' with original MAC: $mac"
                         }} else {{
-                            $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress), will use dynamic MAC"
+                            $warnings += "Invalid MAC for '$nicName': $($nicConfig.macAddress)"
                         }}
                     }} else {{
                         $warnings += "NIC '$nicName' has no saved MAC address, will use dynamic MAC"
@@ -1753,7 +1753,8 @@ try {{
                         $mac = $nicConfig.macAddress -replace '[:-]', ''
                         if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
                             try {{
-                                Set-VMNetworkAdapter -VMName $vmName -Name $nicName -StaticMacAddress $mac -ErrorAction Stop
+                                Set-VMNetworkAdapter -VMName $vmName -Name $nicName `
+                                    -StaticMacAddress $mac -ErrorAction Stop
                                 $warnings += "Restored original MAC address for '$nicName': $mac"
                             }} catch {{
                                 $warnings += "Failed to set MAC address for '$nicName': $_"
@@ -3411,7 +3412,8 @@ try {{
                     -message "SMB connection successful" -severity "error" -details @{{share = $smbUnc}}
             }} else {{
                 Add-Check -name "smb_connectivity" -passed $false `
-                    -message "Failed to connect to SMB share: $netUseResult" -severity "error" -details @{{share = $smbUnc}}
+                    -message "Failed to connect to SMB share: $netUseResult" `
+                    -severity "error" -details @{{share = $smbUnc}}
             }}
         }} catch {{
             Add-Check -name "smb_connectivity" -passed $false `
@@ -3450,7 +3452,8 @@ try {{
         }}
     }} else {{
         Add-Check -name "config_file_valid" -passed $false `
-            -message "vm_full_config.json not found (limited restore options)" -severity "warning" -details @{{path = $configPath}}
+            -message "vm_full_config.json not found (limited restore options)" `
+            -severity "warning" -details @{{path = $configPath}}
     }}
 
     # === Check 4: VHD Files Exist ===
@@ -3499,13 +3502,15 @@ try {{
             $freeSpace = (Get-PSDrive $drive.Name).Free
             $requiredSpace = $result.backup_size_bytes * 1.2  # 20% buffer
 
+            $freeGB = [math]::Round($freeSpace/1GB, 2)
+            $reqGB = [math]::Round($requiredSpace/1GB, 2)
             if ($freeSpace -gt $requiredSpace) {{
                 Add-Check -name "storage_space" -passed $true `
-                    -message "Sufficient space: $([math]::Round($freeSpace/1GB, 2)) GB free, $([math]::Round($requiredSpace/1GB, 2)) GB needed" `
+                    -message "Sufficient space: $freeGB GB free, $reqGB GB needed" `
                     -severity "error" -details @{{free_bytes = $freeSpace; required_bytes = $requiredSpace}}
             }} else {{
                 Add-Check -name "storage_space" -passed $false `
-                    -message "Insufficient space: $([math]::Round($freeSpace/1GB, 2)) GB free, $([math]::Round($requiredSpace/1GB, 2)) GB needed" `
+                    -message "Insufficient space: $freeGB GB free, $reqGB GB needed" `
                     -severity "error" -details @{{free_bytes = $freeSpace; required_bytes = $requiredSpace}}
             }}
         }} catch {{
@@ -3549,7 +3554,8 @@ try {{
     }}
 
     # === Check 7: VMCX File (for import mode) ===
-    $vmcxPath = Get-ChildItem -Path $importPath -Filter "*.vmcx" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    $vmcxPath = Get-ChildItem -Path $importPath -Filter "*.vmcx" -Recurse `
+        -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($vmcxPath) {{
         Add-Check -name "vmcx_file" -passed $true `
             -message "VMCX file found (Import-VM method available)" -severity "info" `
@@ -3766,7 +3772,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
             operations.append({
                 "step": op_num,
                 "action": "import_vm",
-                "description": f"Import VM using Import-VM cmdlet",
+                "description": "Import VM using Import-VM cmdlet",
                 "target": target_vm_name,
                 "details": "Uses .vmcx configuration file for full VM restore",
             })
@@ -3867,7 +3873,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
                         "type": "vhd",
                         "source": vhd_path,
                         "destination": vhd_destination_path or restore_path or "default Hyper-V path",
-                        "controller": f"{vhd.get('controllerType', 'Unknown')} {vhd.get('controllerNumber', 0)}:{vhd.get('controllerLocation', 0)}",
+                        "controller": (
+                            f"{vhd.get('controllerType', 'Unknown')} "
+                            f"{vhd.get('controllerNumber', 0)}:{vhd.get('controllerLocation', 0)}"
+                        ),
                     })
 
             # Config file
@@ -3886,7 +3895,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
             result["settings_to_apply"] = {
                 "name": target_vm_name,
                 "generation": vm_settings.get("generation", 2),
-                "memory_mb": vm_settings.get("memoryStartupBytes", 0) // (1024 * 1024) if vm_settings.get("memoryStartupBytes") else "unknown",
+                "memory_mb": (
+                    vm_settings.get("memoryStartupBytes", 0) // (1024 * 1024)
+                    if vm_settings.get("memoryStartupBytes") else "unknown"
+                ),
                 "processors": vm_settings.get("processorCount", "unknown"),
                 "dynamic_memory": vm_settings.get("dynamicMemoryEnabled", False),
                 "secure_boot": full_config.get("firmware", {}).get("secureBootEnabled", "unknown"),
@@ -4015,7 +4027,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
             # Always restore the original MAC address to preserve network identity
             # Even if the original VM used dynamic MAC, we set it as static to keep the same address
             static_mac_param = f' -StaticMacAddress "{mac_clean}"' if mac_clean else ""
-            vlan_line = f"\n        Set-VMNetworkAdapterVlan -VMNetworkAdapter $nic -Access -VlanId {vlan_id}" if vlan_id else ""
+            vlan_line = (
+                f"\n        Set-VMNetworkAdapterVlan -VMNetworkAdapter $nic -Access -VlanId {vlan_id}"
+                if vlan_id else ""
+            )
 
             nic_config = f'''
     # Network Adapter: {nic_name}
@@ -4026,11 +4041,13 @@ $result | ConvertTo-Json -Depth 10 -Compress
 
     $switch = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue
     if ($switch) {{
-        $nic = Add-VMNetworkAdapter -VMName $NewVmName -SwitchName $switchName -Name "{nic_name}"{static_mac_param} -PassThru{vlan_line}
+        $nic = Add-VMNetworkAdapter -VMName $NewVmName -SwitchName $switchName `
+            -Name "{nic_name}"{static_mac_param} -PassThru{vlan_line}
         Write-Host "  Added NIC: {nic_name} -> $switchName" -ForegroundColor Green
     }} else {{
         Write-Warning "Virtual switch not found: {switch_name}"
-        $nic = Add-VMNetworkAdapter -VMName $NewVmName -Name "{nic_name}"{static_mac_param} -PassThru{vlan_line}
+        $nic = Add-VMNetworkAdapter -VMName $NewVmName `
+            -Name "{nic_name}"{static_mac_param} -PassThru{vlan_line}
         Write-Host "  Added NIC without switch: {nic_name}" -ForegroundColor Yellow
     }}'''
 
@@ -4127,7 +4144,8 @@ Write-Host ("=" * 70) -ForegroundColor Cyan
 Write-Host ""
 
 # Check for admin rights
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$currentPrincipal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {{
     Write-Error "This script must be run as Administrator"
     exit 1
@@ -4200,7 +4218,8 @@ if ($vmFolder) {{
 }}
 
 # Check for .vmcx file
-$vmcxFile = Get-ChildItem -Path $BackupPath -Recurse -Filter "*.vmcx" -ErrorAction SilentlyContinue | Select-Object -First 1
+$vmcxFile = Get-ChildItem -Path $BackupPath -Recurse -Filter "*.vmcx" `
+    -ErrorAction SilentlyContinue | Select-Object -First 1
 $hasVmcx = $null -ne $vmcxFile
 
 Write-Host ""
