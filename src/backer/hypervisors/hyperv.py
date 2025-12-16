@@ -1671,6 +1671,23 @@ try {{
                     $warnings += "Failed to configure adapter '$nicName': $_"
                 }}
 
+                # Set static MAC address if needed (even when VM is not off)
+                if (-not $isOff) {{
+                    $isDynamic = $nicConfig.dynamicMacAddressEnabled
+                    if ($isDynamic -eq $false -and $nicConfig.macAddress) {{
+                        $mac = $nicConfig.macAddress -replace '[:-]', ''
+                        if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
+                            try {{
+                                Set-VMNetworkAdapter -VMName $vmName -Name $nicName -StaticMacAddress $mac -ErrorAction Stop
+                            }} catch {{
+                                $warnings += "Failed to set static MAC address for '$nicName': $_"
+                            }}
+                        }} else {{
+                            $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress)"
+                        }}
+                    }}
+                }}
+
                 # Apply VLAN settings if configured
                 if ($nicConfig.vlanAccess -and $nicConfig.vlanAccess.accessVlanId) {{
                     try {{
@@ -3916,7 +3933,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
 
             # Build the NIC configuration PowerShell block
             mac_clean = mac_address.replace("-", "").replace(":", "") if mac_address else ""
-            static_mac_line = f'\n        Set-VMNetworkAdapter -VMNetworkAdapter $nic -StaticMacAddress "{mac_clean}"' if (not dynamic_mac and mac_clean) else ""
+            # Build MAC address parameter for Add-VMNetworkAdapter command
+            static_mac_param = f' -StaticMacAddress "{mac_clean}"' if (not dynamic_mac and mac_clean) else ""
             vlan_line = f"\n        Set-VMNetworkAdapterVlan -VMNetworkAdapter $nic -Access -VlanId {vlan_id}" if vlan_id else ""
 
             nic_config = f'''
@@ -3928,11 +3946,11 @@ $result | ConvertTo-Json -Depth 10 -Compress
 
     $switch = Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue
     if ($switch) {{
-        $nic = Add-VMNetworkAdapter -VMName $NewVmName -SwitchName $switchName -Name "{nic_name}" -PassThru{static_mac_line}{vlan_line}
+        $nic = Add-VMNetworkAdapter -VMName $NewVmName -SwitchName $switchName -Name "{nic_name}"{static_mac_param} -PassThru{vlan_line}
         Write-Host "  Added NIC: {nic_name} -> $switchName" -ForegroundColor Green
     }} else {{
         Write-Warning "Virtual switch not found: {switch_name}"
-        Add-VMNetworkAdapter -VMName $NewVmName -Name "{nic_name}"
+        $nic = Add-VMNetworkAdapter -VMName $NewVmName -Name "{nic_name}"{static_mac_param} -PassThru{vlan_line}
         Write-Host "  Added NIC without switch: {nic_name}" -ForegroundColor Yellow
     }}'''
 
