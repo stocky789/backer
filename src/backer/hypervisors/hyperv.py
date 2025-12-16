@@ -1586,19 +1586,19 @@ try {{
                         $addParams.SwitchName = $switchName
                     }}
 
-                    # Static MAC address - must explicitly check for $false since JSON bool can be tricky
-                    # Also ensure MAC is in valid format (12 hex chars, no separators for Hyper-V)
-                    $isDynamic = $nicConfig.dynamicMacAddressEnabled
-                    if ($isDynamic -eq $false -and $nicConfig.macAddress) {{
+                    # Always restore the original MAC address to preserve network identity
+                    # Even if the original VM used dynamic MAC, we set it as static to preserve the address
+                    # This ensures the restored VM gets the same MAC (important for DHCP reservations, licensing, etc.)
+                    if ($nicConfig.macAddress) {{
                         $mac = $nicConfig.macAddress -replace '[:-]', ''
                         if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
                             $addParams.StaticMacAddress = $mac
-                            $warnings += "Will create '$nicName' with static MAC: $mac"
+                            $warnings += "Restoring '$nicName' with original MAC: $mac"
                         }} else {{
-                            $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress)"
+                            $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress), will use dynamic MAC"
                         }}
                     }} else {{
-                        $warnings += "NIC '$nicName' will use dynamic MAC (dynamicEnabled=$isDynamic, mac=$($nicConfig.macAddress))"
+                        $warnings += "NIC '$nicName' has no saved MAC address, will use dynamic MAC"
                     }}
 
                     Add-VMNetworkAdapter @addParams -ErrorAction Stop
@@ -1674,23 +1674,20 @@ try {{
                     $warnings += "Failed to configure adapter '$nicName': $_"
                 }}
 
-                # Set static MAC address if needed (even when VM is not off)
+                # Set static MAC address to preserve original MAC (even when VM is not off)
                 if (-not $isOff) {{
-                    $isDynamic = $nicConfig.dynamicMacAddressEnabled
-                    if ($isDynamic -eq $false -and $nicConfig.macAddress) {{
+                    if ($nicConfig.macAddress) {{
                         $mac = $nicConfig.macAddress -replace '[:-]', ''
                         if ($mac -match '^[0-9A-Fa-f]{{12}}$') {{
                             try {{
                                 Set-VMNetworkAdapter -VMName $vmName -Name $nicName -StaticMacAddress $mac -ErrorAction Stop
-                                $warnings += "Set static MAC address for '$nicName': $mac"
+                                $warnings += "Restored original MAC address for '$nicName': $mac"
                             }} catch {{
-                                $warnings += "Failed to set static MAC address for '$nicName': $_"
+                                $warnings += "Failed to set MAC address for '$nicName': $_"
                             }}
                         }} else {{
                             $warnings += "Invalid MAC format for '$nicName': $($nicConfig.macAddress)"
                         }}
-                    }} else {{
-                        $warnings += "NIC '$nicName': dynamicMacAddressEnabled=$isDynamic, macAddress=$($nicConfig.macAddress)"
                     }}
                 }}
 
@@ -3931,7 +3928,6 @@ $result | ConvertTo-Json -Depth 10 -Compress
             switch_name = nic.get("switchName", "")
             nic_name = nic.get("name", "Network Adapter")
             mac_address = nic.get("macAddress", "")
-            dynamic_mac = nic.get("dynamicMacAddressEnabled", True)
             vlan_id = nic.get("vlanAccess", {}).get("accessVlanId") if nic.get("vlanAccess") else None
 
             if switch_name:
@@ -3939,8 +3935,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
 
             # Build the NIC configuration PowerShell block
             mac_clean = mac_address.replace("-", "").replace(":", "") if mac_address else ""
-            # Build MAC address parameter for Add-VMNetworkAdapter command
-            static_mac_param = f' -StaticMacAddress "{mac_clean}"' if (not dynamic_mac and mac_clean) else ""
+            # Always restore the original MAC address to preserve network identity
+            # Even if the original VM used dynamic MAC, we set it as static to keep the same address
+            static_mac_param = f' -StaticMacAddress "{mac_clean}"' if mac_clean else ""
             vlan_line = f"\n        Set-VMNetworkAdapterVlan -VMNetworkAdapter $nic -Access -VlanId {vlan_id}" if vlan_id else ""
 
             nic_config = f'''
