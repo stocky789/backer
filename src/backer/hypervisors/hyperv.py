@@ -3432,7 +3432,11 @@ try {{
     }}
 
     # === Check 3: VM Config File ===
-    $configPath = Join-Path $importPath "vm_full_config.json"
+    # vm_full_config.json is in the timestamp folder (parent of import_path)
+    # import_path is: .../vmname/timestamp/vmname (the VM export subfolder)
+    # config is at: .../vmname/timestamp/vm_full_config.json
+    $timestampFolder = Split-Path $importPath -Parent
+    $configPath = Join-Path $timestampFolder "vm_full_config.json"
     if (Test-Path $configPath) {{
         try {{
             $configContent = Get-Content -Path $configPath -Raw -ErrorAction Stop
