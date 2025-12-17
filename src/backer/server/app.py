@@ -3821,7 +3821,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         request: Request,
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Create a new storage repository."""
+        """Create a new storage repository.
+
+        Automatically triggers test and scan operations after creation.
+        """
         from backer.server.secrets import get_secrets_manager
 
         data = await request.json()
@@ -3854,7 +3857,28 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             domain=data.get("domain"),
         )
 
-        return {"id": repo_id, "name": name, "status": "created"}
+        # Auto-trigger test and scan for better UX
+        test_task_id = None
+        scan_task_id = None
+
+        try:
+            # Start test task
+            test_result = test_repository(repo_id, storage)
+            test_task_id = test_result.get("task_id")
+
+            # Start scan task (will run after test)
+            scan_result = scan_repository(repo_id, storage)
+            scan_task_id = scan_result.get("task_id")
+        except Exception as e:
+            logger.warning(f"Failed to auto-trigger test/scan for repository {repo_id}: {e}")
+
+        return {
+            "id": repo_id,
+            "name": name,
+            "status": "created",
+            "test_task_id": test_task_id,
+            "scan_task_id": scan_task_id,
+        }
 
     @app.delete("/api/v1/repositories/{repo_id}")
     def delete_repository(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
@@ -4173,6 +4197,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "agents": discovery.get("agents", []),
                     "hypervisors": discovery.get("hypervisors", []),
                     "guests": discovery.get("guests", []),
+                    "hypervisor_jobs": discovery.get("hypervisor_jobs", []),
                     "jobs": [
                         {
                             "job_name": j.get("job_name"),
@@ -4363,6 +4388,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # Also scan Hypervisors folder specifically for VM backups
                     all_hypervisors = []
                     all_guests = []
+                    all_hypervisor_jobs = []
                     hypervisors_path = f"{base_path}/Hypervisors" if base_path else "Hypervisors"
                     ok_hv, hv_folders = smb_list_files(
                         server, share, hypervisors_path,
@@ -4401,6 +4427,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                     hv_data = json_module.loads(c)
                                                     hv_data["folder"] = hv_folder
                                                     all_hypervisors.append(hv_data)
+                                                except json_module.JSONDecodeError:
+                                                    pass
+
+                                # Read hypervisor jobs
+                                ok_jobs, job_files = smb_list_files(
+                                    server, share, f"{hv_metadata_base}/hypervisor_jobs",
+                                    username, password, domain
+                                )
+                                if ok_jobs:
+                                    for f in job_files:
+                                        if f.endswith(".json"):
+                                            ok_j, c = smb_read_file(
+                                                server, share, f"{hv_metadata_base}/hypervisor_jobs/{f}",
+                                                username, password, domain
+                                            )
+                                            if ok_j:
+                                                try:
+                                                    job_data = json_module.loads(c)
+                                                    job_data["hypervisor_folder"] = hv_folder
+                                                    all_hypervisor_jobs.append(job_data)
                                                 except json_module.JSONDecodeError:
                                                     pass
 
@@ -4457,12 +4503,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         "snapshots": all_snapshots,
                         "hypervisors": all_hypervisors,
                         "guests": all_guests,
+                        "hypervisor_jobs": all_hypervisor_jobs,
                         "summary": {
                             "agent_count": len(all_agents),
                             "job_count": len(all_jobs),
                             "snapshot_count": len(all_snapshots),
                             "hypervisor_count": len(all_hypervisors),
                             "guest_count": len(all_guests),
+                            "hypervisor_job_count": len(all_hypervisor_jobs),
                             "total_runs": sum(j.get("run_count", 0) for j in all_jobs),
                             "total_vm_runs": sum(g.get("run_count", 0) for g in all_guests),
                         },

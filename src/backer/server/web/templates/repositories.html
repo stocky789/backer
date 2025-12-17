@@ -974,8 +974,10 @@ function displayScanResults(data) {
             <h4>Repository Summary</h4>
             <div class="scan-stats">
                 <div class="scan-stat-item"><span class="scan-stat-value">${summary.agent_count || 0}</span><span class="scan-stat-label">Agents</span></div>
-                <div class="scan-stat-item"><span class="scan-stat-value">${summary.job_count || 0}</span><span class="scan-stat-label">Jobs</span></div>
-                <div class="scan-stat-item"><span class="scan-stat-value">${summary.total_runs || 0}</span><span class="scan-stat-label">Runs</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.job_count || 0}</span><span class="scan-stat-label">Agent Jobs</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.hypervisor_count || 0}</span><span class="scan-stat-label">Hypervisors</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.hypervisor_job_count || 0}</span><span class="scan-stat-label">HV Jobs</span></div>
+                <div class="scan-stat-item"><span class="scan-stat-value">${summary.guest_count || 0}</span><span class="scan-stat-label">VMs</span></div>
                 <div class="scan-stat-item"><span class="scan-stat-value">${summary.snapshot_count || 0}</span><span class="scan-stat-label">Snapshots</span></div>
             </div>
             <p class="text-muted" style="margin-top: 10px; font-size: 11px;">Path: <code>${escapeHtml(data.path)}</code></p>
@@ -1000,6 +1002,35 @@ function displayScanResults(data) {
         html += '</tbody></table></div>';
     }
 
+    if (data.hypervisors && data.hypervisors.length > 0) {
+        html += `<div class="scan-section"><h4>Discovered Hypervisors (${data.hypervisors.length})</h4>
+            <table class="scan-table"><thead><tr><th>Hypervisor ID</th><th>Name</th><th>Type</th></tr></thead><tbody>`;
+        for (const hv of data.hypervisors) {
+            html += `<tr><td><code>${escapeHtml(hv.id || '-')}</code></td><td>${escapeHtml(hv.name || '-')}</td><td>${escapeHtml(hv.type || '-')}</td></tr>`;
+        }
+        html += '</tbody></table></div>';
+    }
+
+    if (data.hypervisor_jobs && data.hypervisor_jobs.length > 0) {
+        html += `<div class="scan-section"><h4>Discovered Hypervisor Jobs (${data.hypervisor_jobs.length})</h4>
+            <table class="scan-table"><thead><tr><th>Job Name</th><th>Hypervisor</th><th>VM Count</th><th>Enabled</th></tr></thead><tbody>`;
+        for (const job of data.hypervisor_jobs) {
+            const vmCount = (job.guest_ids || []).length;
+            const enabled = job.enabled ? 'Yes' : 'No';
+            html += `<tr><td><strong>${escapeHtml(job.name || '-')}</strong></td><td>${escapeHtml(job.hypervisor_id || '-')}</td><td>${vmCount}</td><td>${enabled}</td></tr>`;
+        }
+        html += '</tbody></table></div>';
+    }
+
+    if (data.guests && data.guests.length > 0) {
+        html += `<div class="scan-section"><h4>Discovered VMs (${data.guests.length})</h4>
+            <table class="scan-table"><thead><tr><th>VM ID</th><th>Name</th><th>Hypervisor</th><th>Backups</th></tr></thead><tbody>`;
+        for (const guest of data.guests) {
+            html += `<tr><td><code>${escapeHtml(guest.vmid || '-')}</code></td><td>${escapeHtml(guest.name || '-')}</td><td>${escapeHtml(guest.hypervisor_id || '-')}</td><td>${guest.run_count || 0}</td></tr>`;
+        }
+        html += '</tbody></table></div>';
+    }
+
     if (data.snapshots && data.snapshots.length > 0) {
         html += `<div class="scan-section"><h4>Recent Snapshots (${data.snapshots.length})</h4>
             <table class="scan-table"><thead><tr><th>Snapshot ID</th><th>Hostname</th><th>Time</th><th>Paths</th></tr></thead><tbody>`;
@@ -1011,7 +1042,7 @@ function displayScanResults(data) {
 
     resultsDiv.innerHTML = html;
 
-    if (summary.job_count > 0 || summary.agent_count > 0) {
+    if (summary.job_count > 0 || summary.agent_count > 0 || summary.hypervisor_job_count > 0) {
         document.getElementById('scanActions').style.display = 'block';
     }
 }
