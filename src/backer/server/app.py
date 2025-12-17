@@ -5152,32 +5152,39 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
 
         try:
-            # Build repository path
-            if repo_type == "smb":
+            # Build repository path - use mount_point if available
+            mount_point = repo.get("mount_point")
+            subpath = repo.get("path", "")
+
+            if mount_point:
+                # Repository is mounted, use the mount point
+                repo_path = mount_point
+                if subpath:
+                    repo_path = repo_path.rstrip("/") + "/" + subpath
+            elif repo_type == "local":
+                repo_path = repo.get("share") or repo.get("path", "")
+                if not repo_path:
+                    raise HTTPException(status_code=400, detail="Local repository path not configured")
+            elif repo_type == "smb":
                 server = repo.get("server", "")
                 share = repo.get("share", "")
-                subpath = repo.get("path", "")
 
-                # For SMB, we need to mount or use smbclient
-                # For now, construct UNC path for Windows or mount point for Linux
+                # For SMB without mount point, only works on Windows
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
                         subpath_windows = subpath.replace('/', '\\')
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
-                    # On Linux, assume repository is mounted or use temp mount
-                    # This is a simplification - in production you'd handle mounting
                     raise HTTPException(
-                        status_code=501,
-                        detail="SMB repository scanning requires mounted share on Linux"
+                        status_code=400,
+                        detail="SMB repository requires a mount point on Linux. Please configure mount_point in repository settings."
                     )
-
             elif repo_type == "nfs":
                 server = repo.get("server", "")
                 export = repo.get("export", "")
-                subpath = repo.get("path", "")
 
+                # For NFS without mount point, only works on Windows
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{export}"
                     if subpath:
@@ -5185,15 +5192,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     raise HTTPException(
-                        status_code=501,
-                        detail="NFS repository scanning requires mounted share"
+                        status_code=400,
+                        detail="NFS repository requires a mount point on Linux. Please configure mount_point in repository settings."
                     )
-
-            elif repo_type == "local":
-                repo_path = repo.get("path", "")
-                if not repo_path:
-                    raise HTTPException(status_code=400, detail="Local repository path not configured")
-
             else:
                 raise HTTPException(
                     status_code=400,
@@ -5281,12 +5282,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
 
         try:
-            # Build repository path (same logic as discovery endpoint)
-            if repo_type == "smb":
+            # Build repository path - use mount_point if available (same as discovery)
+            mount_point = repo.get("mount_point")
+            subpath = repo.get("path", "")
+
+            if mount_point:
+                # Repository is mounted, use the mount point
+                repo_path = mount_point
+                if subpath:
+                    repo_path = repo_path.rstrip("/") + "/" + subpath
+            elif repo_type == "local":
+                repo_path = repo.get("share") or repo.get("path", "")
+                if not repo_path:
+                    raise HTTPException(status_code=400, detail="Local repository path not configured")
+            elif repo_type == "smb":
                 server = repo.get("server", "")
                 share = repo.get("share", "")
-                subpath = repo.get("path", "")
 
+                # For SMB without mount point, only works on Windows
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
@@ -5294,15 +5307,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     raise HTTPException(
-                        status_code=501,
-                        detail="SMB repository adoption requires mounted share on Linux"
+                        status_code=400,
+                        detail="SMB repository requires a mount point on Linux. Please configure mount_point in repository settings."
                     )
-
             elif repo_type == "nfs":
                 server = repo.get("server", "")
                 export = repo.get("export", "")
-                subpath = repo.get("path", "")
 
+                # For NFS without mount point, only works on Windows
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{export}"
                     if subpath:
@@ -5310,14 +5322,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     raise HTTPException(
-                        status_code=501,
-                        detail="NFS repository adoption requires mounted share"
+                        status_code=400,
+                        detail="NFS repository requires a mount point on Linux. Please configure mount_point in repository settings."
                     )
-
-            elif repo_type == "local":
-                repo_path = repo.get("path", "")
-                if not repo_path:
-                    raise HTTPException(status_code=400, detail="Local repository path not configured")
 
             else:
                 raise HTTPException(
