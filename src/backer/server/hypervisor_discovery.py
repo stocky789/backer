@@ -373,6 +373,7 @@ class HypervisorDiscoveryService:
         new_hypervisor_name: str,
         guest_vmids: list[int | str],
         import_jobs: bool = True,
+        repository_id: str | None = None,
     ) -> dict[str, Any]:
         """Adopt orphaned backups to a new hypervisor.
 
@@ -384,6 +385,7 @@ class HypervisorDiscoveryService:
             new_hypervisor_name: Name of the hypervisor (for logging)
             guest_vmids: List of VM IDs to adopt
             import_jobs: Whether to import job configurations
+            repository_id: Repository ID (for auto-creating jobs)
 
         Returns:
             Dictionary with adoption results
@@ -538,19 +540,33 @@ class HypervisorDiscoveryService:
                 logger.exception("Error importing jobs")
                 errors.append(f"Job import failed: {str(e)}")
 
+        # If no jobs were imported/adopted, auto-create a basic disabled job for convenience
+        auto_created_job = False
+        if adopted_jobs == 0 and adopted_guests > 0 and repository_id:
+            try:
+                auto_created_job = self._auto_create_adoption_job(
+                    new_hypervisor_id, new_hypervisor_name, guest_vmids, repository_id
+                )
+                if auto_created_job:
+                    adopted_jobs = 1
+            except Exception as e:
+                logger.exception("Failed to auto-create job")
+                errors.append(f"Auto-create job failed: {str(e)}")
+
         result = {
             "adopted_guests": adopted_guests,
             "adopted_jobs": adopted_jobs,
             "total_backups_linked": total_backups_linked,
             "errors": errors,
+            "auto_created_job": auto_created_job,
             "message": self._format_adoption_message(
-                adopted_guests, adopted_jobs, total_backups_linked
+                adopted_guests, adopted_jobs, total_backups_linked, auto_created_job
             ),
         }
 
         logger.info(
             f"Adoption complete: {adopted_guests} guests, {adopted_jobs} jobs, "
-            f"{total_backups_linked} backups"
+            f"{total_backups_linked} backups (auto-created: {auto_created_job})"
         )
 
         return result
@@ -644,8 +660,59 @@ class HypervisorDiscoveryService:
 
         return imported_count
 
+    def _auto_create_adoption_job(
+        self,
+        hypervisor_id: str,
+        hypervisor_name: str,
+        guest_vmids: list[int | str],
+        repository_id: str,
+    ) -> bool:
+        """Auto-create a basic disabled backup job for adopted VMs.
+
+        Creates a convenient starting point job that users can enable/configure.
+
+        Args:
+            hypervisor_id: ID of the hypervisor
+            hypervisor_name: Name of the hypervisor
+            guest_vmids: List of adopted VM IDs
+            repository_id: Repository ID to use for the job
+
+        Returns:
+            True if job was created successfully
+        """
+        import uuid
+
+        # Create a basic job
+        job_id = str(uuid.uuid4())
+        vm_count = len(guest_vmids)
+        job_name = f"Adopted VMs from {hypervisor_name}" if vm_count > 1 else f"Adopted VM from {hypervisor_name}"
+
+        try:
+            self.storage.add_hypervisor_job(
+                job_id=job_id,
+                name=job_name,
+                hypervisor_id=hypervisor_id,
+                guest_ids=[int(g) if str(g).isdigit() else g for g in guest_vmids],
+                repository_id=repository_id,
+                backup_mode="full",
+                compression="zstd",
+                schedule_cron=None,  # Manual schedule
+                enabled=False,  # Disabled by default
+                copies_to_keep=7,
+                verify_backup=False,
+            )
+
+            logger.info(
+                f"Auto-created disabled job '{job_name}' ({job_id}) for {vm_count} adopted VM(s)"
+            )
+            return True
+
+        except Exception:
+            logger.exception(f"Failed to auto-create job for adopted VMs")
+            return False
+
     def _format_adoption_message(
-        self, guests: int, jobs: int, backups: int
+        self, guests: int, jobs: int, backups: int, auto_created: bool = False
     ) -> str:
         """Format a user-friendly adoption success message.
 
@@ -653,6 +720,7 @@ class HypervisorDiscoveryService:
             guests: Number of guests adopted
             jobs: Number of jobs imported
             backups: Number of backups linked
+            auto_created: Whether a job was auto-created
 
         Returns:
             Formatted message string
@@ -663,7 +731,10 @@ class HypervisorDiscoveryService:
             parts.append(f"{guests} VM{'s' if guests != 1 else ''}")
 
         if jobs > 0:
-            parts.append(f"{jobs} job{'s' if jobs != 1 else ''}")
+            if auto_created:
+                parts.append(f"{jobs} job (disabled - review and enable in Jobs tab)")
+            else:
+                parts.append(f"{jobs} job{'s' if jobs != 1 else ''}")
 
         if backups > 0:
             parts.append(f"{backups} backup{'s' if backups != 1 else ''}")

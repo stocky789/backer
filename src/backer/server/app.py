@@ -5327,7 +5327,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 new_hypervisor_id=hypervisor_id,
                 new_hypervisor_name=hypervisor["name"],
                 guest_vmids=guest_vmids,
-                import_jobs=import_jobs
+                import_jobs=import_jobs,
+                repository_id=repository_id
             )
 
             logger.info(
