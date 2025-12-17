@@ -1164,11 +1164,10 @@ function displayScanResults(data) {
             if (hasAgentData) {
                 actionsHtml += '<hr style="margin: 16px 0; border-color: var(--border);">';
             }
-            actionsHtml += `
-                <p style="margin-bottom: 10px; font-size: 12px;"><strong>Hypervisor Backups Found:</strong></p>
-                <p style="margin-bottom: 10px; font-size: 12px;">To import hypervisor backups, you must first create the hypervisor in the Hypervisors page, then use the "Adopt Orphaned Backups" feature.</p>
-                <a href="/hypervisors" class="btn btn-secondary btn-sm">Go to Hypervisors</a>
-            `;
+
+            // Fetch hypervisors to determine what options to show
+            actionsHtml += '<div id="hypervisor-adoption-section"><div class="loading-state" style="padding: 10px;">Checking for configured hypervisors...</div></div>';
+
             if (!hasAgentData) {
                 actionsHtml += '<button class="btn btn-secondary btn-sm" onclick="skipImportAndFinish()" style="margin-left: 8px;">Skip & Create</button>';
             }
@@ -1176,9 +1175,81 @@ function displayScanResults(data) {
 
         scanActionsDiv.innerHTML = actionsHtml;
         scanActionsDiv.style.display = 'block';
+
+        // Load hypervisors if we have hypervisor data
+        if (hasHypervisorData) {
+            loadHypervisorsForAdoption();
+        }
     } else {
         scanActionsDiv.style.display = 'none';
     }
+}
+
+async function loadHypervisorsForAdoption() {
+    try {
+        const response = await fetch('/api/v1/hypervisors');
+        const hypervisors = await response.json();
+
+        const section = document.getElementById('hypervisor-adoption-section');
+        if (!section) return;
+
+        if (hypervisors && hypervisors.length > 0) {
+            // Hypervisors exist - show dropdown to select one
+            let html = `
+                <p style="margin-bottom: 10px; font-size: 12px;"><strong>Hypervisor Backups Found:</strong></p>
+                <p style="margin-bottom: 10px; font-size: 12px;">Adopt these backups to an existing hypervisor, or skip for now.</p>
+                <div style="margin-bottom: 10px;">
+                    <label for="scan-hypervisor-select" style="display: block; margin-bottom: 4px; font-size: 12px; font-weight: 500;">Select Hypervisor:</label>
+                    <select id="scan-hypervisor-select" class="form-control" style="max-width: 400px; display: inline-block;">
+                        <option value="">-- Select Hypervisor --</option>
+            `;
+
+            for (const hv of hypervisors) {
+                html += `<option value="${escapeHtml(hv.id)}">${escapeHtml(hv.name)} (${escapeHtml(hv.type)})</option>`;
+            }
+
+            html += `
+                    </select>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="adoptFromScan()">Adopt to Selected Hypervisor</button>
+                <a href="/hypervisors" class="btn btn-secondary btn-sm" style="margin-left: 8px;">Go to Hypervisors</a>
+            `;
+
+            section.innerHTML = html;
+        } else {
+            // No hypervisors - show message to create one first
+            section.innerHTML = `
+                <p style="margin-bottom: 10px; font-size: 12px;"><strong>Hypervisor Backups Found:</strong></p>
+                <p style="margin-bottom: 10px; font-size: 12px;">To import hypervisor backups, you must first create the hypervisor in the Hypervisors page, then use the "Adopt Orphaned Backups" feature.</p>
+                <a href="/hypervisors" class="btn btn-secondary btn-sm">Go to Hypervisors</a>
+            `;
+        }
+    } catch (e) {
+        console.error('Failed to load hypervisors:', e);
+        const section = document.getElementById('hypervisor-adoption-section');
+        if (section) {
+            section.innerHTML = `<div class="error-msg" style="padding: 10px;">Failed to load hypervisors: ${escapeHtml(e.message)}</div>`;
+        }
+    }
+}
+
+async function adoptFromScan() {
+    const hypervisorSelect = document.getElementById('scan-hypervisor-select');
+    if (!hypervisorSelect) return;
+
+    const hypervisorId = hypervisorSelect.value;
+    if (!hypervisorId) {
+        Toast.warning('Please select a hypervisor');
+        return;
+    }
+
+    if (!currentScanRepoId) {
+        Toast.error('No repository selected');
+        return;
+    }
+
+    // Navigate to the orphaned backups adoption flow
+    window.location.href = `/hypervisors?repo_id=${currentScanRepoId}&adopt=true`;
 }
 
 async function importMetadata() {
