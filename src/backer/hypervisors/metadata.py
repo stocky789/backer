@@ -658,3 +658,98 @@ class HypervisorMetadata:
         # Sort by backup time descending
         discovered.sort(key=lambda x: x.get("backup_time") or "", reverse=True)
         return discovered
+
+    def update_guest_hypervisor(
+        self,
+        vmid: int | str,
+        new_hypervisor_id: str,
+        hypervisor_name: str | None = None,
+    ) -> bool:
+        """Update the hypervisor_id in guest.json.
+
+        Used during adoption to link orphaned backups to a new hypervisor.
+
+        Args:
+            vmid: VM/container ID (int for Proxmox, str for Hyper-V)
+            new_hypervisor_id: New hypervisor ID to link to
+            hypervisor_name: Optional hypervisor name for metadata
+
+        Returns:
+            True if updated successfully
+        """
+        guest_dir = self.metadata_dir / "hypervisor_backups" / str(vmid)
+        guest_path = guest_dir / "guest.json"
+
+        if not guest_path.exists():
+            logger.warning(f"Guest metadata not found for VMID {vmid}")
+            return False
+
+        try:
+            # Read existing metadata
+            guest_data = self._read_json(guest_path)
+            if not guest_data:
+                return False
+
+            # Update hypervisor link
+            old_hypervisor_id = guest_data.get("hypervisor_id")
+            guest_data["hypervisor_id"] = new_hypervisor_id
+            guest_data["updated_at"] = datetime.now().isoformat()
+
+            if hypervisor_name:
+                guest_data["hypervisor_name"] = hypervisor_name
+
+            # Record adoption history
+            if "adoption_history" not in guest_data:
+                guest_data["adoption_history"] = []
+
+            guest_data["adoption_history"].append({
+                "from_hypervisor_id": old_hypervisor_id,
+                "to_hypervisor_id": new_hypervisor_id,
+                "adopted_at": datetime.now().isoformat(),
+            })
+
+            # Write updated metadata
+            success = self._write_json(guest_path, guest_data)
+
+            if success:
+                logger.info(
+                    f"Updated guest {vmid} from hypervisor {old_hypervisor_id} "
+                    f"to {new_hypervisor_id}"
+                )
+
+            return success
+
+        except Exception as e:
+            logger.exception(f"Failed to update guest {vmid} hypervisor")
+            return False
+
+    def discover_orphaned_guests(
+        self,
+        active_hypervisor_ids: set[str]
+    ) -> list[dict[str, Any]]:
+        """Find guests whose hypervisor_id is not in the active set.
+
+        This identifies orphaned backups - VMs whose hypervisor no longer
+        exists in the database (disaster recovery scenario).
+
+        Args:
+            active_hypervisor_ids: Set of hypervisor IDs from database
+
+        Returns:
+            List of guest metadata for orphaned VMs
+        """
+        all_guests = self.list_guests()
+        orphaned = []
+
+        for guest in all_guests:
+            hypervisor_id = guest.get("hypervisor_id")
+
+            # Check if hypervisor is missing or not active
+            if not hypervisor_id or hypervisor_id not in active_hypervisor_ids:
+                orphaned.append(guest)
+
+        logger.debug(
+            f"Found {len(orphaned)} orphaned guests out of {len(all_guests)} total"
+        )
+
+        return orphaned

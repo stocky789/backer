@@ -123,6 +123,158 @@
             </table>
         </div>
     </div>
+
+    <!-- Orphaned Hypervisor Backups Section -->
+    <div class="card" id="orphaned-backups-section" style="display: none; margin-top: 20px;">
+        <div class="card-header">
+            <span class="card-title">Orphaned Hypervisor Backups</span>
+            <div style="display: flex; gap: 10px;">
+                <span id="orphaned-repo-name" class="text-muted" style="font-size: 11px;"></span>
+                <button class="btn btn-sm btn-secondary" onclick="refreshOrphanedBackups()">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div id="orphaned-backups-loading" class="loading-state" style="display: none;">
+                Scanning for orphaned backups...
+            </div>
+
+            <div id="orphaned-backups-empty" class="empty-state" style="display: none;">
+                <div class="empty-state-icon">
+                    <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                    </svg>
+                </div>
+                <h3>No Orphaned Backups</h3>
+                <p>All hypervisor backups in this repository are linked to active hypervisors.</p>
+            </div>
+
+            <div id="orphaned-backups-content" style="display: none;">
+                <p class="form-hint" style="margin-bottom: 15px;">
+                    These VMs have backups in the repository but their hypervisor is no longer configured.
+                    You can adopt them to link the backup history to a new or existing hypervisor.
+                </p>
+
+                <!-- Suggested Matches Banner -->
+                <div id="suggested-matches-banner" style="display: none; margin-bottom: 15px; padding: 12px; background: var(--bg-info); border-left: 4px solid var(--accent); border-radius: 4px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>
+                        </svg>
+                        <div style="flex: 1;">
+                            <strong>Suggested Match Found</strong>
+                            <div id="suggested-match-text" style="font-size: 0.9em; margin-top: 4px;"></div>
+                        </div>
+                        <button class="btn btn-primary btn-sm" onclick="applyAutomatch()" id="apply-automatch-btn">
+                            Apply Suggestion
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="dismissAutomatch()">
+                            Dismiss
+                        </button>
+                    </div>
+                </div>
+
+                <div class="data-grid-container">
+                    <table class="data-grid" id="orphaned-backups-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px;">
+                                    <input type="checkbox" id="select-all-orphaned" onchange="toggleAllOrphaned(this)">
+                                </th>
+                                <th>VM Name</th>
+                                <th>VM ID</th>
+                                <th>Type</th>
+                                <th>Original Hypervisor</th>
+                                <th>Backups</th>
+                                <th>Latest Backup</th>
+                                <th>Total Size</th>
+                            </tr>
+                        </thead>
+                        <tbody id="orphaned-backups-tbody">
+                            <!-- Populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <button class="btn btn-primary" onclick="showAdoptOrphanedModal()" id="adopt-btn">
+                        Adopt Selected Backups
+                    </button>
+                    <button class="btn btn-secondary" onclick="adoptAllOrphaned()" id="adopt-all-btn">
+                        Adopt All
+                    </button>
+                    <span id="orphaned-selected-count" class="form-hint" style="margin-left: 10px;">
+                        0 VMs selected
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Adopt Orphaned Backups Modal -->
+<div id="adoptOrphanedModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-header">
+            <span class="modal-title">Adopt Orphaned Backups</span>
+            <button class="modal-close" onclick="hideAdoptOrphanedModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">Select Hypervisor</label>
+                <select id="adopt-hypervisor-select" class="form-input">
+                    <option value="">-- Select Hypervisor --</option>
+                    <!-- Populated with active hypervisors -->
+                </select>
+                <div class="form-hint">
+                    Choose which hypervisor should adopt the selected backups
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="adopt-import-jobs" checked>
+                    <span>Import job configurations from repository</span>
+                </label>
+                <div class="form-hint">
+                    Restore backup schedules and retention policies
+                </div>
+            </div>
+
+            <div class="form-group">
+                <h4>Selected VMs (<span id="adopt-vm-count">0</span>)</h4>
+                <div id="adopt-vm-list" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; padding: 10px; background: var(--bg-secondary);">
+                    <!-- Populated with selected VMs -->
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideAdoptOrphanedModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="executeAdoptBackups()">Adopt Backups</button>
+        </div>
+    </div>
+</div>
+
+<!-- Adoption History Modal -->
+<div id="adoptionHistoryModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 700px;">
+        <div class="modal-header">
+            <span class="modal-title">Adoption History</span>
+            <button class="modal-close" onclick="hideAdoptionHistoryModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="adoption-history-content">
+                <!-- Populated by JavaScript -->
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideAdoptionHistoryModal()">Close</button>
+        </div>
+    </div>
 </div>
 
 <!-- Add Repository Modal -->
@@ -959,5 +1111,375 @@ function wipeRepo(repoId, repoName) {
         }
     });
 }
+
+// ========================================================================
+// Orphaned Backups Discovery & Adoption
+// ========================================================================
+
+let currentRepositoryId = null;
+let orphanedBackups = [];
+let selectedOrphanedVMs = new Set();
+let suggestedMatches = [];
+let currentSuggestion = null;
+
+async function loadOrphanedBackups(repoId, repoName) {
+    currentRepositoryId = repoId;
+
+    const section = document.getElementById('orphaned-backups-section');
+    const loading = document.getElementById('orphaned-backups-loading');
+    const empty = document.getElementById('orphaned-backups-empty');
+    const content = document.getElementById('orphaned-backups-content');
+    const repoNameSpan = document.getElementById('orphaned-repo-name');
+
+    section.style.display = 'block';
+    loading.style.display = 'block';
+    empty.style.display = 'none';
+    content.style.display = 'none';
+    repoNameSpan.textContent = `Repository: ${repoName}`;
+
+    try {
+        const response = await fetch(`/api/v1/repositories/${repoId}/discover-orphaned-backups`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || 'Discovery failed');
+        }
+
+        orphanedBackups = data.orphaned_guests || [];
+        suggestedMatches = data.suggested_matches || [];
+
+        if (orphanedBackups.length === 0) {
+            loading.style.display = 'none';
+            empty.style.display = 'block';
+        } else {
+            renderOrphanedBackupsTable();
+            showSuggestedMatch();
+        }
+    } catch (error) {
+        console.error('Failed to load orphaned backups:', error);
+        Toast.error('Failed to discover orphaned backups: ' + error.message);
+        loading.style.display = 'none';
+        empty.style.display = 'block';
+    }
+}
+
+function showSuggestedMatch() {
+    if (suggestedMatches.length === 0) {
+        document.getElementById('suggested-matches-banner').style.display = 'none';
+        return;
+    }
+
+    // Show the highest confidence match
+    currentSuggestion = suggestedMatches[0];
+    const banner = document.getElementById('suggested-matches-banner');
+    const textDiv = document.getElementById('suggested-match-text');
+
+    const confidencePct = Math.min(100, currentSuggestion.confidence_score);
+    textDiv.innerHTML = `
+        <strong>${escapeHtml(currentSuggestion.suggested_hypervisor_name)}</strong>
+        (${escapeHtml(currentSuggestion.suggested_hypervisor_type)})
+        might match <strong>${escapeHtml(currentSuggestion.original_hypervisor_name)}</strong>
+        <br>
+        ${currentSuggestion.guest_count} VM${currentSuggestion.guest_count !== 1 ? 's' : ''} ·
+        ${confidencePct}% confidence · ${escapeHtml(currentSuggestion.reason)}
+    `;
+
+    banner.style.display = 'block';
+}
+
+function dismissAutomatch() {
+    document.getElementById('suggested-matches-banner').style.display = 'none';
+    currentSuggestion = null;
+}
+
+function applyAutomatch() {
+    if (!currentSuggestion) return;
+
+    // Select all VMs from this suggestion
+    selectedOrphanedVMs.clear();
+    currentSuggestion.guest_vmids.forEach(vmid => {
+        selectedOrphanedVMs.add(String(vmid));
+    });
+
+    // Update checkboxes
+    document.querySelectorAll('#orphaned-backups-tbody input[type="checkbox"]').forEach(cb => {
+        const vmid = cb.dataset.vmid;
+        cb.checked = selectedOrphanedVMs.has(vmid);
+    });
+
+    updateOrphanedSelectedCount();
+
+    // Pre-select the suggested hypervisor in the modal
+    showAdoptOrphanedModal(currentSuggestion.suggested_hypervisor_id);
+    dismissAutomatch();
+}
+
+function renderOrphanedBackupsTable() {
+    const tbody = document.getElementById('orphaned-backups-tbody');
+    tbody.innerHTML = '';
+
+    orphanedBackups.forEach(guest => {
+        const row = document.createElement('tr');
+        const vmidKey = String(guest.vmid);
+        const isSelected = selectedOrphanedVMs.has(vmidKey);
+
+        row.innerHTML = `
+            <td>
+                <input type="checkbox"
+                       data-vmid="${vmidKey}"
+                       ${isSelected ? 'checked' : ''}
+                       onchange="toggleOrphanedVM(this, '${escapeHtml(vmidKey)}')">
+            </td>
+            <td><strong>${escapeHtml(guest.name)}</strong></td>
+            <td>${escapeHtml(String(guest.vmid))}</td>
+            <td><span class="status-badge muted">${escapeHtml(guest.guest_type)}</span></td>
+            <td>
+                ${escapeHtml(guest.hypervisor_name || 'Unknown')}<br>
+                <span style="font-size: 0.9em; color: var(--text-muted);">${escapeHtml(guest.hypervisor_id || 'N/A')}</span>
+            </td>
+            <td>${guest.run_count || 0}</td>
+            <td>${guest.latest_backup ? timeAgo(guest.latest_backup) : 'N/A'}</td>
+            <td>${formatBytes(guest.total_size_bytes || 0)}</td>
+        `;
+
+        tbody.appendChild(row);
+    });
+
+    document.getElementById('orphaned-backups-loading').style.display = 'none';
+    document.getElementById('orphaned-backups-content').style.display = 'block';
+
+    updateOrphanedSelectedCount();
+}
+
+function toggleOrphanedVM(checkbox, vmid) {
+    if (checkbox.checked) {
+        selectedOrphanedVMs.add(vmid);
+    } else {
+        selectedOrphanedVMs.delete(vmid);
+    }
+    updateOrphanedSelectedCount();
+}
+
+function toggleAllOrphaned(checkbox) {
+    selectedOrphanedVMs.clear();
+
+    if (checkbox.checked) {
+        orphanedBackups.forEach(guest => {
+            selectedOrphanedVMs.add(String(guest.vmid));
+        });
+    }
+
+    document.querySelectorAll('#orphaned-backups-tbody input[type="checkbox"]').forEach(cb => {
+        cb.checked = checkbox.checked;
+    });
+
+    updateOrphanedSelectedCount();
+}
+
+function updateOrphanedSelectedCount() {
+    const count = selectedOrphanedVMs.size;
+    document.getElementById('orphaned-selected-count').textContent = `${count} VM${count !== 1 ? 's' : ''} selected`;
+
+    // Enable/disable adopt button
+    const adoptBtn = document.getElementById('adopt-btn');
+    if (adoptBtn) {
+        adoptBtn.disabled = count === 0;
+    }
+}
+
+async function showAdoptOrphanedModal(preselectedHypervisorId) {
+    if (selectedOrphanedVMs.size === 0) {
+        Toast.warning('Please select at least one VM to adopt');
+        return;
+    }
+
+    try {
+        // Load active hypervisors
+        const response = await fetch('/api/v1/hypervisors');
+        const hypervisors = await response.json();
+
+        const select = document.getElementById('adopt-hypervisor-select');
+        select.innerHTML = '<option value="">-- Select Hypervisor --</option>';
+
+        hypervisors.forEach(hv => {
+            const option = document.createElement('option');
+            option.value = hv.id;
+            option.textContent = `${hv.name} (${hv.hypervisor_type})`;
+            if (preselectedHypervisorId && hv.id === preselectedHypervisorId) {
+                option.selected = true;
+            }
+            select.appendChild(option);
+        });
+
+        // Populate selected VMs list
+        const selectedGuests = orphanedBackups.filter(g => selectedOrphanedVMs.has(String(g.vmid)));
+        const vmList = document.getElementById('adopt-vm-list');
+        vmList.innerHTML = selectedGuests.map(g => `
+            <div style="padding: 5px; border-bottom: 1px solid var(--border-light);">
+                <strong>${escapeHtml(g.name)}</strong> (${escapeHtml(String(g.vmid))}) - ${g.run_count} backup${g.run_count !== 1 ? 's' : ''}
+            </div>
+        `).join('');
+
+        document.getElementById('adopt-vm-count').textContent = selectedOrphanedVMs.size;
+
+        document.getElementById('adoptOrphanedModal').style.display = 'flex';
+    } catch (error) {
+        console.error('Failed to load hypervisors:', error);
+        Toast.error('Failed to load hypervisors: ' + error.message);
+    }
+}
+
+function hideAdoptOrphanedModal() {
+    document.getElementById('adoptOrphanedModal').style.display = 'none';
+}
+
+async function executeAdoptBackups() {
+    const hypervisorId = document.getElementById('adopt-hypervisor-select').value;
+    const importJobs = document.getElementById('adopt-import-jobs').checked;
+
+    if (!hypervisorId) {
+        Toast.error('Please select a hypervisor');
+        return;
+    }
+
+    hideAdoptOrphanedModal();
+
+    try {
+        const guestVmids = Array.from(selectedOrphanedVMs).map(vmid => {
+            // Try to parse as int, keep as string if it fails (for Hyper-V UUIDs)
+            const parsed = parseInt(vmid);
+            return isNaN(parsed) ? vmid : parsed;
+        });
+
+        const response = await fetch(`/api/v1/hypervisors/${hypervisorId}/adopt-backups`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                repository_id: currentRepositoryId,
+                guest_vmids: guestVmids,
+                import_jobs: importJobs
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            Toast.success(data.message || 'Backups adopted successfully');
+            selectedOrphanedVMs.clear();
+
+            // Reload orphaned backups list
+            const repoNameElem = document.getElementById('orphaned-repo-name');
+            const repoName = repoNameElem ? repoNameElem.textContent.replace('Repository: ', '') : '';
+            setTimeout(() => loadOrphanedBackups(currentRepositoryId, repoName), 1000);
+        } else {
+            Toast.error('Adoption failed: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Adoption error:', error);
+        Toast.error('Failed to adopt backups: ' + error.message);
+    }
+}
+
+function refreshOrphanedBackups() {
+    if (currentRepositoryId) {
+        const repoNameElem = document.getElementById('orphaned-repo-name');
+        const repoName = repoNameElem ? repoNameElem.textContent.replace('Repository: ', '') : '';
+        selectedOrphanedVMs.clear();
+        loadOrphanedBackups(currentRepositoryId, repoName);
+    }
+}
+
+function adoptAllOrphaned() {
+    if (orphanedBackups.length === 0) {
+        Toast.warning('No orphaned backups to adopt');
+        return;
+    }
+
+    // Select all VMs
+    selectedOrphanedVMs.clear();
+    orphanedBackups.forEach(guest => {
+        selectedOrphanedVMs.add(String(guest.vmid));
+    });
+
+    // Update checkboxes
+    document.querySelectorAll('#orphaned-backups-tbody input[type="checkbox"]').forEach(cb => {
+        cb.checked = true;
+    });
+    document.getElementById('select-all-orphaned').checked = true;
+
+    updateOrphanedSelectedCount();
+
+    // Show adoption modal
+    showAdoptOrphanedModal();
+}
+
+function showAdoptionHistory(vmid) {
+    const guest = orphanedBackups.find(g => String(g.vmid) === String(vmid));
+    if (!guest) {
+        Toast.error('VM not found');
+        return;
+    }
+
+    const content = document.getElementById('adoption-history-content');
+
+    // Check if guest has adoption history
+    if (!guest.adoption_history || guest.adoption_history.length === 0) {
+        content.innerHTML = `
+            <div class="empty-state" style="padding: 20px;">
+                <p><strong>${escapeHtml(guest.name)}</strong> (VM ID: ${escapeHtml(String(guest.vmid))})</p>
+                <p class="form-hint">No adoption history recorded for this VM.</p>
+            </div>
+        `;
+    } else {
+        let historyHtml = `
+            <p style="margin-bottom: 15px;">
+                <strong>${escapeHtml(guest.name)}</strong> (VM ID: ${escapeHtml(String(guest.vmid))})
+            </p>
+            <div class="data-grid-container">
+                <table class="data-grid">
+                    <thead>
+                        <tr>
+                            <th>From Hypervisor</th>
+                            <th>To Hypervisor</th>
+                            <th>Adopted At</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+
+        guest.adoption_history.forEach(entry => {
+            const adoptedDate = new Date(entry.adopted_at);
+            historyHtml += `
+                <tr>
+                    <td><code>${escapeHtml(entry.from_hypervisor_id || 'N/A')}</code></td>
+                    <td><code>${escapeHtml(entry.to_hypervisor_id)}</code></td>
+                    <td>${adoptedDate.toLocaleString()}</td>
+                </tr>
+            `;
+        });
+
+        historyHtml += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+
+        content.innerHTML = historyHtml;
+    }
+
+    document.getElementById('adoptionHistoryModal').style.display = 'flex';
+}
+
+function hideAdoptionHistoryModal() {
+    document.getElementById('adoptionHistoryModal').style.display = 'none';
+}
+
+// Auto-load orphaned backups when user clicks "Scan" on a repository
+const originalScanRepo = scanRepo;
+scanRepo = function(repoId, repoName) {
+    originalScanRepo(repoId, repoName);
+    // Also load orphaned backups
+    setTimeout(() => loadOrphanedBackups(repoId, repoName), 500);
+};
 </script>
 {% endblock %}

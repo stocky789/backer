@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import socket
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -5114,6 +5115,252 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "repository_id": repo_id,
             }
 
+    @app.get("/api/v1/repositories/{repo_id}/discover-orphaned-backups")
+    async def discover_orphaned_backups(
+        repo_id: str,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Discover hypervisor backups not linked to active hypervisors.
+
+        Scans the repository for VM/container backups whose hypervisor_id
+        no longer exists in the database. This enables disaster recovery
+        by identifying orphaned backups that can be adopted.
+
+        Args:
+            repo_id: Repository ID to scan
+
+        Returns:
+            {
+                "orphaned_guests": [list of orphaned VM metadata],
+                "orphaned_jobs": [list of orphaned job configs],
+                "summary": {stats}
+            }
+        """
+        from pathlib import Path
+
+        from backer.server.hypervisor_discovery import HypervisorDiscoveryService
+
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        repo_type = repo.get("repo_type", "smb")
+
+        # Only SMB/NFS repositories support hypervisor backups
+        if repo_type not in ("smb", "nfs", "local"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository type '{repo_type}' does not support hypervisor backups"
+            )
+
+        try:
+            # Build repository path
+            if repo_type == "smb":
+                server = repo.get("server", "")
+                share = repo.get("share", "")
+                subpath = repo.get("path", "")
+
+                # For SMB, we need to mount or use smbclient
+                # For now, construct UNC path for Windows or mount point for Linux
+                if sys.platform == 'win32':
+                    repo_path = f"\\\\{server}\\{share}"
+                    if subpath:
+                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                else:
+                    # On Linux, assume repository is mounted or use temp mount
+                    # This is a simplification - in production you'd handle mounting
+                    raise HTTPException(
+                        status_code=501,
+                        detail="SMB repository scanning requires mounted share on Linux"
+                    )
+
+            elif repo_type == "nfs":
+                server = repo.get("server", "")
+                export = repo.get("export", "")
+                subpath = repo.get("path", "")
+
+                if sys.platform == 'win32':
+                    repo_path = f"\\\\{server}\\{export}"
+                    if subpath:
+                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                else:
+                    raise HTTPException(
+                        status_code=501,
+                        detail="NFS repository scanning requires mounted share"
+                    )
+
+            elif repo_type == "local":
+                repo_path = repo.get("path", "")
+                if not repo_path:
+                    raise HTTPException(status_code=400, detail="Local repository path not configured")
+
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported repository type: {repo_type}"
+                )
+
+            # Initialize discovery service
+            discovery = HypervisorDiscoveryService(
+                repo_path=repo_path,
+                repo_type=repo_type,
+                storage=storage
+            )
+
+            # Discover orphaned backups
+            result = discovery.discover_orphaned_backups()
+
+            return {
+                "success": True,
+                "repository_id": repo_id,
+                **result
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Failed to discover orphaned backups in repository {repo_id}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Discovery failed: {str(e)}"
+            )
+
+    @app.post("/api/v1/hypervisors/{hypervisor_id}/adopt-backups")
+    async def adopt_orphaned_backups(
+        hypervisor_id: str,
+        request: Request,
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Adopt orphaned backups from repository to this hypervisor.
+
+        Links existing VM/container backups to a new hypervisor, enabling
+        disaster recovery. Updates metadata files to associate backups with
+        the new hypervisor and optionally imports job configurations.
+
+        Request body:
+        {
+            "repository_id": "repo-uuid",
+            "guest_vmids": [100, 101, 102],  // Can be int or str (Hyper-V)
+            "import_jobs": true
+        }
+
+        Args:
+            hypervisor_id: Hypervisor ID to adopt backups to
+        """
+        from pathlib import Path
+
+        from backer.server.hypervisor_discovery import HypervisorDiscoveryService
+
+        # Parse request body
+        body = await request.json()
+        repository_id = body.get("repository_id")
+        guest_vmids = body.get("guest_vmids", [])
+        import_jobs = body.get("import_jobs", True)
+
+        if not repository_id:
+            raise HTTPException(status_code=400, detail="repository_id is required")
+
+        if not guest_vmids:
+            raise HTTPException(status_code=400, detail="guest_vmids cannot be empty")
+
+        # Validate hypervisor exists
+        hypervisor = storage.get_hypervisor(hypervisor_id)
+        if not hypervisor:
+            raise HTTPException(status_code=404, detail="Hypervisor not found")
+
+        # Validate repository exists
+        repo = storage.get_repository(repository_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        repo_type = repo.get("repo_type", "smb")
+
+        # Only SMB/NFS/local repositories support hypervisor backups
+        if repo_type not in ("smb", "nfs", "local"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository type '{repo_type}' does not support hypervisor backups"
+            )
+
+        try:
+            # Build repository path (same logic as discovery endpoint)
+            if repo_type == "smb":
+                server = repo.get("server", "")
+                share = repo.get("share", "")
+                subpath = repo.get("path", "")
+
+                if sys.platform == 'win32':
+                    repo_path = f"\\\\{server}\\{share}"
+                    if subpath:
+                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                else:
+                    raise HTTPException(
+                        status_code=501,
+                        detail="SMB repository adoption requires mounted share on Linux"
+                    )
+
+            elif repo_type == "nfs":
+                server = repo.get("server", "")
+                export = repo.get("export", "")
+                subpath = repo.get("path", "")
+
+                if sys.platform == 'win32':
+                    repo_path = f"\\\\{server}\\{export}"
+                    if subpath:
+                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                else:
+                    raise HTTPException(
+                        status_code=501,
+                        detail="NFS repository adoption requires mounted share"
+                    )
+
+            elif repo_type == "local":
+                repo_path = repo.get("path", "")
+                if not repo_path:
+                    raise HTTPException(status_code=400, detail="Local repository path not configured")
+
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported repository type: {repo_type}"
+                )
+
+            # Initialize discovery service
+            discovery = HypervisorDiscoveryService(
+                repo_path=repo_path,
+                repo_type=repo_type,
+                storage=storage
+            )
+
+            # Adopt backups
+            result = discovery.adopt_backups(
+                new_hypervisor_id=hypervisor_id,
+                new_hypervisor_name=hypervisor["name"],
+                guest_vmids=guest_vmids,
+                import_jobs=import_jobs
+            )
+
+            logger.info(
+                f"Adopted {result['adopted_guests']} guests to hypervisor '{hypervisor['name']}' "
+                f"({hypervisor_id}) from repository {repository_id}"
+            )
+
+            return {
+                "success": True,
+                "hypervisor_id": hypervisor_id,
+                "repository_id": repository_id,
+                **result
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Failed to adopt backups to hypervisor {hypervisor_id}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Adoption failed: {str(e)}"
+            )
+
     @app.post("/api/v1/repositories/{repo_id}/wipe")
     def wipe_repository(
         repo_id: str,
@@ -6490,32 +6737,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if storage.get_hypervisor_job_by_name(name):
             raise HTTPException(status_code=400, detail="Job with this name already exists")
 
-        # TEMPORARY: Disable auto-import to test if it causes the 5-minute freeze
-        # Auto-import any existing jobs from repository metadata for this hypervisor
-        # This enables disaster recovery - if reinstalling backer, jobs are auto-recovered
-        logger.warning("[TESTING] Auto-import temporarily disabled for freeze investigation")
-        if False:
-            imported_jobs = _auto_import_hypervisor_jobs(
-                storage=storage,
-                repository=repository,
-                repository_id=repository_id,
-                hypervisor=hypervisor,
-                hypervisor_id=hypervisor_id,
-            )
-            if imported_jobs > 0:
-                logger.info(f"Auto-imported {imported_jobs} existing jobs from repository metadata")
-                # Check if the job we're trying to create was just imported
-                existing_by_name = storage.get_hypervisor_job_by_name(name)
-                if existing_by_name:
-                    # Job was imported, return it instead of creating duplicate
-                    return {
-                        "id": existing_by_name["id"],
-                        "name": name,
-                        "status": "imported",
-                        "message": f"Job '{name}' was auto-imported from repository metadata "
-                                   f"along with {imported_jobs} other job(s)",
-                        "imported_count": imported_jobs,
-                    }
+        # Note: Auto-import has been removed in favor of explicit adoption workflow
+        # Users can now discover and adopt orphaned backups via the UI:
+        # Storage -> Repository -> Orphaned Backups section
 
         job_id = str(uuid4())
 
