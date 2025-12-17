@@ -790,13 +790,107 @@ async function saveRepository() {
         const data = await response.json();
 
         if (response.ok) {
-            location.reload();
+            // Close the add modal
+            hideAddModal();
+
+            const repoId = data.id;
+            const repoName = data.name;
+
+            // If auto-test and auto-scan were triggered, monitor them and show results
+            if (data.test_task_id && data.scan_task_id) {
+                Toast.success(`Repository '${name}' created! Testing connection...`);
+
+                // Set up scan modal to show the auto-scan results
+                currentScanRepoId = repoId;
+                document.getElementById('scanRepoName').textContent = repoName;
+                document.getElementById('scanResults').innerHTML = '<div class="loading-state">Testing repository connection...</div>';
+                document.getElementById('scanActions').style.display = 'none';
+                showScanModal();
+
+                // Monitor test task first
+                const testTaskId = data.test_task_id;
+                let testAttempts = 0;
+                const maxAttempts = 60;
+
+                const checkTestTask = async () => {
+                    testAttempts++;
+                    try {
+                        const taskResponse = await fetch(`/api/v1/tasks/${testTaskId}`);
+                        const task = await taskResponse.json();
+
+                        if (task.status === 'completed') {
+                            const result = task.result || {};
+                            if (result.success) {
+                                // Test passed, now monitor scan task
+                                document.getElementById('scanResults').innerHTML = '<div class="loading-state">Connection successful! Scanning repository...</div>';
+                                monitorScanTask(data.scan_task_id);
+                            } else {
+                                document.getElementById('scanResults').innerHTML = `<div class="error-msg">Connection test failed: ${escapeHtml(result.message || 'Unknown error')}</div>`;
+                            }
+                        } else if (task.status === 'failed') {
+                            document.getElementById('scanResults').innerHTML = `<div class="error-msg">Connection test failed: ${escapeHtml(task.error || 'Unknown error')}</div>`;
+                        } else if (testAttempts < maxAttempts) {
+                            // Update progress message if available
+                            if (task.message) {
+                                document.getElementById('scanResults').innerHTML = `<div class="loading-state">${escapeHtml(task.message)}</div>`;
+                            }
+                            setTimeout(checkTestTask, 1000);
+                        } else {
+                            document.getElementById('scanResults').innerHTML = '<div class="error-msg">Connection test timed out</div>';
+                        }
+                    } catch (e) {
+                        document.getElementById('scanResults').innerHTML = `<div class="error-msg">Error checking test status: ${escapeHtml(e.message)}</div>`;
+                    }
+                };
+
+                setTimeout(checkTestTask, 500);
+            } else {
+                // No auto tasks, just reload
+                Toast.success(`Repository '${name}' created!`);
+                setTimeout(() => location.reload(), 1000);
+            }
         } else {
             showError('saveError', data.detail || 'Failed to save');
         }
     } catch (e) {
         showError('saveError', 'Save failed: ' + e.message);
     }
+}
+
+async function monitorScanTask(scanTaskId) {
+    let scanAttempts = 0;
+    const maxAttempts = 60;
+
+    const checkScanTask = async () => {
+        scanAttempts++;
+        try {
+            const taskResponse = await fetch(`/api/v1/tasks/${scanTaskId}`);
+            const task = await taskResponse.json();
+
+            if (task.status === 'completed') {
+                const result = task.result || {};
+                if (result.success !== false) {
+                    displayScanResults(result);
+                } else {
+                    document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(result.error || 'Unknown error')}</div>`;
+                }
+            } else if (task.status === 'failed') {
+                document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(task.error || 'Unknown error')}</div>`;
+            } else if (scanAttempts < maxAttempts) {
+                // Update progress message if available
+                if (task.message) {
+                    document.getElementById('scanResults').innerHTML = `<div class="loading-state">${escapeHtml(task.message)}</div>`;
+                }
+                setTimeout(checkScanTask, 1000);
+            } else {
+                document.getElementById('scanResults').innerHTML = '<div class="error-msg">Scan timed out</div>';
+            }
+        } catch (e) {
+            document.getElementById('scanResults').innerHTML = `<div class="error-msg">Error checking scan status: ${escapeHtml(e.message)}</div>`;
+        }
+    };
+
+    setTimeout(checkScanTask, 500);
 }
 
 function showError(elementId, message) {
