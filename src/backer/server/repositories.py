@@ -640,6 +640,89 @@ def smb_file_exists(
     return False, False
 
 
+def smb_write_file(
+    server: str,
+    share: str,
+    remote_path: str,
+    content: str | bytes,
+    username: str | None = None,
+    password: str | None = None,
+    domain: str | None = None,
+) -> tuple[bool, str]:
+    """Write content to a file on an SMB share using smbclient.
+
+    Args:
+        server: SMB server hostname or IP
+        share: Share name
+        remote_path: Path to file within the share
+        content: File content (string or bytes)
+        username: Optional username
+        password: Optional password
+        domain: Optional domain
+
+    Returns:
+        Tuple of (success, message or error)
+    """
+    # Normalize path
+    remote_path = remote_path.replace("\\", "/").strip("/")
+
+    # Create temp file with content
+    fd, temp_path = tempfile.mkstemp(prefix="smb_write_", suffix=".tmp")
+
+    try:
+        # Write content to temp file
+        if isinstance(content, str):
+            os.write(fd, content.encode("utf-8"))
+        else:
+            os.write(fd, content)
+        os.close(fd)
+
+        # Upload to SMB share
+        with smb_auth_file(username, password, domain) as auth_path:
+            cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]
+
+            if auth_path:
+                cmd.extend(["-A", auth_path])
+            else:
+                cmd.append("-N")
+
+            # Use 'put' command to upload file
+            cmd.extend(["-c", f'put "{temp_path}" "{remote_path}"'])
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if result.returncode != 0:
+                    error = result.stderr.strip()
+                    if "NT_STATUS_ACCESS_DENIED" in error:
+                        return False, "Access denied"
+                    elif "NT_STATUS_OBJECT_PATH_NOT_FOUND" in error:
+                        return False, "Parent directory not found"
+                    else:
+                        return False, error or "Upload failed"
+
+                return True, "File written successfully"
+
+            except subprocess.TimeoutExpired:
+                return False, "Connection timed out"
+            except FileNotFoundError:
+                return False, "smbclient not installed"
+            except Exception as e:
+                return False, str(e)
+
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+
 def smb_delete_file(
     server: str,
     share: str,

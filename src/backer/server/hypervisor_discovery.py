@@ -98,6 +98,32 @@ class HypervisorDiscoveryService:
             logger.warning(f"Failed to parse JSON from {remote_path}")
             return None
 
+    def _smb_write_json(self, remote_path: str, data: dict[str, Any]) -> bool:
+        """Write JSON data to a file on SMB share."""
+        from backer.server.repositories import smb_write_file
+
+        try:
+            content = json.dumps(data, indent=2)
+            success, message = smb_write_file(
+                self.server,
+                self.share,
+                remote_path,
+                content,
+                self.username,
+                self.password,
+                self.domain
+            )
+
+            if not success:
+                logger.warning(f"Failed to write JSON to {remote_path}: {message}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.exception(f"Error writing JSON to {remote_path}: {e}")
+            return False
+
     def _scan_smb_guests(self, hypervisors_path: str, hv_folder_name: str) -> list[dict[str, Any]]:
         """Scan guests for a hypervisor using SMB client."""
         guests = []
@@ -138,13 +164,24 @@ class HypervisorDiscoveryService:
     def _get_smb_backup_runs(self, hypervisors_path: str, hv_folder_name: str, vmid_str: str) -> list[dict[str, Any]]:
         """Get backup runs for a guest using SMB client."""
         runs_path = f"{hypervisors_path}/{hv_folder_name}/.backer/hypervisor_backups/{vmid_str}/runs"
-        runs_json_path = f"{runs_path}/runs.json"
 
-        runs_data = self._smb_read_json(runs_json_path)
-        if runs_data and isinstance(runs_data, list):
-            return runs_data
+        # List all JSON files in runs directory (each file is one run)
+        run_files = self._smb_list_folders(runs_path)
 
-        return []
+        runs = []
+        for run_file in run_files:
+            if not run_file.endswith('.json'):
+                continue
+
+            run_json_path = f"{runs_path}/{run_file}"
+            run_data = self._smb_read_json(run_json_path)
+
+            if run_data:
+                runs.append(run_data)
+
+        # Sort by started_at descending
+        runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+        return runs[:50]  # Limit to 50 most recent
 
     def discover_orphaned_backups(self) -> dict[str, Any]:
         """Scan repository for backups not linked to active hypervisors.
@@ -351,6 +388,8 @@ class HypervisorDiscoveryService:
         Returns:
             Dictionary with adoption results
         """
+        from datetime import datetime
+
         logger.info(
             f"Adopting {len(guest_vmids)} guests to hypervisor '{new_hypervisor_name}' ({new_hypervisor_id})"
         )
@@ -360,58 +399,136 @@ class HypervisorDiscoveryService:
         total_backups_linked = 0
         errors = []
 
-        # Build a map of vmid -> hypervisor_folder by scanning all hypervisor folders
-        hypervisors_dir = self.repo_path / "Hypervisors"
-        vmid_to_folder = {}
+        if self._use_smb_client():
+            # Use SMB client for adoption
+            logger.debug("Using SMB client for adoption")
+            base_path = str(self.repo_path) if self.repo_path != Path('.') else ""
+            hypervisors_path = f"{base_path}/Hypervisors" if base_path else "Hypervisors"
 
-        if hypervisors_dir.exists() and hypervisors_dir.is_dir():
-            for hv_folder in hypervisors_dir.iterdir():
-                if hv_folder.is_dir() and not hv_folder.name.startswith('.'):
+            # Build a map of vmid -> hypervisor_folder by scanning all hypervisor folders
+            vmid_to_hv_folder = {}
+            hv_folders = self._smb_list_folders(hypervisors_path)
+
+            for hv_folder_name in hv_folders:
+                if hv_folder_name.startswith('.'):
+                    continue
+
+                # Read guests for this hypervisor
+                guests = self._scan_smb_guests(hypervisors_path, hv_folder_name)
+                for guest in guests:
+                    vmid = guest.get("vmid")
+                    if vmid is not None:
+                        vmid_to_hv_folder[str(vmid)] = hv_folder_name
+
+            # Update guest metadata for each VMID
+            for vmid in guest_vmids:
+                try:
+                    vmid_str = str(vmid)
+
+                    # Find which hypervisor folder contains this VMID
+                    if vmid_str not in vmid_to_hv_folder:
+                        logger.warning(f"Guest metadata not found for VMID {vmid}, skipping")
+                        errors.append(f"Guest {vmid}: metadata not found")
+                        continue
+
+                    hv_folder_name = vmid_to_hv_folder[vmid_str]
+                    guest_json_path = f"{hypervisors_path}/{hv_folder_name}/.backer/hypervisor_backups/{vmid_str}/guest.json"
+
+                    # Read current guest metadata
+                    guest_data = self._smb_read_json(guest_json_path)
+                    if not guest_data:
+                        logger.warning(f"Failed to read guest metadata for VMID {vmid}, skipping")
+                        errors.append(f"Guest {vmid}: failed to read metadata")
+                        continue
+
+                    # Update hypervisor link
+                    old_hypervisor_id = guest_data.get("hypervisor_id")
+                    guest_data["hypervisor_id"] = new_hypervisor_id
+                    guest_data["updated_at"] = datetime.now().isoformat()
+                    guest_data["hypervisor_name"] = new_hypervisor_name
+
+                    # Record adoption history
+                    if "adoption_history" not in guest_data:
+                        guest_data["adoption_history"] = []
+
+                    guest_data["adoption_history"].append({
+                        "from_hypervisor_id": old_hypervisor_id,
+                        "to_hypervisor_id": new_hypervisor_id,
+                        "adopted_at": datetime.now().isoformat(),
+                    })
+
+                    # Write updated metadata
+                    success = self._smb_write_json(guest_json_path, guest_data)
+                    if success:
+                        adopted_guests += 1
+
+                        # Count backups for this guest
+                        runs = self._get_smb_backup_runs(hypervisors_path, hv_folder_name, vmid_str)
+                        total_backups_linked += len(runs)
+
+                        logger.debug(f"Adopted guest {vmid} ({guest_data.get('name')}) with {len(runs)} backups")
+                    else:
+                        errors.append(f"Guest {vmid}: failed to write updated metadata")
+                        logger.error(f"Failed to write updated metadata for guest {vmid}")
+
+                except Exception as e:
+                    logger.exception(f"Error adopting guest {vmid}")
+                    errors.append(f"Guest {vmid}: {str(e)}")
+
+        else:
+            # Use local filesystem access
+            logger.debug("Using local filesystem for adoption")
+            hypervisors_dir = self.repo_path / "Hypervisors"
+            vmid_to_folder = {}
+
+            if hypervisors_dir.exists() and hypervisors_dir.is_dir():
+                for hv_folder in hypervisors_dir.iterdir():
+                    if hv_folder.is_dir() and not hv_folder.name.startswith('.'):
+                        hv_metadata = HypervisorMetadata(hv_folder)
+                        guests = hv_metadata.list_guests()
+                        for guest in guests:
+                            vmid = guest.get("vmid")
+                            if vmid is not None:
+                                vmid_to_folder[str(vmid)] = hv_folder
+
+            # Update guest metadata for each VMID
+            for vmid in guest_vmids:
+                try:
+                    vmid_str = str(vmid)
+
+                    # Find which hypervisor folder contains this VMID
+                    if vmid_str not in vmid_to_folder:
+                        logger.warning(f"Guest metadata not found for VMID {vmid}, skipping")
+                        errors.append(f"Guest {vmid}: metadata not found")
+                        continue
+
+                    hv_folder = vmid_to_folder[vmid_str]
                     hv_metadata = HypervisorMetadata(hv_folder)
-                    guests = hv_metadata.list_guests()
-                    for guest in guests:
-                        vmid = guest.get("vmid")
-                        if vmid is not None:
-                            vmid_to_folder[str(vmid)] = hv_folder
 
-        # Update guest metadata for each VMID
-        for vmid in guest_vmids:
-            try:
-                vmid_str = str(vmid)
+                    # Get current guest metadata
+                    guest = hv_metadata.get_guest(vmid)
+                    if not guest:
+                        logger.warning(f"Guest metadata not found for VMID {vmid}, skipping")
+                        errors.append(f"Guest {vmid}: metadata not found")
+                        continue
 
-                # Find which hypervisor folder contains this VMID
-                if vmid_str not in vmid_to_folder:
-                    logger.warning(f"Guest metadata not found for VMID {vmid}, skipping")
-                    errors.append(f"Guest {vmid}: metadata not found")
-                    continue
+                    # Update hypervisor_id in guest.json
+                    success = hv_metadata.update_guest_hypervisor(vmid, new_hypervisor_id, new_hypervisor_name)
+                    if success:
+                        adopted_guests += 1
 
-                hv_folder = vmid_to_folder[vmid_str]
-                hv_metadata = HypervisorMetadata(hv_folder)
+                        # Count backups for this guest
+                        runs = hv_metadata.get_backup_runs(vmid)
+                        total_backups_linked += len(runs)
 
-                # Get current guest metadata
-                guest = hv_metadata.get_guest(vmid)
-                if not guest:
-                    logger.warning(f"Guest metadata not found for VMID {vmid}, skipping")
-                    errors.append(f"Guest {vmid}: metadata not found")
-                    continue
+                        logger.debug(f"Adopted guest {vmid} ({guest.get('name')}) with {len(runs)} backups")
+                    else:
+                        errors.append(f"Guest {vmid}: failed to update metadata")
+                        logger.error(f"Failed to update metadata for guest {vmid}")
 
-                # Update hypervisor_id in guest.json
-                success = hv_metadata.update_guest_hypervisor(vmid, new_hypervisor_id, new_hypervisor_name)
-                if success:
-                    adopted_guests += 1
-
-                    # Count backups for this guest
-                    runs = hv_metadata.get_backup_runs(vmid)
-                    total_backups_linked += len(runs)
-
-                    logger.debug(f"Adopted guest {vmid} ({guest.get('name')}) with {len(runs)} backups")
-                else:
-                    errors.append(f"Guest {vmid}: failed to update metadata")
-                    logger.error(f"Failed to update metadata for guest {vmid}")
-
-            except Exception as e:
-                logger.exception(f"Error adopting guest {vmid}")
-                errors.append(f"Guest {vmid}: {str(e)}")
+                except Exception as e:
+                    logger.exception(f"Error adopting guest {vmid}")
+                    errors.append(f"Guest {vmid}: {str(e)}")
 
         # Import orphaned jobs if requested
         if import_jobs:
