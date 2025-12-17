@@ -10118,10 +10118,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     guest_ids = job.get("guest_ids", [])
                                     # Replace old GUID with new GUID (case-insensitive comparison)
                                     # Check if old_vm_id matches any guest_id (case-insensitive)
-                                    guest_ids_lower = [gid.lower() for gid in guest_ids]
-                                    if old_vm_id in guest_ids_lower:
+                                    # Convert to strings first to handle both int and str VMIDs
+                                    guest_ids_lower = [str(gid).lower() for gid in guest_ids]
+                                    if old_vm_id.lower() in guest_ids_lower:
                                         updated_guest_ids = [
-                                            new_vm_id if gid.lower() == old_vm_id else gid
+                                            new_vm_id if str(gid).lower() == old_vm_id.lower() else gid
                                             for gid in guest_ids
                                         ]
                                         _storage.update_hypervisor_job(
