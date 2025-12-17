@@ -1248,8 +1248,35 @@ async function adoptFromScan() {
         return;
     }
 
-    // Navigate to the orphaned backups adoption flow
-    window.location.href = `/hypervisors?repo_id=${currentScanRepoId}&adopt=true`;
+    // Get the repository name from the modal
+    const repoNameElement = document.querySelector('#scanResults .text-muted code');
+    const repoName = repoNameElement ? repoNameElement.textContent.trim() : 'Repository';
+
+    // Close the scan modal
+    hideScanModal();
+
+    // Load orphaned backups for this repository
+    await loadOrphanedBackups(currentScanRepoId, repoName);
+
+    // Auto-select all orphaned VMs
+    if (orphanedBackups.length > 0) {
+        selectedOrphanedVMs.clear();
+        orphanedBackups.forEach(guest => {
+            selectedOrphanedVMs.add(String(guest.vmid));
+        });
+
+        // Update checkboxes
+        document.querySelectorAll('#orphaned-backups-tbody input[type="checkbox"]').forEach(cb => {
+            cb.checked = true;
+        });
+
+        updateOrphanedSelectedCount();
+
+        // Show adoption modal with the selected hypervisor pre-selected
+        await showAdoptOrphanedModal(parseInt(hypervisorId));
+    } else {
+        Toast.info('No orphaned backups found for this repository');
+    }
 }
 
 async function importMetadata() {

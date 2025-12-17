@@ -69,12 +69,15 @@ class HypervisorDiscoveryService:
         )
 
         if not success:
-            logger.warning(f"Failed to list SMB folder {remote_path}: {result}")
+            logger.warning(f"[DISCOVERY] Failed to list SMB folder {remote_path}: {result}")
             return []
 
+        logger.debug(f"[DISCOVERY] SMB list for {remote_path}: {result}")
         # Filter to only directories (entries without extensions typically)
         # This is a heuristic - SMB list doesn't distinguish dirs from files
-        return [name for name in result if not name.startswith('.')]
+        filtered = [name for name in result if not name.startswith('.')]
+        logger.debug(f"[DISCOVERY] After filtering: {filtered}")
+        return filtered
 
     def _smb_read_json(self, remote_path: str) -> dict[str, Any] | None:
         """Read and parse JSON file from SMB share."""
@@ -131,13 +134,21 @@ class HypervisorDiscoveryService:
 
         # List guest folders (VMIDs)
         vmid_folders = self._smb_list_folders(metadata_path)
+        logger.debug(f"[DISCOVERY] Found {len(vmid_folders)} guest folders in {hv_folder_name}: {vmid_folders}")
 
         for vmid_str in vmid_folders:
+            logger.debug(f"[DISCOVERY] Reading guest from folder '{vmid_str}'")
             guest_json_path = f"{metadata_path}/{vmid_str}/guest.json"
             guest_data = self._smb_read_json(guest_json_path)
 
             if guest_data:
+                actual_vmid = guest_data.get('vmid')
+                logger.info(f"[DISCOVERY] Found guest: folder='{vmid_str}', vmid={actual_vmid}, name={guest_data.get('name')}")
+                if str(actual_vmid) != vmid_str:
+                    logger.warning(f"[DISCOVERY] MISMATCH: Folder name '{vmid_str}' != vmid '{actual_vmid}'")
                 guests.append(guest_data)
+            else:
+                logger.warning(f"[DISCOVERY] Failed to read or parse guest.json from folder '{vmid_str}'")
 
         return guests
 
