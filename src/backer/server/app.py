@@ -5152,10 +5152,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
 
         try:
-            # Build repository path - use mount_point if available
+            # Get repository credentials and paths
             mount_point = repo.get("mount_point")
             subpath = repo.get("path", "")
+            server = repo.get("server", "")
+            share = repo.get("share") or repo.get("export", "")
+            username = repo.get("username")
+            password = storage.get_repository_password(repo_id)
+            domain = repo.get("domain")
 
+            # Determine repo_path based on type and platform
             if mount_point:
                 # Repository is mounted, use the mount point
                 repo_path = mount_point
@@ -5165,47 +5171,33 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 repo_path = repo.get("share") or repo.get("path", "")
                 if not repo_path:
                     raise HTTPException(status_code=400, detail="Local repository path not configured")
-            elif repo_type == "smb":
-                server = repo.get("server", "")
-                share = repo.get("share", "")
-
-                # For SMB without mount point, only works on Windows
+            elif repo_type in ("smb", "nfs"):
+                # For SMB/NFS, use subpath only (SMB client will be used on Linux)
                 if sys.platform == 'win32':
+                    # Windows can use UNC paths
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
                         subpath_windows = subpath.replace('/', '\\')
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="SMB repository requires a mount point on Linux. Please configure mount_point in repository settings."
-                    )
-            elif repo_type == "nfs":
-                server = repo.get("server", "")
-                export = repo.get("export", "")
-
-                # For NFS without mount point, only works on Windows
-                if sys.platform == 'win32':
-                    repo_path = f"\\\\{server}\\{export}"
-                    if subpath:
-                        subpath_windows = subpath.replace('/', '\\')
-                        repo_path = f"{repo_path}\\{subpath_windows}"
-                else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="NFS repository requires a mount point on Linux. Please configure mount_point in repository settings."
-                    )
+                    # Linux will use SMB client - just pass subpath
+                    repo_path = subpath or "."
             else:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unsupported repository type: {repo_type}"
                 )
 
-            # Initialize discovery service
+            # Initialize discovery service with SMB credentials
             discovery = HypervisorDiscoveryService(
                 repo_path=repo_path,
                 repo_type=repo_type,
-                storage=storage
+                storage=storage,
+                server=server,
+                share=share,
+                username=username,
+                password=password,
+                domain=domain
             )
 
             # Discover orphaned backups

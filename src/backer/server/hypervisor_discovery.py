@@ -4,6 +4,7 @@ Scans repositories for orphaned hypervisor backups and provides
 adoption functionality for disaster recovery scenarios.
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -17,17 +18,133 @@ logger = logging.getLogger(__name__)
 class HypervisorDiscoveryService:
     """Service for discovering and adopting orphaned hypervisor backups."""
 
-    def __init__(self, repo_path: Path | str, repo_type: str, storage: Storage):
+    def __init__(
+        self,
+        repo_path: Path | str,
+        repo_type: str,
+        storage: Storage,
+        server: str | None = None,
+        share: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        domain: str | None = None,
+    ):
         """Initialize discovery service.
 
         Args:
-            repo_path: Path to repository root
+            repo_path: Path to repository root (for local/mounted) or subpath (for SMB)
             repo_type: Repository type (smb, nfs, local)
             storage: Database storage instance
+            server: SMB/NFS server (required for smb/nfs on Linux)
+            share: SMB share or NFS export (required for smb/nfs on Linux)
+            username: SMB username (optional)
+            password: SMB password (optional)
+            domain: SMB domain (optional)
         """
         self.repo_path = Path(repo_path) if isinstance(repo_path, str) else repo_path
         self.repo_type = repo_type
         self.storage = storage
+        self.server = server
+        self.share = share
+        self.username = username
+        self.password = password
+        self.domain = domain
+
+    def _use_smb_client(self) -> bool:
+        """Check if we should use SMB client for file access."""
+        import sys
+        return self.repo_type == "smb" and sys.platform != 'win32' and self.server and self.share
+
+    def _smb_list_folders(self, remote_path: str) -> list[str]:
+        """List folders in SMB share using smbclient."""
+        from backer.server.repositories import smb_list_files
+
+        success, result = smb_list_files(
+            self.server,
+            self.share,
+            remote_path,
+            self.username,
+            self.password,
+            self.domain
+        )
+
+        if not success:
+            logger.warning(f"Failed to list SMB folder {remote_path}: {result}")
+            return []
+
+        # Filter to only directories (entries without extensions typically)
+        # This is a heuristic - SMB list doesn't distinguish dirs from files
+        return [name for name in result if not name.startswith('.')]
+
+    def _smb_read_json(self, remote_path: str) -> dict[str, Any] | None:
+        """Read and parse JSON file from SMB share."""
+        from backer.server.repositories import smb_read_file
+
+        success, content = smb_read_file(
+            self.server,
+            self.share,
+            remote_path,
+            self.username,
+            self.password,
+            self.domain
+        )
+
+        if not success:
+            return None
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse JSON from {remote_path}")
+            return None
+
+    def _scan_smb_guests(self, hypervisors_path: str, hv_folder_name: str) -> list[dict[str, Any]]:
+        """Scan guests for a hypervisor using SMB client."""
+        guests = []
+        metadata_path = f"{hypervisors_path}/{hv_folder_name}/.backer/hypervisor_backups"
+
+        # List guest folders (VMIDs)
+        vmid_folders = self._smb_list_folders(metadata_path)
+
+        for vmid_str in vmid_folders:
+            guest_json_path = f"{metadata_path}/{vmid_str}/guest.json"
+            guest_data = self._smb_read_json(guest_json_path)
+
+            if guest_data:
+                guests.append(guest_data)
+
+        return guests
+
+    def _scan_smb_jobs(self, hypervisors_path: str, hv_folder_name: str) -> list[dict[str, Any]]:
+        """Scan jobs for a hypervisor using SMB client."""
+        jobs = []
+        jobs_path = f"{hypervisors_path}/{hv_folder_name}/.backer/jobs"
+
+        # List job JSON files
+        job_files = self._smb_list_folders(jobs_path)
+
+        for job_file in job_files:
+            if not job_file.endswith('.json'):
+                continue
+
+            job_json_path = f"{jobs_path}/{job_file}"
+            job_data = self._smb_read_json(job_json_path)
+
+            if job_data:
+                jobs.append(job_data)
+
+        return jobs
+
+    def _get_smb_backup_runs(self, hypervisors_path: str, hv_folder_name: str, vmid_str: str) -> list[dict[str, Any]]:
+        """Get backup runs for a guest using SMB client."""
+        runs_path = f"{hypervisors_path}/{hv_folder_name}/.backer/hypervisor_backups/{vmid_str}/runs"
+        runs_json_path = f"{runs_path}/runs.json"
+
+        runs_data = self._smb_read_json(runs_json_path)
+        if runs_data and isinstance(runs_data, list):
+            return runs_data
+
+        return []
 
     def discover_orphaned_backups(self) -> dict[str, Any]:
         """Scan repository for backups not linked to active hypervisors.
@@ -42,38 +159,70 @@ class HypervisorDiscoveryService:
             - suggested_matches: List of suggested hypervisor matches
             - summary: Statistics about orphaned backups
         """
-        logger.info(f"Discovering orphaned backups in {self.repo_path}")
+        logger.info(f"Discovering orphaned backups in repository")
 
         # Get all active hypervisor IDs from database
         active_hypervisors = self.storage.list_hypervisors()
         active_hypervisor_ids = {hv["id"] for hv in active_hypervisors}
         logger.debug(f"Active hypervisor IDs: {active_hypervisor_ids}")
 
-        # Scan all hypervisor folders in Hypervisors/ directory
+        #Scan all hypervisor folders in Hypervisors/ directory
         all_guests = []
         all_jobs = []
-        vmid_to_metadata = {}  # Map vmid -> HypervisorMetadata instance
-        hypervisors_dir = self.repo_path / "Hypervisors"
+        vmid_to_hv_folder = {}  # Map vmid -> hypervisor folder name for later lookups
 
-        if hypervisors_dir.exists() and hypervisors_dir.is_dir():
-            for hv_folder in hypervisors_dir.iterdir():
-                if hv_folder.is_dir() and not hv_folder.name.startswith('.'):
-                    # Each folder represents a hypervisor's backup location
-                    hv_metadata = HypervisorMetadata(hv_folder)
+        if self._use_smb_client():
+            # Use SMB client to scan remote share
+            logger.debug("Using SMB client for discovery")
+            base_path = str(self.repo_path) if self.repo_path != Path('.') else ""
+            hypervisors_path = f"{base_path}/Hypervisors" if base_path else "Hypervisors"
 
-                    # Collect guests from this hypervisor folder
-                    guests = hv_metadata.list_guests()
-                    all_guests.extend(guests)
+            # List hypervisor folders
+            hv_folders = self._smb_list_folders(hypervisors_path)
+            logger.debug(f"Found {len(hv_folders)} hypervisor folders in SMB share")
 
-                    # Map vmid to metadata instance for later use
-                    for guest in guests:
-                        vmid = guest.get("vmid")
-                        if vmid is not None:
-                            vmid_to_metadata[str(vmid)] = hv_metadata
+            for hv_folder_name in hv_folders:
+                if hv_folder_name.startswith('.'):
+                    continue
 
-                    # Collect jobs from this hypervisor folder
-                    jobs = hv_metadata.list_jobs()
-                    all_jobs.extend(jobs)
+                # Read guests for this hypervisor
+                guests = self._scan_smb_guests(hypervisors_path, hv_folder_name)
+                all_guests.extend(guests)
+
+                # Map VMIDs to this hypervisor folder
+                for guest in guests:
+                    vmid = guest.get("vmid")
+                    if vmid is not None:
+                        vmid_to_hv_folder[str(vmid)] = hv_folder_name
+
+                # Read jobs for this hypervisor
+                jobs = self._scan_smb_jobs(hypervisors_path, hv_folder_name)
+                all_jobs.extend(jobs)
+
+        else:
+            # Use local filesystem access
+            logger.debug("Using local filesystem for discovery")
+            hypervisors_dir = self.repo_path / "Hypervisors"
+
+            if hypervisors_dir.exists() and hypervisors_dir.is_dir():
+                for hv_folder in hypervisors_dir.iterdir():
+                    if hv_folder.is_dir() and not hv_folder.name.startswith('.'):
+                        # Each folder represents a hypervisor's backup location
+                        hv_metadata = HypervisorMetadata(hv_folder)
+
+                        # Collect guests from this hypervisor folder
+                        guests = hv_metadata.list_guests()
+                        all_guests.extend(guests)
+
+                        # Map vmid to hypervisor folder name
+                        for guest in guests:
+                            vmid = guest.get("vmid")
+                            if vmid is not None:
+                                vmid_to_hv_folder[str(vmid)] = hv_folder.name
+
+                        # Collect jobs from this hypervisor folder
+                        jobs = hv_metadata.list_jobs()
+                        all_jobs.extend(jobs)
 
         logger.debug(f"Found {len(all_guests)} total guests in repository")
 
@@ -85,11 +234,20 @@ class HypervisorDiscoveryService:
                 # This guest is orphaned - its hypervisor no longer exists
                 vmid = guest.get("vmid")
                 if vmid is not None:
-                    # Get backup runs for this guest from the correct metadata instance
+                    # Get backup runs for this guest
                     vmid_str = str(vmid)
-                    if vmid_str in vmid_to_metadata:
-                        hv_metadata = vmid_to_metadata[vmid_str]
-                        runs = hv_metadata.get_backup_runs(vmid)
+                    hv_folder_name = vmid_to_hv_folder.get(vmid_str)
+
+                    if hv_folder_name:
+                        if self._use_smb_client():
+                            base_path = str(self.repo_path) if self.repo_path != Path('.') else ""
+                            hypervisors_path = f"{base_path}/Hypervisors" if base_path else "Hypervisors"
+                            runs = self._get_smb_backup_runs(hypervisors_path, hv_folder_name, vmid_str)
+                        else:
+                            hypervisors_dir = self.repo_path / "Hypervisors"
+                            hv_folder_path = hypervisors_dir / hv_folder_name
+                            hv_metadata = HypervisorMetadata(hv_folder_path)
+                            runs = hv_metadata.get_backup_runs(vmid)
                     else:
                         runs = []
 
@@ -114,13 +272,15 @@ class HypervisorDiscoveryService:
         logger.info(f"Found {len(orphaned_guests)} orphaned guests")
 
         # Process orphaned jobs from all collected jobs
-        # Get deleted job IDs from all hypervisor folders
+        # Get deleted job IDs - for SMB this is simplified (we already filtered in scan)
         deleted_job_ids = set()
-        if hypervisors_dir.exists() and hypervisors_dir.is_dir():
-            for hv_folder in hypervisors_dir.iterdir():
-                if hv_folder.is_dir() and not hv_folder.name.startswith('.'):
-                    hv_metadata = HypervisorMetadata(hv_folder)
-                    deleted_job_ids.update(hv_metadata.get_deleted_job_ids())
+        if not self._use_smb_client():
+            hypervisors_dir = self.repo_path / "Hypervisors"
+            if hypervisors_dir.exists() and hypervisors_dir.is_dir():
+                for hv_folder in hypervisors_dir.iterdir():
+                    if hv_folder.is_dir() and not hv_folder.name.startswith('.'):
+                        hv_metadata = HypervisorMetadata(hv_folder)
+                        deleted_job_ids.update(hv_metadata.get_deleted_job_ids())
 
         orphaned_jobs = []
         for job in all_jobs:
