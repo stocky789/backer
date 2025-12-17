@@ -1137,8 +1137,41 @@ function displayScanResults(data) {
 
     resultsDiv.innerHTML = html;
 
-    if (summary.job_count > 0 || summary.agent_count > 0 || summary.hypervisor_job_count > 0) {
-        document.getElementById('scanActions').style.display = 'block';
+    // Show import actions
+    const scanActionsDiv = document.getElementById('scanActions');
+    const hasAgentData = (summary.job_count > 0 || summary.agent_count > 0);
+    const hasHypervisorData = (summary.hypervisor_job_count > 0 || summary.hypervisor_count > 0 || summary.guest_count > 0);
+
+    if (hasAgentData || hasHypervisorData) {
+        let actionsHtml = '';
+
+        if (hasAgentData) {
+            actionsHtml += `
+                <p style="margin-bottom: 10px; font-size: 12px;">Import discovered agent jobs and run history into this server's database:</p>
+                <button id="importBtn" class="btn btn-primary btn-sm" onclick="importMetadata()">Import Agent Data</button>
+                <button class="btn btn-secondary btn-sm" onclick="hideScanModal()">Close</button>
+                <span class="text-muted" style="margin-left: 10px; font-size: 11px;">This will import agent job configurations and backup history</span>
+            `;
+        }
+
+        if (hasHypervisorData) {
+            if (hasAgentData) {
+                actionsHtml += '<hr style="margin: 16px 0; border-color: var(--border);">';
+            }
+            actionsHtml += `
+                <p style="margin-bottom: 10px; font-size: 12px;"><strong>Hypervisor Backups Found:</strong></p>
+                <p style="margin-bottom: 10px; font-size: 12px;">To import hypervisor backups, you must first create the hypervisor in the Hypervisors page, then use the "Adopt Orphaned Backups" feature.</p>
+                <a href="/hypervisors" class="btn btn-secondary btn-sm">Go to Hypervisors</a>
+            `;
+            if (!hasAgentData) {
+                actionsHtml += '<button class="btn btn-secondary btn-sm" onclick="hideScanModal()" style="margin-left: 8px;">Close</button>';
+            }
+        }
+
+        scanActionsDiv.innerHTML = actionsHtml;
+        scanActionsDiv.style.display = 'block';
+    } else {
+        scanActionsDiv.style.display = 'none';
     }
 }
 
