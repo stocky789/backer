@@ -1511,9 +1511,12 @@ async function executeAdoptBackups() {
 
     try {
         const guestVmids = Array.from(selectedOrphanedVMs).map(vmid => {
-            // Try to parse as int, keep as string if it fails (for Hyper-V UUIDs)
-            const parsed = parseInt(vmid);
-            return isNaN(parsed) ? vmid : parsed;
+            // Keep as string if it contains hyphens (GUID) or non-numeric chars
+            // Only convert to int if it's purely numeric (Proxmox VMIDs)
+            if (vmid.includes('-') || vmid.includes('_') || !/^\d+$/.test(vmid)) {
+                return vmid;  // Keep as string for Hyper-V GUIDs or other formats
+            }
+            return parseInt(vmid);  // Convert to int for Proxmox numeric VMIDs
         });
 
         const response = await fetch(`/api/v1/hypervisors/${hypervisorId}/adopt-backups`, {
