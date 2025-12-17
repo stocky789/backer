@@ -5136,8 +5136,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "summary": {stats}
             }
         """
-        from pathlib import Path
-
         from backer.server.hypervisor_discovery import HypervisorDiscoveryService
 
         repo = storage.get_repository(repo_id)
@@ -5165,7 +5163,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
-                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                        subpath_windows = subpath.replace('/', '\\')
+                        repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     # On Linux, assume repository is mounted or use temp mount
                     # This is a simplification - in production you'd handle mounting
@@ -5182,7 +5181,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{export}"
                     if subpath:
-                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                        subpath_windows = subpath.replace('/', '\\')
+                        repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     raise HTTPException(
                         status_code=501,
@@ -5247,8 +5247,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         Args:
             hypervisor_id: Hypervisor ID to adopt backups to
         """
-        from pathlib import Path
-
         from backer.server.hypervisor_discovery import HypervisorDiscoveryService
 
         # Parse request body
@@ -5292,7 +5290,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
-                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                        subpath_windows = subpath.replace('/', '\\')
+                        repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     raise HTTPException(
                         status_code=501,
@@ -5307,7 +5306,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if sys.platform == 'win32':
                     repo_path = f"\\\\{server}\\{export}"
                     if subpath:
-                        repo_path = f"{repo_path}\\{subpath.replace('/', '\\')}"
+                        subpath_windows = subpath.replace('/', '\\')
+                        repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     raise HTTPException(
                         status_code=501,
@@ -6067,7 +6067,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         cleanup_errors.append(f"Job {data['job'].get('name')}: {e}")
 
                 # Clean up hypervisor folders
-                task.message = f"Cleaning up hypervisor folders"
+                task.message = "Cleaning up hypervisor folders"
                 task.progress = 70
 
                 for repository_id, repository in repos_to_cleanup.items():

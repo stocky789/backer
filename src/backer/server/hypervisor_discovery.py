@@ -361,7 +361,7 @@ class HypervisorDiscoveryService:
                 imported_count += 1
                 logger.info(f"Imported job {job_id} ({job.get('name')})")
 
-            except Exception as e:
+            except Exception:
                 logger.exception(f"Failed to import job {job_id}")
                 # Continue with other jobs
 
@@ -518,7 +518,7 @@ class HypervisorDiscoveryService:
         elif original_lower in suggested_lower:
             return f"Name contains '{original}'"
         elif suggested_lower in original_lower:
-            return f"Similar name pattern"
+            return "Similar name pattern"
         elif score >= 70:
             return "Strong similarity"
         elif score >= 50:

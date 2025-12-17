@@ -719,7 +719,7 @@ class HypervisorMetadata:
 
             return success
 
-        except Exception as e:
+        except Exception:
             logger.exception(f"Failed to update guest {vmid} hypervisor")
             return False
 
