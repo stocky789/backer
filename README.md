@@ -4,6 +4,19 @@ Open-source backup management with a web UI. Supports agent-based backups for Wi
 
 **Default Login**: `admin` / `admin`
 
+## Development Status
+
+### Agent Backups
+- **Windows**: ✅ Operational (backup & restore)
+- **Linux**: ✅ Operational (backup & restore)
+- **Metadata Discovery**: ✅ Can adopt existing jobs from storage repositories
+
+### Hypervisor Backups
+- **Proxmox Standalone Nodes**: ✅ Fully functional (backup & restore)
+- **Hyper-V Clusters**: ⚠️ Operational (backup & restore), auto-discovery from existing storage repos requires more testing
+- **XCP-ng / XCP-ng Resource Pools**: 🚧 Next implementation
+- **Unraid**: 🚧 Planned after XCP-ng
+
 ## Installation
 
 ### Server (Linux)
@@ -69,19 +82,6 @@ backer restore /backup /destination
 - Storage: SMB, NFS, local, S3
 - Cron scheduling with retention policies
 - Web dashboard with backup history
-
-## Development Status
-
-### Agent Backups
-- **Windows**: ✅ Operational (backup & restore)
-- **Linux**: ✅ Operational (backup & restore)
-- **Metadata Discovery**: ✅ Can adopt existing jobs from storage repositories
-
-### Hypervisor Backups
-- **Proxmox Standalone Nodes**: ✅ Fully functional (backup & restore)
-- **Hyper-V Clusters**: ⚠️ Operational (backup & restore), auto-discovery from existing storage repos requires more testing
-- **XCP-ng / XCP-ng Resource Pools**: 🚧 Next implementation
-- **Unraid**: 🚧 Planned after XCP-ng
 
 ## Links
 
