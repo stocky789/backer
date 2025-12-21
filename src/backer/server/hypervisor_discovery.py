@@ -143,7 +143,10 @@ class HypervisorDiscoveryService:
 
             if guest_data:
                 actual_vmid = guest_data.get('vmid')
-                logger.info(f"[DISCOVERY] Found guest: folder='{vmid_str}', vmid={actual_vmid}, name={guest_data.get('name')}")
+                guest_name = guest_data.get('name')
+                logger.info(
+                    f"[DISCOVERY] Found guest: folder='{vmid_str}', vmid={actual_vmid}, name={guest_name}"
+                )
                 if str(actual_vmid) != vmid_str:
                     logger.warning(f"[DISCOVERY] MISMATCH: Folder name '{vmid_str}' != vmid '{actual_vmid}'")
 
@@ -210,7 +213,7 @@ class HypervisorDiscoveryService:
             - suggested_matches: List of suggested hypervisor matches
             - summary: Statistics about orphaned backups
         """
-        logger.info(f"Discovering orphaned backups in repository")
+        logger.info("Discovering orphaned backups in repository")
 
         # Get all active hypervisor IDs from database
         active_hypervisors = self.storage.list_hypervisors()
@@ -448,7 +451,10 @@ class HypervisorDiscoveryService:
                         continue
 
                     hv_folder_name = vmid_to_hv_folder[vmid_str]
-                    guest_json_path = f"{hypervisors_path}/{hv_folder_name}/.backer/hypervisor_backups/{vmid_str}/guest.json"
+                    guest_json_path = (
+                        f"{hypervisors_path}/{hv_folder_name}/.backer/"
+                        f"hypervisor_backups/{vmid_str}/guest.json"
+                    )
 
                     # Read current guest metadata
                     guest_data = self._smb_read_json(guest_json_path)
@@ -722,7 +728,7 @@ class HypervisorDiscoveryService:
             return True
 
         except Exception:
-            logger.exception(f"Failed to auto-create job for adopted VMs")
+            logger.exception("Failed to auto-create job for adopted VMs")
             return False
 
     def _format_adoption_message(

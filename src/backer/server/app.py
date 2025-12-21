@@ -4455,7 +4455,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     server, share, f"{hv_metadata_base}/hypervisor_backups",
                                     username, password, domain
                                 )
-                                logger.debug(f"[SCAN] Found {len(guest_dirs) if ok_guests else 0} guest directories in {hv_folder}")
+                                guest_count = len(guest_dirs) if ok_guests else 0
+                                logger.debug(f"[SCAN] Found {guest_count} guest directories in {hv_folder}")
                                 if ok_guests:
                                     for vmid_dir in guest_dirs:
                                         logger.debug(f"[SCAN] Reading guest from folder: {vmid_dir}")
@@ -4466,7 +4467,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         if ok_g:
                                             try:
                                                 guest_data = json_module.loads(g_content)
-                                                logger.debug(f"[SCAN] Guest data: vmid={guest_data.get('vmid')}, name={guest_data.get('name')}")
+                                                vmid = guest_data.get('vmid')
+                                                name = guest_data.get('name')
+                                                logger.debug(f"[SCAN] Guest data: vmid={vmid}, name={name}")
                                                 guest_data["hypervisor_folder"] = hv_folder
                                                 # Count backup runs
                                                 runs_path = f"{hv_metadata_base}/hypervisor_backups/{vmid_dir}/runs"
@@ -4476,7 +4479,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                 run_count = len([r for r in run_files if r.endswith(".json")])
                                                 guest_data["run_count"] = run_count if ok_runs else 0
                                                 all_guests.append(guest_data)
-                                                logger.info(f"[SCAN] Added guest {guest_data.get('vmid')} ({guest_data.get('name')}) with {run_count} backups")
+                                                vmid = guest_data.get('vmid')
+                                                name = guest_data.get('name')
+                                                logger.info(
+                                                    f"[SCAN] Added guest {vmid} ({name}) with {run_count} backups"
+                                                )
                                             except json_module.JSONDecodeError as e:
                                                 logger.error(f"[SCAN] Failed to parse guest.json for {vmid_dir}: {e}")
                                         else:
