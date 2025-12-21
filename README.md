@@ -70,6 +70,19 @@ backer restore /backup /destination
 - Cron scheduling with retention policies
 - Web dashboard with backup history
 
+## Development Status
+
+### Agent Backups
+- **Windows**: ✅ Operational (backup & restore)
+- **Linux**: ✅ Operational (backup & restore)
+- **Metadata Discovery**: ✅ Can adopt existing jobs from storage repositories
+
+### Hypervisor Backups
+- **Proxmox Standalone Nodes**: ✅ Fully functional (backup & restore)
+- **Hyper-V Clusters**: ⚠️ Operational (backup & restore), auto-discovery from existing storage repos requires more testing
+- **XCP-ng / XCP-ng Resource Pools**: 🚧 Next implementation
+- **Unraid**: 🚧 Planned after XCP-ng
+
 ## Links
 
 - [Releases](https://github.com/stocky789/backer/releases)
