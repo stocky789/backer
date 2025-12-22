@@ -14,8 +14,7 @@ Open-source backup management with a web UI. Supports agent-based backups for Wi
 ### Hypervisor Backups
 - **Proxmox Standalone Nodes**: ✅ Fully functional (backup & restore)
 - **Hyper-V Clusters**: ⚠️ Operational (backup & restore), auto-discovery from existing storage repos requires more testing
-- **XCP-ng / XCP-ng Resource Pools**: 🚧 Next implementation
-- **Unraid**: 🚧 Planned after XCP-ng
+- **Unraid**: 🚧 Next implementation
 
 ## Installation
 
