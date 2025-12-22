@@ -8,7 +8,9 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from backer.server import timezone as tz
 from backer.server.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,7 @@ class RetentionManager:
 
         # Determine which runs to keep
         runs_to_keep = set()
-        now = datetime.now()
+        now = tz.get_now()
 
         # Sort by start time (newest first)
         runs_sorted = sorted(
@@ -278,7 +280,7 @@ class RetentionManager:
         runs_to_delete = []
         cutoff_date = None
         if policy.max_age_days:
-            cutoff_date = datetime.now() - timedelta(days=policy.max_age_days)
+            cutoff_date = tz.get_now() - timedelta(days=policy.max_age_days)
 
         for run in runs:
             run_id = run["run_id"]
@@ -293,6 +295,9 @@ class RetentionManager:
                 if started:
                     try:
                         dt = datetime.fromisoformat(started)
+                        # Ensure timezone-aware for comparison
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
                         if dt < cutoff_date:
                             runs_to_delete.append(run)
                             continue

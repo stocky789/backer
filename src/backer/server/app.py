@@ -4718,7 +4718,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         existing = storage.get_job(job_name)
                                         if not existing:
                                             config["repository_id"] = repo_id
-                                            config["imported_at"] = dt.now().isoformat()
+                                            config["imported_at"] = tz.get_now().isoformat()
                                             config["imported_from_repo"] = True
                                             config["job_folder"] = job_folder
                                             # Set destination_path to repo path for restores
@@ -4749,7 +4749,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                                 run = json_module.loads(run_content)
                                                                 run_id = run.get("run_id")
                                                                 if run_id:
-                                                                    started_at = dt.now()
+                                                                    started_at = tz.get_now()
                                                                     finished_at = None
                                                                     if run.get("started_at"):
                                                                         try:

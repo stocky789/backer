@@ -68,7 +68,7 @@ class BackupScheduler:
         Returns ZoneInfo for the configured timezone, or UTC if not set or invalid.
         Uses a cache to avoid hitting the database on every call.
         """
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("UTC"))
 
         # Check if cache is valid
         if (
@@ -136,7 +136,7 @@ class BackupScheduler:
 
     def _run_cleanup_if_due(self) -> None:
         """Run periodic cleanup tasks if enough time has passed."""
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("UTC"))
 
         # Check if cleanup is due
         if self._last_cleanup is not None:

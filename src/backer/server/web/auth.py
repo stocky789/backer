@@ -5,6 +5,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -44,12 +45,13 @@ def verify_password(password: str, password_hash: str) -> bool:
 def create_session(user_id: int, username: str, display_name: str) -> str:
     """Create a new session and return the session token."""
     token = secrets.token_urlsafe(32)
+    now = datetime.now(ZoneInfo("UTC"))
     _sessions[token] = {
         "user_id": user_id,
         "username": username,
         "display_name": display_name,
-        "created_at": datetime.now(),
-        "expires_at": datetime.now() + timedelta(seconds=SESSION_MAX_AGE),
+        "created_at": now,
+        "expires_at": now + timedelta(seconds=SESSION_MAX_AGE),
     }
     return token
 
@@ -60,7 +62,7 @@ def get_session(token: str) -> dict[str, Any] | None:
     if not session:
         return None
 
-    if datetime.now() > session["expires_at"]:
+    if datetime.now(ZoneInfo("UTC")) > session["expires_at"]:
         # Session expired, remove it
         del _sessions[token]
         return None

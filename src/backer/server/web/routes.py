@@ -98,7 +98,7 @@ async def dashboard(request: Request):
         is_online = False
         if a.last_seen:
             # Consider online if seen in last 2 minutes
-            diff = datetime.now() - a.last_seen
+            diff = tz.get_now() - a.last_seen
             is_online = diff.total_seconds() < 120
 
         if is_online:
@@ -230,7 +230,7 @@ async def agents_page(request: Request):
     for a in agents_raw:
         is_online = False
         if a.last_seen:
-            diff = datetime.now() - a.last_seen
+            diff = tz.get_now() - a.last_seen
             is_online = diff.total_seconds() < 120
 
         agents.append({

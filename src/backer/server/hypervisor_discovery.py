@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backer.hypervisors.metadata import HypervisorMetadata
+from backer.server import timezone as tz
 from backer.server.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -407,8 +408,6 @@ class HypervisorDiscoveryService:
         Returns:
             Dictionary with adoption results
         """
-        from datetime import datetime
-
         logger.info(
             f"Adopting {len(guest_vmids)} guests to hypervisor '{new_hypervisor_name}' ({new_hypervisor_id})"
         )
@@ -466,7 +465,7 @@ class HypervisorDiscoveryService:
                     # Update hypervisor link
                     old_hypervisor_id = guest_data.get("hypervisor_id")
                     guest_data["hypervisor_id"] = new_hypervisor_id
-                    guest_data["updated_at"] = datetime.now().isoformat()
+                    guest_data["updated_at"] = tz.get_now().isoformat()
                     guest_data["hypervisor_name"] = new_hypervisor_name
 
                     # Record adoption history
@@ -476,7 +475,7 @@ class HypervisorDiscoveryService:
                     guest_data["adoption_history"].append({
                         "from_hypervisor_id": old_hypervisor_id,
                         "to_hypervisor_id": new_hypervisor_id,
-                        "adopted_at": datetime.now().isoformat(),
+                        "adopted_at": tz.get_now().isoformat(),
                     })
 
                     # Write updated metadata

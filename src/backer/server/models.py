@@ -3,6 +3,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +25,7 @@ class Client(BaseModel):
     ip_address: str | None = None
     status: ClientStatus = ClientStatus.UNKNOWN
     last_seen: datetime | None = None
-    registered_at: datetime = Field(default_factory=datetime.now)
+    registered_at: datetime = Field(default_factory=lambda: datetime.now(ZoneInfo("UTC")))
     version: str | None = None
     os_info: str | None = None
     tags: list[str] = Field(default_factory=list)

@@ -7,7 +7,9 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from backer.server import timezone as tz
 from backer.server.models import Client, ClientStatus
 
 
@@ -405,12 +407,12 @@ class Storage:
                     UPDATE clients SET status = ?, last_seen = ?, ip_address = ?
                     WHERE id = ?
                     """,
-                    (status.value, datetime.now().isoformat(), ip_address, client_id),
+                    (status.value, tz.get_now().isoformat(), ip_address, client_id),
                 )
             else:
                 conn.execute(
                     "UPDATE clients SET status = ?, last_seen = ? WHERE id = ?",
-                    (status.value, datetime.now().isoformat(), client_id),
+                    (status.value, tz.get_now().isoformat(), client_id),
                 )
 
     def delete_client(self, client_id: str) -> bool:
@@ -421,14 +423,26 @@ class Storage:
 
     def _row_to_client(self, row: sqlite3.Row) -> Client:
         """Convert a database row to a Client object."""
+        # Parse datetimes and ensure timezone-aware
+        last_seen = None
+        if row["last_seen"]:
+            last_seen = datetime.fromisoformat(row["last_seen"])
+            if last_seen.tzinfo is None:
+                # Assume UTC if naive
+                last_seen = last_seen.replace(tzinfo=ZoneInfo("UTC"))
+
+        registered_at = datetime.fromisoformat(row["registered_at"])
+        if registered_at.tzinfo is None:
+            registered_at = registered_at.replace(tzinfo=ZoneInfo("UTC"))
+
         return Client(
             id=row["id"],
             name=row["name"],
             hostname=row["hostname"],
             ip_address=row["ip_address"],
             status=ClientStatus(row["status"]),
-            last_seen=datetime.fromisoformat(row["last_seen"]) if row["last_seen"] else None,
-            registered_at=datetime.fromisoformat(row["registered_at"]),
+            last_seen=last_seen,
+            registered_at=registered_at,
             version=row["version"],
             os_info=row["os_info"],
             tags=json.loads(row["tags"]) if row["tags"] else [],
@@ -437,7 +451,7 @@ class Storage:
     # Job operations
     def save_job(self, name: str, config: dict[str, Any]) -> None:
         """Save or update a job configuration."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -610,7 +624,7 @@ class Storage:
                 INSERT INTO command_queue (client_id, command_type, payload, created_at, status)
                 VALUES (?, ?, ?, ?, 'pending')
                 """,
-                (client_id, command_type, json.dumps(payload), datetime.now().isoformat()),
+                (client_id, command_type, json.dumps(payload), tz.get_now().isoformat()),
             )
             return cursor.lastrowid or 0
 
@@ -643,7 +657,7 @@ class Storage:
                 UPDATE command_queue SET status = 'executed', executed_at = ?
                 WHERE id = ?
                 """,
-                (datetime.now().isoformat(), command_id),
+                (tz.get_now().isoformat(), command_id),
             )
 
     def mark_command_failed(self, command_id: int) -> None:
@@ -654,7 +668,7 @@ class Storage:
                 UPDATE command_queue SET status = 'failed', executed_at = ?
                 WHERE id = ?
                 """,
-                (datetime.now().isoformat(), command_id),
+                (tz.get_now().isoformat(), command_id),
             )
 
     def clear_pending_commands(self, client_id: str | None = None) -> int:
@@ -669,7 +683,7 @@ class Storage:
                     UPDATE command_queue SET status = 'cancelled', executed_at = ?
                     WHERE client_id = ? AND status = 'pending'
                     """,
-                    (datetime.now().isoformat(), client_id),
+                    (tz.get_now().isoformat(), client_id),
                 )
             else:
                 cursor = conn.execute(
@@ -677,7 +691,7 @@ class Storage:
                     UPDATE command_queue SET status = 'cancelled', executed_at = ?
                     WHERE status = 'pending'
                     """,
-                    (datetime.now().isoformat(),),
+                    (tz.get_now().isoformat(),),
                 )
             return cursor.rowcount
 
@@ -713,7 +727,7 @@ class Storage:
                     username,
                     password_encrypted,
                     domain,
-                    datetime.now().isoformat(),
+                    tz.get_now().isoformat(),
                     json.dumps(config or {}),
                 ),
             )
@@ -760,7 +774,7 @@ class Storage:
                     UPDATE repositories SET status = ?, mount_point = ?, last_checked = ?
                     WHERE id = ?
                     """,
-                    (status, mount_point, datetime.now().isoformat(), repo_id),
+                    (status, mount_point, tz.get_now().isoformat(), repo_id),
                 )
             else:
                 conn.execute(
@@ -768,7 +782,7 @@ class Storage:
                     UPDATE repositories SET status = ?, last_checked = ?
                     WHERE id = ?
                     """,
-                    (status, datetime.now().isoformat(), repo_id),
+                    (status, tz.get_now().isoformat(), repo_id),
                 )
 
     def delete_repository(self, repo_id: str) -> bool:
@@ -854,7 +868,7 @@ class Storage:
         client_id: str | None = None,
     ) -> None:
         """Start tracking progress for a job run."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -879,7 +893,7 @@ class Storage:
     ) -> None:
         """Update progress for a running job."""
         updates = ["updated_at = ?"]
-        params: list[Any] = [datetime.now().isoformat()]
+        params: list[Any] = [tz.get_now().isoformat()]
 
         if status is not None:
             updates.append("status = ?")
@@ -922,7 +936,7 @@ class Storage:
                 UPDATE job_progress SET status = ?, progress_percent = 100, updated_at = ?
                 WHERE run_id = ?
                 """,
-                (status, datetime.now().isoformat(), run_id),
+                (status, tz.get_now().isoformat(), run_id),
             )
 
     def get_job_progress(self, run_id: str) -> dict[str, Any] | None:
@@ -950,7 +964,7 @@ class Storage:
 
     def cleanup_stale_progress(self, max_age_minutes: int = 60) -> int:
         """Clean up stale progress records (jobs that hung or crashed)."""
-        cutoff = (datetime.now() - timedelta(minutes=max_age_minutes)).isoformat()
+        cutoff = (tz.get_now() - timedelta(minutes=max_age_minutes)).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -973,7 +987,7 @@ class Storage:
 
     def set_setting(self, key: str, value: str) -> None:
         """Set a setting value."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -998,7 +1012,7 @@ class Storage:
         path: str,
     ) -> None:
         """Save a new browse request."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1018,7 +1032,7 @@ class Storage:
         path: str | None = None,
     ) -> None:
         """Save browse results from agent."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             if path is not None:
                 conn.execute(
@@ -1061,7 +1075,7 @@ class Storage:
 
     def cleanup_old_browse_requests(self, max_age_minutes: int = 10) -> int:
         """Clean up old browse requests."""
-        cutoff = (datetime.now() - timedelta(minutes=max_age_minutes)).isoformat()
+        cutoff = (tz.get_now() - timedelta(minutes=max_age_minutes)).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM browse_requests WHERE created_at < ?",
@@ -1079,7 +1093,7 @@ class Storage:
         role: str = "admin",
     ) -> int:
         """Create a new user. Returns user ID."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -1119,7 +1133,7 @@ class Storage:
     ) -> bool:
         """Update user information."""
         updates = ["updated_at = ?"]
-        params: list[Any] = [datetime.now().isoformat()]
+        params: list[Any] = [tz.get_now().isoformat()]
 
         if display_name is not None:
             updates.append("display_name = ?")
@@ -1145,7 +1159,7 @@ class Storage:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE users SET last_login = ? WHERE id = ?",
-                (datetime.now().isoformat(), user_id),
+                (tz.get_now().isoformat(), user_id),
             )
 
     def list_users(self) -> list[dict[str, Any]]:
@@ -1203,7 +1217,7 @@ class Storage:
         from backer.server.secrets import get_secrets_manager
 
         secrets = get_secrets_manager(self.db_path.parent)
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
 
         # Encrypt sensitive credentials
         token_secret_encrypted = None
@@ -1304,7 +1318,7 @@ class Storage:
             updates.append("status = ?")
             params.append(status)
             updates.append("last_checked = ?")
-            params.append(datetime.now().isoformat())
+            params.append(tz.get_now().isoformat())
         if version is not None:
             updates.append("version = ?")
             params.append(version)
@@ -1470,7 +1484,7 @@ class Storage:
         verify_backup: bool = False,
     ) -> None:
         """Add a new hypervisor backup job."""
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1514,7 +1528,7 @@ class Storage:
     ) -> bool:
         """Update a hypervisor job."""
         updates = ["updated_at = ?"]
-        params: list[Any] = [datetime.now().isoformat()]
+        params: list[Any] = [tz.get_now().isoformat()]
 
         if name is not None:
             updates.append("name = ?")
@@ -1650,7 +1664,7 @@ class Storage:
         verification_status: str | None = None,
     ) -> None:
         """Save or update a hypervisor backup run."""
-        started = (started_at or datetime.now()).isoformat()
+        started = (started_at or tz.get_now()).isoformat()
 
         with self._connect() as conn:
             # Check if run exists
@@ -1860,7 +1874,7 @@ class Storage:
             last_incremental_backup: Timestamp of last incremental
             backup_count: Number of incrementals since last full
         """
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1910,7 +1924,7 @@ class Storage:
             backup_type: "full" or "incremental"
             timestamp: Backup timestamp (default: now)
         """
-        now = timestamp or datetime.now().isoformat()
+        now = timestamp or tz.get_now().isoformat()
         with self._connect() as conn:
             if backup_type == "full":
                 conn.execute(
@@ -1952,7 +1966,7 @@ class Storage:
         Returns:
             Number of bitmaps invalidated
         """
-        now = datetime.now().isoformat()
+        now = tz.get_now().isoformat()
         with self._connect() as conn:
             if disk_node:
                 result = conn.execute(

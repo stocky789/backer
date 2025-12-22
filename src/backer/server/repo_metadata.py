@@ -24,6 +24,7 @@ from backer.core.repo_metadata import (
     RepositoryMetadata,
     RepositoryMetadataError,
 )
+from backer.server import timezone as tz
 
 if TYPE_CHECKING:
     from backer.server.storage import Storage
@@ -250,7 +251,7 @@ def import_repository_metadata(
             if not existing:
                 # Update config to reference this repository
                 config["repository_id"] = repo_id
-                config["imported_at"] = datetime.now().isoformat()
+                config["imported_at"] = tz.get_now().isoformat()
                 config["imported_from_repo"] = True
 
                 storage.save_job(job_name, config)
@@ -262,7 +263,7 @@ def import_repository_metadata(
                     run_id = run.get("run_id")
                     if run_id:
                         # Parse timestamps with error handling for malformed dates
-                        started_at = datetime.now()
+                        started_at = tz.get_now()
                         finished_at = None
 
                         if run.get("started_at"):
