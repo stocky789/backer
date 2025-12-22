@@ -18,7 +18,7 @@ from urllib.request import urlopen
 # Only rclone and restic are supported for agent-based backups.
 TOOL_INFO: dict[str, dict[str, Any]] = {
     "rclone": {
-        "version": "1.68.2",
+        "version": "1.72.1",
         "base_url": "https://downloads.rclone.org/v{version}/rclone-v{version}-{platform}-{arch}.{ext}",
         "platforms": {
             "Linux": {"name": "linux", "ext": "zip"},
@@ -50,7 +50,7 @@ TOOL_INFO: dict[str, dict[str, Any]] = {
         "binary_name": {"Linux": "restic", "Darwin": "restic", "Windows": "restic.exe"},
     },
     "kopia": {
-        "version": "0.17.0",
+        "version": "0.22.3",
         "base_url": "https://github.com/kopia/kopia/releases/download/v{version}/kopia-{version}-{platform}-{arch}.{ext}",
         "platforms": {
             "Linux": {"name": "linux", "ext": "tar.gz"},
