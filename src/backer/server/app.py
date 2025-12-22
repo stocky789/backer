@@ -3196,6 +3196,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
 
+        # Check if job is already running (prevent duplicate runs)
+        recent_runs = storage.get_job_runs(job_name, limit=5)
+        for run in recent_runs:
+            if run.get("status") in ("pending", "running"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Job '{job_name}' is already running (run_id: {run.get('run_id')})"
+                )
+
         now = tz.get_now()
         run_id = now.strftime("%Y%m%d_%H%M%S_%f")
         started_at = now
