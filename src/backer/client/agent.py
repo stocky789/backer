@@ -9,7 +9,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
@@ -82,22 +81,28 @@ class BackerAgent:
         self.config_path = config_path or get_config_dir() / "agent.yaml"
         self.hostname = socket.gethostname()
 
-        self._running = False
+        # Threading synchronization
+        self._stop_event = threading.Event()  # Replaces _running boolean
+        self._http_client_lock = threading.Lock()  # Protects HTTP client
+        self._active_jobs_lock = threading.Lock()  # Protects active jobs set
+        self._active_jobs: set[str] = set()  # Track running job names
+
         self._heartbeat_thread: threading.Thread | None = None
         self._http_client: httpx.Client | None = None
 
     def _get_client(self) -> httpx.Client:
-        """Get or create HTTP client."""
-        if self._http_client is None:
-            auth = None
-            if self.client_id and self.client_secret:
-                auth = (self.client_id, self.client_secret)
-            self._http_client = httpx.Client(
-                base_url=self.server_url,
-                auth=auth,
-                timeout=35.0,  # Server uses 25s long-polling, need longer timeout
-            )
-        return self._http_client
+        """Get or create HTTP client (thread-safe)."""
+        with self._http_client_lock:
+            if self._http_client is None:
+                auth = None
+                if self.client_id and self.client_secret:
+                    auth = (self.client_id, self.client_secret)
+                self._http_client = httpx.Client(
+                    base_url=self.server_url,
+                    auth=auth,
+                    timeout=35.0,  # Server uses 25s long-polling, need longer timeout
+                )
+            return self._http_client
 
     def register(self) -> tuple[str, str]:
         """Register this agent with the server.
@@ -125,8 +130,9 @@ class BackerAgent:
         # Save credentials
         self._save_credentials()
 
-        # Recreate client with auth
-        self._http_client = None
+        # Recreate client with auth (thread-safe)
+        with self._http_client_lock:
+            self._http_client = None
 
         return self.client_id, self.client_secret
 
@@ -194,7 +200,7 @@ class BackerAgent:
         The interval parameter is only used on connection errors to avoid
         hammering the server.
         """
-        while self._running:
+        while not self._stop_event.is_set():
             try:
                 result = self.heartbeat()
                 # Process any pending commands
@@ -203,16 +209,13 @@ class BackerAgent:
             except Exception as e:
                 print(f"Heartbeat failed: {e}")
                 # On error, wait before retry to avoid hammering server
-                for _ in range(5):
-                    if not self._running:
-                        break
-                    time.sleep(1)
+                if self._stop_event.wait(timeout=5):
+                    break
                 continue
 
             # Brief pause between heartbeats (server handles the waiting)
-            if not self._running:
+            if self._stop_event.wait(timeout=1):
                 break
-            time.sleep(1)
 
     def _handle_command(self, command: dict[str, Any]) -> None:
         """Handle a command from the server."""
@@ -224,25 +227,91 @@ class BackerAgent:
 
         try:
             if cmd_type == "backup":
-                # Merge command-level fields into payload for backwards compat
+                # Run backup in background thread so heartbeat continues
                 job_data = {**command, **payload}
                 dry_run = payload.get("dry_run", False)
-                self.execute_backup(job_data, dry_run=dry_run)
+                job_name = job_data.get("job_name", "unknown")
+
+                # Check if this job is already running
+                with self._active_jobs_lock:
+                    if job_name in self._active_jobs:
+                        print(f"[WARN] Job '{job_name}' is already running, skipping duplicate")
+                        # Still acknowledge to prevent server from re-sending
+                        if cmd_id:
+                            self._acknowledge_command(cmd_id)
+                        return
+                    self._active_jobs.add(job_name)
+
+                backup_thread = threading.Thread(
+                    target=self._run_backup_worker,
+                    args=(job_data, dry_run, job_name),
+                    daemon=True,
+                    name=f"backup-{job_name}"
+                )
+                backup_thread.start()
+
             elif cmd_type == "restore":
+                # Run restore in background thread so heartbeat continues
                 dry_run = payload.get("dry_run", False)
-                self.execute_restore(payload, dry_run=dry_run)
+                job_name = payload.get("job_name", "unknown")
+
+                # Check if this job is already running
+                with self._active_jobs_lock:
+                    restore_key = f"restore-{job_name}"
+                    if restore_key in self._active_jobs:
+                        print(f"[WARN] Restore '{job_name}' is already running, skipping duplicate")
+                        if cmd_id:
+                            self._acknowledge_command(cmd_id)
+                        return
+                    self._active_jobs.add(restore_key)
+
+                restore_thread = threading.Thread(
+                    target=self._run_restore_worker,
+                    args=(payload, dry_run, restore_key),
+                    daemon=True,
+                    name=f"restore-{job_name}"
+                )
+                restore_thread.start()
+
             elif cmd_type == "browse_filesystem":
+                # Browse is quick, run synchronously
                 self._execute_browse_filesystem(payload)
             else:
                 print(f"Unknown command: {cmd_type}")
                 return
 
-            # Acknowledge command was processed
+            # Acknowledge command was received (not completed - that happens in worker)
             if cmd_id:
                 self._acknowledge_command(cmd_id)
 
         except Exception as e:
             print(f"Command {cmd_id} failed: {e}")
+
+    def _run_backup_worker(self, job_data: dict[str, Any], dry_run: bool, job_name: str) -> None:
+        """Worker thread for executing backups without blocking heartbeat."""
+        try:
+            self.execute_backup(job_data, dry_run=dry_run)
+        except Exception as e:
+            print(f"Backup worker failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Remove from active jobs when done
+            with self._active_jobs_lock:
+                self._active_jobs.discard(job_name)
+
+    def _run_restore_worker(self, payload: dict[str, Any], dry_run: bool, restore_key: str) -> None:
+        """Worker thread for executing restores without blocking heartbeat."""
+        try:
+            self.execute_restore(payload, dry_run=dry_run)
+        except Exception as e:
+            print(f"Restore worker failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Remove from active jobs when done
+            with self._active_jobs_lock:
+                self._active_jobs.discard(restore_key)
 
     def _acknowledge_command(self, command_id: int) -> None:
         """Acknowledge that a command was processed."""
@@ -1423,7 +1492,7 @@ class BackerAgent:
 
     def run(self, heartbeat_interval: int = 60) -> None:
         """Run the agent in daemon mode."""
-        self._running = True
+        self._stop_event.clear()
 
         # Set up signal handlers
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -1440,10 +1509,9 @@ class BackerAgent:
         )
         self._heartbeat_thread.start()
 
-        # Main loop - just keep the process alive
+        # Main loop - wait for stop signal
         try:
-            while self._running:
-                time.sleep(1)
+            self._stop_event.wait()
         except KeyboardInterrupt:
             pass
 
@@ -1452,19 +1520,20 @@ class BackerAgent:
     def stop(self) -> None:
         """Stop the agent."""
         print("Stopping agent...")
-        self._running = False
+        self._stop_event.set()
 
-        if self._http_client:
-            self._http_client.close()
-            self._http_client = None
+        with self._http_client_lock:
+            if self._http_client:
+                self._http_client.close()
+                self._http_client = None
 
     def _handle_signal(self, signum: int, frame: object) -> None:
         """Handle shutdown signals gracefully.
 
-        Sets running flag to false to allow current operations to complete
+        Sets stop event to allow current operations to complete
         before exiting. This ensures backup results are reported to the server.
         """
         print(f"\nReceived signal {signum}, initiating graceful shutdown...")
-        self._running = False
+        self._stop_event.set()
         # Don't call sys.exit(0) immediately - let the main loop exit naturally
         # This allows any in-progress backup reporting to complete

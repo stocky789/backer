@@ -23,15 +23,69 @@ Metadata Structure in Repository:
 import json
 import logging
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Cross-platform file locking
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 logger = logging.getLogger(__name__)
 
 # Backer metadata directory name
 BACKER_METADATA_DIR = ".backer"
 METADATA_VERSION = "1.0"
+
+
+@contextmanager
+def file_lock(file_path: Path, mode: str = "r+"):
+    """Cross-platform file locking context manager.
+
+    Acquires an exclusive lock on a file before yielding the file handle.
+    Automatically releases the lock when exiting the context.
+
+    Args:
+        file_path: Path to the file to lock
+        mode: File open mode (default: 'r+' for read-write)
+
+    Yields:
+        Open file handle with lock acquired
+
+    Note:
+        - On Windows: Uses msvcrt.locking() for exclusive locks
+        - On Unix: Uses fcntl.flock() with LOCK_EX
+        - Lock is automatically released when file is closed
+    """
+    # Ensure parent directory exists
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create file if it doesn't exist (for 'r+' mode)
+    if not file_path.exists():
+        file_path.touch()
+
+    f = open(file_path, mode, encoding="utf-8")
+    try:
+        if sys.platform == "win32":
+            # Windows: Lock the entire file
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            # Unix: Exclusive lock
+            fcntl.flock(f, fcntl.LOCK_EX)
+
+        yield f
+
+    finally:
+        if sys.platform == "win32":
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass  # May already be unlocked
+        # Unix: flock automatically releases on close
+        f.close()
 
 
 def normalize_path_for_platform(path: str, repo_type: str = "local") -> str:
@@ -114,10 +168,12 @@ class RepositoryMetadata:
             return None
 
     def _write_json(self, path: Path, data: dict[str, Any]) -> bool:
-        """Write a JSON file to the repository."""
+        """Write a JSON file to the repository (thread-safe with file locking)."""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            # Use file locking to prevent concurrent writes
+            with file_lock(path, mode="w") as f:
+                json.dump(data, f, indent=2, default=str)
             return True
         except OSError as e:
             logger.error(f"Failed to write {path}: {e}")
@@ -181,7 +237,7 @@ class RepositoryMetadata:
 
     # Agent metadata methods
     def save_agent(self, agent_id: str, agent_data: dict[str, Any]) -> bool:
-        """Save agent metadata to repository.
+        """Save agent metadata to repository (thread-safe).
 
         Args:
             agent_id: Unique agent identifier
@@ -191,15 +247,30 @@ class RepositoryMetadata:
 
         agent_path = self.metadata_dir / "agents" / f"{agent_id}.json"
 
-        # Merge with existing data if present
-        existing = self._read_json(agent_path) or {}
-        existing.update(agent_data)
-        existing["agent_id"] = agent_id
-        existing["updated_at"] = datetime.now().isoformat()
-        if "first_seen" not in existing:
-            existing["first_seen"] = datetime.now().isoformat()
+        # Atomic read-modify-write with file locking
+        try:
+            with file_lock(agent_path, mode="r+") as f:
+                # Read existing data
+                f.seek(0)
+                content = f.read().strip()
+                existing = json.loads(content) if content else {}
 
-        return self._write_json(agent_path, existing)
+                # Merge and update
+                existing.update(agent_data)
+                existing["agent_id"] = agent_id
+                existing["updated_at"] = datetime.now().isoformat()
+                if "first_seen" not in existing:
+                    existing["first_seen"] = datetime.now().isoformat()
+
+                # Write back
+                f.seek(0)
+                f.truncate()
+                json.dump(existing, f, indent=2, default=str)
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save agent {agent_id}: {e}")
+            return False
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         """Get agent metadata from repository."""
@@ -221,7 +292,7 @@ class RepositoryMetadata:
 
     # Job metadata methods
     def save_job(self, job_name: str, job_config: dict[str, Any]) -> bool:
-        """Save job configuration to repository.
+        """Save job configuration to repository (thread-safe).
 
         Args:
             job_name: Name of the backup job
@@ -235,19 +306,36 @@ class RepositoryMetadata:
 
         config_path = job_dir / "config.json"
 
-        config_data = {
-            "job_name": job_name,
-            "config": job_config,
-            "updated_at": datetime.now().isoformat(),
-        }
+        # Atomic read-modify-write with file locking
+        try:
+            with file_lock(config_path, mode="r+") as f:
+                # Read existing data
+                f.seek(0)
+                content = f.read().strip()
+                existing = json.loads(content) if content else {}
 
-        existing = self._read_json(config_path)
-        if existing:
-            config_data["created_at"] = existing.get("created_at", datetime.now().isoformat())
-        else:
-            config_data["created_at"] = datetime.now().isoformat()
+                # Build config data
+                config_data = {
+                    "job_name": job_name,
+                    "config": job_config,
+                    "updated_at": datetime.now().isoformat(),
+                }
 
-        return self._write_json(config_path, config_data)
+                # Preserve created_at if exists
+                if existing:
+                    config_data["created_at"] = existing.get("created_at", datetime.now().isoformat())
+                else:
+                    config_data["created_at"] = datetime.now().isoformat()
+
+                # Write back
+                f.seek(0)
+                f.truncate()
+                json.dump(config_data, f, indent=2, default=str)
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save job {job_name}: {e}")
+            return False
 
     def get_job(self, job_name: str) -> dict[str, Any] | None:
         """Get job configuration from repository."""
