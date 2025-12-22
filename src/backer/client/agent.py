@@ -1494,9 +1494,10 @@ class BackerAgent:
         """Run the agent in daemon mode."""
         self._stop_event.clear()
 
-        # Set up signal handlers
-        signal.signal(signal.SIGTERM, self._handle_signal)
+        # Set up signal handlers (SIGTERM not available on Windows)
         signal.signal(signal.SIGINT, self._handle_signal)
+        if sys.platform != "win32":
+            signal.signal(signal.SIGTERM, self._handle_signal)
 
         print(f"Backer agent starting (client_id: {self.client_id})")
         print(f"Connecting to server: {self.server_url}")

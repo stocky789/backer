@@ -68,22 +68,33 @@ def file_lock(file_path: Path, mode: str = "r+"):
         file_path.touch()
 
     f = open(file_path, mode, encoding="utf-8")
+    lock_acquired = False
     try:
         if sys.platform == "win32":
-            # Windows: Lock the entire file
-            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            # Windows: Lock bytes from start of file
+            # msvcrt.locking() locks a range of bytes, use a reasonable size
+            # for our small JSON metadata files (64KB should be plenty)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 65536)
+                lock_acquired = True
+            except OSError:
+                # If non-blocking fails, try blocking lock
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 65536)
+                lock_acquired = True
         else:
-            # Unix: Exclusive lock
+            # Unix: Exclusive lock on entire file
             fcntl.flock(f, fcntl.LOCK_EX)
+            lock_acquired = True
 
         yield f
 
     finally:
-        if sys.platform == "win32":
+        if sys.platform == "win32" and lock_acquired:
             try:
-                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                f.seek(0)  # Ensure we're at start for unlock
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 65536)
             except Exception:
-                pass  # May already be unlocked
+                pass  # May already be unlocked or file closed
         # Unix: flock automatically releases on close
         f.close()
 
