@@ -248,9 +248,9 @@ print_done() {
     echo -e "${GREEN}════════════════════════════════════════${NC}"
     echo
     echo "Commands:"
-    echo "  backer agent status    - Check status"
-    echo "  backer agent logs      - View logs"
-    echo "  backer agent setup     - Re-run setup wizard"
+    echo "  sudo backer agent status    - Check status"
+    echo "  sudo backer agent logs      - View logs"
+    echo "  sudo backer agent setup     - Re-run setup wizard"
     echo
     echo "Service:"
     echo "  sudo systemctl status backer-agent"
