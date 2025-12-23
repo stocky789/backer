@@ -653,32 +653,40 @@ class AgentService:
         unc_path = f"\\\\{server}\\{share}"
         logger.info(f"[SMB] Connecting to {unc_path}")
 
-        # First, try to disconnect any existing connection (ignore errors)
+        # Step 1: Store credentials in Windows Credential Manager
+        # This avoids error 1219 because we won't be providing "different" credentials
+        if username and password:
+            full_user = f"{domain}\\{username}" if domain else username
+            logger.debug(f"[SMB] Storing credentials for {server} as {full_user}")
+
+            # Delete any existing cached credentials for this server
+            subprocess.run(
+                ['cmdkey', '/delete', f'\\\\{server}'],
+                capture_output=True,
+                creationflags=get_subprocess_flags(),
+            )
+
+            # Add new credentials
+            result = subprocess.run(
+                ['cmdkey', '/add', f'\\\\{server}', '/user', full_user, '/pass', password],
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+            if result.returncode != 0:
+                logger.warning(f"[SMB] cmdkey failed (non-fatal): {result.stderr}")
+
+        # Step 2: Try to delete any existing connections to avoid conflicts
         subprocess.run(
             ['net', 'use', unc_path, '/delete', '/y'],
             capture_output=True,
             creationflags=get_subprocess_flags(),
         )
 
-        # Build net use command
-        cmd = ['net', 'use', unc_path]
-
-        if password:
-            cmd.append(password)
-
-        if username:
-            if domain:
-                cmd.extend([f'/user:{domain}\\{username}'])
-            else:
-                cmd.extend([f'/user:{username}'])
-
-        cmd.append('/persistent:no')
-
-        # Log command without password
-        safe_cmd = cmd.copy()
-        if password and password in safe_cmd:
-            safe_cmd[safe_cmd.index(password)] = '***'
-        logger.debug(f"[SMB] Running: {' '.join(safe_cmd)}")
+        # Step 3: Connect without explicit credentials (uses stored credentials)
+        # This avoids error 1219 "multiple connections with different credentials"
+        cmd = ['net', 'use', unc_path, '/persistent:no']
+        logger.debug(f"[SMB] Running: {' '.join(cmd)}")
 
         result = subprocess.run(
             cmd,
@@ -690,35 +698,77 @@ class AgentService:
         if result.returncode == 0:
             logger.info(f"[SMB] Successfully connected to {unc_path}")
             return True
-        else:
-            # Check if already connected (error 1219) - need to force reconnect
-            if '1219' in result.stderr or 'already' in result.stderr.lower():
-                logger.warning("[SMB] Existing connection detected, forcing reconnect...")
-                # Delete ALL connections to this server to clear credential cache
-                subprocess.run(
-                    ['net', 'use', f'\\\\{server}', '/delete', '/y'],
-                    capture_output=True,
-                    creationflags=get_subprocess_flags(),
-                )
-                subprocess.run(
-                    ['net', 'use', unc_path, '/delete', '/y'],
-                    capture_output=True,
-                    creationflags=get_subprocess_flags(),
-                )
-                # Try again with credentials
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    creationflags=get_subprocess_flags(),
-                )
-                if result.returncode == 0:
-                    logger.info(f"[SMB] Successfully reconnected to {unc_path}")
-                    return True
-                logger.error(f"[SMB] Failed to reconnect: {result.stderr}")
-                return False
-            logger.error(f"[SMB] Failed to connect: {result.stderr}")
+
+        # Step 4: If still failing with 1219, try more aggressive cleanup
+        if '1219' in result.stderr or 'already' in result.stderr.lower():
+            logger.warning("[SMB] Credential conflict detected, attempting full cleanup...")
+
+            # Delete ALL connections to this server
+            subprocess.run(
+                ['net', 'use', f'\\\\{server}', '/delete', '/y'],
+                capture_output=True,
+                creationflags=get_subprocess_flags(),
+            )
+
+            # Also try wildcard delete for any mapped drives to this server
+            list_result = subprocess.run(
+                ['net', 'use'],
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+            if list_result.returncode == 0:
+                for line in list_result.stdout.split('\n'):
+                    if server in line:
+                        # Extract the network path and delete it
+                        parts = line.split()
+                        for part in parts:
+                            if server in part:
+                                logger.debug(f"[SMB] Deleting connection: {part}")
+                                subprocess.run(
+                                    ['net', 'use', part, '/delete', '/y'],
+                                    capture_output=True,
+                                    creationflags=get_subprocess_flags(),
+                                )
+
+            # Try connecting again
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+
+            if result.returncode == 0:
+                logger.info(f"[SMB] Successfully connected after cleanup to {unc_path}")
+                return True
+
+            # Last resort: try with explicit credentials anyway
+            logger.warning("[SMB] Trying with explicit credentials as last resort...")
+            cmd_explicit = ['net', 'use', unc_path]
+            if password:
+                cmd_explicit.append(password)
+            if username:
+                full_user = f"{domain}\\{username}" if domain else username
+                cmd_explicit.extend([f'/user:{full_user}'])
+            cmd_explicit.append('/persistent:no')
+
+            result = subprocess.run(
+                cmd_explicit,
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+
+            if result.returncode == 0:
+                logger.info(f"[SMB] Successfully connected with explicit credentials to {unc_path}")
+                return True
+
+            logger.error(f"[SMB] Failed to connect after all attempts: {result.stderr}")
             return False
+
+        logger.error(f"[SMB] Failed to connect: {result.stderr}")
+        return False
 
     def _disconnect_windows_smb(self, server: str, share: str) -> None:
         """Disconnect from an SMB share on Windows."""
@@ -730,6 +780,13 @@ class AgentService:
 
         subprocess.run(
             ['net', 'use', unc_path, '/delete', '/y'],
+            capture_output=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        # Also clean up stored credentials from Credential Manager
+        subprocess.run(
+            ['cmdkey', '/delete', f'\\\\{server}'],
             capture_output=True,
             creationflags=get_subprocess_flags(),
         )
