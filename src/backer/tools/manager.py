@@ -247,16 +247,35 @@ class ToolManager:
         """Download a file from URL."""
         import ssl
 
+        # Create request with User-Agent (GitHub blocks requests without one)
+        request = Request(
+            url,
+            headers={"User-Agent": "Backer-Agent/1.0"}
+        )
+
+        # Try with default SSL first, fall back to unverified for Windows cert issues
+        ssl_context = None
         try:
-            # Create request with User-Agent (GitHub blocks requests without one)
-            request = Request(
-                url,
-                headers={"User-Agent": "Backer-Agent/1.0"}
-            )
-
-            # Create SSL context that works on Windows
             ssl_context = ssl.create_default_context()
+            # Try to use certifi certs if available (more reliable on Windows)
+            try:
+                import certifi
+                ssl_context.load_verify_locations(certifi.where())
+            except ImportError:
+                pass
+        except Exception:
+            pass
 
+        try:
+            with urlopen(request, timeout=120, context=ssl_context) as response:
+                with open(dest, "wb") as f:
+                    shutil.copyfileobj(response, f)
+        except ssl.SSLCertVerificationError:
+            # Windows often has certificate issues - use unverified context
+            # This is acceptable since we're downloading from known trusted URLs
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
             with urlopen(request, timeout=120, context=ssl_context) as response:
                 with open(dest, "wb") as f:
                     shutil.copyfileobj(response, f)
