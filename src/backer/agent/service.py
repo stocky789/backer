@@ -691,10 +691,32 @@ class AgentService:
             logger.info(f"[SMB] Successfully connected to {unc_path}")
             return True
         else:
-            # Check if already connected (error 1219)
+            # Check if already connected (error 1219) - need to force reconnect
             if '1219' in result.stderr or 'already' in result.stderr.lower():
-                logger.info(f"[SMB] Already connected to {unc_path}")
-                return True
+                logger.warning(f"[SMB] Existing connection detected, forcing reconnect...")
+                # Delete ALL connections to this server to clear credential cache
+                subprocess.run(
+                    ['net', 'use', f'\\\\{server}', '/delete', '/y'],
+                    capture_output=True,
+                    creationflags=get_subprocess_flags(),
+                )
+                subprocess.run(
+                    ['net', 'use', unc_path, '/delete', '/y'],
+                    capture_output=True,
+                    creationflags=get_subprocess_flags(),
+                )
+                # Try again with credentials
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    creationflags=get_subprocess_flags(),
+                )
+                if result.returncode == 0:
+                    logger.info(f"[SMB] Successfully reconnected to {unc_path}")
+                    return True
+                logger.error(f"[SMB] Failed to reconnect: {result.stderr}")
+                return False
             logger.error(f"[SMB] Failed to connect: {result.stderr}")
             return False
 
