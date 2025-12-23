@@ -693,7 +693,7 @@ class AgentService:
         else:
             # Check if already connected (error 1219) - need to force reconnect
             if '1219' in result.stderr or 'already' in result.stderr.lower():
-                logger.warning(f"[SMB] Existing connection detected, forcing reconnect...")
+                logger.warning("[SMB] Existing connection detected, forcing reconnect...")
                 # Delete ALL connections to this server to clear credential cache
                 subprocess.run(
                     ['net', 'use', f'\\\\{server}', '/delete', '/y'],
