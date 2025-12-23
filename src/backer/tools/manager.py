@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 # Tool download information
 # Note: rsync backend exists but is NOT currently supported for remote agents.
@@ -245,8 +245,19 @@ class ToolManager:
 
     def _download_file(self, url: str, dest: Path) -> None:
         """Download a file from URL."""
+        import ssl
+
         try:
-            with urlopen(url, timeout=60) as response:
+            # Create request with User-Agent (GitHub blocks requests without one)
+            request = Request(
+                url,
+                headers={"User-Agent": "Backer-Agent/1.0"}
+            )
+
+            # Create SSL context that works on Windows
+            ssl_context = ssl.create_default_context()
+
+            with urlopen(request, timeout=120, context=ssl_context) as response:
                 with open(dest, "wb") as f:
                     shutil.copyfileobj(response, f)
         except Exception as e:
