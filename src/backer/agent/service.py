@@ -180,6 +180,19 @@ class SMBConnectionManager:
                     logger.error("[SMB-POOL] Error 1219 detected but couldn't identify conflicting connection")
                 return False
 
+            # Handle Error 1223 - operation canceled (UAC/permission issue)
+            if '1223' in result.stderr:
+                logger.error(
+                    f"[SMB-POOL] Error 1223: Operation canceled connecting to {unc_path}. "
+                    f"This usually means:\n"
+                    f"  1. Agent is not running with Administrator privileges\n"
+                    f"  2. UAC is blocking the operation\n"
+                    f"  3. Windows security policy is preventing credential storage\n"
+                    f"Attempting connection with explicit credentials as fallback..."
+                )
+                # Try direct connection with explicit credentials
+                return self._connect_with_explicit_credentials(server, share, username, password, domain)
+
             logger.error(f"[SMB-POOL] Connection failed: {result.stderr}")
             return False
 
@@ -246,6 +259,58 @@ class SMBConnectionManager:
             logger.debug(f"[SMB-POOL] cmdkey add failed: {result.stderr}")
             return False
 
+        return True
+
+    def _connect_with_explicit_credentials(
+        self,
+        server: str,
+        share: str,
+        username: str,
+        password: str,
+        domain: str | None = None,
+    ) -> bool:
+        """Fallback method to connect using explicit credentials in net use command.
+
+        This bypasses cmdkey and passes credentials directly to net use.
+        Used when Error 1223 occurs (UAC/permission issues preventing credential storage).
+
+        Args:
+            server: SMB server hostname or IP
+            share: Share name
+            username: Username for authentication
+            password: Password for authentication
+            domain: Optional domain name
+
+        Returns:
+            True if connection successful, False otherwise
+        """
+        unc_path = f"\\\\{server}\\{share}"
+        full_user = f"{domain}\\{username}" if domain else username
+
+        logger.info(f"[SMB-POOL] Attempting explicit credential connection to {unc_path}")
+
+        # Try to connect with explicit credentials
+        result = subprocess.run(
+            ['net', 'use', unc_path, f'/user:{full_user}', password],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode != 0:
+            logger.error(f"[SMB-POOL] Explicit credential connection failed: {result.stderr}")
+            return False
+
+        # Track the connection
+        key = (server, share)
+        self._connections[key] = {
+            'username': username,
+            'domain': domain,
+            'connected_at': datetime.now().isoformat(),
+            'method': 'explicit',  # Mark as using explicit credentials
+        }
+
+        logger.info(f"[SMB-POOL] Successfully connected to {unc_path} using explicit credentials")
         return True
 
     def disconnect(self, server: str, share: str) -> None:
