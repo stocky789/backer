@@ -82,6 +82,240 @@ def setup_agent_logging(log_dir: Path | None = None) -> Path:
 logger = logging.getLogger(__name__)
 
 
+class SMBConnectionManager:
+    """Manages persistent SMB connections for Windows agents.
+
+    This prevents Error 1219 by reusing existing connections and properly
+    managing credentials through Windows Credential Manager.
+    """
+
+    def __init__(self):
+        self._connections: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def connect(
+        self,
+        server: str,
+        share: str,
+        username: str | None,
+        password: str | None,
+        domain: str | None = None,
+    ) -> bool:
+        """Connect to SMB share, reusing existing connection if credentials match.
+
+        Args:
+            server: SMB server hostname or IP
+            share: Share name
+            username: Username for authentication
+            password: Password for authentication
+            domain: Windows domain (optional)
+
+        Returns:
+            True if connection successful or already connected, False otherwise
+        """
+        key = (server, share)
+
+        with self._lock:
+            # Check if already connected with same credentials
+            if key in self._connections:
+                existing = self._connections[key]
+                if existing['username'] == username:
+                    logger.info(f"[SMB-POOL] Reusing existing connection to {server}/{share}")
+                    return True
+                else:
+                    # Different credentials - need to reconnect
+                    logger.warning(
+                        f"[SMB-POOL] Credential change detected for {server}/{share}, "
+                        f"reconnecting..."
+                    )
+                    self._disconnect_internal(server, share)
+
+            # Check for conflicts with other shares on the same server
+            conflict = self._find_server_conflict(server, username)
+            if conflict:
+                logger.error(
+                    f"[SMB-POOL] Cannot connect to {server}/{share} - "
+                    f"existing connection found: {conflict}. "
+                    f"Windows only allows one credential set per server."
+                )
+                return False
+
+            # Store credentials in Credential Manager first
+            if username and password:
+                if not self._store_credentials(server, username, password, domain):
+                    logger.warning("[SMB-POOL] Failed to store credentials (non-fatal)")
+
+            # Attempt connection
+            unc_path = f"\\\\{server}\\{share}"
+            cmd = ['net', 'use', unc_path, '/persistent:no']
+
+            logger.debug(f"[SMB-POOL] Connecting to {unc_path}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags()
+            )
+
+            if result.returncode == 0:
+                self._connections[key] = {
+                    'username': username,
+                    'connected_at': datetime.now(),
+                    'server': server,
+                    'share': share,
+                }
+                logger.info(f"[SMB-POOL] Successfully connected to {unc_path}")
+                return True
+
+            # Handle Error 1219 - connection already exists with different credentials
+            if '1219' in result.stderr:
+                existing_conn = self._find_existing_connection(server)
+                if existing_conn:
+                    logger.error(
+                        f"[SMB-POOL] Error 1219: Cannot connect to {unc_path}.\n"
+                        f"Existing connection: {existing_conn}\n"
+                        f"Please disconnect the existing connection or use the same credentials."
+                    )
+                else:
+                    logger.error(f"[SMB-POOL] Error 1219 detected but couldn't identify conflicting connection")
+                return False
+
+            logger.error(f"[SMB-POOL] Connection failed: {result.stderr}")
+            return False
+
+    def _find_server_conflict(self, server: str, username: str | None) -> str | None:
+        """Check if there's a conflicting connection to this server.
+
+        Returns the conflicting share name if found, None otherwise.
+        """
+        for (conn_server, conn_share), info in self._connections.items():
+            if conn_server.lower() == server.lower() and info['username'] != username:
+                return f"\\\\{conn_server}\\{conn_share} (user: {info['username']})"
+        return None
+
+    def _find_existing_connection(self, server: str) -> str | None:
+        """Find existing net use connection to server.
+
+        Returns the connection string if found, None otherwise.
+        """
+        try:
+            result = subprocess.run(
+                ['net', 'use'],
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags()
+            )
+
+            for line in result.stdout.split('\n'):
+                if server.lower() in line.lower() and '\\\\' in line:
+                    return line.strip()
+        except Exception as e:
+            logger.debug(f"[SMB-POOL] Error checking existing connections: {e}")
+
+        return None
+
+    def _store_credentials(
+        self,
+        server: str,
+        username: str,
+        password: str,
+        domain: str | None
+    ) -> bool:
+        """Store credentials in Windows Credential Manager.
+
+        Returns True if successful, False otherwise.
+        """
+        full_user = f"{domain}\\{username}" if domain else username
+
+        # Delete any existing cached credentials for this server
+        subprocess.run(
+            ['cmdkey', '/delete', f'\\\\{server}'],
+            capture_output=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        # Add new credentials
+        result = subprocess.run(
+            ['cmdkey', '/add', f'\\\\{server}', '/user', full_user, '/pass', password],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        if result.returncode != 0:
+            logger.debug(f"[SMB-POOL] cmdkey add failed: {result.stderr}")
+            return False
+
+        return True
+
+    def disconnect(self, server: str, share: str) -> None:
+        """Disconnect from a specific SMB share.
+
+        Args:
+            server: SMB server hostname or IP
+            share: Share name
+        """
+        with self._lock:
+            self._disconnect_internal(server, share)
+
+    def _disconnect_internal(self, server: str, share: str) -> None:
+        """Internal disconnect without lock (caller must hold lock)."""
+        key = (server, share)
+        unc_path = f"\\\\{server}\\{share}"
+
+        # Remove the connection
+        subprocess.run(
+            ['net', 'use', unc_path, '/delete', '/y'],
+            capture_output=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+        # Clean up credentials if no other shares on this server
+        has_other_shares = any(
+            conn_server == server
+            for (conn_server, conn_share) in self._connections.keys()
+            if conn_share != share
+        )
+
+        if not has_other_shares:
+            subprocess.run(
+                ['cmdkey', '/delete', f'\\\\{server}'],
+                capture_output=True,
+                creationflags=get_subprocess_flags(),
+            )
+
+        # Remove from tracking
+        self._connections.pop(key, None)
+        logger.debug(f"[SMB-POOL] Disconnected from {unc_path}")
+
+    def disconnect_all(self) -> None:
+        """Disconnect all managed connections (cleanup on shutdown)."""
+        with self._lock:
+            for (server, share) in list(self._connections.keys()):
+                self._disconnect_internal(server, share)
+            logger.info("[SMB-POOL] All connections disconnected")
+
+    def get_connection_status(self) -> dict[str, Any]:
+        """Get current connection status for monitoring.
+
+        Returns:
+            Dictionary with connection information
+        """
+        with self._lock:
+            return {
+                'active_connections': len(self._connections),
+                'connections': [
+                    {
+                        'server': conn['server'],
+                        'share': conn['share'],
+                        'username': conn['username'],
+                        'connected_at': conn['connected_at'].isoformat(),
+                    }
+                    for conn in self._connections.values()
+                ]
+            }
+
+
 class AgentService:
     """Background service that communicates with the Backer server."""
 
@@ -125,6 +359,9 @@ class AgentService:
         # Initialize tool manager for automatic tool downloads
         self._tool_manager = None
         self._tools_ready = False
+
+        # Initialize SMB connection pool for Windows
+        self._smb_manager = SMBConnectionManager() if sys.platform == 'win32' else None
 
         self._running = False
         self._thread: threading.Thread | None = None
@@ -216,6 +453,25 @@ class AgentService:
 
         return self._tool_manager.list_tools()
 
+    def get_smb_status(self) -> dict[str, Any]:
+        """Get SMB connection pool status for monitoring and diagnostics.
+
+        Returns:
+            Dictionary with SMB connection information, or status indicating
+            SMB management is not available on this platform.
+        """
+        if not self._smb_manager:
+            return {
+                'available': False,
+                'platform': sys.platform,
+                'message': 'SMB connection pooling not available on this platform'
+            }
+
+        status = self._smb_manager.get_connection_status()
+        status['available'] = True
+        status['platform'] = sys.platform
+        return status
+
     def _get_auth_header(self) -> str:
         """Get HTTP Basic auth header."""
         credentials = f"{self.client_id}:{self.client_secret}"
@@ -266,6 +522,11 @@ class AgentService:
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
+
+        # Cleanup SMB connections
+        if self._smb_manager:
+            self._smb_manager.disconnect_all()
+
         logger.info("Agent service stopped")
 
     def _run_loop(self):
@@ -351,7 +612,8 @@ class AgentService:
 
         try:
             if cmd_type == 'backup':
-                self._execute_backup(payload)
+                # Use retry logic for backups (SMB/network failures are common)
+                self._execute_backup_with_retry(payload, max_retries=3)
             elif cmd_type == 'restore':
                 self._execute_restore(payload)
             elif cmd_type == 'browse_filesystem':
@@ -374,6 +636,59 @@ class AgentService:
                 success=False,
                 error=str(e),
             )
+
+    def _execute_backup_with_retry(self, payload: dict[str, Any], max_retries: int = 3):
+        """Execute backup with retry logic for transient failures.
+
+        Args:
+            payload: Backup command payload
+            max_retries: Maximum number of retry attempts (default: 3)
+
+        Raises:
+            Exception: If all retry attempts fail
+        """
+        last_error = None
+        job_name = payload.get('job_name', 'unknown')
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"[BACKUP] Attempt {attempt + 1}/{max_retries} for job '{job_name}'")
+                self._execute_backup(payload)
+                logger.info(f"[BACKUP] Job '{job_name}' completed successfully on attempt {attempt + 1}")
+                return  # Success - exit retry loop
+
+            except Exception as e:
+                last_error = str(e)
+                error_lower = last_error.lower()
+
+                # Check if error is retryable
+                is_retryable = any(keyword in error_lower for keyword in [
+                    '1219',  # Windows SMB error
+                    'smb',
+                    'network',
+                    'connection',
+                    'timeout',
+                    'unreachable',
+                    'refused',
+                    'failed to connect',
+                ])
+
+                if is_retryable and attempt < max_retries - 1:
+                    delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning(
+                        f"[BACKUP] Attempt {attempt + 1}/{max_retries} failed with retryable error: {last_error}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Non-retryable error or final attempt
+                    if attempt < max_retries - 1:
+                        logger.error(f"[BACKUP] Non-retryable error encountered: {last_error}")
+                    raise
+
+        # If we get here, all attempts failed
+        raise RuntimeError(f"Backup failed after {max_retries} attempts. Last error: {last_error}")
 
     def _execute_backup(self, payload: dict[str, Any]):
         """Execute a backup command."""
@@ -640,156 +955,38 @@ class AgentService:
         password: str | None = None,
         domain: str | None = None,
     ) -> bool:
-        """Connect to an SMB share on Windows using net use.
+        """Connect to an SMB share on Windows using the connection pool.
 
         This establishes credentials for accessing the share so that
         tools like kopia can access UNC paths without authentication errors.
+
+        Uses the SMB connection pool to prevent Error 1219 by reusing
+        existing connections when credentials match.
 
         Returns True if connection successful or already connected.
         """
         if sys.platform != 'win32':
             return True  # Not needed on Linux (we mount instead)
 
-        unc_path = f"\\\\{server}\\{share}"
-        logger.info(f"[SMB] Connecting to {unc_path}")
-
-        # Step 1: Store credentials in Windows Credential Manager
-        # This avoids error 1219 because we won't be providing "different" credentials
-        if username and password:
-            full_user = f"{domain}\\{username}" if domain else username
-            logger.debug(f"[SMB] Storing credentials for {server} as {full_user}")
-
-            # Delete any existing cached credentials for this server
-            subprocess.run(
-                ['cmdkey', '/delete', f'\\\\{server}'],
-                capture_output=True,
-                creationflags=get_subprocess_flags(),
-            )
-
-            # Add new credentials
-            result = subprocess.run(
-                ['cmdkey', '/add', f'\\\\{server}', '/user', full_user, '/pass', password],
-                capture_output=True,
-                text=True,
-                creationflags=get_subprocess_flags(),
-            )
-            if result.returncode != 0:
-                logger.warning(f"[SMB] cmdkey failed (non-fatal): {result.stderr}")
-
-        # Step 2: Try to delete any existing connections to avoid conflicts
-        subprocess.run(
-            ['net', 'use', unc_path, '/delete', '/y'],
-            capture_output=True,
-            creationflags=get_subprocess_flags(),
-        )
-
-        # Step 3: Connect without explicit credentials (uses stored credentials)
-        # This avoids error 1219 "multiple connections with different credentials"
-        cmd = ['net', 'use', unc_path, '/persistent:no']
-        logger.debug(f"[SMB] Running: {' '.join(cmd)}")
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            creationflags=get_subprocess_flags(),
-        )
-
-        if result.returncode == 0:
-            logger.info(f"[SMB] Successfully connected to {unc_path}")
-            return True
-
-        # Step 4: If still failing with 1219, try more aggressive cleanup
-        if '1219' in result.stderr or 'already' in result.stderr.lower():
-            logger.warning("[SMB] Credential conflict detected, attempting full cleanup...")
-
-            # Delete ALL connections to this server
-            subprocess.run(
-                ['net', 'use', f'\\\\{server}', '/delete', '/y'],
-                capture_output=True,
-                creationflags=get_subprocess_flags(),
-            )
-
-            # Also try wildcard delete for any mapped drives to this server
-            list_result = subprocess.run(
-                ['net', 'use'],
-                capture_output=True,
-                text=True,
-                creationflags=get_subprocess_flags(),
-            )
-            if list_result.returncode == 0:
-                for line in list_result.stdout.split('\n'):
-                    if server in line:
-                        # Extract the network path and delete it
-                        parts = line.split()
-                        for part in parts:
-                            if server in part:
-                                logger.debug(f"[SMB] Deleting connection: {part}")
-                                subprocess.run(
-                                    ['net', 'use', part, '/delete', '/y'],
-                                    capture_output=True,
-                                    creationflags=get_subprocess_flags(),
-                                )
-
-            # Try connecting again
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                creationflags=get_subprocess_flags(),
-            )
-
-            if result.returncode == 0:
-                logger.info(f"[SMB] Successfully connected after cleanup to {unc_path}")
-                return True
-
-            # Last resort: try with explicit credentials anyway
-            logger.warning("[SMB] Trying with explicit credentials as last resort...")
-            cmd_explicit = ['net', 'use', unc_path]
-            if password:
-                cmd_explicit.append(password)
-            if username:
-                full_user = f"{domain}\\{username}" if domain else username
-                cmd_explicit.extend([f'/user:{full_user}'])
-            cmd_explicit.append('/persistent:no')
-
-            result = subprocess.run(
-                cmd_explicit,
-                capture_output=True,
-                text=True,
-                creationflags=get_subprocess_flags(),
-            )
-
-            if result.returncode == 0:
-                logger.info(f"[SMB] Successfully connected with explicit credentials to {unc_path}")
-                return True
-
-            logger.error(f"[SMB] Failed to connect after all attempts: {result.stderr}")
+        if not self._smb_manager:
+            logger.error("[SMB] Connection pool not initialized")
             return False
 
-        logger.error(f"[SMB] Failed to connect: {result.stderr}")
-        return False
+        logger.info(f"[SMB] Requesting connection to \\\\{server}\\{share}")
+        return self._smb_manager.connect(server, share, username, password, domain)
 
     def _disconnect_windows_smb(self, server: str, share: str) -> None:
-        """Disconnect from an SMB share on Windows."""
+        """Disconnect from an SMB share on Windows.
+
+        Note: With connection pooling, this is typically not called per-backup
+        as connections are reused. Cleanup happens on agent shutdown.
+        """
         if sys.platform != 'win32':
             return
 
-        unc_path = f"\\\\{server}\\{share}"
-        logger.debug(f"[SMB] Disconnecting from {unc_path}")
-
-        subprocess.run(
-            ['net', 'use', unc_path, '/delete', '/y'],
-            capture_output=True,
-            creationflags=get_subprocess_flags(),
-        )
-
-        # Also clean up stored credentials from Credential Manager
-        subprocess.run(
-            ['cmdkey', '/delete', f'\\\\{server}'],
-            capture_output=True,
-            creationflags=get_subprocess_flags(),
-        )
+        if self._smb_manager:
+            logger.debug(f"[SMB] Requesting disconnect from \\\\{server}\\{share}")
+            self._smb_manager.disconnect(server, share)
 
     def _run_rclone_sync(
         self,

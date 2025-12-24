@@ -614,22 +614,31 @@ class Storage:
         command_type: str,
         payload: dict[str, Any],
     ) -> int:
-        """Add a command to the queue for a client.
+        """Add a command to the queue for a client with encrypted payload.
 
         Returns the command ID.
         """
+        # Get secrets manager for encryption
+        secrets = get_secrets_manager(self.db_path.parent)
+
+        # Encrypt the entire payload to protect credentials
+        payload_json = json.dumps(payload)
+        payload_encrypted = secrets.encrypt(payload_json)
+
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO command_queue (client_id, command_type, payload, created_at, status)
                 VALUES (?, ?, ?, ?, 'pending')
                 """,
-                (client_id, command_type, json.dumps(payload), tz.get_now().isoformat()),
+                (client_id, command_type, payload_encrypted, tz.get_now().isoformat()),
             )
             return cursor.lastrowid or 0
 
     def get_pending_commands(self, client_id: str) -> list[dict[str, Any]]:
-        """Get pending commands for a client."""
+        """Get pending commands for a client with decrypted payloads."""
+        secrets = get_secrets_manager(self.db_path.parent)
+
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -639,15 +648,29 @@ class Storage:
                 """,
                 (client_id,),
             ).fetchall()
-            return [
-                {
+
+            results = []
+            for row in rows:
+                try:
+                    # Try to decrypt (new encrypted format)
+                    payload_json = secrets.decrypt(row["payload"])
+                    payload = json.loads(payload_json)
+                except Exception:
+                    # Fallback for legacy plaintext payloads (backward compatibility)
+                    try:
+                        payload = json.loads(row["payload"])
+                    except Exception as e:
+                        logger.error(f"Failed to parse command payload: {e}")
+                        continue
+
+                results.append({
                     "id": row["id"],
                     "command_type": row["command_type"],
-                    "payload": json.loads(row["payload"]),
+                    "payload": payload,
                     "created_at": row["created_at"],
-                }
-                for row in rows
-            ]
+                })
+
+            return results
 
     def mark_command_executed(self, command_id: int) -> None:
         """Mark a command as executed."""
