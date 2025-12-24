@@ -177,7 +177,7 @@ class SMBConnectionManager:
                         f"Please disconnect the existing connection or use the same credentials."
                     )
                 else:
-                    logger.error(f"[SMB-POOL] Error 1219 detected but couldn't identify conflicting connection")
+                    logger.error("[SMB-POOL] Error 1219 detected but couldn't identify conflicting connection")
                 return False
 
             logger.error(f"[SMB-POOL] Connection failed: {result.stderr}")

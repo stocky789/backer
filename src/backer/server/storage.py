@@ -1,6 +1,7 @@
 """Storage backend for server state (clients, jobs, history)."""
 
 import json
+import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -11,6 +12,9 @@ from zoneinfo import ZoneInfo
 
 from backer.server import timezone as tz
 from backer.server.models import Client, ClientStatus
+from backer.server.secrets import get_secrets_manager
+
+logger = logging.getLogger(__name__)
 
 
 class Storage:
