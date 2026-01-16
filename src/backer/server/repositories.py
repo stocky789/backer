@@ -440,34 +440,72 @@ class LocalBrowser:
     @staticmethod
     def test_connection(path: str) -> tuple[bool, str]:
         """Test if a local directory is accessible."""
+        import getpass
+        import stat
+        
         try:
             dir_path = Path(path)
+            current_user = getpass.getuser()
+            current_uid = os.getuid()
+            
+            logger.info(f"Testing local path: {path}")
+            logger.info(f"Current user: {current_user} (UID: {current_uid})")
 
             if not dir_path.exists():
-                return False, f"Path does not exist: {path}"
+                msg = f"Path does not exist: {path}"
+                logger.warning(msg)
+                return False, msg
 
             if not dir_path.is_dir():
-                return False, f"Not a directory: {path}"
+                msg = f"Not a directory: {path}"
+                logger.warning(msg)
+                return False, msg
+
+            # Get directory stats for debugging
+            try:
+                st = dir_path.stat()
+                dir_mode = stat.filemode(st.st_mode)
+                dir_owner = st.st_uid
+                logger.info(f"Directory permissions: {dir_mode} owner UID: {dir_owner}")
+            except Exception as e:
+                logger.warning(f"Could not stat directory: {e}")
 
             # Check read/write permissions
-            if not os.access(dir_path, os.R_OK):
-                return False, f"Path is not readable: {path}"
+            readable = os.access(dir_path, os.R_OK)
+            writable = os.access(dir_path, os.W_OK)
+            logger.info(f"Permission checks - readable: {readable}, writable: {writable}")
+            
+            if not readable:
+                msg = f"Path is not readable: {path}"
+                logger.warning(msg)
+                return False, msg
 
-            if not os.access(dir_path, os.W_OK):
-                return False, f"Path is not writable: {path}"
+            if not writable:
+                msg = f"Path is not writable: {path}"
+                logger.warning(msg)
+                return False, msg
 
             # Try to list directory contents as additional verification
             try:
-                list(dir_path.iterdir())
-            except PermissionError:
-                return False, f"Cannot list directory contents: {path}"
+                entries = list(dir_path.iterdir())
+                logger.info(f"Successfully listed {len(entries)} entries in {path}")
+            except PermissionError as e:
+                msg = f"Cannot list directory contents: {path} - {e}"
+                logger.error(msg)
+                return False, msg
 
-            return True, f"Local directory accessible: {path}"
+            msg = f"Local directory accessible: {path}"
+            logger.info(msg)
+            return True, msg
 
         except PermissionError as e:
-            return False, f"Permission denied: {e}"
+            msg = f"Permission denied: {e}"
+            logger.error(msg)
+            return False, msg
         except Exception as e:
-            return False, f"Error accessing path: {e}"
+            msg = f"Error accessing path: {e}"
+            logger.error(msg, exc_info=True)
+            return False, msg
 
     @staticmethod
     def list_directory(path: str = "/") -> tuple[bool, list[DirectoryEntry] | str]:

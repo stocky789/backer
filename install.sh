@@ -378,7 +378,12 @@ After=network.target
 
 [Service]
 Type=simple
-# Run as root for full filesystem access (backup server needs to read/write all paths)
+# Run as root for full filesystem access
+# Backup server needs to access:
+#   - All user home directories (/home/*)
+#   - System paths for backup jobs
+#   - Network mount points (SMB, NFS)
+#   - Local repository paths
 User=root
 Group=root
 WorkingDirectory=$INSTALL_DIR
@@ -386,10 +391,6 @@ Environment="BACKER_DATA_DIR=$DATA_DIR"
 ExecStart=$INSTALL_DIR/venv/bin/backer server start --host 0.0.0.0 --port 8420
 Restart=always
 RestartSec=5
-
-# Minimal hardening - backup server needs access to entire filesystem
-# including /home directories, network mounts, and system paths
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
