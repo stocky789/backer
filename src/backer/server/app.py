@@ -3954,6 +3954,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Validate local repository paths
         if repo_type == "local":
+            import getpass
+            import stat
+            
             local_path = data.get("share", "").strip()
             if not local_path:
                 raise HTTPException(status_code=400, detail="Local path required")
@@ -3962,31 +3965,50 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             try:
                 path_obj = Path(local_path).resolve().absolute()
 
-                # Security: Reject paths that resolve to home directory or its parents
-                try:
-                    path_obj.relative_to(Path.home())
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Cannot use home directory or subdirectories for backups",
-                    )
-                except ValueError:
-                    # Good - path is not under home directory
-                    pass
+                # Log current process permissions for debugging
+                current_user = getpass.getuser()
+                current_uid = os.getuid() if hasattr(os, 'getuid') else 'N/A'
+                logger.info(f"[CREATE REPO] Running as user: {current_user} (UID: {current_uid})")
+                logger.info(f"[CREATE REPO] Validating local path: {path_obj}")
 
                 # Check if path exists or can be created
-                path_obj.mkdir(parents=True, exist_ok=True)
+                if not path_obj.exists():
+                    logger.info(f"[CREATE REPO] Path doesn't exist, attempting to create: {path_obj}")
+                    try:
+                        path_obj.mkdir(parents=True, exist_ok=True)
+                        logger.info(f"[CREATE REPO] Successfully created directory: {path_obj}")
+                    except Exception as mkdir_err:
+                        logger.error(f"[CREATE REPO] Failed to create directory: {mkdir_err}")
+                        raise
+                else:
+                    logger.info(f"[CREATE REPO] Path already exists: {path_obj}")
+                    try:
+                        st = path_obj.stat()
+                        mode = stat.filemode(st.st_mode)
+                        owner_uid = st.st_uid
+                        logger.info(f"[CREATE REPO] Directory permissions: {mode} owner UID: {owner_uid}")
+                    except Exception as stat_err:
+                        logger.warning(f"[CREATE REPO] Could not stat directory: {stat_err}")
 
                 # Verify it's readable and writable
-                if not os.access(path_obj, os.R_OK | os.W_OK):
-                    raise HTTPException(status_code=400, detail="Path must be readable/writable")
+                readable = os.access(path_obj, os.R_OK)
+                writable = os.access(path_obj, os.W_OK)
+                logger.info(f"[CREATE REPO] Permission check - readable: {readable}, writable: {writable}")
+                
+                if not readable or not writable:
+                    logger.error(f"[CREATE REPO] Insufficient permissions for {path_obj}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Path must be readable and writable (readable={readable}, writable={writable})"
+                    )
 
                 # Update share with absolute normalized path (cross-platform compatible)
                 data["share"] = str(path_obj)
-                logger.info(f"[CREATE REPO] Validated local path: {path_obj}")
+                logger.info(f"[CREATE REPO] Successfully validated local path: {path_obj}")
             except HTTPException:
                 raise
             except Exception as e:
-                logger.error(f"[CREATE REPO] Failed to validate local path '{local_path}': {e}")
+                logger.error(f"[CREATE REPO] Failed to validate local path '{local_path}': {e}", exc_info=True)
                 raise HTTPException(status_code=400, detail=f"Invalid local path: {str(e)}")
 
         password = data.get("password")
