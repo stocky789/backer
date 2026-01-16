@@ -18,11 +18,22 @@ class BackendRegistry:
             return
 
         # Import backend modules to register them
-        try:
-            from . import kopia, proxy, rclone, restic, rsync  # noqa: F401
-        except ImportError:
-            # Some backends may not be available
-            pass
+        backends_to_load = ['kopia', 'proxy', 'rclone', 'restic', 'rsync']
+        
+        for backend_name in backends_to_load:
+            try:
+                __import__(f'backer.backends.{backend_name}', fromlist=[backend_name])
+            except ImportError as e:
+                # Log which backends fail to load but don't fail completely
+                # Some backends may not be available (missing dependencies, etc.)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Backend '{backend_name}' failed to load: {e}")
+            except Exception as e:
+                # Catch other errors (syntax errors, etc.) and log them
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Unexpected error loading backend '{backend_name}': {e}", exc_info=True)
 
         cls._backends_loaded = True
 
