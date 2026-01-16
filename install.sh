@@ -378,18 +378,17 @@ After=network.target
 
 [Service]
 Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
+# Run as root for full filesystem access (backup server needs to read/write all paths)
+User=root
+Group=root
 WorkingDirectory=$INSTALL_DIR
 Environment="BACKER_DATA_DIR=$DATA_DIR"
 ExecStart=$INSTALL_DIR/venv/bin/backer server start --host 0.0.0.0 --port 8420
 Restart=always
 RestartSec=5
 
-# Security hardening (NoNewPrivileges disabled to allow sudo for NFS mounts)
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA_DIR
+# Minimal hardening - backup server needs access to entire filesystem
+# including /home directories, network mounts, and system paths
 PrivateTmp=true
 
 [Install]
