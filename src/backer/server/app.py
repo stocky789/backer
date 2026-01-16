@@ -4562,8 +4562,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         if result.returncode != 0:
                             error_msg = result.stderr.strip().lower()
                             if any(err in error_msg for err in ("permission", "setuid", "user", "fstab")):
-                                mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{share}", str(temp_mount)]
-                                result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+                                nfs_target = f"{server}:{share}"
+                                mount_cmd = [
+                                    "sudo", "-n", "mount", "-t", "nfs",
+                                    "-o", nfs_opts, nfs_target, str(temp_mount)
+                                ]
+                                result = subprocess.run(
+                                    mount_cmd, capture_output=True, text=True, timeout=30
+                                )
 
                         if result.returncode != 0:
                             return {
@@ -4591,10 +4597,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         # Always cleanup: unmount and remove temp dir
                         if mounted:
                             try:
-                                subprocess.run(["umount", str(temp_mount)], capture_output=True, timeout=10)
+                                subprocess.run(
+                                    ["umount", str(temp_mount)],
+                                    capture_output=True, timeout=10
+                                )
                             except Exception:
                                 try:
-                                    subprocess.run(["sudo", "-n", "umount", str(temp_mount)], capture_output=True, timeout=10)
+                                    subprocess.run(
+                                        ["sudo", "-n", "umount", str(temp_mount)],
+                                        capture_output=True, timeout=10
+                                    )
                                 except Exception:
                                     pass
                         try:
