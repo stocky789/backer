@@ -263,7 +263,7 @@ jobs:
           else
             VERSION="main"
             TAG="main"
-            TITLE="Backer main"
+            TITLE="Latest Release"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
