@@ -33,6 +33,21 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
+      # Docker build validation (Linux only)
+      - name: Set up Docker Buildx
+        if: matrix.os == 'ubuntu-latest'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Docker build
+        if: matrix.os == 'ubuntu-latest'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: test-build
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # Build Windows agent installer for dev release
   build-windows-agent:
     needs: test
