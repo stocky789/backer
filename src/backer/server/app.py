@@ -161,36 +161,17 @@ def _build_backup_command_payload(
                 payload["nfs_export"] = repo.get("share")
 
             elif repo_type == "local":
-                # For local repositories, use proxy backend
-                # The agent will stream data to the server via HTTP/HTTPS
-                # Get the public URL for proxy connections
-                public_url = storage.get_setting("public_url", "http://localhost:8420")
-
-                # Determine proxy scheme based on public_url protocol
-                # Use "proxys://" for HTTPS, "proxy://" for HTTP
-                if public_url.startswith("https://"):
-                    proxy_scheme = "proxys"
-                    # Extract host:port from https URL
-                    host_part = public_url[8:]  # Remove "https://"
-                else:
-                    proxy_scheme = "proxy"
-                    # Extract host:port from http URL
-                    host_part = public_url[7:]  # Remove "http://"
-
-                # Generate proxy URI: proxy://server/repo/{id} or proxys://server/repo/{id}
-                proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}"
-
-                # Override destination_path with proxy URI
-                payload["destination_path"] = proxy_uri
-
-                # Override backend to use proxy
-                payload["backend"] = "proxy"
-
-                # Include repository password for proxy backend
+                # For local repositories, use the local path directly
+                # The destination_path is already set to the local path from the job config
+                # No need for proxy - we'll use the configured backend (kopia, restic, etc.)
+                # on the server to directly access the local path
+                
+                # Include repository password for the backend if needed
                 if repo_password:
-                    payload["backend_options"]["password"] = repo_password
-
-                logger.debug(f"[BACKUP] Using proxy for local repo: {proxy_uri} (scheme={proxy_scheme})")
+                    if backend in ("restic", "kopia"):
+                        payload["backend_options"]["password"] = repo_password
+                
+                logger.debug(f"[BACKUP] Using local repository backend: {backend} at {destination_path}")
 
             # For restic/kopia backends, include the repository password
             # This is needed for the agent to authenticate with the backup repository
@@ -2935,6 +2916,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         if storage.get_job(job.name):
             raise HTTPException(status_code=409, detail="Job already exists")
+
+        # Validate LOCAL repository jobs - they must NOT be assigned to agents
+        # LOCAL repos are server-side paths and can't be accessed by agents
+        repository_id = job.repository_id if hasattr(job, 'repository_id') else None
+        if repository_id and job.client_id:
+            repo = storage.get_repository(repository_id)
+            if repo and repo.get("repo_type") == "local":
+                raise HTTPException(
+                    status_code=400,
+                    detail="LOCAL repositories cannot be used with agents. "
+                    "LOCAL repos are server-side paths. Jobs using LOCAL repos must run on the server (no agent assigned)."
+                )
 
         config = job.model_dump()
         storage.save_job(job.name, config)
