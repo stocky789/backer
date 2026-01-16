@@ -873,12 +873,23 @@ class BackerAgent:
 
         smb_cleanup_ctx = None
         try:
-            backend_options = job.get("backend_options", {})
+            backend_options = job.get("backend_options", {}).copy()
 
-            # Log backend options (without password)
-            safe_options = {k: v for k, v in backend_options.items() if k != "password"}
+            # For proxy backend, destination_path IS the location URI
+            # Also include agent credentials for authentication
+            if backend_name == "proxy":
+                backend_options["location"] = job.get("destination_path", "")
+                backend_options["client_id"] = self.client_id
+                backend_options["client_secret"] = self.client_secret
+                print(f"[BACKUP] Proxy backend configured with location: {backend_options['location']}")
+
+            # Log backend options (without password/secrets)
+            safe_options = {k: v for k, v in backend_options.items()
+                           if k not in ("password", "client_secret")}
             if "password" in backend_options:
                 safe_options["password"] = "***"
+            if "client_secret" in backend_options:
+                safe_options["client_secret"] = "***"
             print(f"[BACKUP] Backend options: {safe_options}")
 
             backend = get_backend(
