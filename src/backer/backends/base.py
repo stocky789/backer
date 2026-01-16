@@ -93,16 +93,16 @@ class BackendBase(ABC):
         check: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a subprocess command with proper error logging and stderr handling.
-        
+
         Args:
             cmd: Command and arguments as list
             timeout: Timeout in seconds
             env: Environment variables dict
             check: If True, raise CalledProcessError on non-zero return code
-            
+
         Returns:
             CompletedProcess with stdout, stderr, and returncode
-            
+
         Raises:
             subprocess.CalledProcessError: If check=True and returncode != 0
             subprocess.TimeoutExpired: If command times out
@@ -116,7 +116,7 @@ class BackendBase(ABC):
                 env=env,
                 check=False,  # We handle return codes ourselves
             )
-            
+
             # Log stderr if present
             if result.stderr:
                 backend_name = getattr(self, 'backend_type', 'unknown')
@@ -131,7 +131,7 @@ class BackendBase(ABC):
                         f"[{backend_name}] Command warnings (stderr):\n"
                         f"stderr: {result.stderr}"
                     )
-            
+
             # Check for errors if requested
             if check and result.returncode != 0:
                 raise subprocess.CalledProcessError(
@@ -140,9 +140,9 @@ class BackendBase(ABC):
                     output=result.stdout,
                     stderr=result.stderr,
                 )
-            
+
             return result
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             backend_name = getattr(self, 'backend_type', 'unknown')
             logger.error(
                 f"[{backend_name}] Command timeout after {timeout}s: {' '.join(cmd)}"

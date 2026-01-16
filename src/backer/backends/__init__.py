@@ -5,4 +5,14 @@ from backer.backends import kopia, proxy, rclone, restic, rsync  # noqa: F401
 from backer.backends.base import BackendBase, BackendResult
 from backer.backends.registry import BackendRegistry, get_backend
 
-__all__ = ["BackendBase", "BackendResult", "BackendRegistry", "get_backend", "rclone", "restic", "rsync", "kopia", "proxy"]
+__all__ = [
+    "BackendBase",
+    "BackendResult",
+    "BackendRegistry",
+    "get_backend",
+    "rclone",
+    "restic",
+    "rsync",
+    "kopia",
+    "proxy",
+]

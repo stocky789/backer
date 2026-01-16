@@ -836,7 +836,7 @@ class Storage:
             "created_at": row["created_at"],
             "config": json.loads(row["config"]) if row["config"] else {},
         }
-        
+
         # Normalize local repository paths (cross-platform)
         if repo["repo_type"] == "local" and repo["share"]:
             try:
@@ -844,7 +844,7 @@ class Storage:
                 repo["share"] = normalized
             except Exception as e:
                 logger.warning(f"Failed to normalize local path for repo {repo['id']}: {e}")
-        
+
         return repo
 
     def get_repository_password(self, repo_id: str) -> str | None:

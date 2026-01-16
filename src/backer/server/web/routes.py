@@ -598,7 +598,7 @@ async def settings_page(request: Request):
 
     # Get current timezone setting
     timezone = storage.get_setting("timezone", "UTC")
-    
+
     # Get public URL setting for reverse proxy support
     public_url = storage.get_setting("public_url", "http://localhost:8420")
 
