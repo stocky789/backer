@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from backer._version import __version__
+from backer import __version__
 from backer.core.repo_metadata import RepositoryMetadata
 
 

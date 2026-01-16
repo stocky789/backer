@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 
 # Import version - works in both normal and frozen (PyInstaller) mode
 try:
-    from backer._version import __version__
+    from backer import __version__
 except ImportError:
     __version__ = "0.0.0"
 

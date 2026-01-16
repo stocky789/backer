@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-from backer._version import __version__
+from backer import __version__
 
 # Tool download information
 # Note: rsync backend exists but is NOT currently supported for remote agents.
