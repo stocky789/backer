@@ -4,10 +4,19 @@
 #   docker compose up -d
 #
 # Web UI: http://localhost:8420
+# Default login: admin / admin
+#
+# For local development, use: docker compose up --build
+# For production, use: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 services:
   backer:
-    image: ghcr.io/stocky789/backer:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: latest
+    image: backer:latest
     container_name: backer
     restart: unless-stopped
     ports:
@@ -23,7 +32,18 @@ services:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
+    labels:
+      com.backer.description: "Unified backup orchestration server"
+      com.backer.version: "latest"
+    # Health check (Docker will monitor container health)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8420/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 volumes:
   backer-data:
     name: backer-data
+    driver: local

@@ -55,6 +55,28 @@ Access the web UI at `http://your-server:8420`
 
 The Docker image includes pre-installed backup tools (rclone, restic, kopia) for immediate use. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
 
+#### Quick Start (Docker Compose)
+
+```bash
+# Clone the repository
+git clone https://github.com/stocky789/backer.git
+cd backer
+
+# Start the server (builds image locally)
+make docker-up
+
+# Access the web UI at http://localhost:8420
+# Default login: admin / admin
+
+# View logs
+make docker-logs
+
+# Stop the server
+make docker-down
+```
+
+#### Docker Run (Pre-built Image)
+
 ```bash
 docker run -d --name backer \
   -p 8420:8420 \
@@ -63,6 +85,28 @@ docker run -d --name backer \
   --security-opt apparmor:unconfined \
   ghcr.io/stocky789/backer:latest
 ```
+
+#### Local Development
+
+For local development with live code changes:
+
+```bash
+# Build the image locally
+make docker-build
+
+# Start with auto-rebuild on code changes
+docker compose up --build
+
+# Or use the convenience target
+make docker-up
+```
+
+#### Docker Security Notes
+
+- `SYS_ADMIN` capability is required for mounting SMB/NFS shares inside the container
+- `apparmor:unconfined` allows the container to perform mount operations
+- The `backer` user runs with minimal privileges (non-root)
+- Backup tools are downloaded on first use and cached in the persistent volume
 
 ### Windows Agent
 

@@ -2,7 +2,13 @@
 # Build: docker build -t backer .
 # Run: docker run -d -p 8420:8420 -v backer-data:/data backer
 
-FROM python:3.11-slim
+ARG VERSION=latest
+
+FROM python:3.12-slim
+
+LABEL maintainer="Backer Contributors"
+LABEL description="Unified backup orchestration - consolidating rsync, rclone, restic and more"
+LABEL version="${VERSION}"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,28 +34,24 @@ RUN echo "backer ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount" > /etc/sud
 # Set working directory
 WORKDIR /app
 
-# Copy source
-COPY . /app
+# Copy only pyproject.toml and source code (optimize layer caching)
+COPY pyproject.toml /app/
+COPY src /app/src
+COPY README.md /app/
 
-# Install backer
+# Install backer and dependencies
 RUN pip install --no-cache-dir ".[server]"
 
-# Create data directory
-RUN mkdir -p /data/tools /data/logs
+# Create data directory for tools and logs
+RUN mkdir -p /data/tools /data/logs && \
+    chown -R backer:backer /data
 
-# Set environment before setup so tools are downloaded to /data/tools
+# Set environment variables
 ENV BACKER_DATA_DIR=/data
 ENV PATH=/data/tools:$PATH
 ENV PYTHONUNBUFFERED=1
 
-# Download backup tools (rclone, restic, kopia)
-# This will fail the build if tools cannot be downloaded - intentional for reliability
-RUN backer setup
-
-# Fix ownership after tools are downloaded
-RUN chown -R backer:backer /data
-
-# Switch to app user
+# Switch to app user (before runtime, not after setup)
 USER backer
 
 # Expose port

@@ -1,4 +1,4 @@
-.PHONY: install install-dev setup test test-quick lint format type-check clean build build-agent run-server demo release help
+.PHONY: install install-dev setup test test-quick lint format type-check clean build build-agent run-server demo release docker-build docker-up docker-down docker-logs help
 
 # Default target
 help:
@@ -24,6 +24,12 @@ help:
 	@echo "Run:"
 	@echo "  make run-server   Start the backup server"
 	@echo "  make demo         Run a demo backup"
+	@echo ""
+	@echo "Docker:"
+	@echo "  make docker-build Build Docker image locally"
+	@echo "  make docker-up    Start Docker container (builds if needed)"
+	@echo "  make docker-down  Stop and remove Docker container"
+	@echo "  make docker-logs  View Docker container logs"
 	@echo ""
 	@echo "Release:"
 	@echo "  make release VERSION=x.y.z   Create and push a release tag"
@@ -107,3 +113,27 @@ demo:
 	@ls -la /tmp/backer-demo/dest/
 	@echo ""
 	@echo "Demo complete! Clean up with: rm -rf /tmp/backer-demo"
+
+# Docker targets
+docker-build:
+	@echo "Building Docker image..."
+	docker compose build
+
+docker-up:
+	@echo "Starting Docker container..."
+	docker compose up -d
+	@echo ""
+	@echo "Backer is starting. Waiting for health check..."
+	@sleep 5
+	@echo ""
+	@echo "Web UI: http://localhost:8420"
+	@echo "Default login: admin / admin"
+	@echo ""
+	@echo "View logs with: make docker-logs"
+
+docker-down:
+	@echo "Stopping Docker container..."
+	docker compose down
+
+docker-logs:
+	docker compose logs -f backer
