@@ -60,6 +60,12 @@
   - Solution: Connection pool reuses existing connections
   - Provides clear error message when conflict detected
 
+- **Windows Error 1223** - "Operation was canceled by the user"
+  - Root cause: UAC/permission issues preventing cmdkey credential storage
+  - Solution: Automatic fallback to explicit credential connection
+  - Bypasses cmdkey and passes credentials directly to net use
+  - Detailed error logging explains the issue and fallback action
+
 - **Transient network failures** - No longer cause permanent backup failures
   - Automatic retry recovers from temporary issues
   - Exponential backoff prevents server overload
@@ -77,6 +83,8 @@
 
 2. `src/backer/agent/service.py`
    - Lines 85-317: SMBConnectionManager class
+   - Lines 183-194: Error 1223 detection and fallback trigger
+   - Lines 264-314: _connect_with_explicit_credentials() fallback method
    - Lines 364: AgentService SMB manager initialization
    - Lines 507-509: Cleanup in stop() method
    - Lines 621-672: Retry logic wrapper
@@ -109,14 +117,16 @@
 - ✅ Credentials encrypted at rest in database
 - ✅ Fernet symmetric encryption with separate key file
 - ✅ Credentials redacted in logs
-- ⚠️ Credentials still briefly visible in process list during cmdkey execution
+- ⚠️ Credentials visible in process list during net use with explicit credentials (fallback method)
+- ⚠️ Credentials briefly visible in process list during cmdkey execution (primary method)
 - 🔐 Key file permissions: 0600 (owner read/write only)
 
 ### Known Limitations
 1. Error 1219 still possible if user has manual connections with different credentials
-2. Connection pool Windows-only (Linux uses different mount mechanism)
-3. Retry logic only for backup operations (restore not included yet)
-4. Max retries hardcoded to 3 (not yet configurable)
+2. Error 1223 fallback uses explicit credentials in command line (less secure than cmdkey)
+3. Connection pool Windows-only (Linux uses different mount mechanism)
+4. Retry logic only for backup operations (restore not included yet)
+5. Max retries hardcoded to 3 (not yet configurable)
 
 ### Tested
 - ✅ Python syntax validation (py_compile)
