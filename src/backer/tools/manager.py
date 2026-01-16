@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+from backer import __version__
+
 # Tool download information
 # Note: rsync backend exists but is NOT currently supported for remote agents.
 # Only rclone and restic are supported for agent-based backups.
@@ -250,7 +252,7 @@ class ToolManager:
         # Create request with User-Agent (GitHub blocks requests without one)
         request = Request(
             url,
-            headers={"User-Agent": "Backer-Agent/1.0"}
+            headers={"User-Agent": f"Backer-Agent/{__version__}"}
         )
 
         # Try with default SSL first, fall back to unverified for Windows cert issues

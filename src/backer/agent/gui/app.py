@@ -14,6 +14,12 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+# Import version - works in both normal and frozen (PyInstaller) mode
+try:
+    from backer import __version__
+except ImportError:
+    __version__ = "0.0.0"
+
 # Add parent to path for imports when running as frozen exe
 if getattr(sys, 'frozen', False):
     APP_DIR = Path(sys.executable).parent
@@ -324,7 +330,7 @@ class BackerAgentApp:
             # Test connection to server
             health_url = f"{server_url.rstrip('/')}/health"
             req = urllib.request.Request(health_url, method='GET')
-            req.add_header('User-Agent', 'Backer-Agent/1.0')
+            req.add_header('User-Agent', f'Backer-Agent/{__version__}')
 
             with urllib.request.urlopen(req, timeout=10) as response:
                 if response.status != 200:
@@ -338,13 +344,13 @@ class BackerAgentApp:
             register_url = f"{server_url.rstrip('/')}/api/v1/clients/register"
             data = json.dumps({
                 'hostname': hostname,
-                'version': '1.0.0',
+                'version': __version__,
                 'os_info': f"{platform.system()} {platform.release()}",
             }).encode('utf-8')
 
             req = urllib.request.Request(register_url, data=data, method='POST')
             req.add_header('Content-Type', 'application/json')
-            req.add_header('User-Agent', 'Backer-Agent/1.0')
+            req.add_header('User-Agent', f'Backer-Agent/{__version__}')
 
             with urllib.request.urlopen(req, timeout=10) as response:
                 result = json.loads(response.read().decode('utf-8'))
@@ -457,7 +463,7 @@ class BackerAgentApp:
                 import urllib.request
                 health_url = f"{server_url.rstrip('/')}/health"
                 req = urllib.request.Request(health_url, method='GET')
-                req.add_header('User-Agent', 'Backer-Agent/1.0')
+                req.add_header('User-Agent', f'Backer-Agent/{__version__}')
 
                 with urllib.request.urlopen(req, timeout=5) as response:
                     if response.status == 200:
