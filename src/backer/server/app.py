@@ -3956,7 +3956,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if repo_type == "local":
             import getpass
             import stat
-            
+
             local_path = data.get("share", "").strip()
             if not local_path:
                 raise HTTPException(status_code=400, detail="Local path required")
@@ -3994,7 +3994,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 readable = os.access(path_obj, os.R_OK)
                 writable = os.access(path_obj, os.W_OK)
                 logger.info(f"[CREATE REPO] Permission check - readable: {readable}, writable: {writable}")
-                
+
                 if not readable or not writable:
                     logger.error(f"[CREATE REPO] Insufficient permissions for {path_obj}")
                     raise HTTPException(

@@ -442,12 +442,12 @@ class LocalBrowser:
         """Test if a local directory is accessible."""
         import getpass
         import stat
-        
+
         try:
             dir_path = Path(path)
             current_user = getpass.getuser()
             current_uid = os.getuid()
-            
+
             logger.info(f"Testing local path: {path}")
             logger.info(f"Current user: {current_user} (UID: {current_uid})")
 
@@ -474,7 +474,7 @@ class LocalBrowser:
             readable = os.access(dir_path, os.R_OK)
             writable = os.access(dir_path, os.W_OK)
             logger.info(f"Permission checks - readable: {readable}, writable: {writable}")
-            
+
             if not readable:
                 msg = f"Path is not readable: {path}"
                 logger.warning(msg)
