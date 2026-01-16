@@ -9,6 +9,22 @@ class BackendRegistry:
     """Registry for backup backends."""
 
     _backends: dict[BackendType, type[BackendBase]] = {}
+    _backends_loaded = False
+
+    @classmethod
+    def _ensure_backends_loaded(cls):
+        """Ensure all backend modules are imported and registered."""
+        if cls._backends_loaded:
+            return
+
+        # Import backend modules to register them
+        try:
+            from . import kopia, proxy, rclone, restic, rsync  # noqa: F401
+        except ImportError:
+            # Some backends may not be available
+            pass
+
+        cls._backends_loaded = True
 
     @classmethod
     def register(cls, backend_type: BackendType):
@@ -23,6 +39,8 @@ class BackendRegistry:
     @classmethod
     def get(cls, backend_type: BackendType, config: dict[str, Any] | None = None) -> BackendBase:
         """Get an instance of a backend by type."""
+        cls._ensure_backends_loaded()
+
         if backend_type not in cls._backends:
             available = ", ".join(b.value for b in cls._backends.keys())
             raise ValueError(
