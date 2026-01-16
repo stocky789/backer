@@ -723,11 +723,17 @@ class BackerAgent:
         - For rclone with SMB: Use on-the-fly SMB backend config
         - For rclone with NFS: Mount the export first
         - For restic/kopia: Mount the share/export first
+        - For proxy backend: Use destination_path as-is (it's a proxy:// URI)
 
         Returns:
             Tuple of (destination_path, cleanup_context_or_none)
         """
         dest_path = job.get("destination_path", "")
+
+        # Proxy backend uses destination_path as a proxy:// URI directly
+        # Don't try to mount it as a filesystem path
+        if backend_name == "proxy" or dest_path.startswith(("proxy://", "proxys://")):
+            return dest_path, None
 
         # Windows can use UNC paths directly
         if sys.platform == "win32":
