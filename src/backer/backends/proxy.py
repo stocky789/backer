@@ -498,39 +498,110 @@ class ProxyBackend(BackendBase):
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
     ) -> BackendResult:
-        """Stream restore data from server with memory-safe chunked reading."""
+        """Stream restore data from server with memory-safe chunked reading.
+
+        Retrieves the backup from the server via tar.gz and extracts to destination.
+        """
+        import tarfile
+        import tempfile
+
         started_at = datetime.now()
+        bytes_transferred = 0
+        files_transferred = 0
 
         try:
-            # Build restore request params
-            params = {}
-            if snapshot:
-                params["snapshot"] = snapshot
+            logger.info(f"[PROXY] Restore starting: {self.server_url}/repo/{self.repo_id} -> {destination}")
+
             if dry_run:
-                params["dry_run"] = "true"
+                logger.info("[PROXY] Dry run - not actually restoring data")
+                return BackendResult(
+                    success=True,
+                    operation=OperationType.RESTORE,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    output="Dry run completed (no data restored)",
+                    return_code=0,
+                )
+
+            # Build restore request with optional snapshot
+            path = "/restore"
+            if snapshot:
+                path += f"?snapshot={snapshot}"
+            if dry_run:
+                sep = "&" if snapshot else "?"
+                path += f"{sep}dry_run=true"
             if original_source_path:
-                params["original_source_path"] = original_source_path
+                sep = "&" if (snapshot or dry_run) else "?"
+                path += f"{sep}original_source_path={original_source_path}"
 
-            # Build query string
-            # Note: query_parts not needed for current placeholder implementation
+            logger.info(f"[PROXY] Requesting restore from {self.server_url}/api/repo/{self.repo_id}{path}")
 
-            logger.info("[PROXY] Restore starting via proxy with memory-safe streaming")
-
-            # Note: Actual streaming implementation depends on server providing /restore endpoint
-            # with streaming response. Currently just returning success as placeholder.
-            # In production, this would stream restoration data using iter_content():
-            # response = self._request("GET", path, stream=True)
-            # for chunk in response.iter_content(chunk_size=self.chunk_size):
-            #     destination.write(chunk)
-
-            return BackendResult(
-                success=True,
-                operation=OperationType.RESTORE,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                output="Restore streamed via proxy (memory-safe)",
-                return_code=0,
+            # Stream response to temp file
+            response = self._request(
+                "GET",
+                path,
+                stream=True,
+                timeout=self.timeout * 2,  # Double timeout for restore
             )
+
+            # Verify response
+            if response.status_code >= 400:
+                error_detail = response.text[:500] if response.text else "No response body"
+                raise RuntimeError(f"Restore failed (HTTP {response.status_code}): {error_detail}")
+
+            # Create destination directory
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            # Stream to temp file
+            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+                tmp_path = tmp.name
+                bytes_transferred = 0
+
+                for chunk in response.iter_content(chunk_size=self.chunk_size):
+                    if chunk:
+                        tmp.write(chunk)
+                        bytes_transferred += len(chunk)
+
+                        # Progress callback every 5MB
+                        if progress_callback and bytes_transferred % (5 * 1024 * 1024) == 0:
+                            try:
+                                progress_callback(
+                                    bytes_done=bytes_transferred,
+                                    files_done=0,
+                                    current_file="Downloading archive",
+                                )
+                            except Exception:
+                                pass
+
+            logger.info(f"[PROXY] Downloaded {bytes_transferred / 1024 / 1024:.1f}MB")
+
+            # Extract tar archive to destination
+            try:
+                with tarfile.open(tmp_path, "r:gz") as tar:
+                    tar.extractall(path=str(destination))
+                    members = tar.getnames()
+                    files_transferred = len(members)
+
+                logger.info(f"[PROXY] Extracted {files_transferred} files to {destination}")
+
+                return BackendResult(
+                    success=True,
+                    operation=OperationType.RESTORE,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    output=f"Restore completed: {files_transferred} files, {bytes_transferred / 1024 / 1024:.1f}MB",
+                    bytes_transferred=bytes_transferred,
+                    files_transferred=files_transferred,
+                    return_code=0,
+                )
+
+            finally:
+                # Clean up temp file
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+
         except Exception as e:
             logger.error(f"[PROXY] Restore failed: {e}")
             return BackendResult(

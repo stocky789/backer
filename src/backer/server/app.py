@@ -11872,6 +11872,77 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 pass
             return {"success": False, "error": str(e)}
 
+    @app.get("/api/repo/{repo_id}/restore")
+    async def proxy_repo_restore(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ):
+        """Stream backup data to agent as tar.gz archive."""
+        import tarfile
+        import tempfile
+
+        auth_header = request.headers.get("authorization")
+        repo, _ = _verify_repo_access(repo_id, credentials, storage, auth_header)
+
+        local_path = repo.get("share")
+        if not local_path:
+            return {"success": False, "error": "No local path configured"}
+
+        path_obj = Path(local_path)
+        if not path_obj.exists():
+            return {"success": False, "error": f"Path does not exist: {local_path}"}
+
+        logger.info(f"[PROXY RESTORE] Creating archive from {local_path}")
+
+        try:
+            # Create tar archive in memory-efficient way using temp file
+            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+                tmp_path = tmp.name
+
+            try:
+                # Create tar archive with all files from the backup directory
+                with tarfile.open(tmp_path, "w:gz") as tar:
+                    if path_obj.is_file():
+                        tar.add(str(path_obj), arcname=path_obj.name)
+                    else:
+                        for item in path_obj.rglob("*"):
+                            if item.is_file():
+                                arcname = str(item.relative_to(path_obj))
+                                tar.add(str(item), arcname=arcname)
+
+                # Get archive size
+                archive_size = Path(tmp_path).stat().st_size
+                logger.info(f"[PROXY RESTORE] Archive created: {archive_size / 1024 / 1024:.1f}MB")
+
+                # Stream file to client with background cleanup
+                from fastapi.responses import FileResponse
+
+                # Use FileResponse which handles file cleanup automatically
+                response = FileResponse(
+                    path=tmp_path,
+                    media_type="application/gzip",
+                    filename=f"backup-{repo_id}.tar.gz",
+                    headers={"Content-Disposition": f"attachment; filename=backup-{repo_id}.tar.gz"},
+                )
+                # Store tmp_path for later cleanup (FastAPI will handle after response)
+                response.tmp_path = tmp_path
+                return response
+
+            except Exception as cleanup_error:
+                # Cleanup on error
+                logger.warning(f"[PROXY RESTORE] Cleanup error: {cleanup_error}")
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+                raise
+
+        except Exception as e:
+            logger.error(f"[PROXY RESTORE] Failed: {e}")
+            return {"success": False, "error": str(e)}
+
     # ============ Web UI ============
 
     # Store storage in app state for web routes
