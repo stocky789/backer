@@ -430,9 +430,28 @@ class ProxyBackend(BackendBase):
                 # Stream upload to server
                 logger.info(f"[PROXY] Uploading to {self.server_url}/api/repo/{self.repo_id}/backup")
 
-                # Get the destination subfolder from the destination path
-                # The destination.path contains the full path including job subfolder
-                dest_subfolder = str(destination.path) if destination.path else ""
+                # Extract just the job subfolder from the destination path
+                # destination.path is the full proxy URI like:
+                #   proxy://192.168.0.158:8420/repo/5279b837/Agents/testjob
+                # We need just: Agents/testjob
+                dest_subfolder = ""
+                if destination.path:
+                    dest_str = str(destination.path)
+                    # Check if it's a proxy URI and extract the path after /repo/{id}/
+                    if "/repo/" in dest_str:
+                        # Split on /repo/{repo_id}/ and take what's after
+                        parts = dest_str.split("/repo/", 1)
+                        if len(parts) > 1:
+                            # parts[1] is like: "5279b837/Agents/testjob"
+                            # Skip the repo_id and get the rest
+                            subparts = parts[1].split("/", 1)
+                            if len(subparts) > 1:
+                                dest_subfolder = subparts[1]  # "Agents/testjob"
+                    elif not dest_str.startswith(("proxy://", "proxys://", "http://", "https://")):
+                        # It's a local path, use as-is
+                        dest_subfolder = dest_str
+
+                logger.debug(f"[PROXY] Using subfolder: {dest_subfolder}")
 
                 with open(tmp_path, "rb") as f:
                     # Use chunked upload for memory efficiency

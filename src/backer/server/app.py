@@ -11822,16 +11822,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not local_path:
             return {"success": False, "error": "No local path configured"}
 
-        # Get destination subfolder from headers
+        # Get destination subfolder from headers (e.g., "Agents/testjob")
         subfolder = request.headers.get("X-Backup-Subfolder", "")
         source_path = request.headers.get("X-Source-Path", "unknown")
 
-        # Build full destination path
+        # Build full destination path: {local_path}/{subfolder}
+        # Example: /home/matt/repo/Agents/testjob
         dest_path = Path(local_path)
         if subfolder:
-            # Extract just the relative part after the repo path
-            if subfolder.startswith(local_path):
-                subfolder = subfolder[len(local_path):].lstrip("/\\")
+            # Clean any leading/trailing slashes and use as relative path
+            subfolder = subfolder.strip("/\\")
             dest_path = dest_path / subfolder
 
         dest_path.mkdir(parents=True, exist_ok=True)
