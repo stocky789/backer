@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backer"
-version = "0.6.5"
+version = "0.6.6"
 description = "Unified backup orchestration - consolidating rsync, rclone, restic and more"
 readme = "README.md"
 license = "MIT"
