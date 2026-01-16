@@ -350,6 +350,17 @@ if [ $PIP_EXIT -ne 0 ]; then
 fi
 success "Backer installed"
 
+# Verify installation
+info "Verifying installation..."
+if ! "$INSTALL_DIR/venv/bin/python" -c "import backer.server.auth; import backer.server.app" 2>/dev/null; then
+    warn "Installation verification failed. Trying to reinstall..."
+    pip install --no-cache-dir --force-reinstall -e "$INSTALL_DIR[server]" > /dev/null 2>&1 || true
+    if ! "$INSTALL_DIR/venv/bin/python" -c "import backer.server.auth; import backer.server.app" 2>/dev/null; then
+        error "Failed to verify Backer server package installation. Check dependencies with: pip install 'backer[server]'"
+    fi
+fi
+success "Installation verified"
+
 # Download backup tools (rclone + restic)
 info "Downloading backup tools..."
 "$INSTALL_DIR/venv/bin/backer" setup --data-dir "$DATA_DIR" 2>/dev/null || \

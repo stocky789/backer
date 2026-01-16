@@ -255,6 +255,48 @@ def server() -> None:
     pass
 
 
+def _check_server_dependencies() -> None:
+    """Check if all server dependencies are installed.
+
+    Raises ImportError with helpful message if dependencies are missing.
+    """
+    required_modules = {
+        "fastapi": "FastAPI web framework",
+        "uvicorn": "ASGI server",
+        "jwt": "PyJWT - JWT token support",
+        "requests": "HTTP client library",
+        "tenacity": "Retry library",
+    }
+
+    missing_modules = []
+    for module_name, description in required_modules.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_modules.append(f"{module_name} ({description})")
+
+    if missing_modules:
+        missing_list = ", ".join(missing_modules)
+        raise ImportError(
+            f"Server dependencies missing: {missing_list}. "
+            "Install with: pip install 'backer[server]'"
+        )
+
+
+def _verify_server_package() -> None:
+    """Verify that the backer server package is properly installed.
+
+    Raises ImportError if the server package is not properly installed.
+    """
+    try:
+        import backer.server.auth  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            f"Backer server package not properly installed: {e}. "
+            "Try reinstalling with: pip install --force-reinstall 'backer[server]'"
+        ) from e
+
+
 @server.command("start")
 @click.option("--host", "-h", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8420, help="Port to listen on")
@@ -264,11 +306,19 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
     console.print(f"[bold]Starting Backer server[/bold] on {host}:{port}")
 
     try:
+        # Check dependencies before importing server modules
+        _check_server_dependencies()
+
+        # Verify that the server package is properly installed
+        _verify_server_package()
+
         from backer.server.daemon import run_server
         run_server(host=host, port=port, data_dir=data_dir)
     except ImportError as e:
-        console.print(f"[red]Error:[/red] Server dependencies not installed: {e}")
-        console.print("Install with: pip install backer[server]")
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] Failed to start server: {e}")
         raise SystemExit(1)
 
 
