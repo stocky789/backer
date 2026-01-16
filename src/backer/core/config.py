@@ -63,6 +63,7 @@ class ServerConfig(BaseModel):
     secret_key: str = ""  # For signing tokens
     data_dir: str = "/var/lib/backer"
     allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
+    public_url: str = "http://localhost:8420"  # Public URL for reverse proxy (Cloudflare, nginx, etc.)
 
 
 class ClientConfig(BaseModel):

@@ -117,6 +117,71 @@ backer restore /backup /destination
 - Cron scheduling with retention policies
 - Web dashboard with backup history
 
+## Storage Repositories
+
+Backer supports multiple storage backend types for backup destinations:
+
+### SMB/CIFS (Windows Shares)
+- Network shares accessible via SMB protocol
+- Supports authentication with username/password/domain
+- Auto-discovery of available shares
+- Connection pooling to avoid Windows Error 1219
+
+### NFS (Linux/Unix)
+- NFS exports from Linux/Unix NAS devices
+- Auto-discovery of available exports
+- Requires mount permissions (root or passwordless sudo)
+
+### Local Directory (Docker/Server-Side)
+**New**: Store backups directly on the Backer server filesystem using local paths.
+
+#### Why Local Directory?
+- **Docker-friendly**: No complex SMB/NFS mounts inside containers
+- **Cross-platform**: Works seamlessly with Windows and Linux agents
+- **Simplified permissions**: No network share authentication needed
+- **Reverse proxy compatible**: Works with Cloudflare, nginx, Traefik, etc.
+
+#### How It Works
+Agents stream backup data to the server via HTTP using the "proxy backend". The server executes the actual backup tool (restic/kopia/rclone) locally on the configured path.
+
+#### Docker Setup
+```yaml
+# docker-compose.yml
+services:
+  backer:
+    image: ghcr.io/stocky789/backer:latest
+    volumes:
+      - backer-data:/data
+      # Mount your backup destination into the container
+      - /mnt/nas/backups:/data/backups        # NAS mount
+      # OR
+      - ./backups:/data/backups               # Local folder
+      # OR
+      - /path/to/external:/data/external      # External drive
+    environment:
+      # Set your public URL for reverse proxy support
+      BACKER_PUBLIC_URL: https://backer.example.com
+      # Or for local network:
+      # BACKER_PUBLIC_URL: http://192.168.1.100:8420
+```
+
+#### Usage
+1. In the Backer UI, go to **Repositories** → **Add Repository**
+2. Select **Local Directory** as the type
+3. Enter the container path: `/data/backups` (matches the volume mount)
+4. Give it a name like "NAS Backups"
+5. Create backup jobs pointing to this repository
+
+The agents will automatically stream data to the server, which writes it to the mounted path.
+
+#### Reverse Proxy Configuration
+If using a reverse proxy (Cloudflare, nginx, etc.), set `BACKER_PUBLIC_URL` to your external domain:
+```bash
+BACKER_PUBLIC_URL: https://backer.example.com
+```
+
+Agents will use this URL to connect and stream backup data.
+
 ## Windows Agent - SMB/Network Share Requirements
 
 ### Prerequisites

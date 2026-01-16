@@ -73,6 +73,11 @@ Server Settings
                     </select>
                     <div class="form-hint">This timezone is used for scheduling backups. Scheduled jobs will run according to this timezone.</div>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">Public URL (for Reverse Proxy)</label>
+                    <input type="text" name="public_url" class="form-input" value="{{ public_url or 'http://localhost:8420' }}" placeholder="http://localhost:8420">
+                    <div class="form-hint">The public URL agents use to connect. Set this to your domain when using Cloudflare, nginx, or other reverse proxies. Used for Local Directory repositories.</div>
+                </div>
                 <div style="display: flex; align-items: center; gap: 12px;">
                     <button type="submit" class="btn btn-primary">Save Settings</button>
                     {% if settings_saved %}

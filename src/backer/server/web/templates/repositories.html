@@ -39,6 +39,10 @@
             <div class="stat-value">{{ repositories|selectattr('repo_type', 'equalto', 'nfs')|list|length }}</div>
         </div>
         <div class="stat-card">
+            <div class="stat-label">Local Directories</div>
+            <div class="stat-value">{{ repositories|selectattr('repo_type', 'equalto', 'local')|list|length }}</div>
+        </div>
+        <div class="stat-card">
             <div class="stat-label">Connected</div>
             <div class="stat-value success">{{ repositories|selectattr('status', 'equalto', 'connected')|list|length }}</div>
         </div>
@@ -78,6 +82,8 @@
                             <span class="status-badge info">SMB</span>
                             {% elif repo.repo_type == 'nfs' %}
                             <span class="status-badge info">NFS</span>
+                            {% elif repo.repo_type == 'local' %}
+                            <span class="status-badge success">Local</span>
                             {% else %}
                             <span class="status-badge muted">{{ repo.repo_type }}</span>
                             {% endif %}
@@ -295,13 +301,27 @@
                     <select id="repoType" class="form-input" onchange="onTypeChange()">
                         <option value="smb">SMB/CIFS (Windows Shares)</option>
                         <option value="nfs">NFS (Linux/Unix)</option>
+                        <option value="local">Local Directory (Server Path)</option>
                     </select>
                 </div>
 
-                <div class="form-group">
+                <div class="form-group" id="serverGroup">
                     <label class="form-label">Server Address</label>
                     <input type="text" id="server" class="form-input" placeholder="192.168.1.100 or nas.local">
                     <div class="form-hint">IP address or hostname of your NAS/server</div>
+                </div>
+
+                <div id="localPathGroup" style="display: none;">
+                    <div class="form-group">
+                        <label class="form-label">Local Directory Path</label>
+                        <input type="text" id="localPath" class="form-input" placeholder="/data/backups or C:\Backups">
+                        <div class="form-hint"><strong>Absolute path on the Backer server.</strong> For Docker, use container paths that match your volume mounts (e.g., /data/backups if you mounted ./host/backups:/data/backups).</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Repository Name</label>
+                        <input type="text" id="localRepoName" class="form-input" placeholder="My Local Backups">
+                        <div class="form-hint">A friendly name for this repository</div>
+                    </div>
                 </div>
 
                 <div id="smbCredentials">
@@ -602,7 +622,23 @@ function resetWizard() {
 
 function onTypeChange() {
     currentType = document.getElementById('repoType').value;
-    document.getElementById('smbCredentials').style.display = currentType === 'smb' ? 'block' : 'none';
+    const isLocal = currentType === 'local';
+    const isSmb = currentType === 'smb';
+    
+    // Show/hide fields based on type
+    document.getElementById('smbCredentials').style.display = isSmb ? 'block' : 'none';
+    document.getElementById('serverGroup').style.display = isLocal ? 'none' : 'block';
+    document.getElementById('localPathGroup').style.display = isLocal ? 'block' : 'none';
+    
+    // Update the button text
+    const discoverBtn = document.getElementById('discoverBtn');
+    if (isLocal) {
+        discoverBtn.textContent = 'Save Local Repository';
+        discoverBtn.onclick = saveLocalRepository;
+    } else {
+        discoverBtn.textContent = 'Connect & Browse Shares';
+        discoverBtn.onclick = discoverShares;
+    }
 }
 
 function backToStep1() {
@@ -614,6 +650,62 @@ function backToStep1() {
 function backToStep2() {
     document.getElementById('step2').style.display = 'block';
     document.getElementById('step3').style.display = 'none';
+}
+
+async function saveLocalRepository() {
+    const localPath = document.getElementById('localPath').value.trim();
+    const name = document.getElementById('localRepoName').value.trim();
+    
+    if (!localPath) {
+        showError('discoverError', 'Please enter a local directory path');
+        return;
+    }
+    
+    // Validate path format
+    const isAbsolutePath = localPath.startsWith('/') || (localPath.match(/^[A-Z]:\\/) !== null);
+    if (!isAbsolutePath) {
+        showError('discoverError', 'Path must be absolute (e.g., /data/backups or C:\\Backups)');
+        return;
+    }
+    
+    if (!name) {
+        showError('discoverError', 'Please enter a repository name');
+        return;
+    }
+    
+    const btn = document.getElementById('discoverBtn');
+    btn.textContent = 'Saving...';
+    
+    try {
+        const response = await fetch('/api/v1/repositories', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                name: name,
+                type: 'local',
+                server: '',
+                share: localPath,
+                path: '',
+                username: null,
+                password: null,
+                domain: null
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            Toast.success(`Local repository '${name}' created successfully!`);
+            hideAddModal();
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            showError('discoverError', data.detail || 'Failed to create repository');
+        }
+    } catch (e) {
+        showError('discoverError', 'Failed to save repository: ' + e.message);
+    }
+    
+    btn.textContent = 'Save Local Repository';
 }
 
 async function discoverShares() {

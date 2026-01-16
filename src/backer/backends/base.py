@@ -1,11 +1,15 @@
 """Abstract base class for all backup backends."""
 
+import logging
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class BackendType(str, Enum):
@@ -16,6 +20,7 @@ class BackendType(str, Enum):
     RESTIC = "restic"
     BORG = "borg"
     KOPIA = "kopia"
+    PROXY = "proxy"  # Proxy to remote server (for local directory storage)
 
 
 class OperationType(str, Enum):
@@ -79,6 +84,74 @@ class BackendBase(ABC):
     def __init__(self, config: dict[str, Any] | None = None):
         """Initialize the backend with optional configuration."""
         self.config = config or {}
+
+    def run_command(
+        self,
+        cmd: list[str],
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute a subprocess command with proper error logging and stderr handling.
+        
+        Args:
+            cmd: Command and arguments as list
+            timeout: Timeout in seconds
+            env: Environment variables dict
+            check: If True, raise CalledProcessError on non-zero return code
+            
+        Returns:
+            CompletedProcess with stdout, stderr, and returncode
+            
+        Raises:
+            subprocess.CalledProcessError: If check=True and returncode != 0
+            subprocess.TimeoutExpired: If command times out
+        """
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                check=False,  # We handle return codes ourselves
+            )
+            
+            # Log stderr if present
+            if result.stderr:
+                backend_name = getattr(self, 'backend_type', 'unknown')
+                if result.returncode != 0:
+                    logger.error(
+                        f"[{backend_name}] Command failed with return code {result.returncode}:\n"
+                        f"Command: {' '.join(cmd)}\n"
+                        f"stderr: {result.stderr}"
+                    )
+                else:
+                    logger.debug(
+                        f"[{backend_name}] Command warnings (stderr):\n"
+                        f"stderr: {result.stderr}"
+                    )
+            
+            # Check for errors if requested
+            if check and result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    cmd,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                )
+            
+            return result
+        except subprocess.TimeoutExpired as e:
+            backend_name = getattr(self, 'backend_type', 'unknown')
+            logger.error(
+                f"[{backend_name}] Command timeout after {timeout}s: {' '.join(cmd)}"
+            )
+            raise
+        except Exception as e:
+            backend_name = getattr(self, 'backend_type', 'unknown')
+            logger.error(f"[{backend_name}] Error executing command: {e}")
+            raise
 
     @abstractmethod
     def check_available(self) -> tuple[bool, str]:

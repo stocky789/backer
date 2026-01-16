@@ -598,6 +598,9 @@ async def settings_page(request: Request):
 
     # Get current timezone setting
     timezone = storage.get_setting("timezone", "UTC")
+    
+    # Get public URL setting for reverse proxy support
+    public_url = storage.get_setting("public_url", "http://localhost:8420")
 
     # Check if settings were just saved
     settings_saved = request.query_params.get("saved") == "1"
@@ -609,6 +612,7 @@ async def settings_page(request: Request):
         "server_url": server_url,
         "data_dir": data_dir,
         "timezone": timezone,
+        "public_url": public_url,
         "settings_saved": settings_saved,
         "user": get_current_user(request),
     })
@@ -618,10 +622,12 @@ async def settings_page(request: Request):
 async def settings_save(
     request: Request,
     timezone: str = Form("UTC"),
+    public_url: str = Form("http://localhost:8420"),
 ):
     """Save settings."""
     storage = get_storage(request)
     storage.set_setting("timezone", timezone)
+    storage.set_setting("public_url", public_url)
 
     # Clear timezone cache so new setting takes effect immediately
     tz.clear_cache()

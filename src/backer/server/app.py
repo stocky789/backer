@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 import re
 import secrets
 import socket
@@ -22,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backer import __version__
 from backer.server import timezone as tz
+from backer.server.auth import generate_agent_token, verify_agent_token
 from backer.server.models import (
     BackupResult,
     Client,
@@ -157,6 +159,38 @@ def _build_backup_command_payload(
                 # NFS info (no password needed typically)
                 payload["nfs_server"] = repo.get("server")
                 payload["nfs_export"] = repo.get("share")
+
+            elif repo_type == "local":
+                # For local repositories, use proxy backend
+                # The agent will stream data to the server via HTTP/HTTPS
+                # Get the public URL for proxy connections
+                public_url = storage.get_setting("public_url", "http://localhost:8420")
+                
+                # Determine proxy scheme based on public_url protocol
+                # Use "proxys://" for HTTPS, "proxy://" for HTTP
+                if public_url.startswith("https://"):
+                    proxy_scheme = "proxys"
+                    # Extract host:port from https URL
+                    host_part = public_url[8:]  # Remove "https://"
+                else:
+                    proxy_scheme = "proxy"
+                    # Extract host:port from http URL
+                    host_part = public_url[7:]  # Remove "http://"
+                
+                # Generate proxy URI: proxy://server/repo/{id} or proxys://server/repo/{id}
+                proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}"
+                
+                # Override destination_path with proxy URI
+                payload["destination_path"] = proxy_uri
+                
+                # Override backend to use proxy
+                payload["backend"] = "proxy"
+                
+                # Include repository password for proxy backend
+                if repo_password:
+                    payload["backend_options"]["password"] = repo_password
+                
+                logger.debug(f"[BACKUP] Using proxy backend for local repo: {proxy_uri} (scheme={proxy_scheme})")
 
             # For restic/kopia backends, include the repository password
             # This is needed for the agent to authenticate with the backup repository
@@ -2486,6 +2520,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         # Startup
         logger.info("Starting Backer server...")
+        
+        # Load PUBLIC_URL from environment if set (for reverse proxy support)
+        public_url = os.getenv("BACKER_PUBLIC_URL")
+        if public_url:
+            _storage.set_setting("public_url", public_url)
+            logger.info(f"Public URL configured: {public_url}")
+        else:
+            # Fall back to database setting or default
+            existing_url = _storage.get_setting("public_url")
+            if existing_url:
+                logger.info(f"Using stored public URL: {existing_url}")
+            else:
+                # Set default
+                default_url = "http://localhost:8420"
+                _storage.set_setting("public_url", default_url)
+                logger.info(f"Using default public URL: {default_url}")
+        
         if _scheduler:
             _scheduler.start()
         yield
@@ -2609,6 +2660,57 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             client_secret=client_secret,
             server_version=__version__,
         )
+
+    @app.post("/api/v1/clients/token")
+    def get_agent_token(
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Generate a JWT token for an agent using client credentials.
+        
+        Authentication: HTTP Basic (client_id:client_secret)
+        Returns: JWT token valid for 24 hours
+        """
+        if not credentials:
+            raise HTTPException(
+                status_code=401,
+                detail="Client credentials required",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        
+        # Verify client exists and credentials are valid
+        client = storage.get_client(credentials.username)
+        if not client:
+            raise HTTPException(status_code=401, detail="Invalid client ID")
+        
+        # Verify secret
+        secret_hash = storage.get_client_secret_hash(credentials.username)
+        provided_hash = hashlib.sha256(credentials.password.encode()).hexdigest()
+        
+        if not secrets.compare_digest(secret_hash or "", provided_hash):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        # Generate JWT token
+        try:
+            token = generate_agent_token(
+                client_id=credentials.username,
+                additional_claims={
+                    "client_name": client.name,
+                    "client_hostname": client.hostname,
+                },
+            )
+            
+            logger.info(f"Generated token for client: {credentials.username} ({client.name})")
+            
+            return {
+                "token": token,
+                "token_type": "Bearer",
+                "expires_in": 86400,  # 24 hours in seconds
+                "client_id": credentials.username,
+            }
+        except Exception as e:
+            logger.error(f"Failed to generate token: {e}")
+            raise HTTPException(status_code=500, detail="Token generation failed")
 
     @app.get("/api/v1/clients", response_model=list[Client])
     def list_clients(storage: Storage = Depends(get_storage)) -> list[Client]:
@@ -3848,6 +3950,42 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="Repository name already exists")
 
         repo_id = str(uuid4())[:8]
+        repo_type = data.get("type", "smb")
+        
+        # Validate local repository paths
+        if repo_type == "local":
+            local_path = data.get("share", "").strip()
+            if not local_path:
+                raise HTTPException(status_code=400, detail="Local path required")
+            
+            # Normalize and validate path (cross-platform)
+            try:
+                path_obj = Path(local_path).resolve().absolute()
+                
+                # Security: Reject paths that resolve to home directory or its parents
+                try:
+                    path_obj.relative_to(Path.home())
+                    raise HTTPException(status_code=400, detail="Cannot use home directory or subdirectories for backups")
+                except ValueError:
+                    # Good - path is not under home directory
+                    pass
+                
+                # Check if path exists or can be created
+                path_obj.mkdir(parents=True, exist_ok=True)
+                
+                # Verify it's readable and writable
+                if not os.access(path_obj, os.R_OK | os.W_OK):
+                    raise HTTPException(status_code=400, detail="Local path must be readable and writable")
+                
+                # Update share with absolute normalized path (cross-platform compatible)
+                data["share"] = str(path_obj)
+                logger.info(f"[CREATE REPO] Validated local path: {path_obj}")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"[CREATE REPO] Failed to validate local path '{local_path}': {e}")
+                raise HTTPException(status_code=400, detail=f"Invalid local path: {str(e)}")
+        
         password = data.get("password")
         password_encrypted = None
         if password:
@@ -3857,7 +3995,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage.add_repository(
             repo_id=repo_id,
             name=name,
-            repo_type=data.get("type", "smb"),
+            repo_type=repo_type,
             server=data.get("server"),
             share=data.get("share"),
             path=data.get("path", ""),
@@ -11381,6 +11519,259 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "Connection": "keep-alive",
             }
         )
+
+    # ============ Proxy Repository Operations ============
+    # These endpoints handle backup/restore/check operations for agents
+    # using local directory storage via the proxy backend.
+
+    def _verify_repo_access(
+        repo_id: str,
+        credentials: HTTPBasicCredentials | None,
+        storage: Storage,
+        authorization: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Verify that an agent has access to a repository.
+        
+        Supports two authentication methods:
+        1. Bearer token (JWT) via Authorization header
+        2. HTTP Basic auth (client_id:client_secret)
+        
+        Returns: (repository_dict, password)
+        Raises: HTTPException if access denied
+        """
+        # Verify repository exists and is local type
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        
+        if repo.get("repo_type") != "local":
+            raise HTTPException(status_code=400, detail="Repository is not local type")
+        
+        # Check for bearer token first (preferred method)
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization[7:]  # Remove "Bearer " prefix
+            claims = verify_agent_token(token)
+            if not claims:
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+            logger.debug(f"[AUTH] Repository access verified via JWT token for {claims.get('sub')}")
+        # Fall back to HTTP Basic auth
+        elif credentials:
+            client = storage.get_client(credentials.username)
+            if not client:
+                raise HTTPException(status_code=401, detail="Invalid client ID")
+            
+            secret_hash = storage.get_client_secret_hash(credentials.username)
+            provided_hash = hashlib.sha256(credentials.password.encode()).hexdigest()
+            
+            if not secrets.compare_digest(secret_hash or "", provided_hash):
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            logger.debug(f"[AUTH] Repository access verified via HTTP Basic auth for {credentials.username}")
+        else:
+            raise HTTPException(status_code=401, detail="Authentication required (Bearer token or Basic auth)")
+        
+        # Get repository password (secure)
+        password = storage.get_repository_password(repo_id) or ""
+        
+        return repo, password
+
+    @app.get("/api/repo/{repo_id}/check")
+    async def proxy_repo_check(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Check if a repository is available (health check for proxy backend)."""
+        auth_header = request.headers.get("authorization")
+        repo, _ = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        
+        # Check if local path exists and is readable
+        # For local repos, the path is stored in the 'share' field
+        local_path = repo.get("share")
+        if not local_path:
+            return {"available": False, "error": "No local path configured"}
+        
+        path = Path(local_path)
+        if not path.exists():
+            return {"available": False, "error": f"Path does not exist: {local_path}"}
+        
+        if not path.is_dir():
+            return {"available": False, "error": f"Path is not a directory: {local_path}"}
+        
+        if not os.access(path, os.R_OK):
+            return {"available": False, "error": f"Path is not readable: {local_path}"}
+        
+        return {"available": True, "message": "OK"}
+
+    @app.post("/api/repo/{repo_id}/init")
+    async def proxy_repo_init(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Initialize a backup repository on the server."""
+        auth_header = request.headers.get("authorization")
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        
+        # Parse request body (password may be sent for verification)
+        try:
+            body = await request.json()
+            # Use repository password, not from body
+        except Exception:
+            pass
+        
+        local_path = repo.get("share")
+        if not local_path:
+            return {"success": False, "error": "No local path configured"}
+        
+        path = Path(local_path)
+        
+        # Ensure directory exists and is writable
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            if not os.access(path, os.W_OK):
+                return {"success": False, "error": f"Path is not writable: {local_path}"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to create/access directory: {e}"}
+        
+        # Get the actual backend type to use (stored in config)
+        config = json.loads(repo.get("config", "{}"))
+        backend_type = config.get("backend_type", "restic")
+        
+        try:
+            # Import here to avoid circular imports
+            from backer.backends.registry import get_backend
+            from backer.backends.base import BackupDestination
+            
+            backend = get_backend(backend_type, {
+                "password": repo_password,
+            })
+            
+            dest = BackupDestination(path=str(path), backend_type=backend_type)
+            result = backend.init_repo(dest)
+            
+            return {
+                "success": result.success,
+                "output": result.output,
+                "error": result.errors[0] if result.errors else None,
+            }
+        except Exception as e:
+            logger.error(f"Failed to init repository {repo_id}: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/repo/{repo_id}/snapshots")
+    async def proxy_repo_snapshots(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """List snapshots in the repository."""
+        auth_header = request.headers.get("authorization")
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        
+        try:
+            from backer.backends.registry import get_backend
+            from backer.backends.base import BackupDestination
+            
+            local_path = repo.get("share")
+            config = json.loads(repo.get("config", "{}"))
+            backend_type = config.get("backend_type", "restic")
+            
+            backend = get_backend(backend_type, {
+                "password": repo_password,
+            })
+            
+            dest = BackupDestination(path=str(local_path), backend_type=backend_type)
+            snapshots = backend.list_snapshots(dest)
+            
+            return {"snapshots": snapshots}
+        except Exception as e:
+            logger.error(f"Failed to list snapshots for {repo_id}: {e}")
+            return {"snapshots": [], "error": str(e)}
+
+    @app.post("/api/repo/{repo_id}/prune")
+    async def proxy_repo_prune(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Prune the repository to remove unused data."""
+        auth_header = request.headers.get("authorization")
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        
+        try:
+            body = await request.json()
+            dry_run = body.get("dry_run", False)
+        except Exception:
+            dry_run = False
+        
+        try:
+            from backer.backends.registry import get_backend
+            from backer.backends.base import BackupDestination
+            
+            local_path = repo.get("share")
+            config = json.loads(repo.get("config", "{}"))
+            backend_type = config.get("backend_type", "restic")
+            
+            backend = get_backend(backend_type, {
+                "password": repo_password,
+            })
+            
+            dest = BackupDestination(path=str(local_path), backend_type=backend_type)
+            result = backend.prune(dest, dry_run=dry_run)
+            
+            return {
+                "success": result.success,
+                "output": result.output,
+                "error": result.errors[0] if result.errors else None,
+            }
+        except Exception as e:
+            logger.error(f"Failed to prune repository {repo_id}: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/repo/{repo_id}/check-integrity")
+    async def proxy_repo_check_integrity(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Check repository integrity."""
+        auth_header = request.headers.get("authorization")
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        
+        try:
+            body = await request.json()
+            dry_run = body.get("dry_run", False)
+        except Exception:
+            dry_run = False
+        
+        try:
+            from backer.backends.registry import get_backend
+            from backer.backends.base import BackupDestination
+            
+            local_path = repo.get("share")
+            config = json.loads(repo.get("config", "{}"))
+            backend_type = config.get("backend_type", "restic")
+            
+            backend = get_backend(backend_type, {
+                "password": repo_password,
+            })
+            
+            dest = BackupDestination(path=str(local_path), backend_type=backend_type)
+            result = backend.check(dest, dry_run=dry_run)
+            
+            return {
+                "success": result.success,
+                "output": result.output,
+                "error": result.errors[0] if result.errors else None,
+            }
+        except Exception as e:
+            logger.error(f"Failed to check repository {repo_id}: {e}")
+            return {"success": False, "error": str(e)}
 
     # ============ Web UI ============
 
