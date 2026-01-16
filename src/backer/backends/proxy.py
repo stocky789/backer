@@ -352,22 +352,132 @@ class ProxyBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
     ) -> BackendResult:
-        """Stream backup data to server."""
+        """Stream backup data to server via tar archive.
+
+        Creates a tar.gz archive of the source directory and streams it
+        to the server, which extracts it to the configured local path.
+        """
+        import tarfile
+        import tempfile
+
         started_at = datetime.now()
+        bytes_transferred = 0
+        files_transferred = 0
 
         try:
-            # For proxy, we just return that the backup should be streamed
-            # The actual backup is handled by job.py which calls this backend
-            logger.info(f"[PROXY] Backup starting via proxy to {self.server_url}/repo/{self.repo_id}")
+            logger.info(f"[PROXY] Backup starting: {source.path} -> {self.server_url}/repo/{self.repo_id}")
 
-            return BackendResult(
-                success=True,
-                operation=OperationType.BACKUP,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                output="Backup streamed via proxy",
-                return_code=0,
-            )
+            if dry_run:
+                logger.info("[PROXY] Dry run - not actually transferring data")
+                return BackendResult(
+                    success=True,
+                    operation=OperationType.BACKUP,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    output="Dry run completed (no data transferred)",
+                    return_code=0,
+                )
+
+            # Verify source exists
+            source_path = Path(source.path)
+            if not source_path.exists():
+                raise FileNotFoundError(f"Source path does not exist: {source_path}")
+
+            # Create tar archive in memory-efficient way using temp file
+            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+                tmp_path = tmp.name
+
+            try:
+                logger.info(f"[PROXY] Creating tar archive of {source_path}")
+
+                # Build exclude filter
+                def exclude_filter(tarinfo: Any) -> Any | None:
+                    for pattern in source.excludes:
+                        if pattern in tarinfo.name or tarinfo.name.endswith(pattern):
+                            return None
+                    return tarinfo
+
+                # Create compressed tar archive
+                with tarfile.open(tmp_path, "w:gz") as tar:
+                    # Add files with progress tracking
+                    if source_path.is_file():
+                        tar.add(str(source_path), arcname=source_path.name, filter=exclude_filter)
+                        files_transferred = 1
+                    else:
+                        for item in source_path.rglob("*"):
+                            if item.is_file():
+                                arcname = str(item.relative_to(source_path))
+                                member = tar.gettarinfo(str(item), arcname=arcname)
+                                if exclude_filter(member):
+                                    with open(item, "rb") as f:
+                                        tar.addfile(member, f)
+                                    files_transferred += 1
+
+                                    if progress_callback and files_transferred % 100 == 0:
+                                        try:
+                                            progress_callback(
+                                                bytes_done=0,
+                                                files_done=files_transferred,
+                                                current_file=arcname,
+                                            )
+                                        except Exception:
+                                            pass
+
+                # Get archive size
+                archive_size = Path(tmp_path).stat().st_size
+                logger.info(f"[PROXY] Archive created: {archive_size / 1024 / 1024:.1f}MB, {files_transferred} files")
+
+                # Stream upload to server
+                logger.info(f"[PROXY] Uploading to {self.server_url}/api/repo/{self.repo_id}/backup")
+
+                # Get the destination subfolder from the destination path
+                # The destination.path contains the full path including job subfolder
+                dest_subfolder = str(destination.path) if destination.path else ""
+
+                with open(tmp_path, "rb") as f:
+                    # Use chunked upload for memory efficiency
+                    headers = self._get_auth_headers()
+                    headers["Content-Type"] = "application/gzip"
+                    headers["Content-Length"] = str(archive_size)
+                    headers["X-Backup-Subfolder"] = dest_subfolder
+                    headers["X-Source-Path"] = str(source_path)
+
+                    response = self.session.post(
+                        f"{self.server_url}/api/repo/{self.repo_id}/backup",
+                        data=f,
+                        headers=headers,
+                        timeout=self.timeout,
+                        verify=self.verify_ssl,
+                    )
+
+                    if response.status_code >= 400:
+                        error_detail = response.text[:500] if response.text else "No response body"
+                        raise RuntimeError(f"Upload failed (HTTP {response.status_code}): {error_detail}")
+
+                    result = response.json()
+                    bytes_transferred = archive_size
+
+                logger.info(f"[PROXY] Backup completed: {bytes_transferred / 1024 / 1024:.1f}MB uploaded")
+
+                return BackendResult(
+                    success=result.get("success", True),
+                    operation=OperationType.BACKUP,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    output=result.get("message", "Backup streamed via proxy"),
+                    bytes_transferred=bytes_transferred,
+                    files_transferred=files_transferred,
+                    return_code=0 if result.get("success") else 1,
+                    errors=result.get("errors", []),
+                )
+
+            finally:
+                # Clean up temp file
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+
         except Exception as e:
             logger.error(f"[PROXY] Backup failed: {e}")
             return BackendResult(

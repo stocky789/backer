@@ -11804,6 +11804,74 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             logger.error(f"Failed to check repository {repo_id}: {e}")
             return {"success": False, "error": str(e)}
 
+    @app.post("/api/repo/{repo_id}/backup")
+    async def proxy_repo_backup(
+        repo_id: str,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """Receive backup data from agent and extract to local repository."""
+        import tarfile
+        import tempfile
+
+        auth_header = request.headers.get("authorization")
+        repo, _ = _verify_repo_access(repo_id, credentials, storage, auth_header)
+
+        local_path = repo.get("share")
+        if not local_path:
+            return {"success": False, "error": "No local path configured"}
+
+        # Get destination subfolder from headers
+        subfolder = request.headers.get("X-Backup-Subfolder", "")
+        source_path = request.headers.get("X-Source-Path", "unknown")
+
+        # Build full destination path
+        dest_path = Path(local_path)
+        if subfolder:
+            # Extract just the relative part after the repo path
+            if subfolder.startswith(local_path):
+                subfolder = subfolder[len(local_path):].lstrip("/\\")
+            dest_path = dest_path / subfolder
+
+        dest_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[PROXY BACKUP] Receiving backup from {source_path} to {dest_path}")
+
+        try:
+            # Stream body to temp file
+            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+                tmp_path = tmp.name
+                bytes_received = 0
+                async for chunk in request.stream():
+                    tmp.write(chunk)
+                    bytes_received += len(chunk)
+
+            logger.info(f"[PROXY BACKUP] Received {bytes_received / 1024 / 1024:.1f}MB")
+
+            # Extract tar archive
+            with tarfile.open(tmp_path, "r:gz") as tar:
+                tar.extractall(path=str(dest_path))
+                members = tar.getnames()
+
+            # Clean up
+            Path(tmp_path).unlink()
+
+            logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {dest_path}")
+            return {
+                "success": True,
+                "message": f"Backup received: {len(members)} files, {bytes_received / 1024 / 1024:.1f}MB",
+                "files": len(members),
+                "bytes": bytes_received,
+            }
+
+        except Exception as e:
+            logger.error(f"[PROXY BACKUP] Failed: {e}")
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+            return {"success": False, "error": str(e)}
+
     # ============ Web UI ============
 
     # Store storage in app state for web routes
