@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -893,8 +894,7 @@ class AgentService:
                 dest_path = Path(destination_path)
                 if dest_path.exists():
                     logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
-                    import shutil
-                    shutil.rmtree(destination_path)
+                    self._clear_destination_contents(dest_path)
                     # Don't recreate the directory - let restic create it
                     # This avoids metadata conflicts that can cause restore issues
 
@@ -947,6 +947,46 @@ class AgentService:
                 error=str(e),
             )
             raise
+
+    def _clear_destination_contents(self, dest_path: Path) -> None:
+        """Delete contents of a destination directory without removing the directory itself."""
+        for item in dest_path.iterdir():
+            try:
+                if item.is_dir():
+                    self._remove_path(item)
+                else:
+                    self._remove_file(item)
+            except Exception as exc:
+                logger.warning(f"[RESTORE] Failed to remove {item}: {exc}")
+
+    def _remove_file(self, path: Path) -> None:
+        """Remove a file, retrying after making it writable when needed."""
+        try:
+            path.unlink()
+        except PermissionError:
+            self._make_writable(path)
+            path.unlink()
+
+    def _remove_path(self, path: Path) -> None:
+        """Remove a directory tree, ensuring files are writable when needed."""
+        import shutil
+
+        def onerror(func, target, exc_info):
+            try:
+                self._make_writable(Path(target))
+                func(target)
+            except Exception:
+                raise
+
+        shutil.rmtree(path, onerror=onerror)
+
+    def _make_writable(self, path: Path) -> None:
+        """Ensure a path is writable (helps with Windows read-only files)."""
+        try:
+            mode = path.stat().st_mode
+            path.chmod(mode | stat.S_IWRITE)
+        except OSError as exc:
+            logger.debug(f"[RESTORE] Failed to chmod {path}: {exc}")
 
     def _get_tool_path(self, tool_name: str) -> Path:
         """Get path to a backup tool, using tool manager if available."""

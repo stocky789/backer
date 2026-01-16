@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     smbclient \
     nfs-common \
     sshpass \
+    rsync \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user
@@ -25,13 +27,14 @@ WORKDIR /app
 COPY . /app
 
 # Install backer
-RUN pip install --no-cache-dir -e ".[server]"
+RUN pip install --no-cache-dir ".[server]"
 
 # Create data directory
 RUN mkdir -p /data/tools /data/logs
 
 # Set environment before setup so tools are downloaded to /data/tools
 ENV BACKER_DATA_DIR=/data
+ENV PATH=/data/tools:$PATH
 ENV PYTHONUNBUFFERED=1
 
 # Download backup tools (rclone, restic, kopia)

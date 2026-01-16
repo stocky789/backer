@@ -32,6 +32,8 @@ Access the web UI at `http://your-server:8420`
 
 ### Docker
 
+The Docker image includes pre-installed backup tools (rclone, restic, kopia) for immediate use.
+
 ```bash
 docker run -d --name backer \
   -p 8420:8420 \
