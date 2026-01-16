@@ -19,7 +19,7 @@ class BackendRegistry:
 
         # Import backend modules to register them
         backends_to_load = ['kopia', 'proxy', 'rclone', 'restic', 'rsync']
-        
+
         for backend_name in backends_to_load:
             try:
                 __import__(f'backer.backends.{backend_name}', fromlist=[backend_name])
