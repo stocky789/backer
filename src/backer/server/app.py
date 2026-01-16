@@ -4086,7 +4086,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         def test_connection(task: Task) -> dict[str, Any]:
             """Background task to test repository connection."""
-            from backer.server.repositories import NFSBrowser, SMBBrowser
+            from backer.server.repositories import LocalBrowser, NFSBrowser, SMBBrowser
 
             task.message = f"Testing connection to {server}..."
             task.progress = 20
@@ -4113,6 +4113,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         message = f"NFS server responding, {len(result)} exports available"
                     else:
                         message = result
+                elif repo_type == "local":
+                    # For local repos, the path is stored in 'share' field
+                    local_path = share or repo.get("path", "/")
+                    task.message = f"Testing local path {local_path}..."
+                    task.progress = 40
+                    success, message = LocalBrowser.test_connection(local_path)
                 else:
                     success, message = False, "Test not supported for this repository type"
 

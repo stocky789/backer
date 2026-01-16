@@ -438,6 +438,38 @@ class LocalBrowser:
     """Browse local filesystem directories."""
 
     @staticmethod
+    def test_connection(path: str) -> tuple[bool, str]:
+        """Test if a local directory is accessible."""
+        try:
+            dir_path = Path(path)
+
+            if not dir_path.exists():
+                return False, f"Path does not exist: {path}"
+
+            if not dir_path.is_dir():
+                return False, f"Not a directory: {path}"
+
+            # Check read/write permissions
+            if not os.access(dir_path, os.R_OK):
+                return False, f"Path is not readable: {path}"
+
+            if not os.access(dir_path, os.W_OK):
+                return False, f"Path is not writable: {path}"
+
+            # Try to list directory contents as additional verification
+            try:
+                list(dir_path.iterdir())
+            except PermissionError:
+                return False, f"Cannot list directory contents: {path}"
+
+            return True, f"Local directory accessible: {path}"
+
+        except PermissionError as e:
+            return False, f"Permission denied: {e}"
+        except Exception as e:
+            return False, f"Error accessing path: {e}"
+
+    @staticmethod
     def list_directory(path: str = "/") -> tuple[bool, list[DirectoryEntry] | str]:
         """List contents of a local directory."""
         try:
@@ -483,6 +515,27 @@ def discover_shares(
         return SMBBrowser.list_shares(server, username, password, domain)
     elif repo_type == RepositoryType.NFS:
         return NFSBrowser.list_exports(server)
+    elif repo_type == RepositoryType.LOCAL:
+        # For LOCAL repos, return root directories as "shares"
+        try:
+            root = Path("/")
+            shares = []
+            for entry in root.iterdir():
+                if entry.is_dir():
+                    try:
+                        # Only include accessible directories
+                        list(entry.iterdir())
+                        shares.append(ShareInfo(
+                            name=entry.name,
+                            path=str(entry),
+                            share_type="directory",
+                        ))
+                    except (PermissionError, OSError):
+                        continue
+            shares.sort(key=lambda s: s.name.lower())
+            return True, shares
+        except Exception as e:
+            return False, f"Error listing root directories: {e}"
     else:
         return False, f"Discovery not supported for {repo_type}"
 
