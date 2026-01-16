@@ -411,9 +411,29 @@ chmod +x /usr/local/bin/backer
 success "Command 'backer' available system-wide"
 
 # Enable and start service
-info "Starting Backer service..."
-systemctl enable backer --quiet
-systemctl start backer
+info "Starting Backer service with full system access..."
+systemctl enable backer.service --quiet
+systemctl restart backer.service
+
+# Wait a moment for service to start
+sleep 2
+
+# Verify service is running as root
+info "Verifying service permissions..."
+SERVICE_USER=$(ps aux 2>/dev/null | grep -E '[b]acker server start' | awk '{print $1}' | head -n1)
+if [ -z "$SERVICE_USER" ]; then
+    # Try alternative check
+    SERVICE_USER=$(systemctl show backer.service -p User --value 2>/dev/null)
+fi
+
+if [ "$SERVICE_USER" = "root" ] || [ -z "$SERVICE_USER" ]; then
+    # If we can't determine user but service started, it's likely root
+    success "Backer service has full system access (root)"
+else
+    error "Service is running as '$SERVICE_USER' instead of 'root'"
+    error "This prevents access to /home directories and other user paths"
+    error "Please reinstall with: sudo ./install.sh"
+fi
 
 # Wait for the HTTP server to be ready (not just the process)
 info "Waiting for server to be ready..."
