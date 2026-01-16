@@ -169,14 +169,82 @@ class RepositoryMetadata:
             raise RepositoryMetadataError(f"Failed to create metadata directories: {e}")
 
     def _read_json(self, path: Path) -> dict[str, Any] | None:
-        """Read a JSON file from the repository."""
+        """Read a JSON file from the repository.
+
+        Falls back to sudo cat if normal read fails with permission error.
+        This helps with NFS mounts where file ownership doesn't match.
+        """
         try:
             if path.exists():
                 return json.loads(path.read_text(encoding="utf-8"))
             return None
+        except PermissionError:
+            # Try sudo fallback for NFS permission issues
+            return self._read_json_sudo(path)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to read {path}: {e}")
             return None
+
+    def _read_json_sudo(self, path: Path) -> dict[str, Any] | None:
+        """Read a JSON file using sudo (fallback for NFS permission issues)."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "cat", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout)
+            logger.warning(f"sudo cat failed for {path}: {result.stderr}")
+            return None
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to read {path} with sudo: {e}")
+            return None
+
+    def _list_dirs_sudo(self, path: Path) -> list[str]:
+        """List directories using sudo (fallback for NFS permission issues)."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "ls", "-1", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return [d for d in result.stdout.strip().split('\n') if d]
+            return []
+        except (subprocess.TimeoutExpired, OSError):
+            return []
+
+    def _list_json_files_sudo(self, path: Path) -> list[dict[str, Any]]:
+        """List and read JSON files in a directory using sudo."""
+        import subprocess
+
+        results = []
+        try:
+            # List files
+            ls_result = subprocess.run(
+                ["sudo", "-n", "ls", "-1", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if ls_result.returncode != 0:
+                return []
+
+            for filename in ls_result.stdout.strip().split('\n'):
+                if filename.endswith('.json'):
+                    data = self._read_json_sudo(path / filename)
+                    if data:
+                        results.append(data)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return results
 
     def _write_json(self, path: Path, data: dict[str, Any]) -> bool:
         """Write a JSON file to the repository (thread-safe with file locking)."""
@@ -294,10 +362,14 @@ class RepositoryMetadata:
             return []
 
         agents = []
-        for agent_file in agents_dir.glob("*.json"):
-            agent_data = self._read_json(agent_file)
-            if agent_data:
-                agents.append(agent_data)
+        try:
+            for agent_file in agents_dir.glob("*.json"):
+                agent_data = self._read_json(agent_file)
+                if agent_data:
+                    agents.append(agent_data)
+        except PermissionError:
+            # Try sudo fallback for NFS permission issues
+            agents = self._list_json_files_sudo(agents_dir)
 
         return agents
 
@@ -360,16 +432,29 @@ class RepositoryMetadata:
             return []
 
         jobs = []
-        for job_dir in jobs_dir.iterdir():
-            if job_dir.is_dir():
+        try:
+            for job_dir in jobs_dir.iterdir():
+                if job_dir.is_dir():
+                    job_data = self._read_json(job_dir / "config.json")
+                    if job_data:
+                        # Add run count
+                        runs_dir = job_dir / "runs"
+                        try:
+                            if runs_dir.exists():
+                                job_data["run_count"] = len(list(runs_dir.glob("*.json")))
+                            else:
+                                job_data["run_count"] = 0
+                        except PermissionError:
+                            job_data["run_count"] = 0
+                        jobs.append(job_data)
+        except PermissionError:
+            # Try sudo fallback for NFS permission issues
+            job_dirs = self._list_dirs_sudo(jobs_dir)
+            for job_dir_name in job_dirs:
+                job_dir = jobs_dir / job_dir_name
                 job_data = self._read_json(job_dir / "config.json")
                 if job_data:
-                    # Add run count
-                    runs_dir = job_dir / "runs"
-                    if runs_dir.exists():
-                        job_data["run_count"] = len(list(runs_dir.glob("*.json")))
-                    else:
-                        job_data["run_count"] = 0
+                    job_data["run_count"] = 0  # Skip run count with sudo
                     jobs.append(job_data)
 
         return jobs
@@ -467,10 +552,14 @@ class RepositoryMetadata:
             return []
 
         snapshots = []
-        for snapshot_file in snapshots_dir.glob("*.json"):
-            snapshot_data = self._read_json(snapshot_file)
-            if snapshot_data:
-                snapshots.append(snapshot_data)
+        try:
+            for snapshot_file in snapshots_dir.glob("*.json"):
+                snapshot_data = self._read_json(snapshot_file)
+                if snapshot_data:
+                    snapshots.append(snapshot_data)
+        except PermissionError:
+            # Try sudo fallback for NFS permission issues
+            snapshots = self._list_json_files_sudo(snapshots_dir)
 
         # Sort by time, newest first
         snapshots.sort(
@@ -530,8 +619,20 @@ class RepositoryMetadata:
             if not folder.exists():
                 return
 
-            for item in folder.iterdir():
-                if item.is_dir() and not item.name.startswith('.'):
+            # Try normal iteration, fall back to sudo ls
+            try:
+                items = list(folder.iterdir())
+            except PermissionError:
+                item_names = self._list_dirs_sudo(folder)
+                items = [folder / name for name in item_names]
+
+            for item in items:
+                try:
+                    is_dir = item.is_dir()
+                except PermissionError:
+                    continue  # Skip items we can't stat
+
+                if is_dir and not item.name.startswith('.'):
                     # Check if this subfolder has .backer metadata
                     subfolder_meta = RepositoryMetadata(item, self.repo_type)
                     if subfolder_meta.is_initialized():
@@ -564,9 +665,20 @@ class RepositoryMetadata:
 
             # Also scan legacy structure (direct subfolders)
             # Skip Agents/ and Hypervisors/ folders as they use the new structure
-            for item in self.repo_path.iterdir():
-                skip_dirs = ('.', '..', 'Agents', 'Hypervisors')
-                if item.is_dir() and item.name not in skip_dirs and not item.name.startswith('.'):
+            try:
+                items = list(self.repo_path.iterdir())
+            except PermissionError:
+                item_names = self._list_dirs_sudo(self.repo_path)
+                items = [self.repo_path / name for name in item_names]
+
+            skip_dirs = ('.', '..', 'Agents', 'Hypervisors')
+            for item in items:
+                try:
+                    is_dir = item.is_dir()
+                except PermissionError:
+                    continue
+
+                if is_dir and item.name not in skip_dirs and not item.name.startswith('.'):
                     subfolder_meta = RepositoryMetadata(item, self.repo_type)
                     if subfolder_meta.is_initialized():
                         found_any = True

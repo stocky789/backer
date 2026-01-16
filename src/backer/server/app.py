@@ -4590,8 +4590,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         if subpath:
                             scan_path = scan_path.rstrip("/") + "/" + subpath
 
-                        repo_meta = RepositoryMetadata(scan_path, repo_type)
-                        return format_result(repo_meta.discover_all())
+                        try:
+                            repo_meta = RepositoryMetadata(scan_path, repo_type)
+                            return format_result(repo_meta.discover_all())
+                        except PermissionError as perm_err:
+                            return {
+                                "success": False,
+                                "error": f"Permission denied reading NFS files: {perm_err}",
+                                "repository_id": repo_id,
+                                "repository_name": repo_name,
+                                "path": display_path,
+                                "hint": (
+                                    "NFS permission issue. The container user (UID 1000) "
+                                    "cannot read files on the share. Solutions:\n"
+                                    "1. On NFS server: chmod -R o+r on backup files\n"
+                                    "2. Use 'all_squash,anonuid=1000' in NFS exports\n"
+                                    "3. Run container with matching UID via --user flag"
+                                ),
+                            }
 
                     finally:
                         # Always cleanup: unmount and remove temp dir
