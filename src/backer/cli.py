@@ -283,20 +283,6 @@ def _check_server_dependencies() -> None:
         )
 
 
-def _verify_server_package() -> None:
-    """Verify that the backer server package is properly installed.
-
-    Raises ImportError if the server package is not properly installed.
-    """
-    try:
-        import backer.server.auth  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            f"Backer server package not properly installed: {e}. "
-            "Try reinstalling with: pip install --force-reinstall 'backer[server]'"
-        ) from e
-
-
 @server.command("start")
 @click.option("--host", "-h", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8420, help="Port to listen on")
@@ -309,13 +295,12 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
         # Check dependencies before importing server modules
         _check_server_dependencies()
 
-        # Verify that the server package is properly installed
-        _verify_server_package()
-
+        # Import and run the server daemon
         from backer.server.daemon import run_server
         run_server(host=host, port=port, data_dir=data_dir)
     except ImportError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] Server dependencies not installed: {e}")
+        console.print("[yellow]Install with:[/yellow] pip install 'backer[server]'")
         raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Error:[/red] Failed to start server: {e}")
