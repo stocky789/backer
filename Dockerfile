@@ -14,11 +14,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nfs-common \
     sshpass \
     rsync \
+    sudo \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user
 RUN useradd --system --home-dir /data --shell /bin/false backer
+
+# Allow backer to mount/unmount for SMB/NFS repos (Docker)
+RUN echo "backer ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount" > /etc/sudoers.d/backer-mount \
+    && chmod 440 /etc/sudoers.d/backer-mount
 
 # Set working directory
 WORKDIR /app

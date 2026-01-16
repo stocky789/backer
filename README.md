@@ -53,7 +53,7 @@ Access the web UI at `http://your-server:8420`
 
 ### Docker
 
-The Docker image includes pre-installed backup tools (rclone, restic, kopia) for immediate use.
+The Docker image includes pre-installed backup tools (rclone, restic, kopia) for immediate use. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
 
 ```bash
 docker run -d --name backer \

@@ -7,8 +7,7 @@
 
 services:
   backer:
-    build: .
-    image: backer:latest
+    image: ghcr.io/stocky789/backer:latest
     container_name: backer
     restart: unless-stopped
     ports:
@@ -18,33 +17,12 @@ services:
       # Optional: Mount backup destinations
       # - /mnt/backups:/mnt/backups
     environment:
-      - BACKER_DATA_DIR=/data
+      BACKER_DATA_DIR: /data
     # Required for SMB/NFS mounts inside container
     cap_add:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
-    # Resource limits to prevent container from consuming all host resources
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    # Log rotation to prevent disk fill
-    logging:
-      driver: json-file
-      options:
-        max-size: "100m"
-        max-file: "5"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8420/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
 volumes:
   backer-data:
