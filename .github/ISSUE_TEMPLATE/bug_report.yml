@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a problem with Backer
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Describe the issue and what you expected to happen.
+      placeholder: "When I ... I expected ... but ..."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: Provide steps to reproduce the behavior.
+      placeholder: "1. ... 2. ... 3. ..."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Logs
+      description: Paste relevant logs (redact secrets).
+      render: shell
+  - type: input
+    attributes:
+      label: Backer version
+      placeholder: "e.g., 0.6.7"
+  - type: input
+    attributes:
+      label: OS / Environment
+      placeholder: "Ubuntu 22.04, Docker, etc."

@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an idea for Backer
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    attributes:
+      label: What problem does this solve?
+      description: Describe the problem you're trying to solve.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed solution
+      description: How should Backer work?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: Optional — other approaches you thought about.

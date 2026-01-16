@@ -47,5 +47,10 @@ htmlcov/
 *.db-journal
 .backer/
 
+# Logs & build artifacts
+backer-agent-*.log
+Backer/
+.ruff_cache/
+
 # Claude instructions
 claude.md

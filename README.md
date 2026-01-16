@@ -4,6 +4,27 @@ Open-source backup management with a web UI. Supports agent-based backups for Wi
 
 **Default Login**: `admin` / `admin`
 
+## Quick Start
+
+### Docker (fastest)
+
+```bash
+docker run -d --name backer \
+  -p 8420:8420 \
+  -v backer-data:/data \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  ghcr.io/stocky789/backer:latest
+```
+
+### Linux Installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
+```
+
+Access the web UI at `http://your-server:8420`.
+
 ## Development Status
 
 ### Agent Backups
