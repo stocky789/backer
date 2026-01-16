@@ -49,7 +49,7 @@ htmlcov/
 
 # Logs & build artifacts
 backer-agent-*.log
-Backer/
+# Note: Removed 'Backer/' as it conflicts with src/backer on case-insensitive filesystems
 .ruff_cache/
 
 # Claude instructions
