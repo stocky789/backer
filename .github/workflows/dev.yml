@@ -230,7 +230,7 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           VERSION="dev"
-          TAG="dev"
+          TAG="release-dev"
           TITLE="Backer dev ($SHORT_SHA)"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
