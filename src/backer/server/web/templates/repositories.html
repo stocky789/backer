@@ -391,14 +391,14 @@
                 <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                 Repository Scan: <span id="scanRepoName"></span>
             </span>
-            <button class="modal-close" onclick="hideScanModal()">&times;</button>
+            <button class="modal-close" onclick="closeScanModalAndRefresh()">&times;</button>
         </div>
         <div class="modal-body">
             <div id="scanResults"></div>
             <div id="scanActions" style="display: none; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border);">
                 <p style="margin-bottom: 10px; font-size: 12px;">Import discovered jobs and run history into this server's database:</p>
                 <button id="importBtn" class="btn btn-primary btn-sm" onclick="importMetadata()">Import to Server</button>
-                <button class="btn btn-secondary btn-sm" onclick="hideScanModal()">Close</button>
+                <button class="btn btn-secondary btn-sm" onclick="closeScanModalAndRefresh()">Close</button>
                 <span class="text-muted" style="margin-left: 10px; font-size: 11px;">This will import job configurations and backup history</span>
             </div>
         </div>
@@ -990,10 +990,14 @@ function hideScanModal() {
     document.getElementById('scanModal').style.display = 'none';
 }
 
+function closeScanModalAndRefresh() {
+    hideScanModal();
+    setTimeout(() => location.reload(), 500);
+}
+
 function skipImportAndFinish() {
     Toast.success('Repository created successfully!');
-    hideScanModal();
-    setTimeout(() => location.reload(), 1000);
+    closeScanModalAndRefresh();
 }
 
 async function scanRepo(repoId, repoName) {
@@ -1181,7 +1185,9 @@ function displayScanResults(data) {
             loadHypervisorsForAdoption();
         }
     } else {
-        scanActionsDiv.style.display = 'none';
+        // No data to import - show Done button to close and refresh
+        scanActionsDiv.innerHTML = '<button class="btn btn-primary btn-sm" onclick="skipImportAndFinish()">Done</button>';
+        scanActionsDiv.style.display = 'block';
     }
 }
 
@@ -1293,8 +1299,7 @@ async function importMetadata() {
         if (data.success) {
             const imported = data.imported || {};
             Toast.success(`Import complete! ${imported.agents || 0} agents, ${imported.jobs || 0} jobs, ${imported.runs || 0} runs`);
-            hideScanModal();
-            setTimeout(() => location.reload(), 1500);
+            closeScanModalAndRefresh();
         } else {
             Toast.error('Import failed: ' + (data.error || 'Unknown error'));
         }
@@ -1307,7 +1312,7 @@ async function importMetadata() {
 }
 
 document.getElementById('scanModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideScanModal();
+    if (e.target === this) closeScanModalAndRefresh();
 });
 
 // ============ Repository Wipe ============

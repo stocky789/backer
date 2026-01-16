@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from backer._version import __version__
 from backer.core.repo_metadata import RepositoryMetadata
 
 
@@ -562,7 +563,7 @@ class AgentService:
         req = urllib.request.Request(url, data=body, method=method)
         req.add_header('Authorization', self._get_auth_header())
         req.add_header('Content-Type', 'application/json')
-        req.add_header('User-Agent', 'Backer-Agent/1.0')
+        req.add_header('User-Agent', f'Backer-Agent/{__version__}')
 
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode('utf-8'))

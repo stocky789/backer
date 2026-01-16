@@ -4538,14 +4538,77 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         },
                     })
 
+                elif repo_type == "nfs":
+                    # NFS requires temporary mount to scan
+                    import subprocess
+                    import tempfile
+                    from pathlib import Path as ScanPath
+
+                    from backer.core.repo_metadata import RepositoryMetadata
+
+                    task.message = "Mounting NFS share..."
+                    task.progress = 20
+
+                    temp_mount = ScanPath(tempfile.mkdtemp(prefix="backer_nfs_scan_"))
+                    mounted = False
+
+                    try:
+                        # Mount NFS share with soft options to prevent hangs
+                        nfs_opts = "soft,timeo=50,retrans=2"
+                        mount_cmd = ["mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{share}", str(temp_mount)]
+                        result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+
+                        # If permission error, try with sudo
+                        if result.returncode != 0:
+                            error_msg = result.stderr.strip().lower()
+                            if any(err in error_msg for err in ("permission", "setuid", "user", "fstab")):
+                                mount_cmd = ["sudo", "-n", "mount", "-t", "nfs", "-o", nfs_opts, f"{server}:{share}", str(temp_mount)]
+                                result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
+
+                        if result.returncode != 0:
+                            return {
+                                "success": False,
+                                "error": f"Failed to mount NFS share: {result.stderr.strip()}",
+                                "repository_id": repo_id,
+                                "repository_name": repo_name,
+                                "path": display_path,
+                                "hint": "Ensure NFS is accessible and backer has mount permissions",
+                            }
+
+                        mounted = True
+                        task.message = "Scanning NFS repository..."
+                        task.progress = 40
+
+                        # Build full path with subpath if specified
+                        scan_path = str(temp_mount)
+                        if subpath:
+                            scan_path = scan_path.rstrip("/") + "/" + subpath
+
+                        repo_meta = RepositoryMetadata(scan_path, repo_type)
+                        return format_result(repo_meta.discover_all())
+
+                    finally:
+                        # Always cleanup: unmount and remove temp dir
+                        if mounted:
+                            try:
+                                subprocess.run(["umount", str(temp_mount)], capture_output=True, timeout=10)
+                            except Exception:
+                                try:
+                                    subprocess.run(["sudo", "-n", "umount", str(temp_mount)], capture_output=True, timeout=10)
+                                except Exception:
+                                    pass
+                        try:
+                            temp_mount.rmdir()
+                        except Exception:
+                            pass
+
                 else:
                     return {
                         "success": False,
-                        "error": "NFS scanning requires mount_point to be set",
+                        "error": f"Unsupported repository type: {repo_type}",
                         "repository_id": repo_id,
                         "repository_name": repo_name,
                         "path": display_path,
-                        "hint": "Mount the NFS share and set the mount_point field",
                     }
 
             except Exception as e:
