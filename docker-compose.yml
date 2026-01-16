@@ -1,22 +1,14 @@
 # Backer Server - Docker Compose
 #
 # Quick start:
-#   docker compose up -d
+#   sudo docker-compose up -d
 #
 # Web UI: http://localhost:8420
 # Default login: admin / admin
-#
-# For local development, use: docker compose up --build
-# For production, use: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 services:
   backer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VERSION: latest
-    image: backer:latest
+    image: ghcr.io/stocky789/backer:latest
     container_name: backer
     restart: unless-stopped
     ports:

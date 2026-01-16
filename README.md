@@ -6,16 +6,17 @@ Open-source backup management with a web UI. Supports agent-based backups for Wi
 
 ## Quick Start
 
-### Docker (fastest)
+### Docker Compose (fastest)
 
 ```bash
-docker run -d --name backer \
-  -p 8420:8420 \
-  -v backer-data:/data \
-  --cap-add SYS_ADMIN \
-  --security-opt apparmor:unconfined \
-  ghcr.io/stocky789/backer:latest
+git clone https://github.com/stocky789/backer.git
+cd backer
+sudo docker-compose up -d
 ```
+
+Access the web UI at `http://localhost:8420` (or `http://your-server:8420` on remote VM).
+
+**Default login:** `admin` / `admin`
 
 ### Linux Installer
 
@@ -55,27 +56,9 @@ Access the web UI at `http://your-server:8420`
 
 The Docker image includes pre-installed backup tools (rclone, restic, kopia) for immediate use. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
 
-#### Quick Start (Docker Compose)
+**Docker Compose** is the recommended way to run Backer server. See Quick Start above.
 
-```bash
-# Clone the repository
-git clone https://github.com/stocky789/backer.git
-cd backer
-
-# Start the server (builds image locally)
-make docker-up
-
-# Access the web UI at http://localhost:8420
-# Default login: admin / admin
-
-# View logs
-make docker-logs
-
-# Stop the server
-make docker-down
-```
-
-#### Docker Run (Pre-built Image)
+#### Docker Run (Alternative)
 
 ```bash
 docker run -d --name backer \
@@ -84,21 +67,6 @@ docker run -d --name backer \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
   ghcr.io/stocky789/backer:latest
-```
-
-#### Local Development
-
-For local development with live code changes:
-
-```bash
-# Build the image locally
-make docker-build
-
-# Start with auto-rebuild on code changes
-docker compose up --build
-
-# Or use the convenience target
-make docker-up
 ```
 
 #### Docker Security Notes
