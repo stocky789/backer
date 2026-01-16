@@ -873,7 +873,14 @@ async function monitorScanTask(scanTaskId) {
                 if (result.success !== false) {
                     displayScanResults(result);
                 } else {
-                    document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(result.error || 'Unknown error')}</div>`;
+                    let errorHtml = `<div class="error-msg">Scan failed: ${escapeHtml(result.error || 'Unknown error')}</div>`;
+                    // Show hint for permission errors (NFS issues)
+                    if (result.hint) {
+                        errorHtml += `<div class="hint-box" style="margin-top: 12px; padding: 12px; background: var(--bg-secondary); border-radius: 4px; font-size: 12px;">
+                            <strong>How to fix:</strong><pre style="margin: 8px 0 0 0; white-space: pre-wrap;">${escapeHtml(result.hint)}</pre>
+                        </div>`;
+                    }
+                    document.getElementById('scanResults').innerHTML = errorHtml;
                 }
             } else if (task.status === 'failed') {
                 document.getElementById('scanResults').innerHTML = `<div class="error-msg">Scan failed: ${escapeHtml(task.error || 'Unknown error')}</div>`;
