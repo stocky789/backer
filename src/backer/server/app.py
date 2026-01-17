@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -43,6 +43,310 @@ from backer.server.web.routes import router as web_router
 
 logger = logging.getLogger(__name__)
 
+
+class ServerKopia:
+    """Server-side kopia helper for proxy backup storage.
+
+    Handles kopia repository operations on the server for LOCAL repositories
+    that receive backup data via the proxy protocol.
+    """
+
+    def __init__(self, repo_path: str, password: str):
+        """Initialize with repository path and password.
+
+        Args:
+            repo_path: Path to the local storage directory
+            password: Repository password for encryption
+        """
+        self.repo_path = Path(repo_path)
+        self.kopia_repo_path = self.repo_path / ".kopia-repo"
+        self.password = password
+        self._binary_path: Path | None = None
+        self._env = os.environ.copy()
+        self._env["KOPIA_PASSWORD"] = password
+
+        # Use a unique config per repository to avoid conflicts
+        config_dir = self.repo_path / ".kopia-config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        self._env["KOPIA_CONFIG_PATH"] = str(config_dir / "repository.config")
+
+    def _get_binary(self) -> Path:
+        """Get path to kopia binary."""
+        if self._binary_path and self._binary_path.exists():
+            return self._binary_path
+
+        from backer.tools.manager import get_tool_manager
+
+        manager = get_tool_manager()
+        path = manager.get_tool_path("kopia")
+        if path:
+            self._binary_path = path
+            return path
+
+        # Try to download
+        try:
+            self._binary_path = manager.download("kopia")
+            return self._binary_path
+        except Exception as e:
+            raise RuntimeError(f"kopia not available: {e}")
+
+    def _run_cmd(
+        self,
+        args: list[str],
+        timeout: int = 300,
+        check: bool = True,
+    ) -> tuple[int, str, str]:
+        """Run a kopia command.
+
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
+        import subprocess
+
+        binary = self._get_binary()
+        cmd = [str(binary)] + args
+
+        logger.debug(f"[SERVER KOPIA] Running: {' '.join(cmd)}")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=self._env,
+                timeout=timeout,
+            )
+            return result.returncode, result.stdout, result.stderr
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Command timed out: {' '.join(args)}")
+
+    def ensure_repo(self) -> bool:
+        """Ensure kopia repository exists, creating if necessary.
+
+        Returns:
+            True if repository is ready
+        """
+        # Try to connect first
+        rc, stdout, stderr = self._run_cmd([
+            "repository", "connect", "filesystem",
+            "--path", str(self.kopia_repo_path),
+        ], check=False)
+
+        if rc == 0:
+            logger.info(f"[SERVER KOPIA] Connected to repository at {self.kopia_repo_path}")
+            self._disconnect()
+            return True
+
+        # Repository doesn't exist - initialize it
+        logger.info(f"[SERVER KOPIA] Initializing repository at {self.kopia_repo_path}")
+        self.kopia_repo_path.mkdir(parents=True, exist_ok=True)
+
+        rc, stdout, stderr = self._run_cmd([
+            "repository", "create", "filesystem",
+            "--path", str(self.kopia_repo_path),
+        ], check=False)
+
+        if rc != 0:
+            logger.error(f"[SERVER KOPIA] Failed to initialize repository: {stderr}")
+            return False
+
+        logger.info("[SERVER KOPIA] Repository initialized successfully")
+        self._disconnect()
+        return True
+
+    def _connect(self) -> bool:
+        """Connect to the repository."""
+        rc, _, stderr = self._run_cmd([
+            "repository", "connect", "filesystem",
+            "--path", str(self.kopia_repo_path),
+        ], check=False)
+
+        if rc != 0:
+            logger.error(f"[SERVER KOPIA] Failed to connect: {stderr}")
+            return False
+        return True
+
+    def _disconnect(self) -> None:
+        """Disconnect from the repository."""
+        try:
+            self._run_cmd(["repository", "disconnect"], timeout=10, check=False)
+        except Exception:
+            pass
+
+    def snapshot_create(
+        self,
+        source_dir: str | Path,
+        job_name: str,
+        source_path: str = "",
+    ) -> dict[str, Any]:
+        """Create a snapshot of the source directory.
+
+        Args:
+            source_dir: Directory to snapshot
+            job_name: Job name for tagging
+            source_path: Original source path on agent (for reference)
+
+        Returns:
+            Dict with success status and snapshot info
+        """
+        if not self._connect():
+            return {"success": False, "error": "Failed to connect to repository"}
+
+        try:
+            # Build snapshot command with tags
+            args = [
+                "snapshot", "create",
+                "--json",
+                "--tags", f"job:{job_name}",
+            ]
+            if source_path:
+                args.extend(["--tags", f"source:{source_path}"])
+
+            args.append(str(source_dir))
+
+            rc, stdout, stderr = self._run_cmd(args, timeout=3600)
+
+            if rc != 0:
+                logger.error(f"[SERVER KOPIA] Snapshot failed: {stderr}")
+                return {"success": False, "error": stderr}
+
+            # Parse snapshot info from JSON output
+            snapshot_id = None
+            for line in stdout.strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if "id" in data:
+                        snapshot_id = data.get("id")
+                    elif "snapshotID" in data:
+                        snapshot_id = data.get("snapshotID")
+                except json.JSONDecodeError:
+                    pass
+
+            logger.info(f"[SERVER KOPIA] Created snapshot: {snapshot_id}")
+            return {
+                "success": True,
+                "snapshot_id": snapshot_id,
+                "message": f"Snapshot created: {snapshot_id}",
+            }
+
+        finally:
+            self._disconnect()
+
+    def snapshot_list(self, job_name: str | None = None) -> list[dict[str, Any]]:
+        """List snapshots, optionally filtered by job name.
+
+        Args:
+            job_name: Optional job name to filter by
+
+        Returns:
+            List of snapshot info dicts
+        """
+        if not self._connect():
+            return []
+
+        try:
+            args = ["snapshot", "list", "--json", "--all"]
+
+            rc, stdout, stderr = self._run_cmd(args, timeout=60)
+
+            if rc != 0 or not stdout.strip():
+                logger.warning(f"[SERVER KOPIA] Failed to list snapshots: {stderr}")
+                return []
+
+            try:
+                snapshots = json.loads(stdout)
+            except json.JSONDecodeError:
+                return []
+
+            # Filter by job tag if specified
+            result = []
+            for snap in snapshots:
+                tags = snap.get("tags", {})
+                snap_job = tags.get("job", "")
+
+                if job_name and snap_job != job_name:
+                    continue
+
+                result.append({
+                    "id": snap.get("id", "")[:12],
+                    "full_id": snap.get("id"),
+                    "timestamp": snap.get("startTime"),
+                    "hostname": snap.get("hostname"),
+                    "source": snap.get("source", {}).get("path", ""),
+                    "job": snap_job,
+                    "size": snap.get("stats", {}).get("totalSize", 0),
+                    "files": snap.get("stats", {}).get("totalFiles", 0),
+                })
+
+            # Sort by timestamp descending (newest first)
+            result.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            return result
+
+        finally:
+            self._disconnect()
+
+    def snapshot_restore(
+        self,
+        snapshot_id: str,
+        dest_dir: str | Path,
+    ) -> dict[str, Any]:
+        """Restore a snapshot to a directory.
+
+        Args:
+            snapshot_id: Snapshot ID to restore (or "latest")
+            dest_dir: Directory to restore to
+
+        Returns:
+            Dict with success status
+        """
+        if not self._connect():
+            return {"success": False, "error": "Failed to connect to repository"}
+
+        try:
+            dest_path = Path(dest_dir)
+            dest_path.mkdir(parents=True, exist_ok=True)
+
+            args = [
+                "snapshot", "restore",
+                "--overwrite-files",
+                "--overwrite-directories",
+                "--overwrite-symlinks",
+                snapshot_id,
+                str(dest_path),
+            ]
+
+            rc, stdout, stderr = self._run_cmd(args, timeout=3600)
+
+            if rc != 0:
+                logger.error(f"[SERVER KOPIA] Restore failed: {stderr}")
+                return {"success": False, "error": stderr}
+
+            logger.info(f"[SERVER KOPIA] Restored snapshot {snapshot_id} to {dest_path}")
+            return {
+                "success": True,
+                "message": f"Restored snapshot {snapshot_id}",
+            }
+
+        finally:
+            self._disconnect()
+
+    def find_latest_snapshot(self, job_name: str) -> str | None:
+        """Find the latest snapshot ID for a job.
+
+        Args:
+            job_name: Job name to search for
+
+        Returns:
+            Snapshot ID or None
+        """
+        snapshots = self.snapshot_list(job_name)
+        if snapshots:
+            return snapshots[0].get("full_id")
+        return None
+
+
 # Characters not allowed in job names (prevent path traversal and shell injection)
 _UNSAFE_NAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]|\.\.|\.\/')
 
@@ -61,6 +365,67 @@ def validate_name(name: str, field: str = "name") -> None:
             status_code=400,
             detail=f"{field} contains invalid characters (no path separators, quotes, or special chars)",
         )
+
+
+def safe_tar_extract(tar_path: str | Path, dest_path: str | Path) -> list[str]:
+    """Safely extract a tar archive with path traversal protection.
+
+    Validates each member before extraction to prevent:
+    - Absolute paths that could write outside dest_path
+    - Relative paths with .. that escape dest_path
+    - Symbolic links pointing outside dest_path
+
+    Args:
+        tar_path: Path to the tar archive
+        dest_path: Destination directory for extraction
+
+    Returns:
+        List of extracted member names
+
+    Raises:
+        ValueError: If archive contains unsafe paths
+    """
+    import tarfile
+
+    dest = Path(dest_path).resolve()
+    members = []
+
+    with tarfile.open(str(tar_path), "r:gz") as tar:
+        for member in tar.getmembers():
+            # Check for absolute paths (both Unix and Windows style)
+            if member.name.startswith("/") or member.name.startswith("\\"):
+                raise ValueError(f"Tar member has absolute path: {member.name}")
+
+            # Check for path traversal (both Unix and Windows separators)
+            if ".." in member.name.split("/") or ".." in member.name.split("\\"):
+                raise ValueError(f"Tar member has path traversal: {member.name}")
+
+            # Resolve the final path and ensure it's within dest
+            # Use is_relative_to() for proper cross-platform comparison
+            # (handles case-insensitivity on Windows)
+            member_path = (dest / member.name).resolve()
+            try:
+                member_path.relative_to(dest)
+            except ValueError:
+                raise ValueError(f"Tar member escapes destination: {member.name}")
+
+            # Check symlinks don't point outside
+            if member.issym() or member.islnk():
+                link_target = Path(member.linkname)
+                if link_target.is_absolute():
+                    raise ValueError(f"Tar symlink has absolute target: {member.name}")
+                resolved_link = (member_path.parent / link_target).resolve()
+                try:
+                    resolved_link.relative_to(dest)
+                except ValueError:
+                    raise ValueError(f"Tar symlink escapes destination: {member.name}")
+
+            members.append(member.name)
+
+        # All members validated, now extract
+        tar.extractall(path=str(dest))
+
+    return members
 
 
 # Global storage instance (initialized in create_app)
@@ -4059,6 +4424,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             password_encrypted=password_encrypted,
             domain=data.get("domain"),
         )
+
+        # Initialize kopia repository for LOCAL repos
+        if repo_type == "local":
+            local_path = data.get("share")
+            kopia_password = password or "backer-default-password"
+            try:
+                kopia = ServerKopia(local_path, kopia_password)
+                if kopia.ensure_repo():
+                    logger.info(f"[CREATE REPO] Kopia repository initialized at {local_path}")
+                else:
+                    logger.warning(f"[CREATE REPO] Failed to initialize kopia repository at {local_path}")
+            except Exception as kopia_err:
+                logger.warning(f"[CREATE REPO] Kopia initialization error: {kopia_err}")
+                # Don't fail - kopia will be initialized on first backup
 
         # Auto-trigger test and scan for better UX
         test_task_id = None
@@ -11841,12 +12220,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         credentials: HTTPBasicCredentials | None = Depends(security),
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Receive backup data from agent and extract to local repository."""
+        """Receive backup data from agent and store using kopia for versioning.
+
+        Flow:
+        1. Receive tar.gz stream from agent
+        2. Extract to staging directory
+        3. Create kopia snapshot with job tags
+        4. Clean up staging directory
+        """
+        import shutil
         import tarfile
         import tempfile
 
         auth_header = request.headers.get("authorization")
-        repo, _ = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
 
         local_path = repo.get("share")
         if not local_path:
@@ -11856,16 +12243,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         subfolder = request.headers.get("X-Backup-Subfolder", "")
         source_path = request.headers.get("X-Source-Path", "unknown")
 
-        # Build full destination path: {local_path}/{subfolder}
-        # Example: /home/matt/repo/Agents/testjob
-        dest_path = Path(local_path)
+        # Extract job name from subfolder (e.g., "Agents/testjob" -> "testjob")
+        # Handle both forward slashes and backslashes for Windows compatibility
+        job_name = "unknown"
         if subfolder:
-            # Clean any leading/trailing slashes and use as relative path
             subfolder = subfolder.strip("/\\")
-            dest_path = dest_path / subfolder
+            # Normalize to forward slashes for consistent parsing
+            subfolder = subfolder.replace("\\", "/")
+            parts = subfolder.split("/")
+            if len(parts) >= 2 and parts[0] == "Agents":
+                job_name = parts[1]
+            elif parts:
+                job_name = parts[-1]
 
-        dest_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"[PROXY BACKUP] Receiving backup from {source_path} to {dest_path}")
+        logger.info(f"[PROXY BACKUP] Receiving backup for job '{job_name}' from {source_path}")
+
+        # Create staging directory for this backup
+        staging_dir = None
+        tmp_path = None
 
         try:
             # Stream body to temp file
@@ -11878,113 +12273,248 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             logger.info(f"[PROXY BACKUP] Received {bytes_received / 1024 / 1024:.1f}MB")
 
-            # Extract tar archive
-            with tarfile.open(tmp_path, "r:gz") as tar:
-                tar.extractall(path=str(dest_path))
-                members = tar.getnames()
+            # Create staging directory
+            staging_dir = tempfile.mkdtemp(prefix=f"backer-staging-{job_name}-")
+            staging_path = Path(staging_dir)
 
-            # Clean up
+            # Extract tar archive to staging (with path traversal protection)
+            members = safe_tar_extract(tmp_path, staging_path)
+
+            logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to staging")
+
+            # Clean up tar file
             Path(tmp_path).unlink()
+            tmp_path = None
 
-            logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {dest_path}")
+            # Get repository password (use default if not set)
+            password = repo_password or "backer-default-password"
+
+            # Initialize kopia and create snapshot
+            kopia = ServerKopia(local_path, password)
+
+            if not kopia.ensure_repo():
+                return {"success": False, "error": "Failed to initialize kopia repository"}
+
+            result = kopia.snapshot_create(
+                source_dir=staging_path,
+                job_name=job_name,
+                source_path=source_path,
+            )
+
+            if not result.get("success"):
+                return {"success": False, "error": result.get("error", "Snapshot creation failed")}
+
+            snapshot_id = result.get("snapshot_id", "unknown")
+            logger.info(f"[PROXY BACKUP] Created kopia snapshot: {snapshot_id}")
+
             return {
                 "success": True,
-                "message": f"Backup received: {len(members)} files, {bytes_received / 1024 / 1024:.1f}MB",
+                "message": f"Backup stored: {len(members)} files, {bytes_received / 1024 / 1024:.1f}MB",
                 "files": len(members),
                 "bytes": bytes_received,
+                "snapshot_id": snapshot_id,
             }
 
         except Exception as e:
             logger.error(f"[PROXY BACKUP] Failed: {e}")
-            try:
-                Path(tmp_path).unlink()
-            except Exception:
-                pass
             return {"success": False, "error": str(e)}
+
+        finally:
+            # Clean up staging directory
+            if staging_dir and Path(staging_dir).exists():
+                try:
+                    shutil.rmtree(staging_dir)
+                except Exception as cleanup_err:
+                    logger.warning(f"[PROXY BACKUP] Failed to clean staging: {cleanup_err}")
+
+            # Clean up temp tar file if it still exists
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
 
     @app.get("/api/repo/{repo_id}/restore")
     async def proxy_repo_restore(
         repo_id: str,
         request: Request,
+        background_tasks: BackgroundTasks,
+        snapshot: str | None = None,
         credentials: HTTPBasicCredentials | None = Depends(security),
         storage: Storage = Depends(get_storage),
     ):
-        """Stream backup data to agent as tar.gz archive."""
+        """Restore from kopia snapshot and stream as tar.gz archive.
+
+        Query parameters:
+            snapshot: Specific snapshot ID to restore (optional, defaults to latest)
+
+        Headers:
+            X-Restore-Subfolder: Job subfolder (e.g., "Agents/testjob")
+        """
+        import shutil
         import tarfile
         import tempfile
 
         auth_header = request.headers.get("authorization")
-        repo, _ = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
 
         local_path = repo.get("share")
         if not local_path:
             return {"success": False, "error": "No local path configured"}
 
         # Get restore subfolder from headers (e.g., "Agents/testjob")
-        # This matches where backup stored the files
         subfolder = request.headers.get("X-Restore-Subfolder", "")
 
-        # Build full source path: {local_path}/{subfolder}
-        # Example: /home/matt/repo/Agents/testjob
-        path_obj = Path(local_path)
+        # Extract job name from subfolder
+        # Handle both forward slashes and backslashes for Windows compatibility
+        job_name = "unknown"
         if subfolder:
-            # Clean any leading/trailing slashes and use as relative path
             subfolder = subfolder.strip("/\\")
-            path_obj = path_obj / subfolder
+            # Normalize to forward slashes for consistent parsing
+            subfolder = subfolder.replace("\\", "/")
+            parts = subfolder.split("/")
+            if len(parts) >= 2 and parts[0] == "Agents":
+                job_name = parts[1]
+            elif parts:
+                job_name = parts[-1]
 
-        if not path_obj.exists():
-            return {"success": False, "error": f"Path does not exist: {path_obj}"}
+        logger.info(f"[PROXY RESTORE] Restoring job '{job_name}', snapshot={snapshot or 'latest'}")
 
-        logger.info(f"[PROXY RESTORE] Creating archive from {path_obj}")
+        # Get repository password
+        password = repo_password or "backer-default-password"
+
+        # Initialize kopia
+        kopia = ServerKopia(local_path, password)
+
+        if not kopia.ensure_repo():
+            return {"success": False, "error": "Kopia repository not initialized"}
+
+        # Determine snapshot to restore
+        snapshot_id = snapshot
+        if not snapshot_id or snapshot_id == "latest":
+            # Find the latest snapshot for this job
+            snapshot_id = kopia.find_latest_snapshot(job_name)
+            if not snapshot_id:
+                return {"success": False, "error": f"No snapshots found for job '{job_name}'"}
+            logger.info(f"[PROXY RESTORE] Using latest snapshot: {snapshot_id}")
+
+        # Create staging directory for restore
+        staging_dir = None
+        tmp_path = None
 
         try:
-            # Create tar archive in memory-efficient way using temp file
+            staging_dir = tempfile.mkdtemp(prefix=f"backer-restore-{job_name}-")
+            staging_path = Path(staging_dir)
+
+            # Restore snapshot to staging
+            result = kopia.snapshot_restore(snapshot_id, staging_path)
+            if not result.get("success"):
+                return {"success": False, "error": result.get("error", "Restore failed")}
+
+            logger.info(f"[PROXY RESTORE] Restored snapshot to staging: {staging_path}")
+
+            # Create tar archive from staging
             with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
                 tmp_path = tmp.name
 
-            try:
-                # Create tar archive with all files from the backup directory
-                # Use .as_posix() for arcname to ensure portable paths (forward slashes)
-                # that work when extracting on both Windows and Linux
-                with tarfile.open(tmp_path, "w:gz") as tar:
-                    if path_obj.is_file():
-                        tar.add(str(path_obj), arcname=path_obj.name)
-                    else:
-                        for item in path_obj.rglob("*"):
-                            if item.is_file():
-                                arcname = item.relative_to(path_obj).as_posix()
-                                tar.add(str(item), arcname=arcname)
+            # Create tar archive with all files
+            # Use .as_posix() for arcname to ensure portable paths
+            with tarfile.open(tmp_path, "w:gz") as tar:
+                for item in staging_path.rglob("*"):
+                    if item.is_file():
+                        arcname = item.relative_to(staging_path).as_posix()
+                        tar.add(str(item), arcname=arcname)
 
-                # Get archive size
-                archive_size = Path(tmp_path).stat().st_size
-                logger.info(f"[PROXY RESTORE] Archive created: {archive_size / 1024 / 1024:.1f}MB")
+            # Get archive size
+            archive_size = Path(tmp_path).stat().st_size
+            logger.info(f"[PROXY RESTORE] Archive created: {archive_size / 1024 / 1024:.1f}MB")
 
-                # Stream file to client with background cleanup
-                from fastapi.responses import FileResponse
+            # Clean up staging directory before streaming response
+            shutil.rmtree(staging_dir)
+            staging_dir = None
 
-                # Use FileResponse which handles file cleanup automatically
-                response = FileResponse(
-                    path=tmp_path,
-                    media_type="application/gzip",
-                    filename=f"backup-{repo_id}.tar.gz",
-                    headers={"Content-Disposition": f"attachment; filename=backup-{repo_id}.tar.gz"},
-                )
-                # Store tmp_path for later cleanup (FastAPI will handle after response)
-                response.tmp_path = tmp_path
-                return response
+            # Stream file to client
+            from fastapi.responses import FileResponse
 
-            except Exception as cleanup_error:
-                # Cleanup on error
-                logger.warning(f"[PROXY RESTORE] Cleanup error: {cleanup_error}")
+            # Schedule cleanup of temp file after response is sent
+            # FileResponse does NOT auto-delete temp files, so we use BackgroundTasks
+            def cleanup_temp_file(path: str) -> None:
+                try:
+                    Path(path).unlink()
+                    logger.debug(f"[PROXY RESTORE] Cleaned up temp file: {path}")
+                except Exception as e:
+                    logger.warning(f"[PROXY RESTORE] Failed to clean temp file {path}: {e}")
+
+            background_tasks.add_task(cleanup_temp_file, tmp_path)
+
+            response = FileResponse(
+                path=tmp_path,
+                media_type="application/gzip",
+                filename=f"backup-{repo_id}-{snapshot_id[:8]}.tar.gz",
+                headers={"Content-Disposition": f"attachment; filename=backup-{repo_id}.tar.gz"},
+            )
+            return response
+
+        except Exception as e:
+            logger.error(f"[PROXY RESTORE] Failed: {e}")
+            # Clean up temp file on error (not handled by background task in error case)
+            if tmp_path and Path(tmp_path).exists():
                 try:
                     Path(tmp_path).unlink()
                 except Exception:
                     pass
-                raise
-
-        except Exception as e:
-            logger.error(f"[PROXY RESTORE] Failed: {e}")
             return {"success": False, "error": str(e)}
+
+        finally:
+            # Clean up staging directory if it still exists
+            if staging_dir and Path(staging_dir).exists():
+                try:
+                    shutil.rmtree(staging_dir)
+                except Exception as cleanup_err:
+                    logger.warning(f"[PROXY RESTORE] Failed to clean staging: {cleanup_err}")
+
+    @app.get("/api/repo/{repo_id}/snapshots")
+    async def proxy_repo_snapshots(
+        repo_id: str,
+        request: Request,
+        job: str | None = None,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
+    ) -> dict[str, Any]:
+        """List available kopia snapshots for a LOCAL repository.
+
+        Query parameters:
+            job: Optional job name to filter snapshots
+
+        Returns:
+            List of snapshot info with id, timestamp, size, files
+        """
+        auth_header = request.headers.get("authorization")
+        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+
+        local_path = repo.get("share")
+        if not local_path:
+            return {"success": False, "error": "No local path configured", "snapshots": []}
+
+        # Get repository password
+        password = repo_password or "backer-default-password"
+
+        # Initialize kopia
+        kopia = ServerKopia(local_path, password)
+
+        if not kopia.ensure_repo():
+            return {"success": False, "error": "Kopia repository not initialized", "snapshots": []}
+
+        try:
+            snapshots = kopia.snapshot_list(job_name=job)
+            return {
+                "success": True,
+                "snapshots": snapshots,
+                "count": len(snapshots),
+            }
+        except Exception as e:
+            logger.error(f"[PROXY SNAPSHOTS] Failed: {e}")
+            return {"success": False, "error": str(e), "snapshots": []}
 
     # ============ Web UI ============
 
