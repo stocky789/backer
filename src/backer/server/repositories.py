@@ -80,6 +80,7 @@ class ShareInfo:
     name: str
     share_type: str  # "Disk", "IPC", "Printer", etc.
     comment: str = ""
+    path: str = ""  # Full path for local directories
 
 
 @dataclass

@@ -47,7 +47,7 @@ Access the web UI at `http://your-server:8420`.
 curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
 
 # Development branch (latest features)
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash -s -- --branch dev
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/install.sh | sudo bash -s -- --branch dev
 ```
 
 Access the web UI at `http://your-server:8420`
@@ -87,7 +87,7 @@ Download `backer-agent-setup.exe` from [Releases](https://github.com/stocky789/b
 curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash
 
 # Development branch
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash -s -- --branch dev
+curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/scripts/install-agent.sh | sudo bash -s -- --branch dev
 ```
 
 ## CLI Usage
