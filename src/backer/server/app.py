@@ -178,10 +178,11 @@ def _build_backup_command_payload(
                     # Extract host:port from http URL
                     host_part = public_url[7:]  # Remove "http://"
 
-                # Generate proxy URI: proxy://server/repo/{id} or proxys://server/repo/{id}
-                proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}"
+                # Generate proxy URI: proxy://server/repo/{id}/Agents/{job} or proxys://...
+                # Include job subfolder so backup files are stored in job-specific directory
+                proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
 
-                # Override destination_path with proxy URI
+                # Override destination_path with proxy URI (includes job subfolder)
                 payload["destination_path"] = proxy_uri
 
                 # Override backend to use proxy
@@ -3703,6 +3704,35 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # NFS info (no password needed typically)
                     command_payload["nfs_server"] = repo.get("server")
                     command_payload["nfs_export"] = repo.get("share")
+
+                elif repo_type == "local":
+                    # For local repositories, use proxy backend for restore
+                    # The agent streams restore data FROM the server via HTTP/HTTPS
+                    public_url = storage.get_setting("public_url", "http://localhost:8420")
+
+                    # Determine proxy scheme based on public_url protocol
+                    if public_url.startswith("https://"):
+                        proxy_scheme = "proxys"
+                        host_part = public_url[8:]  # Remove "https://"
+                    else:
+                        proxy_scheme = "proxy"
+                        host_part = public_url[7:]  # Remove "http://"
+
+                    # Generate proxy URI with job subfolder
+                    # Structure: proxy://host/repo/{id}/Agents/{job}
+                    proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+
+                    # Override source_path with proxy URI
+                    command_payload["source_path"] = proxy_uri
+
+                    # Override backend to use proxy
+                    # Agent will use its own credentials for authentication
+                    command_payload["backend"] = "proxy"
+
+                    if repo_password:
+                        command_payload["backend_options"]["password"] = repo_password
+
+                    logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
 
                 # For restic/kopia backends, include the repository password
                 if backend in ("restic", "kopia") and repo_password:
