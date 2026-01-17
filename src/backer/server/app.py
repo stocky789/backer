@@ -4849,7 +4849,80 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     task.message = "Reading local metadata..."
                     task.progress = 30
                     repo_meta = RepositoryMetadata(repo_path, repo_type)
-                    return format_result(repo_meta.discover_all())
+                    discovery = repo_meta.discover_all()
+
+                    # For LOCAL repos, also scan for kopia snapshots
+                    if repo_type == "local":
+                        task.message = "Scanning kopia repository..."
+                        task.progress = 60
+                        try:
+                            kopia_password = password or "backer-default-password"
+                            kopia = ServerKopia(repo_path, kopia_password)
+
+                            # Check if kopia repo exists
+                            kopia_repo_path = Path(repo_path) / ".kopia-repo"
+                            if kopia_repo_path.exists():
+                                logger.info(f"[SCAN] Found kopia repository at {kopia_repo_path}")
+
+                                # List all snapshots (no job filter)
+                                snapshots = kopia.snapshot_list(job_name=None)
+                                if snapshots:
+                                    logger.info(f"[SCAN] Found {len(snapshots)} kopia snapshots")
+                                    discovery["initialized"] = True
+
+                                    # Convert to expected format and add to discovery
+                                    kopia_snapshots = []
+                                    jobs_from_snapshots = {}
+
+                                    for snap in snapshots:
+                                        kopia_snapshots.append({
+                                            "snapshot_id": snap.get("full_id"),
+                                            "short_id": snap.get("id"),
+                                            "hostname": snap.get("hostname"),
+                                            "time": snap.get("timestamp"),
+                                            "paths": [snap.get("source", "")],
+                                            "job": snap.get("job"),
+                                        })
+
+                                        # Track jobs found in snapshots
+                                        job_name = snap.get("job")
+                                        if job_name:
+                                            if job_name not in jobs_from_snapshots:
+                                                jobs_from_snapshots[job_name] = {
+                                                    "job_name": job_name,
+                                                    "run_count": 0,
+                                                    "source": "kopia",
+                                                }
+                                            jobs_from_snapshots[job_name]["run_count"] += 1
+
+                                    # Merge kopia snapshots with any existing
+                                    existing_snapshots = discovery.get("snapshots", [])
+                                    discovery["snapshots"] = existing_snapshots + kopia_snapshots
+
+                                    # Merge jobs from snapshots with existing jobs
+                                    existing_jobs = {j.get("job_name"): j for j in discovery.get("jobs", [])}
+                                    for job_name, job_info in jobs_from_snapshots.items():
+                                        if job_name not in existing_jobs:
+                                            existing_jobs[job_name] = job_info
+                                        else:
+                                            # Update run count
+                                            existing_jobs[job_name]["run_count"] = max(
+                                                existing_jobs[job_name].get("run_count", 0),
+                                                job_info["run_count"]
+                                            )
+                                    discovery["jobs"] = list(existing_jobs.values())
+
+                                    # Update summary
+                                    summary = discovery.get("summary", {})
+                                    summary["snapshot_count"] = len(discovery["snapshots"])
+                                    summary["job_count"] = len(discovery["jobs"])
+                                    discovery["summary"] = summary
+                            else:
+                                logger.info(f"[SCAN] No kopia repository found at {repo_path}")
+                        except Exception as kopia_err:
+                            logger.warning(f"[SCAN] Error scanning kopia repository: {kopia_err}")
+
+                    return format_result(discovery)
 
                 # For SMB shares, use smbclient to read metadata directly
                 elif repo_type == "smb":
@@ -5376,6 +5449,59 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     repo_path = share or repo.get("path", "")
 
                 result = import_repository_metadata(repo_path, storage, repo_id)
+
+                # For LOCAL repos, also import jobs from kopia snapshots
+                if repo_type == "local":
+                    try:
+                        kopia_password = password or "backer-default-password"
+                        kopia = ServerKopia(repo_path, kopia_password)
+
+                        kopia_repo_path = Path(repo_path) / ".kopia-repo"
+                        if kopia_repo_path.exists():
+                            # List all snapshots to find jobs
+                            snapshots = kopia.snapshot_list(job_name=None)
+                            jobs_imported = 0
+
+                            # Group snapshots by job name
+                            jobs_from_snapshots = {}
+                            for snap in snapshots:
+                                job_name = snap.get("job")
+                                if job_name and job_name not in jobs_from_snapshots:
+                                    jobs_from_snapshots[job_name] = {
+                                        "source": snap.get("source", ""),
+                                        "snapshot_count": 0,
+                                        "latest_snapshot": snap.get("full_id"),
+                                    }
+                                if job_name:
+                                    jobs_from_snapshots[job_name]["snapshot_count"] += 1
+
+                            # Create jobs that don't already exist
+                            for job_name, job_info in jobs_from_snapshots.items():
+                                existing = storage.get_job(job_name)
+                                if not existing:
+                                    job_config = {
+                                        "repository_id": repo_id,
+                                        "source_path": job_info["source"],
+                                        "destination_path": repo_path,
+                                        "backend": "proxy",  # Use proxy for LOCAL repos
+                                        "imported_at": tz.get_now().isoformat(),
+                                        "imported_from_kopia": True,
+                                        "snapshot_count": job_info["snapshot_count"],
+                                    }
+                                    storage.save_job(job_name, job_config)
+                                    jobs_imported += 1
+                                    logger.info(f"[IMPORT] Created job '{job_name}' from kopia snapshots")
+
+                            if jobs_imported > 0:
+                                result["imported"] = result.get("imported", {})
+                                result["imported"]["kopia_jobs"] = jobs_imported
+                                # Update total jobs count
+                                result["imported"]["jobs"] = result["imported"].get("jobs", 0) + jobs_imported
+                                logger.info(f"[IMPORT] Imported {jobs_imported} jobs from kopia snapshots")
+
+                    except Exception as kopia_err:
+                        logger.warning(f"[IMPORT] Error importing from kopia: {kopia_err}")
+
                 return {
                     "repository_id": repo_id,
                     "repository_name": repo.get("name"),

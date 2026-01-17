@@ -340,8 +340,8 @@
                 </div>
 
                 <div class="modal-footer">
-                    <button class="btn btn-primary" onclick="discoverShares()">
-                        <span id="discoverBtn">Connect & Browse Shares</span>
+                    <button class="btn btn-primary" id="discoverBtn" onclick="handleDiscoverClick()">
+                        Connect & Browse Shares
                     </button>
                     <button class="btn btn-secondary" onclick="hideAddModal()">Cancel</button>
                 </div>
@@ -624,20 +624,24 @@ function onTypeChange() {
     currentType = document.getElementById('repoType').value;
     const isLocal = currentType === 'local';
     const isSmb = currentType === 'smb';
-    
+
     // Show/hide fields based on type
     document.getElementById('smbCredentials').style.display = isSmb ? 'block' : 'none';
     document.getElementById('serverGroup').style.display = isLocal ? 'none' : 'block';
     document.getElementById('localPathGroup').style.display = isLocal ? 'block' : 'none';
-    
+
     // Update the button text
     const discoverBtn = document.getElementById('discoverBtn');
-    if (isLocal) {
-        discoverBtn.textContent = 'Save Local Repository';
-        discoverBtn.onclick = saveLocalRepository;
+    discoverBtn.textContent = isLocal ? 'Save Local Repository' : 'Connect & Browse Shares';
+}
+
+function handleDiscoverClick() {
+    // Route to the appropriate handler based on repo type
+    const repoType = document.getElementById('repoType').value;
+    if (repoType === 'local') {
+        saveLocalRepository();
     } else {
-        discoverBtn.textContent = 'Connect & Browse Shares';
-        discoverBtn.onclick = discoverShares;
+        discoverShares();
     }
 }
 
