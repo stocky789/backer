@@ -485,6 +485,12 @@ class ProxyBackend(BackendBase):
 
                 logger.info(f"[PROXY] Backup completed: {bytes_transferred / 1024 / 1024:.1f}MB uploaded")
 
+                # Extract snapshot_id from server response for kopia backups
+                metadata = {}
+                if result.get("snapshot_id"):
+                    metadata["snapshot_id"] = result["snapshot_id"]
+                    logger.info(f"[PROXY] Server returned snapshot_id: {result['snapshot_id']}")
+
                 return BackendResult(
                     success=result.get("success", True),
                     operation=OperationType.BACKUP,
@@ -495,6 +501,7 @@ class ProxyBackend(BackendBase):
                     files_transferred=files_transferred,
                     return_code=0 if result.get("success") else 1,
                     errors=result.get("errors", []),
+                    metadata=metadata,
                 )
 
             finally:
