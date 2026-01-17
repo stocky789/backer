@@ -289,7 +289,9 @@ class ServerKopia:
             result.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
             if job_name and not result:
-                logger.warning(f"[SERVER KOPIA] No snapshots found for job '{job_name}' (total snapshots: {len(snapshots)})")
+                logger.warning(
+                    f"[SERVER KOPIA] No snapshots for job '{job_name}' (total: {len(snapshots)})"
+                )
 
             return result
 
