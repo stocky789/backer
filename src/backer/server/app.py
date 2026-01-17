@@ -11944,13 +11944,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             try:
                 # Create tar archive with all files from the backup directory
+                # Use .as_posix() for arcname to ensure portable paths (forward slashes)
+                # that work when extracting on both Windows and Linux
                 with tarfile.open(tmp_path, "w:gz") as tar:
                     if path_obj.is_file():
                         tar.add(str(path_obj), arcname=path_obj.name)
                     else:
                         for item in path_obj.rglob("*"):
                             if item.is_file():
-                                arcname = str(item.relative_to(path_obj))
+                                arcname = item.relative_to(path_obj).as_posix()
                                 tar.add(str(item), arcname=arcname)
 
                 # Get archive size

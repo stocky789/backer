@@ -1090,6 +1090,16 @@ class BackerAgent:
         """
         source_path = job.get("source_path", "")
 
+        # Proxy backend uses source_path as a proxy:// URI directly
+        # Don't try to mount it as a filesystem path
+        if backend_name == "proxy" or source_path.startswith(("proxy://", "proxys://")):
+            print(f"[RESTORE] Using proxy URI directly: {source_path}")
+            return source_path, None
+
+        # Windows can use UNC paths directly and doesn't need mount handling
+        if sys.platform == "win32":
+            return source_path, None
+
         # Check if NFS credentials were passed (job linked to NFS repository)
         # This takes priority over parsing source_path as NFS, because the server
         # provides the actual NFS export separately from the subpath

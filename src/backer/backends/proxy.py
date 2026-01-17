@@ -403,6 +403,8 @@ class ProxyBackend(BackendBase):
                     return tarinfo
 
                 # Create compressed tar archive
+                # Use .as_posix() for arcname to ensure portable paths (forward slashes)
+                # that work when extracting on both Windows and Linux
                 with tarfile.open(tmp_path, "w:gz") as tar:
                     # Add files with progress tracking
                     if source_path.is_file():
@@ -411,7 +413,7 @@ class ProxyBackend(BackendBase):
                     else:
                         for item in source_path.rglob("*"):
                             if item.is_file():
-                                arcname = str(item.relative_to(source_path))
+                                arcname = item.relative_to(source_path).as_posix()
                                 member = tar.gettarinfo(str(item), arcname=arcname)
                                 if exclude_filter(member):
                                     with open(item, "rb") as f:
