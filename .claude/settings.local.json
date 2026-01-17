@@ -8,7 +8,8 @@
       "Bash(git -C \"/run/user/1000/gvfs/smb-share:server=192.168.0.254,share=homenetwork/Documents/Matt/Github/backer\" show 671fdd5 --stat)",
       "Bash(git -C \"/run/user/1000/gvfs/smb-share:server=192.168.0.254,share=homenetwork/Documents/Matt/Github/backer\" show:*)",
       "Bash(git -C \"/run/user/1000/gvfs/smb-share:server=192.168.0.254,share=homenetwork/Documents/Matt/Github/backer\" show HEAD:src/backer/backends/proxy.py)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(ruff check:*)"
     ]
   }
 }

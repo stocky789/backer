@@ -270,10 +270,11 @@ class ServerKopia:
                 logger.info(f"[SERVER KOPIA] Sample tags: {first.get('tags')}")
 
             # Filter by job tag if specified
+            # Note: kopia stores tags with "tag:" prefix (e.g., "tag:job" not "job")
             result = []
             for snap in snapshots:
                 tags = snap.get("tags", {})
-                snap_job = tags.get("job", "")
+                snap_job = tags.get("tag:job", "")
 
                 logger.info(f"[SERVER KOPIA] Snapshot {snap.get('id', '')[:12]}: tags={tags}")
 
