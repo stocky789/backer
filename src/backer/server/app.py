@@ -261,7 +261,13 @@ class ServerKopia:
                 logger.error("[SERVER KOPIA] Failed to parse snapshot list JSON")
                 return []
 
-            logger.debug(f"[SERVER KOPIA] Found {len(snapshots)} total snapshots")
+            logger.info(f"[SERVER KOPIA] Found {len(snapshots)} total snapshots")
+
+            # Log first snapshot structure for debugging
+            if snapshots:
+                first = snapshots[0]
+                logger.info(f"[SERVER KOPIA] Sample snapshot keys: {list(first.keys())}")
+                logger.info(f"[SERVER KOPIA] Sample tags: {first.get('tags')}")
 
             # Filter by job tag if specified
             result = []
@@ -269,7 +275,7 @@ class ServerKopia:
                 tags = snap.get("tags", {})
                 snap_job = tags.get("job", "")
 
-                logger.debug(f"[SERVER KOPIA] Snapshot {snap.get('id', '')[:12]}: tags={tags}, job_tag='{snap_job}'")
+                logger.info(f"[SERVER KOPIA] Snapshot {snap.get('id', '')[:12]}: tags={tags}")
 
                 if job_name and snap_job != job_name:
                     continue
