@@ -12104,18 +12104,41 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     async def proxy_repo_snapshots(
         repo_id: str,
         request: Request,
+        job: str | None = None,
         credentials: HTTPBasicCredentials | None = Depends(security),
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """List snapshots in the repository."""
+        """List snapshots in the repository.
+
+        Query parameters:
+            job: Optional job name to filter snapshots (LOCAL repos only)
+        """
         auth_header = request.headers.get("authorization")
         repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
 
         try:
+            local_path = repo.get("share")
+            repo_type = repo.get("repo_type", "").lower()
+
+            # For LOCAL repos, use ServerKopia to list snapshots
+            if repo_type == "local":
+                password = repo_password or "backer-default-password"
+                kopia = ServerKopia(local_path, password)
+
+                if not kopia.ensure_repo():
+                    return {"success": False, "error": "Kopia repository not initialized", "snapshots": []}
+
+                snapshots = kopia.snapshot_list(job_name=job)
+                return {
+                    "success": True,
+                    "snapshots": snapshots,
+                    "count": len(snapshots),
+                }
+
+            # For SMB/NFS repos, use the backend's list_snapshots
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            local_path = repo.get("share")
             config = json.loads(repo.get("config", "{}"))
             backend_type = config.get("backend_type", "restic")
 
@@ -12229,7 +12252,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         4. Clean up staging directory
         """
         import shutil
-        import tarfile
         import tempfile
 
         auth_header = request.headers.get("authorization")
@@ -12472,49 +12494,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     shutil.rmtree(staging_dir)
                 except Exception as cleanup_err:
                     logger.warning(f"[PROXY RESTORE] Failed to clean staging: {cleanup_err}")
-
-    @app.get("/api/repo/{repo_id}/snapshots")
-    async def proxy_repo_snapshots(
-        repo_id: str,
-        request: Request,
-        job: str | None = None,
-        credentials: HTTPBasicCredentials | None = Depends(security),
-        storage: Storage = Depends(get_storage),
-    ) -> dict[str, Any]:
-        """List available kopia snapshots for a LOCAL repository.
-
-        Query parameters:
-            job: Optional job name to filter snapshots
-
-        Returns:
-            List of snapshot info with id, timestamp, size, files
-        """
-        auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
-
-        local_path = repo.get("share")
-        if not local_path:
-            return {"success": False, "error": "No local path configured", "snapshots": []}
-
-        # Get repository password
-        password = repo_password or "backer-default-password"
-
-        # Initialize kopia
-        kopia = ServerKopia(local_path, password)
-
-        if not kopia.ensure_repo():
-            return {"success": False, "error": "Kopia repository not initialized", "snapshots": []}
-
-        try:
-            snapshots = kopia.snapshot_list(job_name=job)
-            return {
-                "success": True,
-                "snapshots": snapshots,
-                "count": len(snapshots),
-            }
-        except Exception as e:
-            logger.error(f"[PROXY SNAPSHOTS] Failed: {e}")
-            return {"success": False, "error": str(e), "snapshots": []}
 
     # ============ Web UI ============
 
