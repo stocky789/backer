@@ -11890,11 +11890,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not local_path:
             return {"success": False, "error": "No local path configured"}
 
-        path_obj = Path(local_path)
-        if not path_obj.exists():
-            return {"success": False, "error": f"Path does not exist: {local_path}"}
+        # Get restore subfolder from headers (e.g., "Agents/testjob")
+        # This matches where backup stored the files
+        subfolder = request.headers.get("X-Restore-Subfolder", "")
 
-        logger.info(f"[PROXY RESTORE] Creating archive from {local_path}")
+        # Build full source path: {local_path}/{subfolder}
+        # Example: /home/matt/repo/Agents/testjob
+        path_obj = Path(local_path)
+        if subfolder:
+            # Clean any leading/trailing slashes and use as relative path
+            subfolder = subfolder.strip("/\\")
+            path_obj = path_obj / subfolder
+
+        if not path_obj.exists():
+            return {"success": False, "error": f"Path does not exist: {path_obj}"}
+
+        logger.info(f"[PROXY RESTORE] Creating archive from {path_obj}")
 
         try:
             # Create tar archive in memory-efficient way using temp file

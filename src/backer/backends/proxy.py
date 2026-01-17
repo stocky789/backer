@@ -238,6 +238,7 @@ class ProxyBackend(BackendBase):
         data: bytes | None = None,
         stream: bool = False,
         timeout: int | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> requests.Response:
         """Make HTTP request with automatic retries via tenacity."""
         if not self.server_url or not self.repo_id:
@@ -246,6 +247,10 @@ class ProxyBackend(BackendBase):
         url = f"{self.server_url}/api/repo/{self.repo_id}{path}"
         timeout = timeout or self.timeout
         headers = self._get_auth_headers()
+
+        # Merge extra headers if provided
+        if extra_headers:
+            headers.update(extra_headers)
 
         # Use persistent session with SSL verification settings
         try:
@@ -542,6 +547,29 @@ class ProxyBackend(BackendBase):
                     return_code=0,
                 )
 
+            # Extract the job subfolder from the source path
+            # source.path is the full proxy URI like:
+            #   proxy://192.168.0.158:8420/repo/5279b837/Agents/testjob
+            # We need just: Agents/testjob
+            source_subfolder = ""
+            if source.path:
+                source_str = str(source.path)
+                # Check if it's a proxy URI and extract the path after /repo/{id}/
+                if "/repo/" in source_str:
+                    # Split on /repo/{repo_id}/ and take what's after
+                    parts = source_str.split("/repo/", 1)
+                    if len(parts) > 1:
+                        # parts[1] is like: "5279b837/Agents/testjob"
+                        # Skip the repo_id and get the rest
+                        subparts = parts[1].split("/", 1)
+                        if len(subparts) > 1:
+                            source_subfolder = subparts[1]  # "Agents/testjob"
+                elif not source_str.startswith(("proxy://", "proxys://", "http://", "https://")):
+                    # It's a local path, use as-is
+                    source_subfolder = source_str
+
+            logger.debug(f"[PROXY] Using restore subfolder: {source_subfolder}")
+
             # Build restore request with optional snapshot
             path = "/restore"
             if snapshot:
@@ -555,12 +583,18 @@ class ProxyBackend(BackendBase):
 
             logger.info(f"[PROXY] Requesting restore from {self.server_url}/api/repo/{self.repo_id}{path}")
 
+            # Build extra headers for restore subfolder
+            restore_headers = {}
+            if source_subfolder:
+                restore_headers["X-Restore-Subfolder"] = source_subfolder
+
             # Stream response to temp file
             response = self._request(
                 "GET",
                 path,
                 stream=True,
                 timeout=self.timeout * 2,  # Double timeout for restore
+                extra_headers=restore_headers if restore_headers else None,
             )
 
             # Verify response
