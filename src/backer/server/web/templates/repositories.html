@@ -655,27 +655,27 @@ function backToStep2() {
 async function saveLocalRepository() {
     const localPath = document.getElementById('localPath').value.trim();
     const name = document.getElementById('localRepoName').value.trim();
-    
+
     if (!localPath) {
         showError('discoverError', 'Please enter a local directory path');
         return;
     }
-    
+
     // Validate path format
     const isAbsolutePath = localPath.startsWith('/') || (localPath.match(/^[A-Z]:\\/) !== null);
     if (!isAbsolutePath) {
         showError('discoverError', 'Path must be absolute (e.g., /data/backups or C:\\Backups)');
         return;
     }
-    
+
     if (!name) {
         showError('discoverError', 'Please enter a repository name');
         return;
     }
-    
+
     const btn = document.getElementById('discoverBtn');
     btn.textContent = 'Saving...';
-    
+
     try {
         const response = await fetch('/api/v1/repositories', {
             method: 'POST',
@@ -691,20 +691,75 @@ async function saveLocalRepository() {
                 domain: null
             })
         });
-        
+
         const data = await response.json();
-        
+
         if (response.ok) {
-            Toast.success(`Local repository '${name}' created successfully!`);
+            // Close the add modal
             hideAddModal();
-            setTimeout(() => location.reload(), 1000);
+
+            const repoId = data.id;
+            const repoName = data.name;
+
+            // Monitor test/scan tasks like SMB/NFS repos do
+            if (data.test_task_id && data.scan_task_id) {
+                Toast.success(`Repository '${name}' created! Verifying path...`);
+
+                // Set up scan modal to show progress
+                currentScanRepoId = repoId;
+                document.getElementById('scanRepoName').textContent = repoName;
+                document.getElementById('scanResults').innerHTML = '<div class="loading-state">Verifying local directory access...</div>';
+                document.getElementById('scanActions').style.display = 'none';
+                showScanModal();
+
+                // Monitor test task first
+                const testTaskId = data.test_task_id;
+                let testAttempts = 0;
+                const maxAttempts = 30;
+
+                const checkTestTask = async () => {
+                    testAttempts++;
+                    try {
+                        const taskResponse = await fetch(`/api/v1/tasks/${testTaskId}`);
+                        const task = await taskResponse.json();
+
+                        if (task.status === 'completed') {
+                            const result = task.result || {};
+                            if (result.success) {
+                                // Test passed, now monitor scan task
+                                document.getElementById('scanResults').innerHTML = '<div class="loading-state">Directory verified! Initializing repository...</div>';
+                                monitorScanTask(data.scan_task_id);
+                            } else {
+                                document.getElementById('scanResults').innerHTML = `<div class="error-msg">Directory verification failed: ${escapeHtml(result.message || 'Unknown error')}</div>`;
+                            }
+                        } else if (task.status === 'failed') {
+                            document.getElementById('scanResults').innerHTML = `<div class="error-msg">Directory verification failed: ${escapeHtml(task.error || 'Unknown error')}</div>`;
+                        } else if (testAttempts < maxAttempts) {
+                            if (task.message) {
+                                document.getElementById('scanResults').innerHTML = `<div class="loading-state">${escapeHtml(task.message)}</div>`;
+                            }
+                            setTimeout(checkTestTask, 500);
+                        } else {
+                            document.getElementById('scanResults').innerHTML = '<div class="error-msg">Verification timed out</div>';
+                        }
+                    } catch (e) {
+                        document.getElementById('scanResults').innerHTML = `<div class="error-msg">Error checking status: ${escapeHtml(e.message)}</div>`;
+                    }
+                };
+
+                setTimeout(checkTestTask, 300);
+            } else {
+                // No auto tasks, just reload
+                Toast.success(`Local repository '${name}' created!`);
+                setTimeout(() => location.reload(), 1000);
+            }
         } else {
             showError('discoverError', data.detail || 'Failed to create repository');
         }
     } catch (e) {
         showError('discoverError', 'Failed to save repository: ' + e.message);
     }
-    
+
     btn.textContent = 'Save Local Repository';
 }
 
