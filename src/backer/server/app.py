@@ -258,13 +258,18 @@ class ServerKopia:
             try:
                 snapshots = json.loads(stdout)
             except json.JSONDecodeError:
+                logger.error("[SERVER KOPIA] Failed to parse snapshot list JSON")
                 return []
+
+            logger.debug(f"[SERVER KOPIA] Found {len(snapshots)} total snapshots")
 
             # Filter by job tag if specified
             result = []
             for snap in snapshots:
                 tags = snap.get("tags", {})
                 snap_job = tags.get("job", "")
+
+                logger.debug(f"[SERVER KOPIA] Snapshot {snap.get('id', '')[:12]}: tags={tags}, job_tag='{snap_job}'")
 
                 if job_name and snap_job != job_name:
                     continue
@@ -282,6 +287,10 @@ class ServerKopia:
 
             # Sort by timestamp descending (newest first)
             result.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+            if job_name and not result:
+                logger.warning(f"[SERVER KOPIA] No snapshots found for job '{job_name}' (total snapshots: {len(snapshots)})")
+
             return result
 
         finally:
@@ -12382,7 +12391,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         local_path = repo.get("share")
         if not local_path:
-            return {"success": False, "error": "No local path configured"}
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": "No local path configured"},
+            )
 
         # Get restore subfolder from headers (e.g., "Agents/testjob")
         subfolder = request.headers.get("X-Restore-Subfolder", "")
@@ -12409,7 +12421,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         kopia = ServerKopia(local_path, password)
 
         if not kopia.ensure_repo():
-            return {"success": False, "error": "Kopia repository not initialized"}
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": "Kopia repository not initialized"},
+            )
 
         # Determine snapshot to restore
         snapshot_id = snapshot
@@ -12417,7 +12432,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Find the latest snapshot for this job
             snapshot_id = kopia.find_latest_snapshot(job_name)
             if not snapshot_id:
-                return {"success": False, "error": f"No snapshots found for job '{job_name}'"}
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "error": f"No snapshots found for job '{job_name}'"},
+                )
             logger.info(f"[PROXY RESTORE] Using latest snapshot: {snapshot_id}")
 
         # Create staging directory for restore
@@ -12431,7 +12449,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Restore snapshot to staging
             result = kopia.snapshot_restore(snapshot_id, staging_path)
             if not result.get("success"):
-                return {"success": False, "error": result.get("error", "Restore failed")}
+                return JSONResponse(
+                    status_code=500,
+                    content={"success": False, "error": result.get("error", "Restore failed")},
+                )
 
             logger.info(f"[PROXY RESTORE] Restored snapshot to staging: {staging_path}")
 
@@ -12485,7 +12506,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     Path(tmp_path).unlink()
                 except Exception:
                     pass
-            return {"success": False, "error": str(e)}
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": str(e)},
+            )
 
         finally:
             # Clean up staging directory if it still exists
