@@ -495,6 +495,7 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
     console.print("  • Binary symlink (/usr/local/bin/backer)")
     if not keep_data:
         console.print("  • [yellow]Backup data and config (/var/lib/backer)[/yellow]")
+        console.print("  • [yellow]User data (~/.local/share/backer)[/yellow]")
     else:
         console.print("  • [dim]Backup data will be preserved[/dim]")
     console.print("  • System user (backer)")
@@ -543,6 +544,13 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
     dirs_to_remove = ["/opt/backer"]
     if not keep_data:
         dirs_to_remove.append("/var/lib/backer")
+        # Also check for user data directories
+        # When running as sudo, SUDO_USER contains the original user
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            user_data_dir = Path(f"/home/{sudo_user}/.local/share/backer")
+            if user_data_dir.exists():
+                dirs_to_remove.append(str(user_data_dir))
 
     for dir_path in dirs_to_remove:
         path = Path(dir_path)
@@ -575,7 +583,7 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
 
     # Suggest cleaning up user files
     console.print("\n[dim]To clean up user files, run as your user:[/dim]")
-    console.print("[dim]  rm -rf ~/backer ~/venv[/dim]")
+    console.print("[dim]  rm -rf ~/backer ~/venv ~/.local/share/backer[/dim]")
 
 
 # ============ Agent commands ============

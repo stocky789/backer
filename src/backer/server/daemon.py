@@ -85,7 +85,13 @@ class BackerServer:
     ):
         self.host = host
         self.port = port
-        self.data_dir = data_dir or Path.home() / ".local" / "share" / "backer"
+        # Priority: explicit arg > BACKER_DATA_DIR env > default
+        if data_dir:
+            self.data_dir = data_dir
+        elif os.environ.get("BACKER_DATA_DIR"):
+            self.data_dir = Path(os.environ["BACKER_DATA_DIR"])
+        else:
+            self.data_dir = Path.home() / ".local" / "share" / "backer"
 
         # Setup logging before creating app
         setup_logging(self.data_dir)
