@@ -19,7 +19,6 @@ services:
       BACKER_DATA_DIR: /data
       # Change this to your server's IP for agents to connect
       BACKER_PUBLIC_URL: http://localhost:8420
-    user: "${UID:-1000}:${GID:-1000}"
     # Required for SMB/NFS repository access
     cap_add:
       - SYS_ADMIN
