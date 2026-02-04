@@ -460,6 +460,41 @@ def get_storage() -> Storage:
     return _storage
 
 
+def _get_default_public_url() -> str:
+    """Auto-detect the server's local IP address for the default public URL.
+
+    This is used on fresh installs so agents can connect without manual config.
+    Falls back to localhost if IP detection fails.
+    """
+    import socket
+
+    try:
+        # Create a socket to determine the local IP that would route to external addresses
+        # This doesn't actually make a connection, just determines the local interface
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # Use Google DNS as target (doesn't actually connect)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+
+        # Validate it's not a loopback address
+        if local_ip and not local_ip.startswith("127."):
+            return f"http://{local_ip}:8420"
+    except Exception:
+        pass  # Fall through to default
+
+    # Fallback: try to get hostname-based IP
+    try:
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        if local_ip and not local_ip.startswith("127."):
+            return f"http://{local_ip}:8420"
+    except Exception:
+        pass
+
+    # Final fallback
+    return "http://localhost:8420"
+
+
 def _get_job_subfolder(job_name: str) -> str:
     """Get a safe subfolder name for a job.
 
@@ -3006,15 +3041,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             _storage.set_setting("public_url", public_url)
             logger.info(f"Public URL configured: {public_url}")
         else:
-            # Fall back to database setting or default
+            # Fall back to database setting or auto-detect
             existing_url = _storage.get_setting("public_url")
             if existing_url:
                 logger.info(f"Using stored public URL: {existing_url}")
             else:
-                # Set default
-                default_url = "http://localhost:8420"
+                # Auto-detect local IP for fresh installs
+                default_url = _get_default_public_url()
                 _storage.set_setting("public_url", default_url)
-                logger.info(f"Using default public URL: {default_url}")
+                logger.info(f"Auto-detected public URL: {default_url}")
 
         if _scheduler:
             _scheduler.start()
