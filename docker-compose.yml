@@ -1,10 +1,8 @@
-# Backer Server - Docker Compose
+# Backer Server
 #
-# Quick start:
-#   sudo docker-compose up -d
-#
-# Web UI: http://localhost:8420
-# Default login: admin / admin
+# Start: docker compose up -d
+# Web UI: http://<your-ip>:8420
+# Login: admin / admin
 
 services:
   backer:
@@ -15,45 +13,18 @@ services:
       - "8420:8420"
     volumes:
       - backer-data:/data
-      # LOCAL repository storage: /data/local-backups is created by default
-      # Use path "/data/local-backups" when creating a LOCAL repository in the UI
-      # Backups are stored in: /data/local-backups/Agents/{job_name}/contents/
-      #
-      # Optional: Mount host paths for LOCAL Directory repositories
-      # Examples:
-      # - /mnt/nas/backups:/data/backups:delegated        # Mount host NAS to container
-      # - ./backups:/data/backups:delegated               # Mount local folder
-      # - /path/to/external:/data/external:delegated      # Mount external drive
+      # Optional: mount additional paths for LOCAL repositories
+      # - /mnt/nas/backups:/data/backups
     environment:
       BACKER_DATA_DIR: /data
-      # Public URL for reverse proxy support (Cloudflare, nginx, etc.)
-      # Set this to your external domain when using a reverse proxy
-      # Examples:
-      # - http://localhost:8420 (default, no reverse proxy)
-      # - https://backer.example.com (with reverse proxy)
-      # - http://192.168.1.100:8420 (IP-based access)
+      # Change this to your server's IP for agents to connect
       BACKER_PUBLIC_URL: http://localhost:8420
-      # SSL/TLS verification for reverse proxies with self-signed certificates
-      # Options: "true" (default), "false" (dev only), or path to CA bundle
-      BACKER_SSL_VERIFY: "true"
-      # JWT secret for token-based authentication (change in production!)
-      # If not set, a temporary secret will be generated (tokens invalid after restart)
-      # Generate with: openssl rand -base64 32
-      # BACKER_JWT_SECRET: "change-me-in-production"
-    # User/Group configuration for volume permissions
-    # Set UID/GID to match your host user/group to avoid permission issues
-    # Default: 1000:1000 (typical unprivileged user)
-    # To use current user: user: "${UID:-1000}:${GID:-1000}"
     user: "${UID:-1000}:${GID:-1000}"
-    # Required for SMB/NFS mounts inside container
+    # Required for SMB/NFS repository access
     cap_add:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
-    labels:
-      com.backer.description: "Unified backup orchestration server"
-      com.backer.version: "latest"
-    # Health check (Docker will monitor container health)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8420/health"]
       interval: 30s
@@ -63,5 +34,3 @@ services:
 
 volumes:
   backer-data:
-    name: backer-data
-    driver: local
