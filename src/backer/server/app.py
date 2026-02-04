@@ -4878,7 +4878,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                 "file_count": file_count,
                                                 "path": str(contents_dir),
                                             }
-                                            logger.info(f"[SCAN] Found job '{job_name}' in Agents folder ({file_count} files)")
+                                            logger.info(f"[SCAN] Found job '{job_name}' ({file_count} files)")
 
                                 # Merge filesystem jobs with existing jobs
                                 existing_jobs = {j.get("job_name"): j for j in discovery.get("jobs", [])}
@@ -12439,7 +12439,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         Files remain accessible in the filesystem structure while kopia provides versioning.
         """
-        import shutil
         import tempfile
 
         auth_header = request.headers.get("authorization")
