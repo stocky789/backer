@@ -4851,8 +4851,51 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     repo_meta = RepositoryMetadata(repo_path, repo_type)
                     discovery = repo_meta.discover_all()
 
-                    # For LOCAL repos, also scan for kopia snapshots
+                    # For LOCAL repos, also scan Agents/ folder structure and kopia snapshots
                     if repo_type == "local":
+                        task.message = "Scanning Agents folder..."
+                        task.progress = 40
+
+                        # Scan filesystem for Agents/{job_name}/contents/ structure
+                        agents_dir = Path(repo_path) / "Agents"
+                        if agents_dir.exists() and agents_dir.is_dir():
+                            jobs_from_fs = {}
+                            try:
+                                for job_dir in agents_dir.iterdir():
+                                    if job_dir.is_dir() and not job_dir.name.startswith('.'):
+                                        job_name = job_dir.name
+                                        contents_dir = job_dir / "contents"
+
+                                        # Count files if contents folder exists
+                                        file_count = 0
+                                        if contents_dir.exists():
+                                            file_count = sum(1 for _ in contents_dir.rglob('*') if _.is_file())
+
+                                        if file_count > 0 or contents_dir.exists():
+                                            jobs_from_fs[job_name] = {
+                                                "job_name": job_name,
+                                                "source": "filesystem",
+                                                "file_count": file_count,
+                                                "path": str(contents_dir),
+                                            }
+                                            logger.info(f"[SCAN] Found job '{job_name}' in Agents folder ({file_count} files)")
+
+                                # Merge filesystem jobs with existing jobs
+                                existing_jobs = {j.get("job_name"): j for j in discovery.get("jobs", [])}
+                                for job_name, job_info in jobs_from_fs.items():
+                                    if job_name not in existing_jobs:
+                                        existing_jobs[job_name] = job_info
+                                    else:
+                                        # Add filesystem info to existing job
+                                        existing_jobs[job_name]["file_count"] = job_info.get("file_count", 0)
+                                        existing_jobs[job_name]["path"] = job_info.get("path")
+                                discovery["jobs"] = list(existing_jobs.values())
+                                discovery["initialized"] = True
+
+                                logger.info(f"[SCAN] Found {len(jobs_from_fs)} jobs in Agents folder")
+                            except Exception as fs_err:
+                                logger.warning(f"[SCAN] Error scanning Agents folder: {fs_err}")
+
                         task.message = "Scanning kopia repository..."
                         task.progress = 60
                         try:
@@ -12387,13 +12430,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         credentials: HTTPBasicCredentials | None = Depends(security),
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Receive backup data from agent and store using kopia for versioning.
+        """Receive backup data from agent and store in proper directory structure.
 
         Flow:
         1. Receive tar.gz stream from agent
-        2. Extract to staging directory
-        3. Create kopia snapshot with job tags
-        4. Clean up staging directory
+        2. Extract to {local_path}/Agents/{job_name}/contents/ (persistent storage)
+        3. Create kopia snapshot with job tags (for versioning/point-in-time restore)
+
+        Files remain accessible in the filesystem structure while kopia provides versioning.
         """
         import shutil
         import tempfile
@@ -12424,8 +12468,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         logger.info(f"[PROXY BACKUP] Receiving backup for job '{job_name}' from {source_path}")
 
-        # Create staging directory for this backup
-        staging_dir = None
+        # Build the proper backup directory structure: {local_path}/Agents/{job_name}/contents/
+        # This matches the structure used by SMB/NFS repositories for consistency
+        local_base = Path(local_path)
+        backup_dir = local_base / "Agents" / job_name / "contents"
         tmp_path = None
 
         try:
@@ -12439,14 +12485,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             logger.info(f"[PROXY BACKUP] Received {bytes_received / 1024 / 1024:.1f}MB")
 
-            # Create staging directory
-            staging_dir = tempfile.mkdtemp(prefix=f"backer-staging-{job_name}-")
-            staging_path = Path(staging_dir)
+            # Create the backup directory structure
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"[PROXY BACKUP] Backup directory: {backup_dir}")
 
-            # Extract tar archive to staging (with path traversal protection)
-            members = safe_tar_extract(tmp_path, staging_path)
+            # Extract tar archive to the proper backup location (with path traversal protection)
+            members = safe_tar_extract(tmp_path, backup_dir)
 
-            logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to staging")
+            logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {backup_dir}")
 
             # Clean up tar file
             Path(tmp_path).unlink()
@@ -12455,14 +12501,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Get repository password (use default if not set)
             password = repo_password or "backer-default-password"
 
-            # Initialize kopia and create snapshot
+            # Initialize kopia and create snapshot from the backup directory
+            # This provides versioning/point-in-time restore while keeping files accessible
             kopia = ServerKopia(local_path, password)
 
             if not kopia.ensure_repo():
                 return {"success": False, "error": "Failed to initialize kopia repository"}
 
             result = kopia.snapshot_create(
-                source_dir=staging_path,
+                source_dir=backup_dir,
                 job_name=job_name,
                 source_path=source_path,
             )
@@ -12479,6 +12526,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "files": len(members),
                 "bytes": bytes_received,
                 "snapshot_id": snapshot_id,
+                "backup_path": str(backup_dir),
             }
 
         except Exception as e:
@@ -12486,12 +12534,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return {"success": False, "error": str(e)}
 
         finally:
-            # Clean up staging directory
-            if staging_dir and Path(staging_dir).exists():
-                try:
-                    shutil.rmtree(staging_dir)
-                except Exception as cleanup_err:
-                    logger.warning(f"[PROXY BACKUP] Failed to clean staging: {cleanup_err}")
+            # Note: We don't delete backup_dir - files are stored there permanently
+            # Only clean up the temp tar file if it still exists
 
             # Clean up temp tar file if it still exists
             if tmp_path:

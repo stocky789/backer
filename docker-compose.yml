@@ -15,11 +15,14 @@ services:
       - "8420:8420"
     volumes:
       - backer-data:/data
-      # Optional: Mount backup destinations for Local Directory repositories
-      # These paths can then be configured in the Backer UI as "Local Directory" repos
+      # LOCAL repository storage: /data/local-backups is created by default
+      # Use path "/data/local-backups" when creating a LOCAL repository in the UI
+      # Backups are stored in: /data/local-backups/Agents/{job_name}/contents/
+      #
+      # Optional: Mount host paths for LOCAL Directory repositories
       # Examples:
       # - /mnt/nas/backups:/data/backups:delegated        # Mount host NAS to container
-      # - ./backups:/data/backups:delegated               # Mount local folder (set delegated for performance)
+      # - ./backups:/data/backups:delegated               # Mount local folder
       # - /path/to/external:/data/external:delegated      # Mount external drive
     environment:
       BACKER_DATA_DIR: /data
