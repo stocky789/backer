@@ -20,6 +20,19 @@ try:
 except ImportError:
     __version__ = "0.0.0"
 
+# Explicitly import backend modules for PyInstaller
+# PyInstaller's hiddenimports doesn't work reliably with dynamic __import__()
+# These imports ensure the backends are registered before the registry is used
+try:
+    import backer.backends.proxy  # noqa: F401 - Required for backend registration
+    import backer.backends.kopia  # noqa: F401 - Required for backend registration
+    import backer.backends.rclone  # noqa: F401 - Required for backend registration
+    import backer.backends.restic  # noqa: F401 - Required for backend registration
+except ImportError as e:
+    # Log but don't fail - some backends may not be available
+    import logging as _logging
+    _logging.getLogger(__name__).debug(f"Backend import warning: {e}")
+
 # Add parent to path for imports when running as frozen exe
 if getattr(sys, 'frozen', False):
     APP_DIR = Path(sys.executable).parent

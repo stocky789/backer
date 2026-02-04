@@ -26,6 +26,18 @@ from typing import Any
 from backer import __version__
 from backer.core.repo_metadata import RepositoryMetadata
 
+# Explicitly import backend modules for PyInstaller
+# PyInstaller's hiddenimports doesn't work reliably with dynamic __import__()
+# These imports ensure the backends are registered before the registry is used
+try:
+    import backer.backends.proxy  # noqa: F401 - Required for backend registration
+    import backer.backends.kopia  # noqa: F401 - Required for backend registration
+    import backer.backends.rclone  # noqa: F401 - Required for backend registration
+    import backer.backends.restic  # noqa: F401 - Required for backend registration
+except ImportError as e:
+    # Log but don't fail - some backends may not be available
+    logging.getLogger(__name__).debug(f"Backend import warning: {e}")
+
 
 def get_subprocess_flags() -> int:
     """Get subprocess creation flags to hide console window on Windows."""
