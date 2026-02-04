@@ -3546,7 +3546,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not existing:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        existing["enabled"] = not existing.get("enabled", True)
+        existing["enabled"] = not existing.get("enabled", False)
         storage.save_job(job_name, existing)
 
         return {"name": job_name, "enabled": existing["enabled"]}
