@@ -29,14 +29,16 @@ from backer.core.repo_metadata import RepositoryMetadata
 # Explicitly import backend modules for PyInstaller
 # PyInstaller's hiddenimports doesn't work reliably with dynamic __import__()
 # These imports ensure the backends are registered before the registry is used
-try:
-    import backer.backends.kopia  # noqa: F401 - Required for backend registration
-    import backer.backends.proxy  # noqa: F401 - Required for backend registration
-    import backer.backends.rclone  # noqa: F401 - Required for backend registration
-    import backer.backends.restic  # noqa: F401 - Required for backend registration
-except ImportError as e:
-    # Log but don't fail - some backends may not be available
-    logging.getLogger(__name__).debug(f"Backend import warning: {e}")
+# Import each individually so one failure doesn't prevent others from loading
+_backend_logger = logging.getLogger(__name__)
+for _backend in ['kopia', 'proxy', 'rclone', 'restic']:
+    try:
+        __import__(f'backer.backends.{_backend}')
+        _backend_logger.info(f"Backend '{_backend}' loaded successfully")
+    except ImportError as e:
+        _backend_logger.warning(f"Backend '{_backend}' failed to load: {e}")
+    except Exception as e:
+        _backend_logger.error(f"Backend '{_backend}' error: {e}", exc_info=True)
 
 
 def get_subprocess_flags() -> int:
