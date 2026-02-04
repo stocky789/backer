@@ -48,6 +48,7 @@ RUN mkdir -p /data/tools /data/logs /data/local-backups && \
 
 # Set environment variables
 ENV BACKER_DATA_DIR=/data
+ENV HOME=/data
 ENV PATH=/data/tools:$PATH
 ENV PYTHONUNBUFFERED=1
 
@@ -62,4 +63,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8420/health || exit 1
 
 # Run server
-CMD ["backer", "server", "start", "--host", "0.0.0.0", "--port", "8420"]
+CMD ["backer", "server", "start", "--host", "0.0.0.0", "--port", "8420", "--data-dir", "/data"]
