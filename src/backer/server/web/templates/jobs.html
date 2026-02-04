@@ -130,7 +130,7 @@
                             <div class="btn-group">
                                 <button class="btn btn-primary btn-sm job-run-btn"
                                         data-job-name="{{ job.name }}"
-                                        {% if not job.client_id %}disabled title="Assign an agent first"{% endif %}>
+                                        {% if not job.client_id %}title="No agent assigned - click to select"{% endif %}>
                                     Run
                                 </button>
                                 <button class="btn btn-secondary btn-sm job-restore-btn"
@@ -395,7 +395,101 @@
     </div>
 </div>
 
+<!-- Agent Selection Modal (for disaster recovery / agent reassignment) -->
+<div id="agentSelectModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-header">
+            <span class="modal-title">
+                <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                Select Agent
+            </span>
+            <button class="modal-close" onclick="hideAgentSelectModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <!-- Warning Panel -->
+            <div class="agent-select-warning">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <div>
+                    <strong>Agent Not Found</strong>
+                    <p id="agentSelectMessage">The original agent for this job is no longer connected. Select a connected agent to run this backup.</p>
+                </div>
+            </div>
+
+            <input type="hidden" id="agentSelectJobName">
+            <input type="hidden" id="agentSelectAction" value="run">
+
+            <div class="form-group" style="margin-top: 16px;">
+                <label class="form-label">Select Connected Agent</label>
+                <select id="agentSelectDropdown" class="form-input" {% if not agents %}disabled{% endif %}>
+                    {% if agents %}
+                    {% for agent in agents %}
+                    <option value="{{ agent.id }}" data-hostname="{{ agent.hostname }}">{{ agent.name }} ({{ agent.hostname }})</option>
+                    {% endfor %}
+                    {% else %}
+                    <option value="" disabled>No agents available</option>
+                    {% endif %}
+                </select>
+                <div class="form-hint">Choose which agent should run this backup job</div>
+                {% if not agents %}
+                <div class="form-hint" style="color: var(--warning); margin-top: 4px;">
+                    <a href="/agents" style="color: var(--accent);">Register an agent first</a> to run backups.
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="form-group" style="margin-top: 12px;">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="agentSelectUpdateJob" checked>
+                    <span>Update job with selected agent</span>
+                </label>
+                <div class="form-hint">Save this agent assignment so future runs use this agent automatically</div>
+            </div>
+
+            <div id="agentSelectError" class="error-msg" style="display: none;"></div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" onclick="confirmAgentSelection()">
+                    <svg viewBox="0 0 24 24" width="14" height="14" style="margin-right: 6px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    <span id="agentSelectActionText">Run Backup</span>
+                </button>
+                <button type="button" class="btn btn-secondary" onclick="hideAgentSelectModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <style>
+/* Agent Selection Modal Styles */
+.agent-select-warning {
+    display: flex;
+    gap: 12px;
+    padding: 14px 16px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid var(--warning);
+    border-radius: 6px;
+    color: var(--text);
+}
+.agent-select-warning svg {
+    flex-shrink: 0;
+    stroke: var(--warning);
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.agent-select-warning strong {
+    display: block;
+    color: var(--warning);
+    margin-bottom: 4px;
+    font-size: 13px;
+}
+.agent-select-warning p {
+    font-size: 12px;
+    margin: 0;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
 .row-disabled {
     opacity: 0.5;
 }
@@ -536,12 +630,18 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-async function runJob(jobName) {
+async function runJob(jobName, overrideClientId = null, updateJob = false) {
     try {
+        const body = {dry_run: false};
+        if (overrideClientId) {
+            body.override_client_id = overrideClientId;
+            body.update_job_agent = updateJob;
+        }
+
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/run`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({dry_run: false})
+            body: JSON.stringify(body)
         });
 
         if (response.ok) {
@@ -550,14 +650,23 @@ async function runJob(jobName) {
             setTimeout(() => location.reload(), 1500);
         } else {
             let errorMsg = 'Failed to start job';
+            let errorData = null;
             try {
-                const data = await response.json();
-                errorMsg = data.detail || data.message || errorMsg;
+                errorData = await response.json();
+                errorMsg = errorData.detail || errorData.message || errorMsg;
             } catch {
                 const text = await response.text();
                 if (text) errorMsg = text;
             }
-            Toast.error(errorMsg);
+
+            // Check if it's an agent-related error - show selection modal
+            const isAgentNotFound = errorMsg.toLowerCase().includes('agent') && errorMsg.toLowerCase().includes('not found');
+            const isNoAgent = errorMsg.toLowerCase().includes('no assigned agent');
+            if (isAgentNotFound || isNoAgent) {
+                showAgentSelectModal(jobName, 'run', errorMsg);
+            } else {
+                Toast.error(errorMsg);
+            }
         }
     } catch (e) {
         Toast.error('Error: ' + e.message);
@@ -767,8 +876,15 @@ async function submitRestore(event) {
             successDiv.style.display = 'block';
             document.getElementById('restoreForm').style.display = 'none';
         } else {
-            errorDiv.textContent = data.detail || 'Failed to start restore';
-            errorDiv.style.display = 'block';
+            const errorMsg = data.detail || 'Failed to start restore';
+            // Check if it's an "Agent not found" error - show selection modal
+            if (errorMsg.toLowerCase().includes('agent') && errorMsg.toLowerCase().includes('not found')) {
+                hideRestoreModal();
+                showAgentSelectModal(jobName, 'restore', errorMsg);
+            } else {
+                errorDiv.textContent = errorMsg;
+                errorDiv.style.display = 'block';
+            }
         }
     } catch (e) {
         errorDiv.textContent = e.message;
@@ -828,6 +944,71 @@ async function confirmDeleteJob() {
 
 document.getElementById('deleteModal')?.addEventListener('click', function(e) {
     if (e.target === this) hideDeleteModal();
+});
+
+// Agent Selection Modal Functions
+function showAgentSelectModal(jobName, action, errorMsg) {
+    document.getElementById('agentSelectJobName').value = jobName;
+    document.getElementById('agentSelectAction').value = action;
+    document.getElementById('agentSelectError').style.display = 'none';
+    document.getElementById('agentSelectUpdateJob').checked = true;
+
+    // Determine message based on error type
+    const isNoAgentAssigned = errorMsg && errorMsg.toLowerCase().includes('no assigned agent');
+
+    // Set action text and message based on action type
+    if (action === 'run') {
+        document.getElementById('agentSelectActionText').textContent = 'Run Backup';
+        if (isNoAgentAssigned) {
+            document.getElementById('agentSelectMessage').textContent =
+                `Job "${jobName}" has no agent assigned. Select a connected agent to run this backup.`;
+        } else {
+            document.getElementById('agentSelectMessage').textContent =
+                `The original agent for job "${jobName}" is no longer connected. Select a connected agent to run this backup.`;
+        }
+    } else if (action === 'restore') {
+        document.getElementById('agentSelectActionText').textContent = 'Start Restore';
+        document.getElementById('agentSelectMessage').textContent =
+            `The original agent for this restore is no longer connected. Select a connected agent to restore files to.`;
+    }
+
+    document.getElementById('agentSelectModal').style.display = 'flex';
+}
+
+function hideAgentSelectModal() {
+    document.getElementById('agentSelectModal').style.display = 'none';
+}
+
+async function confirmAgentSelection() {
+    const jobName = document.getElementById('agentSelectJobName').value;
+    const action = document.getElementById('agentSelectAction').value;
+    const selectedAgent = document.getElementById('agentSelectDropdown').value;
+    const updateJob = document.getElementById('agentSelectUpdateJob').checked;
+    const errorDiv = document.getElementById('agentSelectError');
+
+    if (!selectedAgent) {
+        errorDiv.textContent = 'Please select an agent';
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    errorDiv.style.display = 'none';
+    hideAgentSelectModal();
+
+    if (action === 'run') {
+        // Run the job with the selected agent
+        await runJob(jobName, selectedAgent, updateJob);
+    } else if (action === 'restore') {
+        // Update the restore form's client ID and resubmit
+        document.getElementById('restoreClientId').value = selectedAgent;
+        // Re-show restore modal so user can confirm
+        document.getElementById('restoreModal').style.display = 'flex';
+        Toast.info('Agent updated. Click "Start Restore" to continue.');
+    }
+}
+
+document.getElementById('agentSelectModal')?.addEventListener('click', function(e) {
+    if (e.target === this) hideAgentSelectModal();
 });
 </script>
 {% endblock %}

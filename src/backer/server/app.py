@@ -3760,12 +3760,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Trigger a job to run."""
         # Default to non-dry-run if no request body provided
         dry_run = request.dry_run if request else False
+        override_client_id = request.override_client_id if request else None
+        update_job_agent = request.update_job_agent if request else False
 
         job = storage.get_job(job_name)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        client_id = job.get("client_id")
+        # Determine which client to use (override takes precedence)
+        client_id = override_client_id or job.get("client_id")
         if not client_id:
             raise HTTPException(
                 status_code=400,
@@ -3776,6 +3779,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         client = storage.get_client(client_id)
         if not client:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
+
+        # If user wants to update the job with the new agent, do so
+        if override_client_id and update_job_agent:
+            job["client_id"] = override_client_id
+            storage.save_job(job_name, job)
+            logger.info(f"[JOB RUN] Updated job '{job_name}' to use agent '{override_client_id}'")
 
         # Check if job is already running (prevent duplicate runs)
         recent_runs = storage.get_job_runs(job_name, limit=5)
