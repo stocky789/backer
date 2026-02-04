@@ -236,6 +236,13 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
 
+      - name: Delete existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ${{ steps.version.outputs.tag }} --yes --repo ${{ github.repository }} || true
+        shell: bash
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -244,6 +251,7 @@ jobs:
           draft: false
           prerelease: true
           generate_release_notes: false
+          fail_on_unmatched_files: false
           files: |
             release/backer-agent-setup.exe
             release/backer-agent-windows-portable.zip

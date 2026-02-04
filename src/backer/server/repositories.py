@@ -80,6 +80,7 @@ class ShareInfo:
     name: str
     share_type: str  # "Disk", "IPC", "Printer", etc.
     comment: str = ""
+    path: str = ""  # Full path for local directories
 
 
 @dataclass
@@ -438,6 +439,76 @@ class LocalBrowser:
     """Browse local filesystem directories."""
 
     @staticmethod
+    def test_connection(path: str) -> tuple[bool, str]:
+        """Test if a local directory is accessible."""
+        import getpass
+        import stat
+
+        try:
+            dir_path = Path(path)
+            current_user = getpass.getuser()
+            current_uid = os.getuid()
+
+            logger.info(f"Testing local path: {path}")
+            logger.info(f"Current user: {current_user} (UID: {current_uid})")
+
+            if not dir_path.exists():
+                msg = f"Path does not exist: {path}"
+                logger.warning(msg)
+                return False, msg
+
+            if not dir_path.is_dir():
+                msg = f"Not a directory: {path}"
+                logger.warning(msg)
+                return False, msg
+
+            # Get directory stats for debugging
+            try:
+                st = dir_path.stat()
+                dir_mode = stat.filemode(st.st_mode)
+                dir_owner = st.st_uid
+                logger.info(f"Directory permissions: {dir_mode} owner UID: {dir_owner}")
+            except Exception as e:
+                logger.warning(f"Could not stat directory: {e}")
+
+            # Check read/write permissions
+            readable = os.access(dir_path, os.R_OK)
+            writable = os.access(dir_path, os.W_OK)
+            logger.info(f"Permission checks - readable: {readable}, writable: {writable}")
+
+            if not readable:
+                msg = f"Path is not readable: {path}"
+                logger.warning(msg)
+                return False, msg
+
+            if not writable:
+                msg = f"Path is not writable: {path}"
+                logger.warning(msg)
+                return False, msg
+
+            # Try to list directory contents as additional verification
+            try:
+                entries = list(dir_path.iterdir())
+                logger.info(f"Successfully listed {len(entries)} entries in {path}")
+            except PermissionError as e:
+                msg = f"Cannot list directory contents: {path} - {e}"
+                logger.error(msg)
+                return False, msg
+
+            msg = f"Local directory accessible: {path}"
+            logger.info(msg)
+            return True, msg
+
+        except PermissionError as e:
+            msg = f"Permission denied: {e}"
+            logger.error(msg)
+            return False, msg
+        except Exception as e:
+            msg = f"Error accessing path: {e}"
+            logger.error(msg, exc_info=True)
+            return False, msg
+
+    @staticmethod
     def list_directory(path: str = "/") -> tuple[bool, list[DirectoryEntry] | str]:
         """List contents of a local directory."""
         try:
@@ -483,6 +554,27 @@ def discover_shares(
         return SMBBrowser.list_shares(server, username, password, domain)
     elif repo_type == RepositoryType.NFS:
         return NFSBrowser.list_exports(server)
+    elif repo_type == RepositoryType.LOCAL:
+        # For LOCAL repos, return root directories as "shares"
+        try:
+            root = Path("/")
+            shares = []
+            for entry in root.iterdir():
+                if entry.is_dir():
+                    try:
+                        # Only include accessible directories
+                        list(entry.iterdir())
+                        shares.append(ShareInfo(
+                            name=entry.name,
+                            path=str(entry),
+                            share_type="directory",
+                        ))
+                    except (PermissionError, OSError):
+                        continue
+            shares.sort(key=lambda s: s.name.lower())
+            return True, shares
+        except Exception as e:
+            return False, f"Error listing root directories: {e}"
     else:
         return False, f"Discovery not supported for {repo_type}"
 

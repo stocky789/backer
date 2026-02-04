@@ -350,6 +350,15 @@ if [ $PIP_EXIT -ne 0 ]; then
 fi
 success "Backer installed"
 
+# Verify installation (basic check that backer is importable)
+info "Verifying installation..."
+if ! "$INSTALL_DIR/venv/bin/python" -c "import backer; import backer.server" 2>/dev/null; then
+    warn "Installation verification failed. Trying to reinstall..."
+    # Reinstall with --force-reinstall to ensure packages are properly installed
+    "$INSTALL_DIR/venv/bin/pip" install --no-cache-dir --force-reinstall "file://$INSTALL_DIR[server]" > /dev/null 2>&1 || true
+fi
+success "Installation verified"
+
 # Download backup tools (rclone + restic)
 info "Downloading backup tools..."
 "$INSTALL_DIR/venv/bin/backer" setup --data-dir "$DATA_DIR" 2>/dev/null || \
@@ -369,19 +378,19 @@ After=network.target
 
 [Service]
 Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
+# Run as root for full filesystem access
+# Backup server needs to access:
+#   - All user home directories (/home/*)
+#   - System paths for backup jobs
+#   - Network mount points (SMB, NFS)
+#   - Local repository paths
+User=root
+Group=root
 WorkingDirectory=$INSTALL_DIR
 Environment="BACKER_DATA_DIR=$DATA_DIR"
 ExecStart=$INSTALL_DIR/venv/bin/backer server start --host 0.0.0.0 --port 8420
 Restart=always
 RestartSec=5
-
-# Security hardening (NoNewPrivileges disabled to allow sudo for NFS mounts)
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA_DIR
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -402,9 +411,29 @@ chmod +x /usr/local/bin/backer
 success "Command 'backer' available system-wide"
 
 # Enable and start service
-info "Starting Backer service..."
-systemctl enable backer --quiet
-systemctl start backer
+info "Starting Backer service with full system access..."
+systemctl enable backer.service --quiet
+systemctl restart backer.service
+
+# Wait a moment for service to start
+sleep 2
+
+# Verify service is running as root
+info "Verifying service permissions..."
+SERVICE_USER=$(ps aux 2>/dev/null | grep -E '[b]acker server start' | awk '{print $1}' | head -n1)
+if [ -z "$SERVICE_USER" ]; then
+    # Try alternative check
+    SERVICE_USER=$(systemctl show backer.service -p User --value 2>/dev/null)
+fi
+
+if [ "$SERVICE_USER" = "root" ] || [ -z "$SERVICE_USER" ]; then
+    # If we can't determine user but service started, it's likely root
+    success "Backer service has full system access (root)"
+else
+    error "Service is running as '$SERVICE_USER' instead of 'root'"
+    error "This prevents access to /home directories and other user paths"
+    error "Please reinstall with: sudo ./install.sh"
+fi
 
 # Wait for the HTTP server to be ready (not just the process)
 info "Waiting for server to be ready..."

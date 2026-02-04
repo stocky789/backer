@@ -20,6 +20,26 @@ try:
 except ImportError:
     __version__ = "0.0.0"
 
+# Explicitly import backend modules for PyInstaller
+# PyInstaller's hiddenimports doesn't work reliably with dynamic __import__()
+# These imports ensure the backends are registered before the registry is used
+# Import each individually so one failure doesn't prevent others from loading
+def _import_backends():
+    """Import all backend modules, logging any failures."""
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+    backends = ['kopia', 'proxy', 'rclone', 'restic']
+    for backend in backends:
+        try:
+            __import__(f'backer.backends.{backend}')
+            _logger.info(f"Backend '{backend}' loaded successfully")
+        except ImportError as e:
+            _logger.warning(f"Backend '{backend}' failed to load: {e}")
+        except Exception as e:
+            _logger.error(f"Backend '{backend}' error: {e}", exc_info=True)
+
+_import_backends()
+
 # Add parent to path for imports when running as frozen exe
 if getattr(sys, 'frozen', False):
     APP_DIR = Path(sys.executable).parent

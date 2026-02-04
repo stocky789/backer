@@ -1,39 +1,40 @@
-# Python
+# ===========================================
+# Backer Project .gitignore
+# ===========================================
+
+# ----- Python bytecode & cache -----
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual environments
-.env
-.venv
-env/
+# ----- Build & distribution -----
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+sdist/
+develop-eggs/
+.installed.cfg
+
+# ----- Virtual environments -----
+# Note: Use specific names to avoid conflicts with source directories
+.venv/
 venv/
+env/
 ENV/
 
-# IDE
+# ----- IDE & editor files -----
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
-# Testing
+# ----- Testing & linting -----
 .tox/
 .nox/
 .coverage
@@ -41,16 +42,29 @@ ENV/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
-
-# Backer data
-*.db
-*.db-journal
-.backer/
-
-# Logs & build artifacts
-backer-agent-*.log
-Backer/
 .ruff_cache/
 
-# Claude instructions
+# ----- Backer runtime data -----
+# Database files (runtime data, not source)
+*.db
+*.db-journal
+
+# Local backer data directory
+.backer/
+
+# Agent log files
+backer-agent-*.log
+
+# ----- Documentation & notes -----
+# Personal notes (not project docs)
 claude.md
+
+# ===========================================
+# IMPORTANT: Do NOT add patterns that could
+# match source files in src/backer/
+# 
+# Avoid patterns like:
+#   - backer/     (matches src/backer/)
+#   - Backer/     (case-insensitive match)
+#   - *.py        (would exclude all Python!)
+# ===========================================

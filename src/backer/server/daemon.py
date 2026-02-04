@@ -1,14 +1,33 @@
 """Backer server daemon."""
 
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
 
 import uvicorn
 
-from backer.server.app import create_app
 from backer.server.timezone import TimezoneFormatter, get_now
+
+# Lazy import create_app to handle potential import errors with better messages
+_create_app = None
+
+
+def _get_create_app():
+    """Lazy load create_app with error handling."""
+    global _create_app
+    if _create_app is None:
+        try:
+            from backer.server.app import create_app as app_factory
+            _create_app = app_factory
+        except ImportError as e:
+            raise ImportError(
+                f"Failed to import server application: {e}. "
+                "This usually means server dependencies are not installed. "
+                "Install with: pip install 'backer[server]'"
+            ) from e
+    return _create_app
 
 
 def setup_logging(data_dir: Path, log_level: str = "INFO") -> None:
@@ -67,7 +86,13 @@ class BackerServer:
     ):
         self.host = host
         self.port = port
-        self.data_dir = data_dir or Path.home() / ".local" / "share" / "backer"
+        # Priority: explicit arg > BACKER_DATA_DIR env > default
+        if data_dir:
+            self.data_dir = data_dir
+        elif os.environ.get("BACKER_DATA_DIR"):
+            self.data_dir = Path(os.environ["BACKER_DATA_DIR"])
+        else:
+            self.data_dir = Path.home() / ".local" / "share" / "backer"
 
         # Setup logging before creating app
         setup_logging(self.data_dir)
@@ -76,6 +101,8 @@ class BackerServer:
         self.logger.info(f"Initializing Backer server on {host}:{port}")
         self.logger.info(f"Data directory: {self.data_dir}")
 
+        # Lazy load create_app with error handling
+        create_app = _get_create_app()
         self.app = create_app(self.data_dir)
         self._server: uvicorn.Server | None = None
 

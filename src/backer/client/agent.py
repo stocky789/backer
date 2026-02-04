@@ -723,11 +723,17 @@ class BackerAgent:
         - For rclone with SMB: Use on-the-fly SMB backend config
         - For rclone with NFS: Mount the export first
         - For restic/kopia: Mount the share/export first
+        - For proxy backend: Use destination_path as-is (it's a proxy:// URI)
 
         Returns:
             Tuple of (destination_path, cleanup_context_or_none)
         """
         dest_path = job.get("destination_path", "")
+
+        # Proxy backend uses destination_path as a proxy:// URI directly
+        # Don't try to mount it as a filesystem path
+        if backend_name == "proxy" or dest_path.startswith(("proxy://", "proxys://")):
+            return dest_path, None
 
         # Windows can use UNC paths directly
         if sys.platform == "win32":
@@ -873,12 +879,23 @@ class BackerAgent:
 
         smb_cleanup_ctx = None
         try:
-            backend_options = job.get("backend_options", {})
+            backend_options = job.get("backend_options", {}).copy()
 
-            # Log backend options (without password)
-            safe_options = {k: v for k, v in backend_options.items() if k != "password"}
+            # For proxy backend, destination_path IS the location URI
+            # Also include agent credentials for authentication
+            if backend_name == "proxy":
+                backend_options["location"] = job.get("destination_path", "")
+                backend_options["client_id"] = self.client_id
+                backend_options["client_secret"] = self.client_secret
+                print(f"[BACKUP] Proxy backend configured with location: {backend_options['location']}")
+
+            # Log backend options (without password/secrets)
+            safe_options = {k: v for k, v in backend_options.items()
+                           if k not in ("password", "client_secret")}
             if "password" in backend_options:
                 safe_options["password"] = "***"
+            if "client_secret" in backend_options:
+                safe_options["client_secret"] = "***"
             print(f"[BACKUP] Backend options: {safe_options}")
 
             backend = get_backend(
@@ -1073,6 +1090,16 @@ class BackerAgent:
         """
         source_path = job.get("source_path", "")
 
+        # Proxy backend uses source_path as a proxy:// URI directly
+        # Don't try to mount it as a filesystem path
+        if backend_name == "proxy" or source_path.startswith(("proxy://", "proxys://")):
+            print(f"[RESTORE] Using proxy URI directly: {source_path}")
+            return source_path, None
+
+        # Windows can use UNC paths directly and doesn't need mount handling
+        if sys.platform == "win32":
+            return source_path, None
+
         # Check if NFS credentials were passed (job linked to NFS repository)
         # This takes priority over parsing source_path as NFS, because the server
         # provides the actual NFS export separately from the subpath
@@ -1218,12 +1245,23 @@ class BackerAgent:
 
         mount_cleanup_ctx = None
         try:
-            backend_options = job.get("backend_options", {})
+            backend_options = job.get("backend_options", {}).copy()
 
-            # Log backend options (without password)
-            safe_options = {k: v for k, v in backend_options.items() if k != "password"}
+            # For proxy backend, source_path IS the location URI
+            # Also include agent credentials for authentication
+            if backend_name == "proxy":
+                backend_options["location"] = job.get("source_path", "")
+                backend_options["client_id"] = self.client_id
+                backend_options["client_secret"] = self.client_secret
+                print(f"[RESTORE] Proxy backend configured with location: {backend_options['location']}")
+
+            # Log backend options (without password/secrets)
+            safe_options = {k: v for k, v in backend_options.items()
+                           if k not in ("password", "client_secret")}
             if "password" in backend_options:
                 safe_options["password"] = "***"
+            if "client_secret" in backend_options:
+                safe_options["client_secret"] = "***"
             print(f"[RESTORE] Backend options: {safe_options}")
 
             backend = get_backend(
@@ -1321,6 +1359,21 @@ class BackerAgent:
                 client.post("/api/v1/results", json=report)
             except Exception as e:
                 print(f"Failed to report restore result: {e}")
+
+            # Write restore metadata to repository for audit trail (only for non-proxy)
+            if result.success and backend_name != "proxy":
+                try:
+                    self._write_restore_metadata(
+                        source_path=source_path,
+                        job_name=job_name,
+                        run_id=run_id,
+                        result=result,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        snapshot=job.get("snapshot"),
+                    )
+                except Exception as meta_err:
+                    print(f"[RESTORE] Warning - failed to write restore metadata: {meta_err}")
 
             return report
 
@@ -1489,6 +1542,55 @@ class BackerAgent:
                     "backend": backend_name,
                 },
             )
+
+    def _write_restore_metadata(
+        self,
+        source_path: str,
+        job_name: str,
+        run_id: str,
+        result: Any,
+        started_at: datetime,
+        finished_at: datetime,
+        snapshot: str | None,
+    ) -> None:
+        """Write restore operation metadata to the repository for audit trail.
+
+        Tracks restore operations for compliance and debugging purposes.
+        """
+        try:
+            print(f"[RESTORE METADATA] Writing restore metadata to: {source_path}")
+
+            # For SMB paths on Linux, we need to mount first
+            if sys.platform != "win32" and self._is_smb_path(source_path):
+                # Skip metadata for SMB on Linux (would need credentials)
+                print("[RESTORE METADATA] Skipping SMB metadata write (not supported)")
+                return
+
+            repo_path = Path(source_path)
+            repo = RepositoryMetadata(repo_path)
+
+            if not repo.is_initialized():
+                print("[RESTORE METADATA] Repository metadata not initialized, skipping")
+                return
+
+            # Save restore operation record
+            restore_run_data = {
+                "operation_type": "restore",
+                "status": "success" if result.success else "failed",
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "bytes_transferred": getattr(result, "bytes_transferred", 0),
+                "files_transferred": result.files_transferred,
+                "snapshot_id": snapshot,
+                "agent_id": self.client_id,
+                "hostname": socket.gethostname(),
+            }
+            repo.save_job_run(job_name, run_id, restore_run_data)
+
+            print(f"[RESTORE METADATA] Successfully wrote restore metadata for job '{job_name}'")
+
+        except Exception as e:
+            print(f"[RESTORE METADATA] Warning - failed to write metadata: {e}")
 
     def run(self, heartbeat_interval: int = 60) -> None:
         """Run the agent in daemon mode."""

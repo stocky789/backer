@@ -144,6 +144,10 @@ def is_public_path(path: str) -> bool:
         # These are authenticated via HTTP Basic, not session
         return True
 
+    # Proxy repository API paths (authenticated via HTTP Basic or JWT)
+    if path.startswith("/api/repo/"):
+        return True
+
     return False
 
 

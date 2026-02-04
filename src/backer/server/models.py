@@ -65,6 +65,8 @@ class JobRunRequest(BaseModel):
     """Request to run a job."""
 
     dry_run: bool = False
+    override_client_id: str | None = None  # Use a different agent than job's assigned agent
+    update_job_agent: bool = False  # Update the job to use this agent for future runs
 
 
 class JobRunResponse(BaseModel):

@@ -42,8 +42,8 @@ COPY README.md /app/
 # Install backer and dependencies
 RUN pip install --no-cache-dir ".[server]"
 
-# Create data directory for tools and logs
-RUN mkdir -p /data/tools /data/logs && \
+# Create data directory for tools, logs, and local backups
+RUN mkdir -p /data/tools /data/logs /data/local-backups && \
     chown -R backer:backer /data
 
 # Set environment variables

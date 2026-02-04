@@ -820,7 +820,7 @@ class Storage:
 
     def _row_to_repository(self, row: sqlite3.Row) -> dict[str, Any]:
         """Convert a database row to a repository dict."""
-        return {
+        repo = {
             "id": row["id"],
             "name": row["name"],
             "repo_type": row["repo_type"],
@@ -836,6 +836,16 @@ class Storage:
             "created_at": row["created_at"],
             "config": json.loads(row["config"]) if row["config"] else {},
         }
+
+        # Normalize local repository paths (cross-platform)
+        if repo["repo_type"] == "local" and repo["share"]:
+            try:
+                normalized = str(Path(repo["share"]).resolve().absolute())
+                repo["share"] = normalized
+            except Exception as e:
+                logger.warning(f"Failed to normalize local path for repo {repo['id']}: {e}")
+
+        return repo
 
     def get_repository_password(self, repo_id: str) -> str | None:
         """Get repository password (for internal use only).

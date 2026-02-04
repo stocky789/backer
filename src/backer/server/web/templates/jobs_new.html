@@ -91,8 +91,13 @@ Creating New Backup Job
                             <option value="{{ repo.id }}"
                                     data-server="{{ repo.server }}"
                                     data-share="{{ repo.share }}"
-                                    data-path="{{ repo.path }}">
+                                    data-path="{{ repo.path }}"
+                                    data-type="{{ repo.repo_type }}">
+                                {% if repo.repo_type == 'local' %}
+                                {{ repo.name }} (LOCAL: {{ repo.share }})
+                                {% else %}
                                 {{ repo.name }} ({{ repo.repo_type|upper }}: //{{ repo.server }}/{{ repo.share }})
+                                {% endif %}
                             </option>
                             {% endfor %}
                         </select>
@@ -579,7 +584,39 @@ Creating New Backup Job
 
 {% block scripts %}
 <script>
-function onRepoChange() { updateDestPath(); }
+function onRepoChange() {
+    updateDestPath();
+    updateBackendOptions();
+}
+
+function updateBackendOptions() {
+    const select = document.getElementById('repoSelect');
+    const option = select.options[select.selectedIndex];
+    const repoType = option ? option.dataset.type : '';
+
+    const resticCard = document.querySelector('.backup-method-card[data-value="restic"]');
+    const rcloneCard = document.querySelector('.backup-method-card[data-value="rclone"]');
+    const kopiaCard = document.querySelector('.backup-method-card[data-value="kopia"]');
+
+    if (repoType === 'local') {
+        // For LOCAL repos, only Kopia is supported (uses server-side kopia)
+        if (resticCard) resticCard.style.display = 'none';
+        if (rcloneCard) rcloneCard.style.display = 'none';
+
+        // Auto-select Kopia if another backend was selected
+        const selectedCard = document.querySelector('.backup-method-card.selected');
+        if (selectedCard && selectedCard.dataset.value !== 'kopia') {
+            document.querySelectorAll('.backup-method-card').forEach(c => c.classList.remove('selected'));
+            kopiaCard.classList.add('selected');
+            kopiaCard.querySelector('input[type="radio"]').checked = true;
+            onBackendChange();
+        }
+    } else {
+        // For SMB/NFS repos, show all backend options
+        if (resticCard) resticCard.style.display = '';
+        if (rcloneCard) rcloneCard.style.display = '';
+    }
+}
 
 function updateDestPath() {
     const select = document.getElementById('repoSelect');

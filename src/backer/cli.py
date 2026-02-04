@@ -255,6 +255,34 @@ def server() -> None:
     pass
 
 
+def _check_server_dependencies() -> None:
+    """Check if all server dependencies are installed.
+
+    Raises ImportError with helpful message if dependencies are missing.
+    """
+    required_modules = {
+        "fastapi": "FastAPI web framework",
+        "uvicorn": "ASGI server",
+        "jwt": "PyJWT - JWT token support",
+        "requests": "HTTP client library",
+        "tenacity": "Retry library",
+    }
+
+    missing_modules = []
+    for module_name, description in required_modules.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_modules.append(f"{module_name} ({description})")
+
+    if missing_modules:
+        missing_list = ", ".join(missing_modules)
+        raise ImportError(
+            f"Server dependencies missing: {missing_list}. "
+            "Install with: pip install 'backer[server]'"
+        )
+
+
 @server.command("start")
 @click.option("--host", "-h", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", "-p", default=8420, help="Port to listen on")
@@ -264,11 +292,18 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
     console.print(f"[bold]Starting Backer server[/bold] on {host}:{port}")
 
     try:
+        # Check dependencies before importing server modules
+        _check_server_dependencies()
+
+        # Import and run the server daemon
         from backer.server.daemon import run_server
         run_server(host=host, port=port, data_dir=data_dir)
     except ImportError as e:
         console.print(f"[red]Error:[/red] Server dependencies not installed: {e}")
-        console.print("Install with: pip install backer[server]")
+        console.print("[yellow]Install with:[/yellow] pip install 'backer[server]'")
+        raise SystemExit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] Failed to start server: {e}")
         raise SystemExit(1)
 
 
@@ -460,6 +495,7 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
     console.print("  • Binary symlink (/usr/local/bin/backer)")
     if not keep_data:
         console.print("  • [yellow]Backup data and config (/var/lib/backer)[/yellow]")
+        console.print("  • [yellow]User data (~/.local/share/backer)[/yellow]")
     else:
         console.print("  • [dim]Backup data will be preserved[/dim]")
     console.print("  • System user (backer)")
@@ -508,6 +544,13 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
     dirs_to_remove = ["/opt/backer"]
     if not keep_data:
         dirs_to_remove.append("/var/lib/backer")
+        # Also check for user data directories
+        # When running as sudo, SUDO_USER contains the original user
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            user_data_dir = Path(f"/home/{sudo_user}/.local/share/backer")
+            if user_data_dir.exists():
+                dirs_to_remove.append(str(user_data_dir))
 
     for dir_path in dirs_to_remove:
         path = Path(dir_path)
@@ -540,7 +583,7 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
 
     # Suggest cleaning up user files
     console.print("\n[dim]To clean up user files, run as your user:[/dim]")
-    console.print("[dim]  rm -rf ~/backer ~/venv[/dim]")
+    console.print("[dim]  rm -rf ~/backer ~/venv ~/.local/share/backer[/dim]")
 
 
 # ============ Agent commands ============
