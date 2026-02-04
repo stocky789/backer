@@ -959,6 +959,20 @@ class AgentService:
 
             if result['success']:
                 self._update_status(f"Restore complete: {job_name}")
+                # Write restore metadata for audit trail (only for non-proxy)
+                if backend != 'proxy':
+                    try:
+                        self._write_restore_metadata(
+                            source_path=source_path,
+                            job_name=job_name,
+                            run_id=run_id,
+                            result=result,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            snapshot=snapshot,
+                        )
+                    except Exception as meta_err:
+                        logger.warning(f"[RESTORE] Failed to write restore metadata: {meta_err}")
             else:
                 self._update_status(f"Restore failed: {job_name}")
 
@@ -2600,3 +2614,49 @@ class AgentService:
                 os.rmdir(mount_point)
             except Exception:
                 pass
+
+    def _write_restore_metadata(
+        self,
+        source_path: str,
+        job_name: str,
+        run_id: str,
+        result: dict[str, Any],
+        started_at: datetime,
+        finished_at: datetime,
+        snapshot: str | None,
+    ) -> None:
+        """Write restore operation metadata to the repository for audit trail.
+
+        Tracks restore operations for compliance and debugging purposes.
+        """
+        try:
+            from backer.core.repo_metadata import RepositoryMetadata
+
+            # Normalize path for Windows
+            repo_path = self._normalize_windows_path(source_path)
+            logger.info(f"[RESTORE METADATA] Writing restore metadata to: {repo_path}")
+
+            repo = RepositoryMetadata(repo_path)
+
+            if not repo.is_initialized():
+                logger.info("[RESTORE METADATA] Repository metadata not initialized, skipping")
+                return
+
+            # Save restore operation record
+            restore_run_data = {
+                "operation_type": "restore",
+                "status": "success" if result.get('success') else "failed",
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "bytes_transferred": result.get('bytes', 0),
+                "files_transferred": result.get('files', 0),
+                "snapshot_id": snapshot,
+                "agent_id": self.client_id,
+                "hostname": socket.gethostname(),
+            }
+            repo.save_job_run(job_name, run_id, restore_run_data)
+
+            logger.info(f"[RESTORE METADATA] Successfully wrote restore metadata for job '{job_name}'")
+
+        except Exception as e:
+            logger.warning(f"[RESTORE METADATA] Failed to write metadata: {e}")

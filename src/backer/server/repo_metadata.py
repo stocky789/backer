@@ -217,10 +217,13 @@ def import_repository_metadata(
     """
     repo_meta = RepositoryMetadata(repo_path)
 
-    if not repo_meta.is_initialized():
-        return {"error": "Repository has no Backer metadata"}
-
+    # Use discover_all() which scans both root-level and job subfolder metadata
+    # This handles the new structure: repo_root/Agents/{job_name}/.backer/
     discovery = repo_meta.discover_all()
+
+    # Check if any metadata was found (either at root level or in subfolders)
+    if not discovery.get("initialized"):
+        return {"error": "Repository has no Backer metadata"}
 
     imported = {
         "agents": 0,

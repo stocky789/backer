@@ -1221,6 +1221,9 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
             f"'{repository['name']}' (Proxmox storage: {proxmox_storage_id})"
         )
 
+        # Collect results for metadata writing
+        backup_results = []
+
         # Start job progress tracking for activity panel
         _storage.start_job_progress(
             run_id=run_id,
@@ -1298,6 +1301,22 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
                     errors=result.get("errors"),
                 )
 
+                # Collect result for metadata
+                backup_results.append({
+                    "vmid": vmid,
+                    "guest_name": guest_name,
+                    "guest_type": guest_type,
+                    "success": result.get("success", False),
+                    "backup_filename": backup_filename,
+                    "backup_size": backup_size,
+                    "duration_seconds": result.get("duration_seconds"),
+                    "started_at": tz.get_now().isoformat(),
+                    "finished_at": (
+                        result.get("finished_at") or tz.get_now().isoformat()
+                    ),
+                    "errors": result.get("errors"),
+                })
+
                 if result.get("success"):
                     logger.info(
                         f"Backup succeeded for VMID {vmid} -> {proxmox_storage_id} "
@@ -1320,6 +1339,14 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
                     finished_at=tz.get_now(),
                     errors=[str(e)],
                 )
+                # Collect failed result for metadata
+                backup_results.append({
+                    "vmid": vmid,
+                    "guest_name": guest_name,
+                    "guest_type": guest_type,
+                    "success": False,
+                    "errors": [str(e)],
+                })
 
         # Release storage reference (only deletes if no other tasks using it)
         # This unmounts the share when last task completes, keeping Proxmox UI clean
@@ -1339,6 +1366,21 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
         _storage.finish_job_progress(run_id, "completed")
 
         logger.info(f"Scheduled hypervisor job '{job.get('name')}' completed")
+
+        # Write metadata to repository
+        try:
+            _write_backup_metadata_to_repo(
+                repository=repo_with_password,
+                hypervisor=hypervisor,
+                job=job,
+                job_id=job_id,
+                run_id=run_id,
+                results=backup_results,
+                guest_map=guest_map,
+            )
+        except Exception as meta_err:
+            # Don't fail backup if metadata write fails
+            logger.warning(f"Failed to write Proxmox backup metadata: {meta_err}")
 
     except Exception as e:
         logger.exception(f"Hypervisor job {job_id} failed: {e}")
@@ -2167,6 +2209,43 @@ def _write_metadata_smb_ml(
     logger.info(f"Wrote hypervisor backup metadata to //{server}/{share}/{remote_base}")
 
 
+def _write_metadata_local(
+    local_path: str,
+    hypervisor_name: str,
+    backer_dir: Path,
+) -> None:
+    """Write metadata directly to local filesystem for LOCAL repos."""
+    import shutil
+
+    try:
+        # Build target path: {local_path}/Hypervisors/{hypervisor_name}/.backer
+        target_base = Path(local_path) / "Hypervisors" / hypervisor_name
+        target_backer = target_base / ".backer"
+
+        # Create target directory structure
+        target_backer.mkdir(parents=True, exist_ok=True)
+
+        # Copy all files from backer_dir to target
+        # Walk through source and copy each file, preserving directory structure
+        for src_file in backer_dir.rglob("*"):
+            if src_file.is_file():
+                # Get relative path from backer_dir
+                rel_path = src_file.relative_to(backer_dir)
+                dst_file = target_backer / rel_path
+
+                # Ensure parent directory exists
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # Copy the file
+                shutil.copy2(src_file, dst_file)
+                logger.debug(f"Copied metadata: {rel_path}")
+
+        logger.info(f"Wrote hypervisor backup metadata to {target_backer}")
+
+    except Exception as e:
+        logger.warning(f"Failed to write metadata to local path {local_path}: {e}")
+
+
 def _write_backup_metadata_to_repo(
     repository: dict[str, Any],
     hypervisor: dict[str, Any],
@@ -2195,10 +2274,14 @@ def _write_backup_metadata_to_repo(
     from backer.hypervisors.metadata import HypervisorMetadata
 
     repo_type = repository.get("repo_type", "").lower()
-    if repo_type not in ("smb", "nfs"):
+    if repo_type not in ("smb", "nfs", "local"):
         logger.debug(f"Skipping metadata write for repo type: {repo_type}")
         return
 
+    # For LOCAL repos, get the local path
+    local_path = repository.get("share") or repository.get("path", "")
+
+    # For SMB/NFS repos, get network details
     server = repository.get("server", "")
     share = repository.get("share", "")
     subdir = repository.get("path", "")
@@ -2206,7 +2289,12 @@ def _write_backup_metadata_to_repo(
     password = repository.get("password")
     domain = repository.get("domain")
 
-    if not server or not share:
+    # Validate required fields based on repo type
+    if repo_type == "local":
+        if not local_path:
+            logger.warning("Cannot write metadata: missing local path for LOCAL repo")
+            return
+    elif not server or not share:
         logger.warning("Cannot write metadata: missing server or share")
         return
 
@@ -2304,12 +2392,18 @@ def _write_backup_metadata_to_repo(
                 hypervisor_id=hypervisor["id"],
             )
 
-        # Now upload the .backer directory to the share
+        # Now upload the .backer directory to the share/local path
         backer_dir = tmp_path / ".backer"
         if not backer_dir.exists():
             return
 
-        if repo_type == "nfs":
+        if repo_type == "local":
+            _write_metadata_local(
+                local_path=local_path,
+                hypervisor_name=safe_hv_name,
+                backer_dir=backer_dir,
+            )
+        elif repo_type == "nfs":
             _write_metadata_nfs_ml(
                 server=server,
                 export=share,
@@ -6027,6 +6121,104 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     except Exception:
                         pass
 
+            elif repo_type == "local":
+                # LOCAL repo: read directly from filesystem
+                local_path = share or repo.get("path", "")
+                if not local_path:
+                    return {
+                        "success": False,
+                        "error": "No local path configured for LOCAL repository",
+                        "repository_id": repo_id,
+                    }
+
+                hypervisors_dir = Path(local_path) / "Hypervisors"
+                if not hypervisors_dir.exists():
+                    return {
+                        "success": False,
+                        "error": "No Hypervisors directory found in repository",
+                        "repository_id": repo_id,
+                    }
+
+                for hv_dir in hypervisors_dir.iterdir():
+                    if not hv_dir.is_dir() or hv_dir.name.startswith("."):
+                        continue
+
+                    jobs_dir = hv_dir / ".backer" / "hypervisor_jobs"
+                    if not jobs_dir.exists():
+                        continue
+
+                    for job_file in jobs_dir.glob("*.json"):
+                        try:
+                            job_data = json_module.loads(job_file.read_text())
+                            job_id = job_data.get("job_id")
+                            job_name = job_data.get("name")
+                            job_hv_id = job_data.get("hypervisor_id")
+
+                            if not job_id or not job_name:
+                                continue
+
+                            # Filter by hypervisor_id if specified
+                            if hypervisor_id and job_hv_id != hypervisor_id:
+                                continue
+
+                            # Check if job already exists
+                            existing = storage.get_hypervisor_job(job_id)
+                            if existing:
+                                imported["skipped_jobs"] += 1
+                                continue
+
+                            existing_by_name = storage.get_hypervisor_job_by_name(job_name)
+                            if existing_by_name:
+                                imported["skipped_jobs"] += 1
+                                continue
+
+                            # Check if the hypervisor exists
+                            hv = storage.get_hypervisor(job_hv_id)
+                            if not hv:
+                                hv_name = job_data.get("hypervisor_name")
+                                hv_host = job_data.get("hypervisor_host")
+
+                                all_hvs = storage.list_hypervisors()
+                                for existing_hv in all_hvs:
+                                    if existing_hv["name"] == hv_name or existing_hv["host"] == hv_host:
+                                        job_hv_id = existing_hv["id"]
+                                        hv = existing_hv
+                                        break
+
+                                if not hv:
+                                    errors.append(f"Hypervisor not found for job '{job_name}'")
+                                    continue
+
+                            guest_ids = job_data.get("guest_ids") or []
+
+                            storage.add_hypervisor_job(
+                                job_id=job_id,
+                                name=job_name,
+                                hypervisor_id=job_hv_id,
+                                guest_ids=guest_ids,
+                                repository_id=repo_id,
+                                backup_mode=job_data.get("backup_mode", "snapshot"),
+                                compression=job_data.get("compression", "zstd"),
+                                schedule_cron=job_data.get("schedule_cron"),
+                                enabled=job_data.get("enabled", True),
+                                copies_to_keep=job_data.get("copies_to_keep", 0),
+                            )
+                            imported["jobs"] += 1
+                            logger.info(f"Imported hypervisor job '{job_name}' from LOCAL repository")
+
+                        except json_module.JSONDecodeError as e:
+                            errors.append(f"Invalid JSON in {job_file.name}: {e}")
+                        except Exception as e:
+                            errors.append(f"Error importing {job_file.name}: {e}")
+
+                return {
+                    "success": True,
+                    "repository_id": repo_id,
+                    "repository_name": repo.get("name"),
+                    "imported": imported,
+                    "errors": errors if errors else None,
+                }
+
             else:
                 return {
                     "success": False,
@@ -9380,10 +9572,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         from backer.hypervisors.metadata import HypervisorMetadata
 
         repo_type = repository.get("repo_type", "").lower()
-        if repo_type not in ("smb", "nfs"):
+        if repo_type not in ("smb", "nfs", "local"):
             logger.debug(f"Skipping metadata write for repo type: {repo_type}")
             return
 
+        # For LOCAL repos, get the local path
+        local_path = repository.get("share") or repository.get("path", "")
+
+        # For SMB/NFS repos, get network details
         server = repository.get("server", "")
         share = repository.get("share", "")
         subdir = repository.get("path", "")
@@ -9391,7 +9587,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         password = repository.get("password")
         domain = repository.get("domain")
 
-        if not server or not share:
+        # Validate required fields based on repo type
+        if repo_type == "local":
+            if not local_path:
+                logger.warning("Cannot write metadata: missing local path for LOCAL repo")
+                return
+        elif not server or not share:
             logger.warning("Cannot write metadata: missing server or share")
             return
 
@@ -9468,12 +9669,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     hypervisor_id=hypervisor["id"],
                 )
 
-            # Now upload the .backer directory to the share
+            # Now upload the .backer directory to the share/local path
             backer_dir = tmp_path / ".backer"
             if not backer_dir.exists():
                 return
 
-            if repo_type == "nfs":
+            if repo_type == "local":
+                # For LOCAL: write directly to filesystem
+                _write_metadata_local(
+                    local_path=local_path,
+                    hypervisor_name=safe_hv_name,
+                    backer_dir=backer_dir,
+                )
+            elif repo_type == "nfs":
                 # For NFS: temporarily mount and copy files directly
                 _write_metadata_nfs(
                     server=server,
@@ -12519,6 +12727,72 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             snapshot_id = result.get("snapshot_id", "unknown")
             logger.info(f"[PROXY BACKUP] Created kopia snapshot: {snapshot_id}")
 
+            # Write repository metadata for disaster recovery
+            # Metadata goes at job folder level: {local_path}/Agents/{job_name}/.backer/
+            try:
+                from backer.core.repo_metadata import RepositoryMetadata
+
+                job_folder = local_base / "Agents" / job_name
+                repo_meta = RepositoryMetadata(job_folder, repo_type="local")
+
+                # Initialize metadata if not already done
+                if not repo_meta.is_initialized():
+                    repo_meta.initialize()
+                    logger.info(f"[PROXY BACKUP] Initialized metadata at {job_folder}/.backer/")
+
+                # Extract client_id from auth for agent metadata
+                client_id = None
+                client = None
+                if auth_header and auth_header.startswith("Bearer "):
+                    token = auth_header[7:]
+                    claims = verify_agent_token(token)
+                    if claims:
+                        client_id = claims.get("sub")
+                elif credentials:
+                    client_id = credentials.username
+
+                # Save agent metadata if we have client info
+                if client_id:
+                    client = storage.get_client(client_id)
+                    if client:
+                        agent_data = {
+                            "hostname": client.hostname,
+                            "os_info": client.os_info,
+                            "version": client.version,
+                            "ip_address": client.ip_address,
+                            "name": client.name,
+                        }
+                        repo_meta.save_agent(client_id, agent_data)
+                        logger.debug(f"[PROXY BACKUP] Saved agent metadata for {client.hostname}")
+
+                # Save job configuration
+                job_config = {
+                    "source_path": source_path,
+                    "backend_type": "kopia",
+                    "repo_id": repo_id,
+                    "client_id": client_id,
+                }
+                repo_meta.save_job(job_name, job_config)
+
+                # Save job run record
+                run_data = {
+                    "status": "completed",
+                    "started_at": datetime.now().isoformat(),
+                    "finished_at": datetime.now().isoformat(),
+                    "snapshot_id": snapshot_id,
+                    "bytes_transferred": bytes_received,
+                    "files_transferred": len(members),
+                    "client_id": client_id,
+                    "hostname": client.hostname if client else None,
+                }
+                run_id = f"{job_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                repo_meta.save_job_run(job_name, run_id, run_data)
+
+                logger.info(f"[PROXY BACKUP] Saved metadata for job '{job_name}'")
+            except Exception as meta_err:
+                # Log but don't fail the backup if metadata writing fails
+                logger.warning(f"[PROXY BACKUP] Failed to write metadata: {meta_err}")
+
             return {
                 "success": True,
                 "message": f"Backup stored: {len(members)} files, {bytes_received / 1024 / 1024:.1f}MB",
@@ -12649,6 +12923,49 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Get archive size
             archive_size = Path(tmp_path).stat().st_size
             logger.info(f"[PROXY RESTORE] Archive created: {archive_size / 1024 / 1024:.1f}MB")
+
+            # Track restore operation in metadata for audit trail
+            try:
+                from backer.core.repo_metadata import RepositoryMetadata
+
+                local_base = Path(local_path)
+                job_folder = local_base / "Agents" / job_name
+                repo_meta = RepositoryMetadata(job_folder, repo_type="local")
+
+                if repo_meta.is_initialized():
+                    # Extract client_id from auth for tracking
+                    restore_client_id = None
+                    if auth_header and auth_header.startswith("Bearer "):
+                        token = auth_header[7:]
+                        claims = verify_agent_token(token)
+                        if claims:
+                            restore_client_id = claims.get("sub")
+                    elif credentials:
+                        restore_client_id = credentials.username
+
+                    # Get client info for hostname
+                    restore_hostname = None
+                    if restore_client_id:
+                        restore_client = storage.get_client(restore_client_id)
+                        if restore_client:
+                            restore_hostname = restore_client.hostname
+
+                    # Save restore operation record
+                    restore_run_data = {
+                        "operation_type": "restore",
+                        "status": "completed",
+                        "started_at": datetime.now().isoformat(),
+                        "finished_at": datetime.now().isoformat(),
+                        "snapshot_id": snapshot_id,
+                        "bytes_transferred": archive_size,
+                        "client_id": restore_client_id,
+                        "hostname": restore_hostname,
+                    }
+                    restore_run_id = f"restore_{job_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    repo_meta.save_job_run(job_name, restore_run_id, restore_run_data)
+                    logger.info(f"[PROXY RESTORE] Saved restore metadata for job '{job_name}'")
+            except Exception as meta_err:
+                logger.warning(f"[PROXY RESTORE] Failed to write restore metadata: {meta_err}")
 
             # Clean up staging directory before streaming response
             shutil.rmtree(staging_dir)
