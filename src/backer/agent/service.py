@@ -830,6 +830,11 @@ class AgentService:
                     smb_password=smb_password,
                     smb_domain=smb_domain,
                 )
+            elif backend == 'proxy':
+                result = self._run_proxy_backup(
+                    source_path, destination_path, excludes, dry_run, run_id,
+                    backend_options=backend_options,
+                )
             else:
                 raise ValueError(f"Unknown backend: {backend}")
 
@@ -903,9 +908,9 @@ class AgentService:
         self._report_progress(run_id, 'running', 0, 'Starting restore...')
 
         try:
-            # For clean restore with restic/kopia, clear destination first
+            # For clean restore with restic/kopia/proxy, clear destination first
             # (rclone sync already handles this automatically)
-            if clean_restore and backend in ('restic', 'kopia') and not dry_run:
+            if clean_restore and backend in ('restic', 'kopia', 'proxy') and not dry_run:
                 dest_path = Path(destination_path)
                 if dest_path.exists():
                     logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
@@ -929,6 +934,11 @@ class AgentService:
                     source_path, destination_path, snapshot, dry_run, run_id,
                     backend_options=backend_options,
                     include_path=source_subfolder,
+                )
+            elif backend == 'proxy':
+                result = self._run_proxy_restore(
+                    source_path, destination_path, snapshot, dry_run, run_id,
+                    backend_options=backend_options,
                 )
             else:
                 raise ValueError(f"Restore not supported for backend: {backend}")
@@ -1938,6 +1948,188 @@ class AgentService:
             'files': 0,
             'error': None if process.returncode == 0 else f"Exit code: {process.returncode}",
         }
+
+    def _run_proxy_backup(
+        self,
+        source: str,
+        dest: str,
+        excludes: list[str],
+        dry_run: bool,
+        run_id: str,
+        backend_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run proxy backup - streams backup data to server via HTTP.
+
+        Used for LOCAL repository type where the server stores backups
+        in a local directory.
+        """
+        logger.info("[PROXY] Setting up proxy backup")
+        logger.info(f"[PROXY] Source: {source}")
+        logger.info(f"[PROXY] Destination (proxy URI): {dest}")
+
+        try:
+            # Import proxy backend dependencies
+            from backer.backends.base import BackupDestination, BackupSource
+            from backer.backends.proxy import ProxyBackend
+
+            # Build backend config with proxy URI and agent credentials
+            config = {
+                'location': dest,
+                'client_id': self.client_id,
+                'client_secret': self.client_secret,
+            }
+
+            # Add password from backend_options if provided
+            backend_options = backend_options or {}
+            if 'password' in backend_options:
+                config['password'] = backend_options['password']
+
+            # Create proxy backend instance
+            proxy_backend = ProxyBackend(config)
+
+            # Create source and destination objects
+            backup_source = BackupSource(path=source, excludes=excludes)
+            backup_dest = BackupDestination(path=dest)
+
+            # Progress callback for logging
+            def progress_callback(bytes_done: int = 0, files_done: int = 0, current_file: str = ''):
+                if files_done > 0 and files_done % 100 == 0:
+                    logger.info(f"[PROXY] Progress: {files_done} files processed")
+                    self._report_progress(
+                        run_id,
+                        'running',
+                        min(50, files_done // 10),  # Estimate progress
+                        f"Processed {files_done} files..."
+                    )
+
+            # Execute backup via proxy
+            logger.info("[PROXY] Starting backup via proxy backend")
+            result = proxy_backend.backup(
+                source=backup_source,
+                destination=backup_dest,
+                dry_run=dry_run,
+                progress_callback=progress_callback,
+            )
+
+            # Convert BackendResult to dict format expected by _execute_backup
+            return {
+                'success': result.success,
+                'output': result.output or '',
+                'bytes': result.bytes_transferred,
+                'files': result.files_transferred,
+                'snapshot_id': result.metadata.get('snapshot_id') if result.metadata else None,
+                'error': result.errors[0] if result.errors else None,
+            }
+
+        except ImportError as e:
+            logger.error(f"[PROXY] Failed to import proxy backend: {e}")
+            return {
+                'success': False,
+                'output': '',
+                'bytes': 0,
+                'files': 0,
+                'error': f"Proxy backend not available: {e}",
+            }
+        except Exception as e:
+            logger.error(f"[PROXY] Backup failed: {e}", exc_info=True)
+            return {
+                'success': False,
+                'output': '',
+                'bytes': 0,
+                'files': 0,
+                'error': str(e),
+            }
+
+    def _run_proxy_restore(
+        self,
+        source: str,
+        dest: str,
+        snapshot: str | None,
+        dry_run: bool,
+        run_id: str,
+        backend_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run proxy restore - streams restore data from server via HTTP.
+
+        Used for LOCAL repository type where the server streams backup
+        data back to the agent.
+        """
+        logger.info("[PROXY] Setting up proxy restore")
+        logger.info(f"[PROXY] Source (proxy URI): {source}")
+        logger.info(f"[PROXY] Destination: {dest}")
+        logger.info(f"[PROXY] Snapshot: {snapshot or 'latest'}")
+
+        try:
+            # Import proxy backend dependencies
+            from backer.backends.base import BackupDestination
+            from backer.backends.proxy import ProxyBackend
+
+            # Build backend config with proxy URI and agent credentials
+            config = {
+                'location': source,
+                'client_id': self.client_id,
+                'client_secret': self.client_secret,
+            }
+
+            # Add password from backend_options if provided
+            backend_options = backend_options or {}
+            if 'password' in backend_options:
+                config['password'] = backend_options['password']
+
+            # Create proxy backend instance
+            proxy_backend = ProxyBackend(config)
+
+            # Create source (which is actually the repo location for restore)
+            backup_source = BackupDestination(path=source)
+
+            # Progress callback for logging
+            def progress_callback(bytes_done: int = 0, files_done: int = 0, current_file: str = ''):
+                if bytes_done > 0 and bytes_done % (10 * 1024 * 1024) == 0:  # Every 10MB
+                    logger.info(f"[PROXY] Progress: {bytes_done / 1024 / 1024:.1f}MB received")
+                    self._report_progress(
+                        run_id,
+                        'running',
+                        min(50, int(bytes_done / 1024 / 1024)),
+                        f"Received {bytes_done / 1024 / 1024:.1f}MB..."
+                    )
+
+            # Execute restore via proxy
+            logger.info("[PROXY] Starting restore via proxy backend")
+            result = proxy_backend.restore(
+                source=backup_source,
+                destination=Path(dest),
+                snapshot=snapshot,
+                dry_run=dry_run,
+                progress_callback=progress_callback,
+            )
+
+            # Convert BackendResult to dict format expected by _execute_restore
+            return {
+                'success': result.success,
+                'output': result.output or '',
+                'bytes': result.bytes_transferred,
+                'files': result.files_transferred,
+                'error': result.errors[0] if result.errors else None,
+            }
+
+        except ImportError as e:
+            logger.error(f"[PROXY] Failed to import proxy backend: {e}")
+            return {
+                'success': False,
+                'output': '',
+                'bytes': 0,
+                'files': 0,
+                'error': f"Proxy backend not available: {e}",
+            }
+        except Exception as e:
+            logger.error(f"[PROXY] Restore failed: {e}", exc_info=True)
+            return {
+                'success': False,
+                'output': '',
+                'bytes': 0,
+                'files': 0,
+                'error': str(e),
+            }
 
     def _execute_browse_filesystem(self, payload: dict[str, Any]):
         """Execute filesystem browse command and report results."""
