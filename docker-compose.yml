@@ -6,7 +6,8 @@
 
 services:
   backer:
-    image: ghcr.io/stocky789/backer:latest
+    build: .
+    image: backer:latest
     container_name: backer
     restart: unless-stopped
     ports:
