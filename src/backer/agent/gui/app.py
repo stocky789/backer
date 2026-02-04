@@ -24,8 +24,8 @@ except ImportError:
 # PyInstaller's hiddenimports doesn't work reliably with dynamic __import__()
 # These imports ensure the backends are registered before the registry is used
 try:
-    import backer.backends.proxy  # noqa: F401 - Required for backend registration
     import backer.backends.kopia  # noqa: F401 - Required for backend registration
+    import backer.backends.proxy  # noqa: F401 - Required for backend registration
     import backer.backends.rclone  # noqa: F401 - Required for backend registration
     import backer.backends.restic  # noqa: F401 - Required for backend registration
 except ImportError as e:
