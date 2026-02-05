@@ -1,14 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext for local development (localhost, 10.x.x.x, 192.168.x.x) -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">10.0.0.0</domain>
-        <domain includeSubdomains="true">192.168.0.0</domain>
-    </domain-config>
+    <!--
+        Allow cleartext (HTTP) for all connections.
+        This is necessary for self-hosted Backer servers on local networks
+        that don't have HTTPS configured.
 
-    <!-- Default: require HTTPS for all other domains -->
-    <base-config cleartextTrafficPermitted="false">
+        For production use with internet-exposed servers, HTTPS is recommended.
+    -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

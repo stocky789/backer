@@ -4,15 +4,43 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Background circle for the icon -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0" />
-    <!-- Backup/cloud arrow icon -->
-    <path
-        android:fillColor="#1976D2"
-        android:pathData="M54,38 L54,50 L62,50 L54,62 L46,50 L54,50 L54,38 Z" />
-    <path
-        android:fillColor="#1976D2"
-        android:pathData="M42,56 L42,64 L66,64 L66,56 L62,56 L62,60 L46,60 L46,56 Z" />
+
+    <!-- Backer logo - shield with "B" and checkmark -->
+    <!-- Centered in adaptive icon safe zone (offset by 22,22 from 64x64 original) -->
+    <group
+        android:translateX="22"
+        android:translateY="22">
+
+        <!-- Background shield shape -->
+        <path
+            android:fillColor="#1a2332"
+            android:strokeColor="#58a6ff"
+            android:strokeWidth="2"
+            android:pathData="M32,4L8,14v18c0,14.4 10.4,27.2 24,30 13.6,-2.8 24,-15.6 24,-30V14L32,4z" />
+
+        <!-- Inner shield highlight -->
+        <path
+            android:fillColor="#0d1117"
+            android:pathData="M32,10L14,18v12c0,10.8 7.8,20.4 18,22.5 10.2,-2.1 18,-11.7 18,-22.5V18L32,10z" />
+
+        <!-- Stylized "B" letter -->
+        <path
+            android:fillColor="#58a6ff"
+            android:pathData="M23,16h12c4.5,0 8,3 8,7s-2.5,6 -5,6.5c3,0.5 6,3.5 6,7.5 0,4.5 -3.5,8 -8,8H23V16z M28,21v7h6c2,0 4,-1.5 4,-3.5S36,21 34,21h-6z M28,33v8h7c2.5,0 4.5,-1.8 4.5,-4s-2,-4 -4.5,-4h-7z"
+            android:fillType="evenOdd" />
+
+        <!-- Green checkmark badge circle -->
+        <path
+            android:fillColor="#3fb950"
+            android:pathData="M46,46m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0" />
+
+        <!-- White checkmark -->
+        <path
+            android:strokeColor="#ffffff"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M41,46l3.5,3.5 6,-7" />
+
+    </group>
 </vector>
