@@ -93,9 +93,7 @@
                         <td><code style="font-size: 10px;">{{ repo.share or '-' }}</code></td>
                         <td><code style="font-size: 10px;">{{ repo.path or '/' }}</code></td>
                         <td id="storage-{{ repo.id }}" class="storage-cell">
-                            <div class="storage-loading">
-                                <span class="text-muted" style="font-size: 10px;">Loading...</span>
-                            </div>
+                            <span class="storage-loading">Loading...</span>
                         </td>
                         <td>
                             {% if repo.status == 'connected' %}
@@ -587,34 +585,49 @@
 
 {% block scripts %}
 <style>
+.storage-info {
+    min-width: 140px;
+}
 .storage-bar {
     width: 100%;
-    min-width: 100px;
-    height: 8px;
-    background: var(--bg-secondary);
-    border-radius: 4px;
+    height: 6px;
+    background: var(--border-color, #e0e0e0);
+    border-radius: 3px;
     overflow: hidden;
-    margin-bottom: 4px;
+    margin-top: 4px;
 }
 .storage-bar-fill {
     height: 100%;
-    border-radius: 4px;
+    border-radius: 3px;
+    min-width: 2px;
     transition: width 0.3s ease;
 }
-.storage-bar-fill.low { background: var(--success); }
-.storage-bar-fill.medium { background: var(--warning); }
-.storage-bar-fill.high { background: var(--danger); }
+.storage-bar-fill.low { background: #22c55e; }
+.storage-bar-fill.medium { background: #f59e0b; }
+.storage-bar-fill.high { background: #ef4444; }
 .storage-text {
-    font-size: 10px;
-    color: var(--text-muted);
-    white-space: nowrap;
+    font-size: 11px;
+    color: var(--text-secondary, #666);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+.storage-used {
+    font-weight: 500;
+}
+.storage-total {
+    color: var(--text-muted, #999);
 }
 .storage-cell {
-    min-width: 120px;
+    min-width: 140px;
 }
 .storage-error {
-    font-size: 10px;
-    color: var(--text-muted);
+    font-size: 11px;
+    color: var(--text-muted, #999);
+}
+.storage-loading {
+    font-size: 11px;
+    color: var(--text-muted, #999);
 }
 </style>
 <script>
@@ -660,12 +673,18 @@ async function fetchRepoStats(repoId) {
         if (usedPercent >= 90) colorClass = 'high';
         else if (usedPercent >= 70) colorClass = 'medium';
 
+        // Ensure bar is visible even at very low percentages
+        const barWidth = Math.max(usedPercent, usedBytes > 0 ? 2 : 0);
+
         cell.innerHTML = `
-            <div class="storage-bar">
-                <div class="storage-bar-fill ${colorClass}" style="width: ${usedPercent}%"></div>
-            </div>
-            <div class="storage-text">
-                ${formatBytes(usedBytes)} / ${formatBytes(totalBytes)} (${usedPercent.toFixed(1)}%)
+            <div class="storage-info">
+                <div class="storage-text">
+                    <span class="storage-used">${formatBytes(usedBytes)} used</span>
+                    <span class="storage-total">${formatBytes(availableBytes)} free</span>
+                </div>
+                <div class="storage-bar">
+                    <div class="storage-bar-fill ${colorClass}" style="width: ${barWidth}%"></div>
+                </div>
             </div>
         `;
     } catch (error) {
