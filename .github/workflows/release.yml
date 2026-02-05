@@ -116,7 +116,13 @@ jobs:
           if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.version }}") {
             $version = "${{ github.event.inputs.version }}"
           } else {
-            $version = "main"
+            # Extract version from pyproject.toml
+            $content = Get-Content pyproject.toml -Raw
+            if ($content -match 'version\s*=\s*"([^"]+)"') {
+              $version = $matches[1]
+            } else {
+              $version = "0.0.0"
+            }
           }
           $version = $version -replace '^v', ''
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -181,7 +187,8 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
           else
-            VERSION="main"
+            # Extract version from pyproject.toml
+            VERSION=$(grep -E '^version\s*=' pyproject.toml | sed 's/version\s*=\s*"\([^"]*\)"/\1/')
           fi
           VERSION="${VERSION#v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -258,13 +265,12 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
             VERSION="${VERSION#v}"
-            TAG="v$VERSION"
-            TITLE="Backer v$VERSION"
           else
-            VERSION="main"
-            TAG="release-main"
-            TITLE="Latest Release"
+            # Extract version from pyproject.toml
+            VERSION=$(grep -E '^version\s*=' pyproject.toml | sed 's/version\s*=\s*"\([^"]*\)"/\1/')
           fi
+          TAG="v$VERSION"
+          TITLE="Backer v$VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
