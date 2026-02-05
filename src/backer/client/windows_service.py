@@ -85,6 +85,10 @@ def create_windows_service(server_url: str | None = None) -> tuple[bool, str]:
 
     Requires Administrator privileges to install.
 
+    Note: This delegates to create_background_scheduled_task() which uses
+    Task Scheduler with SYSTEM account - simpler and more reliable than
+    a true Windows Service for Python applications.
+
     Args:
         server_url: Optional server URL to connect to
 
@@ -97,70 +101,7 @@ def create_windows_service(server_url: str | None = None) -> tuple[bool, str]:
     if not is_admin():
         return False, "Administrator privileges required to install Windows Service"
 
-    service_name = "BackerAgent"
-    display_name = "Backer Backup Agent"
-    description = "Backer backup agent service - manages automated backups"
-
-    # Determine the command to run
-    if getattr(sys, 'frozen', False):
-        # Running as PyInstaller exe - use the exe directly with --service flag
-        exe_path = sys.executable
-        exe_dir = Path(exe_path).parent
-
-        # Create a wrapper batch script that the service will run
-        wrapper_script = exe_dir / "backer-service.bat"
-        wrapper_content = f'''@echo off
-cd /d "{exe_dir}"
-"{exe_path}" --service
-'''
-        if server_url:
-            wrapper_content = f'''@echo off
-cd /d "{exe_dir}"
-"{exe_path}" --service --server "{server_url}"
-'''
-        wrapper_script.write_text(wrapper_content)
-
-        # Use the batch file as the service binary
-        bin_path = str(wrapper_script)
-    else:
-        # Running from Python - create a wrapper script
-        python_exe = get_python_path()
-        script_dir = Path(os.environ.get("APPDATA", "")) / "Backer"
-        script_dir.mkdir(parents=True, exist_ok=True)
-
-        wrapper_script = script_dir / "backer-service.bat"
-        if server_url:
-            wrapper_content = f'''@echo off
-"{python_exe}" -m backer agent start --server "{server_url}"
-'''
-        else:
-            wrapper_content = f'''@echo off
-"{python_exe}" -m backer agent start
-'''
-        wrapper_script.write_text(wrapper_content)
-        bin_path = str(wrapper_script)
-
-    # First, try to stop and delete existing service
-    subprocess.run(
-        ["sc", "stop", service_name],
-        capture_output=True,
-        creationflags=get_subprocess_flags(),
-    )
-    subprocess.run(
-        ["sc", "delete", service_name],
-        capture_output=True,
-        creationflags=get_subprocess_flags(),
-    )
-
-    # Wait for service to be fully removed
-    import time
-    time.sleep(1)
-
-    # Create the service using sc.exe
-    # Note: We use a wrapper because sc.exe requires a proper service binary
-    # For Python apps, we'll use NSSM-style approach with srvany or similar
-
-    # Alternative: Use Task Scheduler with SYSTEM account (simpler, more reliable)
+    # Use Task Scheduler with SYSTEM account (simpler, more reliable)
     # This achieves the same goal without needing a service wrapper
     return create_background_scheduled_task(server_url)
 

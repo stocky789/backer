@@ -748,7 +748,10 @@ def agent_status() -> None:
                 console.print(f"Service: [{status_color}]{status}[/{status_color}] ({method_desc})")
 
                 if method == "logon_task":
-                    console.print("[dim]  Note: Logon task stops at lockscreen. Use 'backer agent install --method service' for background mode.[/dim]")
+                    console.print(
+                        "[dim]  Note: Logon task stops at lockscreen. "
+                        "Use 'backer agent install --method service' for background mode.[/dim]"
+                    )
             else:
                 console.print("[dim]Service: Not installed (run 'backer agent install')[/dim]")
 

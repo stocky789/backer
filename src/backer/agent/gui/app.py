@@ -594,7 +594,7 @@ class BackerAgentApp:
 
         # Check if background service is installed
         try:
-            from backer.client.windows_service import get_service_status, is_admin
+            from backer.client.windows_service import get_service_status
             service_status = get_service_status()
             has_background_service = (
                 service_status.get("installed") and
@@ -602,7 +602,6 @@ class BackerAgentApp:
             )
         except Exception:
             has_background_service = False
-            is_admin = lambda: False
 
         # Show notification about tray and service
         if TRAY_AVAILABLE:
