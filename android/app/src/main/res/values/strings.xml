@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Backer</string>
+    <string name="app_description">Backup Agent for Backer</string>
+
+    <!-- Setup Screen -->
+    <string name="setup_title">Connect to Backer Server</string>
+    <string name="setup_description">Enter your Backer server URL to register this device as a backup agent.</string>
+    <string name="server_url_label">Server URL</string>
+    <string name="server_url_placeholder">https://backer.example.com:8420</string>
+    <string name="test_connection">Test Connection</string>
+    <string name="register_agent">Register Agent</string>
+    <string name="connection_success">Connected to server</string>
+    <string name="connection_failed">Connection failed</string>
+    <string name="registration_success">Agent registered successfully</string>
+    <string name="registration_failed">Registration failed</string>
+
+    <!-- Status Screen -->
+    <string name="status_title">Status</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="last_backup">Last Backup</string>
+    <string name="never">Never</string>
+    <string name="agent_id">Agent ID</string>
+    <string name="server">Server</string>
+
+    <!-- Browse Screen -->
+    <string name="browse_title">Select Folders</string>
+    <string name="browse_description">Choose folders to back up</string>
+    <string name="add_folder">Add Folder</string>
+    <string name="remove_folder">Remove</string>
+    <string name="no_folders_selected">No folders selected for backup</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_connection">Connection</string>
+    <string name="settings_backup">Backup</string>
+    <string name="settings_notifications">Notifications</string>
+    <string name="settings_about">About</string>
+    <string name="wifi_only">WiFi Only</string>
+    <string name="wifi_only_description">Only backup when connected to WiFi</string>
+    <string name="battery_optimization">Battery Optimization</string>
+    <string name="battery_optimization_description">Disable to ensure reliable background backups</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="disconnect_confirmation">Are you sure you want to disconnect from the server?</string>
+    <string name="version">Version %s</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_status">Agent Status</string>
+    <string name="notification_channel_status_description">Shows connection status</string>
+    <string name="notification_channel_backup">Backup Progress</string>
+    <string name="notification_channel_backup_description">Shows backup progress and results</string>
+    <string name="notification_backup_running">Backup in progress</string>
+    <string name="notification_backup_complete">Backup complete</string>
+    <string name="notification_backup_failed">Backup failed</string>
+
+    <!-- Common -->
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+    <string name="retry">Retry</string>
+    <string name="error">Error</string>
+    <string name="loading">Loading…</string>
+</resources>
