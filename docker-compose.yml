@@ -17,9 +17,8 @@ services:
       # - /mnt/nas/backups:/data/backups
     environment:
       BACKER_DATA_DIR: /data
-      # Change this to your server's IP for agents to connect
+      # Change this to your server's IP or public domain name for agents to connect - local repos will not work without this set
       BACKER_PUBLIC_URL: http://localhost:8420
-    # Required for SMB/NFS repository access
     cap_add:
       - SYS_ADMIN
     security_opt:
