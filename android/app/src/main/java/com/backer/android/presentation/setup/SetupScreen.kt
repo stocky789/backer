@@ -50,6 +50,11 @@ fun SetupScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
+    // Reset state when entering this screen (e.g., after disconnect)
+    LaunchedEffect(Unit) {
+        viewModel.resetState()
+    }
+
     // Navigate on successful registration
     LaunchedEffect(uiState.registrationStatus) {
         if (uiState.registrationStatus == RegistrationStatus.SUCCESS) {

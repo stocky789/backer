@@ -178,26 +178,42 @@ class CommandHandler @Inject constructor(
             return
         }
 
-        Log.d(TAG, "Browse command: requestId=$requestId, path=$path")
+        Log.i(TAG, "[BROWSE] Starting browse: requestId=$requestId, path='$path'")
 
         // Execute browse in background and report results
         scope.launch {
+            var browseResults: BrowseResults
+
             try {
-                val results = fileBrowserRepository.browse(path)
-                apiRepository.reportBrowseResults(requestId, results)
-                Log.d(TAG, "Browse results reported: ${results.entries.size} entries")
+                Log.d(TAG, "[BROWSE] Executing file browser for path: '$path'")
+                browseResults = fileBrowserRepository.browse(path)
+                Log.i(TAG, "[BROWSE] Browse completed: success=${browseResults.success}, " +
+                    "entries=${browseResults.entries.size}, error=${browseResults.error}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to handle browse command", e)
-                // Report error
-                apiRepository.reportBrowseResults(
-                    requestId,
-                    BrowseResults(
-                        success = false,
-                        path = path,
-                        entries = emptyList(),
-                        error = e.message ?: "Browse failed"
-                    )
+                Log.e(TAG, "[BROWSE] Browse failed with exception: ${e.message}", e)
+                browseResults = BrowseResults(
+                    success = false,
+                    path = path,
+                    entries = emptyList(),
+                    error = "Browse exception: ${e.message ?: e::class.simpleName}"
                 )
+            }
+
+            // Always try to report results back to server
+            try {
+                Log.d(TAG, "[BROWSE] Reporting results to server for requestId=$requestId")
+                val result = apiRepository.reportBrowseResults(requestId, browseResults)
+                result.fold(
+                    onSuccess = {
+                        Log.i(TAG, "[BROWSE] Results reported successfully: " +
+                            "${browseResults.entries.size} entries for requestId=$requestId")
+                    },
+                    onFailure = { error ->
+                        Log.e(TAG, "[BROWSE] Failed to report results: ${error.message}", error)
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "[BROWSE] Exception while reporting results: ${e.message}", e)
             }
         }
     }

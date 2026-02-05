@@ -1,6 +1,7 @@
 package com.backer.android.data.repository
 
 import android.os.Build
+import android.util.Log
 import com.backer.android.BuildConfig
 import com.backer.android.data.api.BackerApiService
 import com.backer.android.data.api.models.BackupResult
@@ -137,9 +138,19 @@ class BackerApiRepository @Inject constructor(
     suspend fun reportBrowseResults(requestId: String, results: BrowseResults): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
-                apiService.reportBrowseResults(requestId, results)
-                Result.success(Unit)
+                Log.d(TAG, "[BROWSE] Sending results for requestId=$requestId, " +
+                    "entries=${results.entries.size}, success=${results.success}")
+                val response = apiService.reportBrowseResults(requestId, results)
+                if (response.isSuccessful) {
+                    Log.i(TAG, "[BROWSE] Results reported successfully: ${response.code()}")
+                    Result.success(Unit)
+                } else {
+                    val errorBody = response.errorBody()?.string() ?: "Unknown error"
+                    Log.e(TAG, "[BROWSE] Server error: ${response.code()} - $errorBody")
+                    Result.failure(Exception("Server error ${response.code()}: $errorBody"))
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "[BROWSE] Exception reporting results: ${e.message}", e)
                 Result.failure(e)
             }
         }
@@ -154,5 +165,9 @@ class BackerApiRepository @Inject constructor(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    companion object {
+        private const val TAG = "BackerApiRepository"
     }
 }

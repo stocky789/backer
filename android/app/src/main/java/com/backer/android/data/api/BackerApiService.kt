@@ -83,7 +83,7 @@ interface BackerApiService {
     suspend fun reportBrowseResults(
         @Path("requestId") requestId: String,
         @Body results: BrowseResults
-    )
+    ): Response<ResponseBody>
 
     /**
      * Upload backup data to the server (proxy backend).

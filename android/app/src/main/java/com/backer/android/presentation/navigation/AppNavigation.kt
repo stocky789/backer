@@ -61,8 +61,10 @@ fun BackerNavHost() {
                     navController.popBackStack()
                 },
                 onDisconnected = {
+                    // Clear entire back stack and navigate to Setup
                     navController.navigate(Screen.Setup.route) {
-                        popUpTo(0) { inclusive = true }
+                        popUpTo(navController.graph.id) { inclusive = true }
+                        launchSingleTop = true
                     }
                 }
             )

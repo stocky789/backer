@@ -28,6 +28,21 @@ class SetupViewModel @Inject constructor(
     private val _isRegistered = MutableStateFlow(credentialRepository.isRegistered())
     val isRegistered: StateFlow<Boolean> = _isRegistered.asStateFlow()
 
+    /**
+     * Reset the setup screen state. Called when returning to setup after disconnect.
+     */
+    fun resetState() {
+        _uiState.value = SetupUiState()
+        _isRegistered.value = credentialRepository.isRegistered()
+    }
+
+    /**
+     * Check and update registration status. Called when screen becomes visible.
+     */
+    fun checkRegistrationStatus() {
+        _isRegistered.value = credentialRepository.isRegistered()
+    }
+
     fun updateServerUrl(url: String) {
         _uiState.value = _uiState.value.copy(
             serverUrl = url,
