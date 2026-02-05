@@ -144,6 +144,9 @@ class BackerAgentApp:
         main_menu.add_command(label="Connect", command=self.connect_to_server)
         main_menu.add_command(label="Disconnect", command=self.disconnect_from_server)
         main_menu.add_separator()
+        main_menu.add_command(label="Install as Service", command=self.install_as_service)
+        main_menu.add_command(label="Uninstall Service", command=self.uninstall_service)
+        main_menu.add_separator()
         main_menu.add_command(label="Update", command=self.check_for_updates)
         main_menu.add_separator()
         main_menu.add_command(label="Help", command=self.open_help)
@@ -589,14 +592,44 @@ class BackerAgentApp:
         # Setup system tray icon
         self.setup_tray_icon()
 
-        # Show notification about tray
-        if TRAY_AVAILABLE:
-            messagebox.showinfo(
-                "Agent Started",
-                "Backer Agent is now running!\n\n"
-                "You can close this window - the agent will continue running in the background.\n\n"
-                "Look for the Backer icon in your system tray to access the agent."
+        # Check if background service is installed
+        try:
+            from backer.client.windows_service import get_service_status
+            service_status = get_service_status()
+            has_background_service = (
+                service_status.get("installed") and
+                service_status.get("method") == "background_task"
             )
+        except Exception:
+            has_background_service = False
+
+        # Show notification about tray and service
+        if TRAY_AVAILABLE:
+            if has_background_service:
+                messagebox.showinfo(
+                    "Agent Started",
+                    "Backer Agent is now running!\n\n"
+                    "Background service is installed - the agent will run even at the lockscreen.\n\n"
+                    "You can close this window - backups will continue automatically.\n\n"
+                    "Look for the Backer icon in your system tray to access the agent."
+                )
+            else:
+                # Offer to install as service
+                if messagebox.askyesno(
+                    "Agent Started",
+                    "Backer Agent is now running!\n\n"
+                    "For reliable operation at the lockscreen, you can install the agent as a background service.\n\n"
+                    "Would you like to install it now?\n\n"
+                    "(Requires Administrator privileges)"
+                ):
+                    self.install_as_service()
+                else:
+                    messagebox.showinfo(
+                        "Note",
+                        "You can install the background service later from:\n"
+                        "Menu > Install as Service\n\n"
+                        "Look for the Backer icon in your system tray to access the agent."
+                    )
 
     def _start_agent_failed(self, error: str):
         """Handle failed agent startup."""
@@ -850,6 +883,143 @@ class BackerAgentApp:
             f"Failed to update Backer Agent:\n\n{error}\n\n"
             f"You can manually download the latest version from:\n{GITHUB_REPO_URL}/releases"
         )
+
+    def install_as_service(self):
+        """Install the agent as a Windows background service.
+
+        This allows the agent to run at boot and continue running even when:
+        - No user is logged in
+        - User is at the lockscreen
+        - User logs off
+        """
+        if not self.config.get('server_url') or not self.config.get('client_id'):
+            messagebox.showwarning(
+                "Not Connected",
+                "Please connect to a server first before installing as a service."
+            )
+            return
+
+        # Import here to avoid issues on non-Windows
+        try:
+            from backer.client.windows_service import (
+                create_background_scheduled_task,
+                get_service_status,
+                is_admin,
+            )
+        except ImportError as e:
+            messagebox.showerror("Error", f"Failed to import service module: {e}")
+            return
+
+        # Check if already installed
+        status = get_service_status()
+        if status.get("installed") and status.get("method") == "background_task":
+            if not messagebox.askyesno(
+                "Already Installed",
+                "A background service is already installed.\n\n"
+                "Do you want to reinstall it?"
+            ):
+                return
+
+        # Check for admin rights
+        if not is_admin():
+            messagebox.showwarning(
+                "Administrator Required",
+                "Installing as a background service requires Administrator privileges.\n\n"
+                "Please restart this application as Administrator:\n"
+                "1. Close this application\n"
+                "2. Right-click on the Backer Agent\n"
+                "3. Select 'Run as administrator'\n"
+                "4. Try again"
+            )
+            return
+
+        # Confirm installation
+        if not messagebox.askyesno(
+            "Install Background Service",
+            "This will install the Backer Agent as a background service that:\n\n"
+            "• Starts automatically when Windows boots\n"
+            "• Runs even when no user is logged in\n"
+            "• Continues running at the lockscreen\n"
+            "• Auto-restarts if it crashes\n\n"
+            "Continue with installation?"
+        ):
+            return
+
+        # Perform installation
+        self.status_var.set("Installing service...")
+        self.status_label.config(foreground='blue')
+
+        try:
+            success, message = create_background_scheduled_task(self.config.get('server_url'))
+
+            if success:
+                self.status_var.set("Service installed")
+                self.status_label.config(foreground='green')
+                messagebox.showinfo(
+                    "Service Installed",
+                    "Background service installed successfully!\n\n"
+                    "The agent will now:\n"
+                    "• Start automatically at boot\n"
+                    "• Run in the background (no login required)\n"
+                    "• Continue running at lockscreen\n\n"
+                    "You can close this window - backups will continue automatically."
+                )
+            else:
+                self.status_var.set("Installation failed")
+                self.status_label.config(foreground='red')
+                messagebox.showerror("Installation Failed", message)
+
+        except Exception as e:
+            self.status_var.set("Installation failed")
+            self.status_label.config(foreground='red')
+            messagebox.showerror("Installation Failed", f"Failed to install service:\n\n{e}")
+
+    def uninstall_service(self):
+        """Uninstall the Windows background service."""
+        try:
+            from backer.client.windows_service import get_service_status, uninstall_service
+        except ImportError as e:
+            messagebox.showerror("Error", f"Failed to import service module: {e}")
+            return
+
+        # Check if installed
+        status = get_service_status()
+        if not status.get("installed"):
+            messagebox.showinfo(
+                "Not Installed",
+                "No background service is currently installed."
+            )
+            return
+
+        # Confirm uninstallation
+        if not messagebox.askyesno(
+            "Uninstall Service",
+            "This will remove the background service.\n\n"
+            "The agent will no longer start automatically at boot.\n\n"
+            "Continue?"
+        ):
+            return
+
+        # Perform uninstallation
+        self.status_var.set("Uninstalling service...")
+        self.status_label.config(foreground='blue')
+
+        try:
+            success, message = uninstall_service()
+
+            if success:
+                self.status_var.set("Service uninstalled")
+                self.status_label.config(foreground='green')
+                messagebox.showinfo("Service Uninstalled", message)
+            else:
+                self.status_var.set("Uninstall failed")
+                self.status_label.config(foreground='red')
+                messagebox.showerror("Uninstall Failed", message)
+
+        except Exception as e:
+            self.status_var.set("Uninstall failed")
+            self.status_label.config(foreground='red')
+            messagebox.showerror("Uninstall Failed", f"Failed to uninstall service:\n\n{e}")
 
     def on_window_close(self):
         """Handle window close button - minimize to tray if agent is running."""

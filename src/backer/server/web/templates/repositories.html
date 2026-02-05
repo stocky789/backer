@@ -64,6 +64,7 @@
                         <th>Server</th>
                         <th>Share/Export</th>
                         <th>Path</th>
+                        <th>Storage</th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
@@ -91,6 +92,9 @@
                         <td>{{ repo.server or '-' }}</td>
                         <td><code style="font-size: 10px;">{{ repo.share or '-' }}</code></td>
                         <td><code style="font-size: 10px;">{{ repo.path or '/' }}</code></td>
+                        <td id="storage-{{ repo.id }}" class="storage-cell">
+                            <span class="storage-loading">Loading...</span>
+                        </td>
                         <td>
                             {% if repo.status == 'connected' %}
                             <span class="status-badge success">
@@ -117,7 +121,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="8">
+                        <td colspan="9">
                             <div class="empty-state">
                                 <p>No storage repositories configured</p>
                                 <button class="btn btn-primary btn-sm" onclick="showAddModal()">Add Repository</button>
@@ -580,12 +584,132 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+.storage-info {
+    min-width: 140px;
+}
+.storage-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--border-color, #e0e0e0);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+.storage-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    min-width: 2px;
+    transition: width 0.3s ease;
+}
+.storage-bar-fill.low { background: #22c55e; }
+.storage-bar-fill.medium { background: #f59e0b; }
+.storage-bar-fill.high { background: #ef4444; }
+.storage-text {
+    font-size: 11px;
+    color: var(--text-secondary, #666);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+.storage-used {
+    font-weight: 500;
+}
+.storage-total {
+    color: var(--text-muted, #999);
+}
+.storage-cell {
+    min-width: 140px;
+}
+.storage-error {
+    font-size: 11px;
+    color: var(--text-muted, #999);
+}
+.storage-loading {
+    font-size: 11px;
+    color: var(--text-muted, #999);
+}
+</style>
 <script>
 let currentServer = '';
 let currentShare = '';
 let currentPath = '';
 let currentType = 'smb';
 let currentScanRepoId = null;
+
+// Format bytes to human readable
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Fetch storage stats for a repository
+async function fetchRepoStats(repoId) {
+    const cell = document.getElementById(`storage-${repoId}`);
+    if (!cell) return;
+
+    try {
+        const response = await fetch(`/api/v1/repositories/${repoId}/stats`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch stats');
+        }
+        const stats = await response.json();
+
+        if (stats.error) {
+            cell.innerHTML = `<span class="storage-error">${stats.error}</span>`;
+            return;
+        }
+
+        const usedPercent = stats.used_percent || 0;
+        const usedBytes = stats.used_bytes || 0;
+        const totalBytes = stats.total_bytes || 0;
+        const availableBytes = stats.available_bytes || 0;
+
+        // Determine bar color based on usage
+        let colorClass = 'low';
+        if (usedPercent >= 90) colorClass = 'high';
+        else if (usedPercent >= 70) colorClass = 'medium';
+
+        // Ensure bar is visible even at very low percentages
+        const barWidth = Math.max(usedPercent, usedBytes > 0 ? 2 : 0);
+
+        cell.innerHTML = `
+            <div class="storage-info">
+                <div class="storage-text">
+                    <span class="storage-used">${formatBytes(usedBytes)} used</span>
+                    <span class="storage-total">${formatBytes(availableBytes)} free</span>
+                </div>
+                <div class="storage-bar">
+                    <div class="storage-bar-fill ${colorClass}" style="width: ${barWidth}%"></div>
+                </div>
+            </div>
+        `;
+    } catch (error) {
+        cell.innerHTML = `<span class="storage-error">-</span>`;
+    }
+}
+
+// Fetch stats for all repositories on page load
+function fetchAllRepoStats() {
+    const rows = document.querySelectorAll('.repo-row');
+    rows.forEach(row => {
+        // Extract repo ID from the storage cell ID
+        const storageCell = row.querySelector('[id^="storage-"]');
+        if (storageCell) {
+            const repoId = storageCell.id.replace('storage-', '');
+            fetchRepoStats(repoId);
+        }
+    });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Fetch storage stats after a short delay to let page render
+    setTimeout(fetchAllRepoStats, 100);
+});
 
 // Filter repositories
 function filterRepos() {
