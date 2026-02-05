@@ -714,7 +714,7 @@ def agent_start(server: str | None) -> None:
 def agent_status() -> None:
     """Show agent status."""
     from backer.client.agent import BackerAgent
-    from backer.client.windows_service import get_task_status, is_windows
+    from backer.client.windows_service import get_service_status, is_windows
 
     try:
         ag = BackerAgent.from_config()
@@ -729,9 +729,26 @@ def agent_status() -> None:
 
         # Show service status on Windows
         if is_windows():
-            task_info = get_task_status()
-            if task_info["installed"]:
-                console.print(f"[dim]Service: {task_info.get('status', 'Unknown')}[/dim]")
+            service_info = get_service_status()
+            if service_info.get("installed"):
+                method = service_info.get("method", "unknown")
+                status = service_info.get("status", "Unknown")
+                running = service_info.get("running", False)
+
+                if method == "background_task":
+                    method_desc = "Background Service"
+                elif method == "logon_task":
+                    method_desc = "Logon Task"
+                elif method == "startup_script":
+                    method_desc = "Startup Script"
+                else:
+                    method_desc = method
+
+                status_color = "green" if running else "yellow"
+                console.print(f"Service: [{status_color}]{status}[/{status_color}] ({method_desc})")
+
+                if method == "logon_task":
+                    console.print("[dim]  Note: Logon task stops at lockscreen. Use 'backer agent install --method service' for background mode.[/dim]")
             else:
                 console.print("[dim]Service: Not installed (run 'backer agent install')[/dim]")
 
@@ -741,21 +758,31 @@ def agent_status() -> None:
 
 
 @agent.command("install")
-@click.option("--method", "-m", default="task", type=click.Choice(["task", "startup", "systemd"]),
-              help="Installation method (Windows: task/startup, Linux: systemd)")
+@click.option("--method", "-m", default="service", type=click.Choice(["service", "task", "startup", "systemd"]),
+              help="Installation method (Windows: service/task/startup, Linux: systemd)")
 def agent_install(method: str) -> None:
     """Install agent to run at system startup.
 
-    On Windows, creates a scheduled task or startup script.
-    On Linux, creates a systemd user service.
+    On Windows, the default method is 'service' which creates a background task
+    that runs at boot and continues running even when:
+    - No user is logged in
+    - User is at the lockscreen
+    - User logs off or switches users
+
+    Installation methods:
+        service  - (default) Background service, runs at boot (recommended)
+        task     - Scheduled task at user logon (legacy)
+        startup  - Startup folder script (legacy)
+        systemd  - Linux systemd service
 
     Examples:
-        backer agent install                  # Default: scheduled task on Windows
-        backer agent install --method startup # Use startup folder instead
+        backer agent install                  # Default: background service
+        backer agent install --method service # Background service (lockscreen-safe)
+        backer agent install --method task    # Legacy: runs at user logon
         backer agent install --method systemd # Linux systemd service
     """
     from backer.client.agent import BackerAgent
-    from backer.client.windows_service import create_systemd_service, install_service, is_windows
+    from backer.client.windows_service import create_systemd_service, install_service, is_admin, is_windows
 
     # Check if registered
     try:
@@ -774,10 +801,20 @@ def agent_install(method: str) -> None:
             console.print("[yellow]Warning:[/yellow] Windows service methods not available on Linux")
             console.print("Use --method systemd instead")
             raise SystemExit(1)
+
+        # Check for admin rights when using service method
+        if method == "service" and not is_admin():
+            console.print("[yellow]Note:[/yellow] The 'service' method requires Administrator privileges.")
+            console.print("Please run this command as Administrator for lockscreen support.")
+            console.print()
+            console.print("Alternatively, use --method task for user-level installation:")
+            console.print("  backer agent install --method task")
+            raise SystemExit(1)
+
         success, message = install_service(method=method, server_url=ag.server_url)
 
     if success:
-        console.print(f"[green]✓ {message}[/green]")
+        console.print(f"[green]✓[/green] {message}")
     else:
         console.print(f"[red]Error:[/red] {message}")
         raise SystemExit(1)
