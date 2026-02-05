@@ -19,7 +19,9 @@ import com.backer.android.di.ApiServiceFactory
 import com.backer.android.util.TarArchiveExtractor
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
@@ -124,7 +126,10 @@ class RestoreWorker @AssistedInject constructor(
                 // Update progress (50% to 95% for extraction)
                 val percent = 50 + (filesExtracted.coerceAtMost(100) * 45 / 100)
                 setForegroundAsync(createForegroundInfo(jobName, percent))
-                reportProgress(runId, "running", percent, currentFile)
+                // Fire-and-forget progress update (can't use suspend in callback)
+                CoroutineScope(Dispatchers.IO).launch {
+                    reportProgress(runId, "running", percent, currentFile)
+                }
             }
 
             if (!extractResult.success) {

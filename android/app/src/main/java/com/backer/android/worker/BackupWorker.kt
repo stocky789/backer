@@ -21,7 +21,9 @@ import com.backer.android.di.ApiServiceFactory
 import com.backer.android.util.TarArchiveCreator
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -102,7 +104,10 @@ class BackupWorker @AssistedInject constructor(
                     // Update progress (5% to 70% for archive creation)
                     val percent = 5 + (filesProcessed.coerceAtMost(100) * 65 / 100)
                     setForegroundAsync(createForegroundInfo(jobName, percent))
-                    reportProgress(runId, "running", percent, currentFile)
+                    // Fire-and-forget progress update (can't use suspend in callback)
+                    CoroutineScope(Dispatchers.IO).launch {
+                        reportProgress(runId, "running", percent, currentFile)
+                    }
                 }
 
                 if (!archiveResult.success) {
