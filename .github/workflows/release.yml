@@ -319,6 +319,7 @@ jobs:
             **Option 1: Docker (Recommended)**
             ```bash
             docker run -d --name backer \
+              --restart unless-stopped \
               -p 8420:8420 \
               -v backer-data:/data \
               --cap-add SYS_ADMIN \
