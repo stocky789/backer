@@ -16,11 +16,7 @@
       "Bash(git push:*)",
       "Bash(curl:*)",
       "Bash(./gradlew assembleDebug:*)",
-      "Bash(unzip:*)",
-      "Bash(CLASSPATH=\"/run/user/1000/gvfs/smb-share:server=192.168.0.254,share=homenetwork/Documents/Matt/Github/backer/android/gradle/wrapper/gradle-wrapper.jar\":*)",
-      "Bash(java:*)",
-      "Bash(find:*)",
-      "Bash(wc:*)"
+      "Bash(unzip:*)"
     ]
   }
 }

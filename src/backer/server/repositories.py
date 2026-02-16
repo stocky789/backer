@@ -996,24 +996,24 @@ def smb_delete_directory(
         """Recursively delete a directory and its contents."""
         nonlocal deleted_count, errors
 
-        # List directory contents
-        success, entries = smb_list_files(server, share, path, username, password, domain)
+        # List directory contents - use SMBBrowser directly to get is_dir info
+        success, result = SMBBrowser.list_directory(server, share, path, username, password, domain)
         if not success:
-            # Directory might not exist or be empty
+            # Log the error instead of silently returning
+            error_msg = result if isinstance(result, str) else "Unknown error"
+            if "not found" not in error_msg.lower():
+                logger.warning(f"[SMB DELETE] Failed to list directory '{path}': {error_msg}")
+                errors.append(f"list {path}: {error_msg[:50]}")
             return
 
-        # Parse entries - smb_list_files returns dict with filenames
-        # We need to check if each is a file or directory
-        for entry_name in entries:
-            if entry_name in (".", ".."):
+        # Process entries - we now have DirectoryEntry objects with is_dir attribute
+        for entry in result:
+            if entry.name in (".", ".."):
                 continue
 
-            entry_path = f"{path}/{entry_name}"
+            entry_path = f"{path}/{entry.name}"
 
-            # Try to list it as a directory - if it succeeds, it's a directory
-            is_dir_success, _ = smb_list_files(server, share, entry_path, username, password, domain)
-
-            if is_dir_success:
+            if entry.is_dir:
                 # It's a directory - recurse first
                 delete_recursive(entry_path)
                 # Then delete the empty directory

@@ -515,6 +515,7 @@ def _build_backup_command_payload(
     run_id: str,
     dry_run: bool = False,
     storage: Storage | None = None,
+    client_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the backup command payload with repository credentials.
 
@@ -524,10 +525,24 @@ def _build_backup_command_payload(
 
     Each job automatically gets its own subfolder within the destination
     to prevent conflicts between different backup jobs.
+
+    For Android agents, all repository types (SMB, NFS, local) are automatically
+    routed through the proxy backend since Android cannot mount network shares.
     """
     storage = storage or _storage
     if storage is None:
         raise RuntimeError("Storage not initialized")
+
+    # Check if the target client is an Android device
+    # Android agents cannot mount SMB/NFS shares, so they must use proxy backend
+    is_android_client = False
+    if client_id:
+        client = storage.get_client(client_id)
+        if client:
+            os_info = getattr(client, 'os_info', '') or ''
+            is_android_client = os_info.lower().startswith('android')
+            if is_android_client:
+                logger.debug(f"[BACKUP] Detected Android client: {client_id} (os_info={os_info})")
 
     # Start with basic payload
     backend_options = job.get("backend_options", {}).copy()
@@ -565,18 +580,53 @@ def _build_backup_command_payload(
             repo_password = storage.get_repository_password(repository_id)
 
             if repo_type == "smb":
-                # Include SMB connection info for agents
-                payload["smb_server"] = repo.get("server")
-                payload["smb_share"] = repo.get("share")
-                payload["smb_username"] = repo.get("username")
-                payload["smb_domain"] = repo.get("domain")
-                if repo_password:
-                    payload["smb_password"] = repo_password
+                if is_android_client:
+                    # Android cannot mount SMB shares, route through proxy
+                    # Server will mount the SMB share and store the backup
+                    public_url = storage.get_setting("public_url", "http://localhost:8420")
+                    if public_url.startswith("https://"):
+                        proxy_scheme = "proxys"
+                        host_part = public_url[8:]
+                    else:
+                        proxy_scheme = "proxy"
+                        host_part = public_url[7:]
+
+                    proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+                    payload["destination_path"] = proxy_uri
+                    payload["backend"] = "proxy"
+                    if repo_password:
+                        payload["backend_options"]["password"] = repo_password
+                    logger.debug(f"[BACKUP] Android client using proxy for SMB repo: {proxy_uri}")
+                else:
+                    # Include SMB connection info for agents that can mount shares
+                    payload["smb_server"] = repo.get("server")
+                    payload["smb_share"] = repo.get("share")
+                    payload["smb_username"] = repo.get("username")
+                    payload["smb_domain"] = repo.get("domain")
+                    if repo_password:
+                        payload["smb_password"] = repo_password
 
             elif repo_type == "nfs":
-                # NFS info (no password needed typically)
-                payload["nfs_server"] = repo.get("server")
-                payload["nfs_export"] = repo.get("share")
+                if is_android_client:
+                    # Android cannot mount NFS shares, route through proxy
+                    public_url = storage.get_setting("public_url", "http://localhost:8420")
+                    if public_url.startswith("https://"):
+                        proxy_scheme = "proxys"
+                        host_part = public_url[8:]
+                    else:
+                        proxy_scheme = "proxy"
+                        host_part = public_url[7:]
+
+                    proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+                    payload["destination_path"] = proxy_uri
+                    payload["backend"] = "proxy"
+                    if repo_password:
+                        payload["backend_options"]["password"] = repo_password
+                    logger.debug(f"[BACKUP] Android client using proxy for NFS repo: {proxy_uri}")
+                else:
+                    # NFS info (no password needed typically)
+                    payload["nfs_server"] = repo.get("server")
+                    payload["nfs_export"] = repo.get("share")
 
             elif repo_type == "local":
                 # For local repositories, use proxy backend
@@ -685,6 +735,7 @@ def trigger_job_internal(job_name: str) -> None:
         job_name=job_name,
         run_id=run_id,
         dry_run=False,
+        client_id=client_id,
     )
 
     _storage.queue_command(
@@ -3857,6 +3908,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             run_id=run_id,
             dry_run=dry_run,
             storage=storage,
+            client_id=client_id,
         )
 
         storage.queue_command(
@@ -4190,6 +4242,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Include SMB/NFS credentials for agents that need to mount the backup source
         backend_options = job.get("backend_options", {}).copy()
 
+        # Check if the target client is an Android device
+        # Android agents cannot mount SMB/NFS shares, so they must use proxy backend
+        is_android_client = False
+        os_info = getattr(client, 'os_info', '') or ''
+        is_android_client = os_info.lower().startswith('android')
+        if is_android_client:
+            logger.debug(f"[RESTORE] Detected Android client: {client_id} (os_info={os_info})")
+
         command_payload = {
             "job_name": job_name,
             "run_id": f"restore_{restore_id}",
@@ -4213,18 +4273,52 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 repo_password = storage.get_repository_password(repository_id)
 
                 if repo_type == "smb":
-                    # Include SMB connection info for agents
-                    command_payload["smb_server"] = repo.get("server")
-                    command_payload["smb_share"] = repo.get("share")
-                    command_payload["smb_username"] = repo.get("username")
-                    command_payload["smb_domain"] = repo.get("domain")
-                    if repo_password:
-                        command_payload["smb_password"] = repo_password
+                    if is_android_client:
+                        # Android cannot mount SMB shares, route through proxy
+                        public_url = storage.get_setting("public_url", "http://localhost:8420")
+                        if public_url.startswith("https://"):
+                            proxy_scheme = "proxys"
+                            host_part = public_url[8:]
+                        else:
+                            proxy_scheme = "proxy"
+                            host_part = public_url[7:]
+
+                        proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+                        command_payload["source_path"] = proxy_uri
+                        command_payload["backend"] = "proxy"
+                        if repo_password:
+                            command_payload["backend_options"]["password"] = repo_password
+                        logger.debug(f"[RESTORE] Android client using proxy for SMB repo: {proxy_uri}")
+                    else:
+                        # Include SMB connection info for agents that can mount shares
+                        command_payload["smb_server"] = repo.get("server")
+                        command_payload["smb_share"] = repo.get("share")
+                        command_payload["smb_username"] = repo.get("username")
+                        command_payload["smb_domain"] = repo.get("domain")
+                        if repo_password:
+                            command_payload["smb_password"] = repo_password
 
                 elif repo_type == "nfs":
-                    # NFS info (no password needed typically)
-                    command_payload["nfs_server"] = repo.get("server")
-                    command_payload["nfs_export"] = repo.get("share")
+                    if is_android_client:
+                        # Android cannot mount NFS shares, route through proxy
+                        public_url = storage.get_setting("public_url", "http://localhost:8420")
+                        if public_url.startswith("https://"):
+                            proxy_scheme = "proxys"
+                            host_part = public_url[8:]
+                        else:
+                            proxy_scheme = "proxy"
+                            host_part = public_url[7:]
+
+                        proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+                        command_payload["source_path"] = proxy_uri
+                        command_payload["backend"] = "proxy"
+                        if repo_password:
+                            command_payload["backend_options"]["password"] = repo_password
+                        logger.debug(f"[RESTORE] Android client using proxy for NFS repo: {proxy_uri}")
+                    else:
+                        # NFS info (no password needed typically)
+                        command_payload["nfs_server"] = repo.get("server")
+                        command_payload["nfs_export"] = repo.get("share")
 
                 elif repo_type == "local":
                     # For local repositories, use proxy backend for restore

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        Allow cleartext (HTTP) for all connections.
+        This is necessary for self-hosted Backer servers on local networks
+        that don't have HTTPS configured.
+
+        For production use with internet-exposed servers, HTTPS is recommended.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
