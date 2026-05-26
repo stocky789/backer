@@ -7,6 +7,7 @@ Background service that polls the server for commands and executes backups.
 import base64
 import json
 import logging
+import ntpath
 import os
 import platform
 import socket
@@ -159,7 +160,8 @@ class SMBConnectionManager:
             # Store credentials in Credential Manager first
             if username and password:
                 if not self._store_credentials(server, username, password, domain):
-                    logger.warning("[SMB-POOL] Failed to store credentials (non-fatal)")
+                    logger.warning("[SMB-POOL] Failed to store credentials; trying explicit net use credentials")
+                    return self._connect_with_explicit_credentials(server, share, username, password, domain)
 
             # Attempt connection
             unc_path = f"\\\\{server}\\{share}"
@@ -734,7 +736,8 @@ class AgentService:
         for attempt in range(max_retries):
             try:
                 logger.info(f"[BACKUP] Attempt {attempt + 1}/{max_retries} for job '{job_name}'")
-                self._execute_backup(payload)
+                if not self._execute_backup(payload):
+                    raise RuntimeError(f"Backup failed: {job_name}")
                 logger.info(f"[BACKUP] Job '{job_name}' completed successfully on attempt {attempt + 1}")
                 return  # Success - exit retry loop
 
@@ -874,6 +877,7 @@ class AgentService:
                 )
             else:
                 self._update_status(f"Backup failed: {job_name}")
+                return False
 
         except Exception as e:
             self._report_result(
@@ -886,6 +890,8 @@ class AgentService:
             )
             self._update_status(f"Backup error: {e}")
             raise
+
+        return True
 
     def _execute_restore(self, payload: dict[str, Any]):
         """Execute a restore command."""
@@ -1091,6 +1097,29 @@ class AgentService:
                 return path.replace('/', '\\')
         return path
 
+    def _ensure_repository_parent_directory(self, repo_path: str) -> None:
+        """Create the parent directory for filesystem-backed repositories."""
+        if not repo_path or "://" in repo_path:
+            return
+
+        stripped = repo_path.rstrip("\\/")
+        if not stripped:
+            return
+
+        if sys.platform == 'win32':
+            parent = ntpath.dirname(stripped)
+            if not parent or parent == stripped:
+                return
+            logger.info(f"[BACKUP] Ensuring repository parent directory exists: {parent}")
+            Path(parent).mkdir(parents=True, exist_ok=True)
+            return
+
+        path = Path(stripped)
+        if not path.is_absolute():
+            return
+        logger.info(f"[BACKUP] Ensuring repository parent directory exists: {path.parent}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+
     def _connect_windows_smb(
         self,
         server: str,
@@ -1239,6 +1268,12 @@ class AgentService:
 
         # Repository doesn't exist, initialize it
         logger.info("[RESTIC] Repository not found, initializing...")
+        try:
+            self._ensure_repository_parent_directory(dest)
+        except OSError as exc:
+            logger.error(f"[RESTIC] Failed to create repository parent directory: {exc}")
+            return False
+
         init_cmd = [str(restic), '-r', dest, 'init']
 
         result = subprocess.run(
@@ -1629,6 +1664,12 @@ class AgentService:
 
         # Repository doesn't exist, initialize it
         logger.info("[KOPIA] Repository not found, initializing...")
+        try:
+            self._ensure_repository_parent_directory(dest)
+        except OSError as exc:
+            logger.error(f"[KOPIA] Failed to create repository parent directory: {exc}")
+            return False
+
         init_cmd = [str(kopia), 'repository', 'create', 'filesystem', '--path', dest]
 
         result = subprocess.run(
