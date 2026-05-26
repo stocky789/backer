@@ -207,6 +207,17 @@ def test_windows_agent_build_stages_installer_tool_files() -> None:
     assert "shutil.copy(src, DIST_TOOLS_DIR / tool)" in build_script
 
 
+def test_windows_agent_executable_has_version_resource() -> None:
+    build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
+    spec_file = (ROOT / "backer-agent.spec").read_text(encoding="utf-8")
+
+    assert 'VERSION_FILE = BUILD_DIR / "backer-agent-version.txt"' in build_script
+    assert "StringStruct('FileVersion', '{__version__}')" in build_script
+    assert "StringStruct('ProductVersion', '{__version__}')" in build_script
+    assert "write_pyinstaller_version_file()" in build_script
+    assert "version=str(version_file) if version_file.exists() else None" in spec_file
+
+
 def test_release_workflow_checks_all_release_versions_and_manual_tag_ref() -> None:
     release_workflow = (ROOT / ".gitea" / "workflows" / "release-validation.yml").read_text(encoding="utf-8")
 

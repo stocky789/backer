@@ -30,6 +30,55 @@ BUILD_DIR = Path("build")
 DIST_DIR = Path("dist")
 TOOLS_DIR = BUILD_DIR / "tools"
 DIST_TOOLS_DIR = DIST_DIR / "tools"
+VERSION_FILE = BUILD_DIR / "backer-agent-version.txt"
+
+
+def _version_parts(version: str) -> tuple[int, int, int, int]:
+    parts = [int(part) for part in version.split(".")]
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+def write_pyinstaller_version_file() -> Path:
+    """Write Windows version metadata consumed by PyInstaller."""
+    from backer import __version__
+
+    filevers = _version_parts(__version__)
+    version_csv = ", ".join(str(part) for part in filevers)
+    version_text = f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({version_csv}),
+    prodvers=({version_csv}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'Backer'),
+          StringStruct('FileDescription', 'Backer Agent'),
+          StringStruct('FileVersion', '{__version__}'),
+          StringStruct('InternalName', 'backer-agent'),
+          StringStruct('OriginalFilename', 'backer-agent.exe'),
+          StringStruct('ProductName', 'Backer Agent'),
+          StringStruct('ProductVersion', '{__version__}')
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+    VERSION_FILE.write_text(version_text, encoding="utf-8")
+    return VERSION_FILE
 
 
 def download_file(url: str, dest: Path) -> None:
@@ -82,6 +131,8 @@ def download_restic_windows() -> Path:
 def build_pyinstaller() -> Path:
     """Build the PyInstaller executable."""
     print("Building executable with PyInstaller...")
+
+    write_pyinstaller_version_file()
 
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--clean", "backer-agent.spec"],
