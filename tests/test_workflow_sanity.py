@@ -147,9 +147,41 @@ def test_gitea_replaces_github_workflows() -> None:
     assert sorted(path.name for path in gitea_workflows.glob("*.yml")) == [
         "android-build.yml",
         "docker-build.yml",
+        "main-release.yml",
         "python-ci.yml",
         "release-validation.yml",
     ]
+
+
+def test_branch_validation_workflows_do_not_publish_releases() -> None:
+    gitea_workflows = ROOT / ".gitea" / "workflows"
+    for workflow_name in ("android-build.yml", "docker-build.yml", "python-ci.yml"):
+        workflow_text = (gitea_workflows / workflow_name).read_text(encoding="utf-8")
+        workflow = yaml.safe_load(workflow_text)
+        triggers = workflow.get("on") or workflow.get(True)
+
+        assert triggers["push"]["branches"] == ["dev"]
+        assert triggers["pull_request"]["branches"] == ["main", "dev"]
+        assert "scripts/gitea_release.py" not in workflow_text
+        assert "releases: write" not in workflow_text
+        assert "GITEA_TOKEN" not in workflow_text
+
+
+def test_main_release_workflow_publishes_only_from_main() -> None:
+    workflow_text = (ROOT / ".gitea" / "workflows" / "main-release.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_text)
+    triggers = workflow.get("on") or workflow.get(True)
+
+    assert triggers["push"]["branches"] == ["main"]
+    assert "pull_request" not in triggers
+    assert workflow["permissions"]["code"] == "write"
+    assert workflow["permissions"]["releases"] == "write"
+    assert "refs/heads/main" in workflow_text
+    assert "release-main" in workflow_text
+    assert "actions/upload-artifact@v3" in workflow_text
+    assert "actions/download-artifact@v3" in workflow_text
+    assert "scripts/gitea_release.py" in workflow_text
+    assert "secrets.GITEA_TOKEN" in workflow_text
 
 
 def test_release_workflow_checks_all_release_versions_and_manual_tag_ref() -> None:

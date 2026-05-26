@@ -59,6 +59,7 @@ all = [
 ]
 dev = [
     "backer[server,client]",
+    "build>=1.0",
     "pytest>=7.0",
     "pytest-cov",
     "pytest-asyncio",
