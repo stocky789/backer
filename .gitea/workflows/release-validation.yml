@@ -166,7 +166,7 @@ jobs:
         run: docker save backer:${{ needs.verify-version.outputs.version }} | gzip > backer-docker-image.tar.gz
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: backer-docker-image-${{ needs.verify-version.outputs.version }}
           path: backer-docker-image.tar.gz
@@ -206,7 +206,7 @@ jobs:
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Upload release APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: backer-release-apk-${{ needs.verify-version.outputs.version }}
           path: android/app/build/outputs/apk/release/*.apk
@@ -238,7 +238,7 @@ jobs:
         run: pyinstaller backer-agent.spec --noconfirm
 
       - name: Upload Windows agent artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: backer-windows-agent-${{ needs.verify-version.outputs.version }}
           path: dist/**
