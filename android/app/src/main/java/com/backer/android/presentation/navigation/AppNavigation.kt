@@ -71,7 +71,7 @@ fun BackerNavHost() {
         }
 
         composable(Screen.Browse.route) {
-            // TODO: Implement BrowseScreen
+            // Browse remains unregistered in this cleanup baseline.
         }
     }
 }

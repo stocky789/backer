@@ -13,7 +13,6 @@ Requirements:
     pip install pyinstaller
 """
 
-import os
 import platform
 import shutil
 import subprocess
@@ -79,7 +78,7 @@ def build_pyinstaller() -> Path:
     """Build the PyInstaller executable."""
     print("Building executable with PyInstaller...")
 
-    result = subprocess.run(
+    subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--clean", "backer-agent.spec"],
         check=True,
     )

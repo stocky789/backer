@@ -76,7 +76,7 @@ def get_subprocess_flags() -> int:
 def create_windows_service(server_url: str | None = None) -> tuple[bool, str]:
     """Create a proper Windows Service that runs at boot.
 
-    This is the most robust method for running the agent in the background.
+    This is the preferred method for lockscreen and background operation.
     The service runs under the SYSTEM account and survives:
     - User lockscreen
     - User logoff
@@ -578,7 +578,7 @@ def uninstall_service() -> tuple[bool, str]:
 
 
 def get_service_status() -> dict[str, Any]:
-    """Get comprehensive status of all installation methods.
+    """Get status for each Windows installation method.
 
     Returns:
         Dictionary with status information for all methods

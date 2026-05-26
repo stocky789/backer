@@ -232,17 +232,15 @@
                     <label class="form-label">Hypervisor Type</label>
                     <select id="hvType" class="form-input" onchange="onHypervisorTypeChange()">
                         <option value="proxmox">Proxmox VE</option>
-                        <option value="unraid">Unraid (WIP)</option>
+                        <option value="unraid">Unraid (Experimental)</option>
                         <option value="hyperv">Microsoft Hyper-V</option>
-                        <option value="hyperv-cluster">Hyper-V Failover Cluster (WIP)</option>
+                        <option value="hyperv-cluster">Hyper-V Failover Cluster (Experimental)</option>
                     </select>
-                    <div class="form-hint">Select the hypervisor platform</div>
                 </div>
 
                 <div class="form-group">
                     <label class="form-label">Name</label>
                     <input type="text" id="hvName" class="form-input" placeholder="My Proxmox Server" required>
-                    <div class="form-hint" id="hvNameHint">A friendly name for this hypervisor</div>
                 </div>
 
                 <div class="form-row">

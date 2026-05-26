@@ -36,6 +36,8 @@ from backer.server.models import (
     JobRunRequest,
     JobRunResponse,
 )
+from backer.server.public_url import get_default_public_url as _get_default_public_url
+from backer.server.repository_paths import get_job_subfolder as _get_job_subfolder
 from backer.server.scheduler import BackupScheduler
 from backer.server.storage import Storage
 from backer.server.tasks import Task, get_task_manager
@@ -458,55 +460,6 @@ def get_storage() -> Storage:
     if _storage is None:
         raise RuntimeError("Storage not initialized")
     return _storage
-
-
-def _get_default_public_url() -> str:
-    """Auto-detect the server's local IP address for the default public URL.
-
-    This is used on fresh installs so agents can connect without manual config.
-    Falls back to localhost if IP detection fails.
-    """
-    import socket
-
-    try:
-        # Create a socket to determine the local IP that would route to external addresses
-        # This doesn't actually make a connection, just determines the local interface
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # Use Google DNS as target (doesn't actually connect)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-
-        # Validate it's not a loopback address
-        if local_ip and not local_ip.startswith("127."):
-            return f"http://{local_ip}:8420"
-    except Exception:
-        pass  # Fall through to default
-
-    # Fallback: try to get hostname-based IP
-    try:
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
-        if local_ip and not local_ip.startswith("127."):
-            return f"http://{local_ip}:8420"
-    except Exception:
-        pass
-
-    # Final fallback
-    return "http://localhost:8420"
-
-
-def _get_job_subfolder(job_name: str) -> str:
-    """Get a safe subfolder name for a job.
-
-    Each job gets its own subfolder within the repository to prevent conflicts
-    between different backup jobs (especially important for restic/kopia which
-    initialize the repository on first use).
-    """
-    # Sanitize job name for use as folder name
-    # Replace any unsafe characters with underscores
-    import re
-    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', job_name)
-    return safe_name
 
 
 def _build_backup_command_payload(

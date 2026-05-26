@@ -29,14 +29,17 @@ Access the web UI at `http://your-server:8420`.
 ## Development Status
 
 ### Agent Backups
-- **Windows**: ✅ Operational (backup & restore)
-- **Linux**: ✅ Operational (backup & restore)
-- **Metadata Discovery**: ✅ Can adopt existing jobs from storage repositories
+- **Windows**: Supported for backup and restore. SMB targets need administrator permissions and one credential set per server.
+- **Linux**: Supported for backup and restore.
+- **Metadata discovery**: Supported for adopting existing jobs from storage repositories.
 
 ### Hypervisor Backups
-- **Proxmox Standalone Nodes**: ✅ Fully functional (backup & restore)
-- **Hyper-V Clusters**: ⚠️ Operational (backup & restore), auto-discovery from existing storage repos requires more testing
-- **Unraid**: 🚧 Next implementation
+- **Proxmox standalone nodes**: Supported for VM and LXC backup and restore.
+- **Hyper-V clusters**: Experimental. Backup and restore paths exist, but storage auto-discovery still needs validation.
+- **Unraid**: Experimental. Do not treat it as release-ready yet.
+
+### Mobile
+- **Android agent**: Experimental. The project contains an Android client, but local validation currently requires Android SDK setup.
 
 ## Installation
 
@@ -133,13 +136,13 @@ Backer supports multiple storage backend types for backup destinations:
 - Requires mount permissions (root or passwordless sudo)
 
 ### Local Directory (Docker/Server-Side)
-**New**: Store backups directly on the Backer server filesystem using local paths.
+Store backups directly on the Backer server filesystem using local paths.
 
 #### Why Local Directory?
-- **Docker-friendly**: No complex SMB/NFS mounts inside containers
-- **Cross-platform**: Works seamlessly with Windows and Linux agents
-- **Simplified permissions**: No network share authentication needed
-- **Reverse proxy compatible**: Works with Cloudflare, nginx, Traefik, etc.
+- **Docker-friendly**: Avoids SMB/NFS mounts inside containers
+- **Agent support**: Works with Windows and Linux agents
+- **Simpler permissions**: No network share authentication needed
+- **Reverse proxy compatible**: Works with Cloudflare, nginx, Traefik, and similar proxies
 
 #### How It Works
 Agents stream backup data to the server via HTTP using the "proxy backend". The server executes the actual backup tool (restic/kopia/rclone) locally on the configured path.

@@ -548,7 +548,7 @@ class ProxmoxAPI:
             nodes = [node]
         else:
             # Get all nodes - include those with status "online" or "unknown"
-            # (unknown often means the node is reachable but status not fully reported)
+            # (unknown often means the node is reachable but did not report status)
             all_nodes = self.list_nodes()
             nodes = [n.node for n in all_nodes if n.status != "offline"]
             if not nodes:
@@ -1084,7 +1084,7 @@ class ProxmoxAPI:
 
         logger.info(f"Ensured SMB directory exists: //{server}/{share}/{path}")
 
-        # Add a delay to allow the NAS to fully commit the directory
+        # Give the NAS time to commit the directory before Proxmox scans it.
         # This helps with race conditions where Proxmox CIFS mount doesn't
         # see the newly created directory immediately. TrueNAS and other NAS
         # devices may have slight delays in making new directories visible
@@ -2581,7 +2581,7 @@ class ProxmoxBackupManager:
     ) -> dict[str, Any]:
         """Restore a VM or container from backup.
 
-        This method fully restores VMs including:
+        This method restores VMs including:
         - All disk data (system disks, data disks)
         - EFI disk (efidisk0) for UEFI VMs
         - TPM state (tpmstate0) for Windows 11/Server 2022
@@ -2626,7 +2626,7 @@ class ProxmoxBackupManager:
                         )
                     logger.info(f"VM {target_vmid} stopped successfully")
 
-                    # Small delay to ensure VM is fully stopped
+                    # Small delay to allow the VM to stop.
                     import time
                     time.sleep(2)
             except ProxmoxAPIError as e:

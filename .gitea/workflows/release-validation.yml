@@ -1,0 +1,281 @@
+name: Release Validation
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release candidate tag to validate, for example v0.7.1
+        required: true
+      build_android_release:
+        description: Build Android release APK
+        required: true
+        default: "true"
+      build_windows_agent:
+        description: Build Windows agent package when a windows-latest runner is available
+        required: true
+        default: "false"
+
+jobs:
+  python-ci:
+    name: Python CI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package with dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Compile Python sources
+        run: python -m compileall -q src
+
+      - name: Test
+        run: python -m pytest -q
+
+  verify-version:
+    name: Verify Version Matches Tag
+    runs-on: ubuntu-latest
+    needs:
+      - python-ci
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compare package version with tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        shell: python
+        run: |
+          import ast
+          import os
+          import pathlib
+          import re
+          import tomllib
+
+          def read_text(path):
+              return pathlib.Path(path).read_text(encoding="utf-8")
+
+          def find_required(pattern, text, source):
+              match = re.search(pattern, text)
+              if not match:
+                  raise SystemExit(f"Could not find version in {source}")
+              return match.group(1)
+
+          def android_version_code(version):
+              match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+              if not match:
+                  raise SystemExit(f"Android versionCode requires x.y.z version, got {version!r}")
+              major, minor, patch = (int(part) for part in match.groups())
+              return major * 10000 + minor * 100 + patch
+
+          tag = os.environ.get("RELEASE_TAG") or os.environ.get("GITHUB_REF_NAME")
+          if not tag:
+              raise SystemExit("No release tag was provided")
+          expected = tag[1:] if tag.startswith("v") else tag
+
+          pyproject = tomllib.loads(read_text("pyproject.toml"))
+          package_version = pyproject["project"]["version"]
+
+          version_file = pathlib.Path("src/backer/_version.py")
+          module_version = None
+          tree = ast.parse(read_text(version_file))
+          for node in tree.body:
+              if (
+                  isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+                  and isinstance(node.value, ast.Constant)
+              ):
+                  module_version = str(node.value.value)
+                  break
+
+          if package_version != expected:
+              raise SystemExit(f"pyproject.toml version {package_version!r} does not match tag {tag!r}")
+          if module_version != expected:
+              raise SystemExit(f"src/backer/_version.py version {module_version!r} does not match tag {tag!r}")
+
+          installer_version = find_required(
+              r'#define\s+MyAppVersion\s+"([^"]+)"',
+              read_text("installer/backer-agent.iss"),
+              "installer/backer-agent.iss",
+          )
+          if installer_version != expected:
+              raise SystemExit(f"installer/backer-agent.iss version {installer_version!r} does not match tag {tag!r}")
+
+          android_gradle = read_text("android/app/build.gradle.kts")
+          android_version = find_required(r'versionName\s*=\s*"([^"]+)"', android_gradle, "android/app/build.gradle.kts")
+          if android_version != expected:
+              raise SystemExit(f"Android versionName {android_version!r} does not match tag {tag!r}")
+
+          android_code = int(find_required(r"versionCode\s*=\s*(\d+)", android_gradle, "android/app/build.gradle.kts"))
+          expected_android_code = android_version_code(expected)
+          if android_code != expected_android_code:
+              raise SystemExit(
+                  f"Android versionCode {android_code} does not match expected {expected_android_code} for {tag!r}"
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={expected}\n")
+              output.write(f"tag={tag}\n")
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs:
+      - verify-version
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Build Docker image
+        run: docker build --pull -t backer:${{ needs.verify-version.outputs.version }} .
+
+      - name: Validate Docker Compose file
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Save Docker image artifact
+        run: docker save backer:${{ needs.verify-version.outputs.version }} | gzip > backer-docker-image.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backer-docker-image-${{ needs.verify-version.outputs.version }}
+          path: backer-docker-image.tar.gz
+          if-no-files-found: error
+
+  android-release:
+    name: Build Android Release APK
+    runs-on: ubuntu-latest
+    needs:
+      - verify-version
+    if: github.event_name == 'push' || inputs.build_android_release == 'true'
+
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Assemble release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: backer-release-apk-${{ needs.verify-version.outputs.version }}
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+  windows-agent-package:
+    name: Build Windows Agent Package
+    runs-on: windows-latest
+    needs:
+      - verify-version
+    if: inputs.build_windows_agent == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package and PyInstaller
+        run: python -m pip install -e ".[dev]" pyinstaller
+
+      - name: Build Windows agent
+        run: pyinstaller backer-agent.spec --noconfirm
+
+      - name: Upload Windows agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backer-windows-agent-${{ needs.verify-version.outputs.version }}
+          path: dist/**
+          if-no-files-found: error
+
+  release-artifacts-ready:
+    name: Release Artifacts Ready
+    runs-on: ubuntu-latest
+    needs:
+      - verify-version
+      - python-ci
+      - docker-build
+      - android-release
+      - windows-agent-package
+    if: always()
+
+    steps:
+      - name: Check release jobs
+        shell: bash
+        env:
+          PYTHON_CI_RESULT: ${{ needs.python-ci.result }}
+          DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
+          ANDROID_RELEASE_RESULT: ${{ needs.android-release.result }}
+          WINDOWS_AGENT_PACKAGE_RESULT: ${{ needs.windows-agent-package.result }}
+        run: |
+          set -euo pipefail
+          for job in PYTHON_CI_RESULT DOCKER_BUILD_RESULT; do
+            result="${!job}"
+            if [ "$result" != "success" ]; then
+              echo "$job finished with $result"
+              exit 1
+            fi
+          done
+          for optional_job in ANDROID_RELEASE_RESULT WINDOWS_AGENT_PACKAGE_RESULT; do
+            result="${!optional_job}"
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "$optional_job finished with $result"
+              exit 1
+            fi
+          done
