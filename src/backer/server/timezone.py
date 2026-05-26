@@ -7,9 +7,9 @@ of datetime.now() throughout the codebase to ensure consistent timestamps.
 
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime, tzinfo
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if TYPE_CHECKING:
     from backer.server.storage import Storage
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 _storage: "Storage | None" = None
 
 # Cache for timezone - refreshed periodically
-_cached_tz: ZoneInfo | None = None
+_cached_tz: tzinfo | None = None
 _cache_time: float = 0
 _CACHE_TTL = 60  # Refresh timezone every 60 seconds
 
@@ -44,7 +44,7 @@ def clear_cache() -> None:
     _cache_time = 0
 
 
-def get_timezone() -> ZoneInfo:
+def get_timezone() -> tzinfo:
     """Get the configured timezone.
 
     Returns the user's configured timezone, or UTC if not configured
@@ -60,15 +60,18 @@ def get_timezone() -> ZoneInfo:
 
     # Default to UTC if storage not initialized
     if _storage is None:
-        return ZoneInfo("UTC")
+        return UTC
 
     # Fetch from storage
     try:
         tz_name = _storage.get_setting("timezone", "UTC")
-        tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+        tz = UTC if not tz_name or tz_name.upper() == "UTC" else ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError as e:
+        logger.warning(f"Failed to load timezone {e}, using UTC")
+        tz = UTC
     except Exception as e:
         logger.warning(f"Failed to get timezone setting: {e}, using UTC")
-        tz = ZoneInfo("UTC")
+        tz = UTC
 
     # Update cache
     _cached_tz = tz
@@ -136,7 +139,7 @@ def to_local(dt: datetime) -> datetime:
     """
     if dt.tzinfo is None:
         # Assume it's UTC if naive
-        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(get_timezone())
 
 
@@ -152,7 +155,7 @@ class TimezoneFormatter(logging.Formatter):
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:  # noqa: N802
         """Format the time using the configured timezone."""
         # Get time from record and convert to configured timezone
-        ct = datetime.fromtimestamp(record.created, tz=ZoneInfo("UTC"))
+        ct = datetime.fromtimestamp(record.created, tz=UTC)
         ct = ct.astimezone(get_timezone())
 
         if datefmt:

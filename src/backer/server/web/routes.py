@@ -1,8 +1,9 @@
 """Web UI routes for Backer server."""
 
-from datetime import datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -30,18 +31,26 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.globals["backer_version"] = __version__
 
 
+def render_template(request: Request, name: str, context: dict[str, Any]):
+    """Render a Jinja template using Starlette's current request-first API."""
+    context.setdefault("request", request)
+    return templates.TemplateResponse(request, name, context)
+
+
 def get_storage(request: Request) -> Storage:
     """Get storage from app state."""
     return request.app.state.storage
 
 
-def get_timezone(storage: Storage) -> ZoneInfo:
+def get_timezone(storage: Storage) -> tzinfo:
     """Get configured timezone from storage."""
     tz_name = storage.get_setting("timezone", "UTC")
     try:
-        return ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+        return UTC if not tz_name or tz_name.upper() == "UTC" else ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return UTC
     except Exception:
-        return ZoneInfo("UTC")
+        return UTC
 
 
 def time_ago(dt: datetime | str | None) -> str:
@@ -205,7 +214,7 @@ async def dashboard(request: Request):
         "total_hv_jobs": len(hv_jobs),
     }
 
-    return templates.TemplateResponse("dashboard.html", {
+    return render_template(request, "dashboard.html", {
         "request": request,
         "active": "dashboard",
         "stats": stats,
@@ -239,7 +248,7 @@ async def agents_page(request: Request):
             "last_seen_ago": time_ago(a.last_seen),
         })
 
-    return templates.TemplateResponse("agents.html", {
+    return render_template(request, "agents.html", {
         "request": request,
         "active": "agents",
         "agents": agents,
@@ -286,7 +295,7 @@ async def hypervisors_page(request: Request):
             "last_run_ago": time_ago(latest.get("started_at")) if latest else None,
         })
 
-    return templates.TemplateResponse("hypervisors.html", {
+    return render_template(request, "hypervisors.html", {
         "request": request,
         "active": "hypervisors",
         "hypervisors": hypervisors,
@@ -335,7 +344,7 @@ async def jobs_page(request: Request):
     # Get agents for edit modal
     agents = storage.list_clients()
 
-    return templates.TemplateResponse("jobs.html", {
+    return render_template(request, "jobs.html", {
         "request": request,
         "active": "jobs",
         "jobs": jobs,
@@ -351,7 +360,7 @@ async def jobs_new_page(request: Request):
     agents = storage.list_clients()
     repositories = storage.list_repositories()
 
-    return templates.TemplateResponse("jobs_new.html", {
+    return render_template(request, "jobs_new.html", {
         "request": request,
         "active": "jobs",
         "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
@@ -552,7 +561,7 @@ async def history_page(request: Request):
         logger.error(f"Error loading history page: {e}", exc_info=True)
         all_runs = []
 
-    return templates.TemplateResponse("history.html", {
+    return render_template(request, "history.html", {
         "request": request,
         "active": "history",
         "runs": all_runs,
@@ -566,7 +575,7 @@ async def storage_page(request: Request):
     storage = get_storage(request)
     repositories = storage.list_repositories()
 
-    return templates.TemplateResponse("repositories.html", {
+    return render_template(request, "repositories.html", {
         "request": request,
         "active": "storage",
         "repositories": repositories,
@@ -577,7 +586,7 @@ async def storage_page(request: Request):
 @router.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request):
     """Server logs page."""
-    return templates.TemplateResponse("logs.html", {
+    return render_template(request, "logs.html", {
         "request": request,
         "active": "logs",
         "user": get_current_user(request),
@@ -605,7 +614,7 @@ async def settings_page(request: Request):
     # Check if settings were just saved
     settings_saved = request.query_params.get("saved") == "1"
 
-    return templates.TemplateResponse("settings.html", {
+    return render_template(request, "settings.html", {
         "request": request,
         "active": "settings",
         "version": __version__,
@@ -660,7 +669,7 @@ async def restore_page(request: Request):
     all_runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
     recent_restores = all_runs[:10]
 
-    return templates.TemplateResponse("restore.html", {
+    return render_template(request, "restore.html", {
         "request": request,
         "active": "restore",
         "jobs": jobs,
@@ -684,7 +693,7 @@ async def login_page(request: Request):
         "required": "Please log in to continue",
     }
 
-    return templates.TemplateResponse("login.html", {
+    return render_template(request, "login.html", {
         "request": request,
         "error": error_messages.get(error),
         "username": "",
@@ -703,7 +712,7 @@ async def login_submit(
     # Look up user
     user = storage.get_user_by_username(username)
     if not user or not verify_password(password, user.get("password_hash", "")):
-        return templates.TemplateResponse("login.html", {
+        return render_template(request, "login.html", {
             "request": request,
             "error": "Invalid username or password",
             "username": username,
@@ -756,7 +765,7 @@ async def profile_page(request: Request):
     saved = request.query_params.get("saved") == "1"
     password_changed = request.query_params.get("password_changed") == "1"
 
-    return templates.TemplateResponse("profile.html", {
+    return render_template(request, "profile.html", {
         "request": request,
         "active": "profile",
         "user": user,
@@ -798,7 +807,7 @@ async def profile_update(
     elif action == "change_password":
         # Verify current password
         if not current_password or not verify_password(current_password, user.get("password_hash", "")):
-            return templates.TemplateResponse("profile.html", {
+            return render_template(request, "profile.html", {
                 "request": request,
                 "active": "profile",
                 "user": user,
@@ -807,7 +816,7 @@ async def profile_update(
 
         # Check new passwords match
         if not new_password or new_password != confirm_password:
-            return templates.TemplateResponse("profile.html", {
+            return render_template(request, "profile.html", {
                 "request": request,
                 "active": "profile",
                 "user": user,
@@ -816,7 +825,7 @@ async def profile_update(
 
         # Check password length
         if len(new_password) < 4:
-            return templates.TemplateResponse("profile.html", {
+            return render_template(request, "profile.html", {
                 "request": request,
                 "active": "profile",
                 "user": user,

@@ -5,10 +5,9 @@ import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from backer.server import timezone as tz
 from backer.server.models import Client, ClientStatus
@@ -433,11 +432,11 @@ class Storage:
             last_seen = datetime.fromisoformat(row["last_seen"])
             if last_seen.tzinfo is None:
                 # Assume UTC if naive
-                last_seen = last_seen.replace(tzinfo=ZoneInfo("UTC"))
+                last_seen = last_seen.replace(tzinfo=UTC)
 
         registered_at = datetime.fromisoformat(row["registered_at"])
         if registered_at.tzinfo is None:
-            registered_at = registered_at.replace(tzinfo=ZoneInfo("UTC"))
+            registered_at = registered_at.replace(tzinfo=UTC)
 
         return Client(
             id=row["id"],

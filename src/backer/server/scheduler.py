@@ -3,9 +3,9 @@
 import logging
 import threading
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from croniter import croniter
@@ -54,7 +54,7 @@ class BackupScheduler:
         self._last_hypervisor_run_times: dict[str, datetime] = {}
 
         # Timezone caching to avoid database hits on every _now() call
-        self._cached_timezone: ZoneInfo | None = None
+        self._cached_timezone: tzinfo | None = None
         self._timezone_cache_time: datetime | None = None
         self._timezone_cache_ttl = 300  # Refresh timezone cache every 5 minutes
 
@@ -62,13 +62,13 @@ class BackupScheduler:
         self._last_cleanup: datetime | None = None
         self._cleanup_interval = 300  # Run cleanup every 5 minutes
 
-    def _get_timezone(self) -> ZoneInfo:
+    def _get_timezone(self) -> tzinfo:
         """Get the configured timezone from storage with caching.
 
         Returns ZoneInfo for the configured timezone, or UTC if not set or invalid.
         Uses a cache to avoid hitting the database on every call.
         """
-        now = datetime.now(ZoneInfo("UTC"))
+        now = datetime.now(UTC)
 
         # Check if cache is valid
         if (
@@ -81,10 +81,13 @@ class BackupScheduler:
         # Cache miss or expired - fetch from storage
         tz_name = self.storage.get_setting("timezone", "UTC")
         try:
-            tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+            tz = UTC if not tz_name or tz_name.upper() == "UTC" else ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(f"Invalid timezone '{tz_name}', using UTC")
+            tz = UTC
         except Exception:
             logger.warning(f"Invalid timezone '{tz_name}', using UTC")
-            tz = ZoneInfo("UTC")
+            tz = UTC
 
         # Update cache
         self._cached_timezone = tz
@@ -136,7 +139,7 @@ class BackupScheduler:
 
     def _run_cleanup_if_due(self) -> None:
         """Run periodic cleanup tasks if enough time has passed."""
-        now = datetime.now(ZoneInfo("UTC"))
+        now = datetime.now(UTC)
 
         # Check if cleanup is due
         if self._last_cleanup is not None:

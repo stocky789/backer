@@ -5,10 +5,9 @@ import os
 import re
 import subprocess
 import tempfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from backer.server import timezone as tz
 from backer.server.storage import Storage
@@ -297,7 +296,7 @@ class RetentionManager:
                         dt = datetime.fromisoformat(started)
                         # Ensure timezone-aware for comparison
                         if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+                            dt = dt.replace(tzinfo=UTC)
                         if dt < cutoff_date:
                             runs_to_delete.append(run)
                             continue
