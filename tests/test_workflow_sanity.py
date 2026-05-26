@@ -203,6 +203,7 @@ def test_windows_agent_build_stages_installer_tool_files() -> None:
     build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
 
     assert 'DIST_TOOLS_DIR = DIST_DIR / "tools"' in build_script
+    assert 'normalized_path = TOOLS_DIR / "restic.exe"' in build_script
     assert "shutil.copy(src, DIST_TOOLS_DIR / tool)" in build_script
 
 

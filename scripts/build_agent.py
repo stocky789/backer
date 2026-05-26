@@ -72,6 +72,10 @@ def download_restic_windows() -> Path:
     # Sometimes it's in a subfolder
     if not exe_path.exists():
         exe_path = TOOLS_DIR / f"restic_{RESTIC_VERSION}_windows_amd64.exe"
+    if exe_path.name != "restic.exe":
+        normalized_path = TOOLS_DIR / "restic.exe"
+        shutil.copy(exe_path, normalized_path)
+        exe_path = normalized_path
     return exe_path
 
 
