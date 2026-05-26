@@ -5,11 +5,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      build_windows_agent:
-        description: Build Windows installer and portable package if a windows-latest runner is available
-        required: true
-        default: "false"
 
 permissions:
   code: write
@@ -170,7 +165,6 @@ jobs:
     runs-on: windows-latest
     needs:
       - release-info
-    if: vars.BACKER_BUILD_WINDOWS_AGENT == 'true' || (github.event_name == 'workflow_dispatch' && inputs.build_windows_agent == 'true')
 
     steps:
       - name: Checkout
@@ -242,7 +236,7 @@ jobs:
               exit 1
             fi
           done
-          if [ "$WINDOWS_AGENT_PACKAGE_RESULT" != "success" ] && [ "$WINDOWS_AGENT_PACKAGE_RESULT" != "skipped" ]; then
+          if [ "$WINDOWS_AGENT_PACKAGE_RESULT" != "success" ]; then
             echo "WINDOWS_AGENT_PACKAGE_RESULT finished with $WINDOWS_AGENT_PACKAGE_RESULT"
             exit 1
           fi

@@ -29,6 +29,7 @@ RESTIC_VERSION = "0.16.2"
 BUILD_DIR = Path("build")
 DIST_DIR = Path("dist")
 TOOLS_DIR = BUILD_DIR / "tools"
+DIST_TOOLS_DIR = DIST_DIR / "tools"
 
 
 def download_file(url: str, dest: Path) -> None:
@@ -92,6 +93,7 @@ def create_package() -> Path:
 
     package_dir = DIST_DIR / "backer-agent-windows"
     package_dir.mkdir(parents=True, exist_ok=True)
+    DIST_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Copy executable
     shutil.copy(DIST_DIR / "backer-agent.exe", package_dir / "backer-agent.exe")
@@ -103,6 +105,7 @@ def create_package() -> Path:
     for tool in ["rclone.exe", "restic.exe"]:
         for src in TOOLS_DIR.rglob(tool):
             shutil.copy(src, tools_subdir / tool)
+            shutil.copy(src, DIST_TOOLS_DIR / tool)
             break
 
     # Create a simple batch launcher
@@ -168,6 +171,7 @@ def main():
     BUILD_DIR.mkdir(exist_ok=True)
     TOOLS_DIR.mkdir(exist_ok=True)
     DIST_DIR.mkdir(exist_ok=True)
+    DIST_TOOLS_DIR.mkdir(exist_ok=True)
 
     # Only download Windows tools if building on Windows
     if platform.system() == "Windows":

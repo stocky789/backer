@@ -194,6 +194,16 @@ def test_main_release_workflow_publishes_only_from_main() -> None:
     assert "actions/download-artifact@v3" in workflow_text
     assert "scripts/gitea_release.py" in workflow_text
     assert "secrets.GITEA_TOKEN" in workflow_text
+    assert "runs-on: windows-latest" in workflow_text
+    assert "BACKER_BUILD_WINDOWS_AGENT" not in workflow_text
+    assert "WINDOWS_AGENT_PACKAGE_RESULT\" != \"success\"" in workflow_text
+
+
+def test_windows_agent_build_stages_installer_tool_files() -> None:
+    build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
+
+    assert 'DIST_TOOLS_DIR = DIST_DIR / "tools"' in build_script
+    assert "shutil.copy(src, DIST_TOOLS_DIR / tool)" in build_script
 
 
 def test_release_workflow_checks_all_release_versions_and_manual_tag_ref() -> None:
