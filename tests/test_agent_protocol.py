@@ -12,16 +12,36 @@ from backer.client.agent import BackerAgent
 
 
 class _RestoreBackend:
-    def __init__(self, validation_success: bool, restore_success: bool = True):
+    def __init__(
+        self,
+        validation_success: bool,
+        restore_success: bool = True,
+        validation_files: int = 1,
+        validation_matched_items: int | None = None,
+        restore_matched_items: int | None = None,
+        resolved_snapshot: str = "a" * 64,
+    ):
         self.validation_success = validation_success
         self.restore_success = restore_success
+        self.validation_files = validation_files
+        self.validation_matched_items = validation_matched_items
+        self.restore_matched_items = restore_matched_items
+        self.resolved_snapshot = resolved_snapshot
         self.dry_runs: list[bool] = []
+        self.snapshots: list[str | None] = []
+        self.resolver_calls: list[str] = []
 
     def check_available(self) -> tuple[bool, str]:
         return True, "ready"
 
-    def restore(self, *, destination: Path, dry_run: bool, **_: object) -> BackendResult:
+    def resolve_latest_snapshot(self, destination: object) -> str:
+        self.resolver_calls.append(str(getattr(destination, "path")))
+        return self.resolved_snapshot
+
+    def restore(self, *, destination: Path, dry_run: bool, **kwargs: object) -> BackendResult:
         self.dry_runs.append(dry_run)
+        self.snapshots.append(kwargs.get("snapshot") if isinstance(kwargs.get("snapshot"), str) else None)
+        matched_items = self.validation_matched_items if dry_run else self.restore_matched_items
         if not dry_run and not self.restore_success:
             (destination / "partial.txt").write_text("partial")
         return BackendResult(
@@ -30,6 +50,8 @@ class _RestoreBackend:
             started_at=datetime.now(),
             finished_at=datetime.now(),
             errors=[] if (self.validation_success if dry_run else self.restore_success) else ["repository unavailable"],
+            files_transferred=self.validation_files if dry_run else 1,
+            metadata={"matched_items": matched_items} if matched_items is not None else {},
         )
 
 
@@ -164,6 +186,99 @@ def test_clean_restore_keeps_destination_when_validation_fails(
     assert not report["success"]
     assert original.exists()
     assert backend.dry_runs == [True]
+
+
+@pytest.mark.parametrize(
+    ("requested_snapshot", "expected_snapshot", "resolver_calls"),
+    [(None, "a" * 64, 1), ("latest", "a" * 64, 1), ("chosen", "chosen", 0)],
+)
+def test_clean_restic_restore_uses_one_immutable_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_snapshot: str | None,
+    expected_snapshot: str,
+    resolver_calls: int,
+) -> None:
+    destination = tmp_path / "restore"
+    backend = _RestoreBackend(validation_success=True)
+    agent = _agent(tmp_path)
+    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
+    monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
+
+    report = agent.execute_restore({
+        "run_id": "run-1",
+        "job_name": "job",
+        "backend": "restic",
+        "source_path": str(tmp_path / "repo"),
+        "destination_path": str(destination),
+        "snapshot": requested_snapshot,
+        "clean_restore": True,
+    })
+
+    assert report["success"]
+    assert len(backend.resolver_calls) == resolver_calls
+    assert backend.snapshots == [expected_snapshot, expected_snapshot]
+
+
+def test_clean_restic_restore_keeps_destination_when_no_files_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "restore"
+    destination.mkdir()
+    original = destination / "keep.txt"
+    original.write_text("keep")
+    backend = _RestoreBackend(validation_success=True, validation_matched_items=0)
+    agent = _agent(tmp_path)
+    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
+    monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
+
+    report = agent.execute_restore({
+        "run_id": "run-1",
+        "job_name": "job",
+        "backend": "restic",
+        "source_path": str(tmp_path / "repo"),
+        "destination_path": str(destination),
+        "clean_restore": True,
+    })
+
+    assert not report["success"]
+    assert "no files" in report["errors"][0]
+    assert original.exists()
+    assert backend.dry_runs == [True]
+
+
+def test_clean_restic_restore_rolls_back_when_actual_restore_matches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "restore"
+    destination.mkdir()
+    original = destination / "keep.txt"
+    original.write_text("keep")
+    backend = _RestoreBackend(
+        validation_success=True,
+        validation_matched_items=1,
+        restore_matched_items=0,
+    )
+    agent = _agent(tmp_path)
+    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
+    monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
+
+    report = agent.execute_restore({
+        "run_id": "run-1",
+        "job_name": "job",
+        "backend": "restic",
+        "source_path": str(tmp_path / "repo"),
+        "destination_path": str(destination),
+        "clean_restore": True,
+    })
+
+    assert not report["success"]
+    assert "no files" in report["errors"][0]
+    assert original.exists()
+    assert backend.dry_runs == [True, False]
 
 
 def test_clean_restore_validates_before_clearing_destination(

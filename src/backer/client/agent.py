@@ -1344,8 +1344,11 @@ class BackerAgent:
             # removes anything.  A dry-run is non-mutating for the supported
             # backends except Kopia, which explicitly rejects it.
             clean_restore = job.get("clean_restore", False)
+            restore_snapshot = job.get("snapshot")
             staged_destination: Path | None = None
             if clean_restore and not dry_run:
+                if backend_name == "restic" and restore_snapshot in (None, "", "latest"):
+                    restore_snapshot = backend.resolve_latest_snapshot(source)
                 if backend_name == "proxy":
                     raise RuntimeError(
                         "Clean restore is not supported for proxy backends because "
@@ -1364,13 +1367,16 @@ class BackerAgent:
                     validation = backend.restore(
                         source=source,
                         destination=destination,
-                        snapshot=job.get("snapshot"),
+                        snapshot=restore_snapshot,
                         dry_run=True,
                         original_source_path=job.get("original_source_path"),
                         include_path=job.get("source_subfolder") or None,
                     )
                     if not validation.success:
                         raise RuntimeError("Clean restore validation failed: " + "; ".join(validation.errors))
+                    matched_items = validation.metadata.get("matched_items", validation.files_transferred)
+                    if backend_name == "restic" and matched_items == 0:
+                        raise RuntimeError("Clean restore found no files in the selected Restic snapshot")
 
                 resolved_destination = destination.resolve()
                 if resolved_destination == resolved_destination.parent:
@@ -1426,7 +1432,7 @@ class BackerAgent:
                 result = backend.restore(
                     source=source,
                     destination=destination,
-                    snapshot=job.get("snapshot"),
+                    snapshot=restore_snapshot,
                     dry_run=dry_run,
                     original_source_path=original_source_path,
                     include_path=job.get("source_subfolder") or None,
@@ -1447,6 +1453,15 @@ class BackerAgent:
                             f"{staged_destination}: {rollback_err}"
                         ) from rollback_err
                 raise
+
+            if (
+                clean_restore
+                and not dry_run
+                and backend_name == "restic"
+                and result.metadata.get("matched_items", result.files_transferred) == 0
+            ):
+                result.success = False
+                result.errors.append("Clean restore found no files in the selected Restic snapshot")
 
             if clean_restore and not dry_run and not result.success:
                 try:
