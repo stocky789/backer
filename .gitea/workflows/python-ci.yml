@@ -1,13 +1,6 @@
 name: Python CI
 
-on:
-  push:
-    branches:
-      - dev
-  pull_request:
-    branches:
-      - main
-      - dev
+on: workflow_dispatch
 
 jobs:
   python-ci:

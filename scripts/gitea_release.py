@@ -93,6 +93,7 @@ def create_release(
     target: str,
     name: str,
     body: str,
+    prerelease: bool,
 ) -> dict:
     release = api_request(
         method="POST",
@@ -103,7 +104,7 @@ def create_release(
             "body": body,
             "draft": False,
             "name": name,
-            "prerelease": False,
+            "prerelease": prerelease,
             "tag_name": tag,
             "target_commitish": target,
         },
@@ -123,6 +124,7 @@ def update_release(
     target: str,
     name: str,
     body: str,
+    prerelease: bool,
 ) -> dict:
     release = api_request(
         method="PATCH",
@@ -133,7 +135,7 @@ def update_release(
             "body": body,
             "draft": False,
             "name": name,
-            "prerelease": False,
+            "prerelease": prerelease,
             "tag_name": tag,
             "target_commitish": target,
         },
@@ -210,6 +212,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asset-dir", action="append", default=[], help="Directory tree containing release assets.")
     parser.add_argument("--body", default="", help="Release body.")
     parser.add_argument("--name", default="", help="Release title.")
+    parser.add_argument("--prerelease", action="store_true", help="Mark the release as a prerelease.")
+    parser.add_argument("--prune", action="store_true", help="Delete release assets not in this upload.")
     parser.add_argument("--tag", default="", help="Release tag.")
     parser.add_argument("--target", default="", help="Target commit SHA.")
     parser.add_argument("--version", default="", help="Project version.")
@@ -232,6 +236,7 @@ def main() -> int:
         raise SystemExit("No release assets were found")
 
     release = get_release(base_url, token, repository, tag)
+    existing_assets = release.get("assets", []) if release else []
     if release is None:
         release = create_release(
             base_url=base_url,
@@ -241,6 +246,7 @@ def main() -> int:
             target=target,
             name=name,
             body=body,
+            prerelease=args.prerelease,
         )
     else:
         release = update_release(
@@ -252,12 +258,21 @@ def main() -> int:
             target=target,
             name=name,
             body=body,
+            prerelease=args.prerelease,
         )
+    release["assets"] = existing_assets
 
     for asset in assets:
         delete_existing_asset(base_url, token, repository, release, asset.name)
         upload_asset(base_url, token, repository, release["id"], asset)
         print(f"Uploaded {asset.name}")
+
+    if args.prune:
+        asset_names = {path.name for path in assets}
+        for asset in release.get("assets", []):
+            if asset.get("name") not in asset_names:
+                delete_existing_asset(base_url, token, repository, release, asset["name"])
+                print(f"Deleted stale asset {asset['name']}")
 
     print(f"Published {name} ({tag})")
     return 0

@@ -133,55 +133,163 @@ def test_installed_package_exposes_expected_console_scripts() -> None:
         assert callable(getattr(module, function_name))
 
 
-def test_gitea_replaces_github_workflows() -> None:
-    github_workflows = ROOT / ".github" / "workflows"
-    gitea_workflows = ROOT / ".gitea" / "workflows"
+def workflow_triggers(workflow_path: Path) -> dict:
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    return workflow.get("on") or workflow.get(True)
 
-    # Builds and releases run on Gitea only; the changelog check is mirrored to
-    # GitHub because the repository is also pushed there.
-    assert sorted(path.name for path in github_workflows.glob("*.yml")) == ["changelog.yml"]
-    assert sorted(path.name for path in gitea_workflows.glob("*.yml")) == [
-        "android-build.yml",
-        "changelog.yml",
-        "docker-build.yml",
-        "main-release.yml",
-        "python-ci.yml",
-        "release-validation.yml",
-    ]
+
+def test_github_and_gitea_have_rolling_release_workflows() -> None:
+    for path in (".github/workflows/release.yml", ".gitea/workflows/main-release.yml"):
+        triggers = workflow_triggers(ROOT / path)
+
+        assert triggers["push"]["branches"] == ["main", "dev"]
+        assert triggers["pull_request"]["branches"] == ["main", "dev"]
+        assert "workflow_dispatch" in triggers
 
 
 def test_branch_validation_workflows_do_not_publish_releases() -> None:
     gitea_workflows = ROOT / ".gitea" / "workflows"
     for workflow_name in ("android-build.yml", "docker-build.yml", "python-ci.yml"):
         workflow_text = (gitea_workflows / workflow_name).read_text(encoding="utf-8")
-        workflow = yaml.safe_load(workflow_text)
-        triggers = workflow.get("on") or workflow.get(True)
+        triggers = workflow_triggers(gitea_workflows / workflow_name)
 
-        assert triggers["push"]["branches"] == ["dev"]
-        assert triggers["pull_request"]["branches"] == ["main", "dev"]
+        assert triggers == "workflow_dispatch"
         assert "scripts/gitea_release.py" not in workflow_text
         assert "releases: write" not in workflow_text
         assert "GITEA_TOKEN" not in workflow_text
 
 
-def test_main_release_workflow_publishes_only_from_main() -> None:
-    workflow_text = (ROOT / ".gitea" / "workflows" / "main-release.yml").read_text(encoding="utf-8")
-    workflow = yaml.safe_load(workflow_text)
-    triggers = workflow.get("on") or workflow.get(True)
+def test_rolling_release_workflows_only_publish_after_pr_validation() -> None:
+    gitea = yaml.safe_load((ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8"))
+    github = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
 
-    assert triggers["push"]["branches"] == ["main"]
-    assert "pull_request" not in triggers
-    assert workflow["permissions"]["code"] == "write"
-    assert workflow["permissions"]["releases"] == "write"
-    assert "refs/heads/main" in workflow_text
-    assert "release-main" in workflow_text
-    assert "actions/upload-artifact@v3" in workflow_text
-    assert "actions/download-artifact@v3" in workflow_text
-    assert "scripts/gitea_release.py" in workflow_text
-    assert "secrets.GITEA_TOKEN" in workflow_text
-    assert "runs-on: windows-latest" in workflow_text
-    assert "BACKER_BUILD_WINDOWS_AGENT" not in workflow_text
-    assert "WINDOWS_AGENT_PACKAGE_RESULT\" != \"success\"" in workflow_text
+    for workflow, job_names in ((gitea, ("publish-release",)), (github, ("publish-release", "docker-publish"))):
+        for job_name in job_names:
+            guard = str(workflow["jobs"][job_name]["if"])
+            assert "github.event_name != 'pull_request'" in guard or "github.event_name == 'push'" in guard
+
+
+def test_rolling_release_permissions_are_scoped_to_publish_jobs() -> None:
+    github = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    gitea = yaml.safe_load((ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8"))
+
+    assert github["permissions"] == {"contents": "read"}
+    assert gitea["permissions"] == {"contents": "read"}
+
+    assert github["jobs"]["publish-release"]["permissions"]["contents"] == "write"
+    assert github["jobs"]["docker-publish"]["permissions"]["packages"] == "write"
+    assert gitea["jobs"]["publish-release"]["permissions"]["code"] == "write"
+    assert gitea["jobs"]["publish-release"]["permissions"]["releases"] == "write"
+    assert all(
+        name == "publish-release"
+        or all(job.get("permissions", {}).get(scope) != "write" for scope in ("code", "releases"))
+        for name, job in gitea["jobs"].items()
+    )
+
+
+def test_github_release_concurrency_keeps_branch_pushes_independent() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    concurrency = workflow["concurrency"]
+
+    assert "github.ref" in str(concurrency["group"])
+    cancel_in_progress = concurrency["cancel-in-progress"]
+    assert cancel_in_progress is False or (
+        "github.event_name" in str(cancel_in_progress) and "pull_request" in str(cancel_in_progress)
+    )
+
+
+def test_rolling_release_workflows_publish_expected_assets_and_channels() -> None:
+    for path, artifact_version in (
+        (".github/workflows/release.yml", "v4"),
+        (".gitea/workflows/main-release.yml", "v3"),
+    ):
+        workflow_text = (ROOT / path).read_text(encoding="utf-8")
+
+        assert f"actions/upload-artifact@{artifact_version}" in workflow_text
+        assert f"actions/download-artifact@{artifact_version}" in workflow_text
+        assert "release-main" in workflow_text
+        assert "release-dev" in workflow_text
+        assert "prerelease" in workflow_text
+        assert "pyproject.toml" in workflow_text
+        assert "GITHUB_SHA" in workflow_text
+        assert "GITHUB_BASE_REF" in workflow_text
+        assert "backer-agent-setup.exe" in workflow_text
+        assert "backer-agent-windows-portable.zip" in workflow_text
+        assert "backer-android.apk" in workflow_text
+        assert "dist/" in workflow_text
+
+    gitea_release = (ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8")
+    assert "scripts/gitea_release.py" in gitea_release
+    assert "--prune" in gitea_release
+    github_release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "$image:$version,$image:latest" in github_release
+    assert "$image:dev,$image:dev-$shortsha" in github_release
+    assert "gh release create" in github_release
+    assert "--verify-tag" in github_release
+
+
+def test_gitea_release_prerelease_update_prunes_stale_assets_after_upload(monkeypatch, tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    gitea_release = importlib.import_module("gitea_release")
+    fresh_asset = tmp_path / "fresh.zip"
+    fresh_asset.write_bytes(b"fresh")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_api_request(*, method: str, path: str, payload: dict | None = None, **_kwargs):
+        calls.append((method, path, payload))
+        if method == "GET":
+            return {
+                "id": 7,
+                "assets": [
+                    {"id": 1, "name": "fresh.zip"},
+                    {"id": 2, "name": "obsolete.zip"},
+                ],
+            }
+        if method == "PATCH":
+            return {"id": 7, "assets": [{"id": 1, "name": "fresh.zip"}, {"id": 2, "name": "obsolete.zip"}]}
+        return None
+
+    monkeypatch.setattr(gitea_release, "api_request", fake_api_request)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gitea_release.py",
+            "--asset",
+            str(fresh_asset),
+            "--prerelease",
+            "--prune",
+            "--tag",
+            "release-dev",
+            "--target",
+            "abc123",
+        ],
+    )
+    monkeypatch.setenv("GITEA_BASE_URL", "https://gitea.example.test")
+    monkeypatch.setenv("GITEA_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+
+    assert gitea_release.main() == 0
+    update = next(payload for method, _, payload in calls if method == "PATCH")
+    assert update is not None and update["prerelease"] is True
+
+    uploaded_at = next(
+        index for index, (method, path, _) in enumerate(calls) if method == "POST" and "/assets?" in path
+    )
+    stale_delete_at = next(
+        index for index, (method, path, _) in enumerate(calls) if method == "DELETE" and path.endswith("/assets/2")
+    )
+    assert stale_delete_at > uploaded_at
+
+    calls.clear()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gitea_release.py", "--asset", str(fresh_asset), "--tag", "release-dev", "--target", "abc123"],
+    )
+
+    assert gitea_release.main() == 0
+    assert not any(method == "DELETE" and path.endswith("/assets/2") for method, path, _ in calls)
 
 
 def test_windows_agent_build_stages_installer_tool_files() -> None:

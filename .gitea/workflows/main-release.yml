@@ -1,15 +1,22 @@
-name: Main Release
+name: Branch Release
 
 on:
   push:
     branches:
       - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
   workflow_dispatch:
 
 permissions:
-  code: write
   contents: read
-  releases: write
+
+concurrency:
+  group: branch-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-info:
@@ -19,6 +26,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       title: ${{ steps.version.outputs.title }}
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
 
     steps:
       - name: Checkout
@@ -38,10 +46,18 @@ jobs:
           from pathlib import Path
 
           version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          branch = os.environ.get("GITHUB_BASE_REF") or os.environ["GITHUB_REF_NAME"]
+          if branch == "main":
+              tag, title, prerelease = "release-main", f"Backer {version}", "false"
+          elif branch == "dev":
+              tag, title, prerelease = "release-dev", f"Backer {version} dev ({os.environ['GITHUB_SHA'][:7]})", "true"
+          else:
+              raise SystemExit(f"Branch must be main or dev, got {branch!r}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("tag=release-main\n")
-              output.write(f"title=Backer {version}\n")
+              output.write(f"tag={tag}\n")
+              output.write(f"title={title}\n")
               output.write(f"version={version}\n")
+              output.write(f"prerelease={prerelease}\n")
 
   python-ci:
     name: Ruff, Compile, Pytest
@@ -60,6 +76,9 @@ jobs:
 
       - name: Install package with dev dependencies
         run: python -m pip install -e ".[dev]"
+
+      - name: Check changelog
+        run: python scripts/check_changelog.py
 
       - name: Lint
         run: python -m ruff check .
@@ -209,6 +228,10 @@ jobs:
   publish-release:
     name: Publish Gitea Release
     runs-on: ubuntu-latest
+    permissions:
+      code: write
+      contents: read
+      releases: write
     needs:
       - release-info
       - python-ci
@@ -216,7 +239,7 @@ jobs:
       - docker-build
       - android-release
       - windows-agent-package
-    if: always() && github.ref == 'refs/heads/main'
+    if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
 
     steps:
       - name: Check required jobs
@@ -251,7 +274,7 @@ jobs:
         with:
           path: release-assets
 
-      - name: Move main release tag
+      - name: Move release tag
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
@@ -270,12 +293,17 @@ jobs:
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
           RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
           RELEASE_TITLE: ${{ needs.release-info.outputs.title }}
+          RELEASE_PRERELEASE: ${{ needs.release-info.outputs.prerelease }}
         run: |
           notes="$(awk '/^## [0-9]/{n++} n==1' CHANGELOG.md)"
           body="$(printf '%s\nBuilt from %s.\n' "$notes" "$GITEA_COMMIT")"
+          prerelease=()
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then prerelease=(--prerelease); fi
           python scripts/gitea_release.py \
             --asset-dir release-assets \
             --body "$body" \
             --name "${RELEASE_TITLE}" \
+            --prune \
             --tag "${RELEASE_TAG}" \
-            --target "${GITEA_COMMIT}"
+            --target "${GITEA_COMMIT}" \
+            "${prerelease[@]}"

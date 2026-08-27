@@ -1,14 +1,6 @@
 name: Docker Build
 
-on:
-  push:
-    branches:
-      - dev
-  pull_request:
-    branches:
-      - main
-      - dev
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   docker-build:
