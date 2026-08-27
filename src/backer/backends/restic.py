@@ -71,6 +71,40 @@ class ResticBackend(BackendBase):
     def _repo_args(self, repository: str) -> list[str]:
         return ["--repo", repository, *self._s3_options]
 
+    def resolve_latest_snapshot(self, destination: BackupDestination) -> str:
+        """Resolve latest to its immutable Restic snapshot ID."""
+        try:
+            result = subprocess.run(
+                [str(self._get_binary()), "snapshots", "latest", *self._repo_args(destination.path), "--json"],
+                capture_output=True,
+                text=True,
+                env=self._env,
+                timeout=30,
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"Failed to resolve latest Restic snapshot: {exc}") from exc
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Failed to resolve latest Restic snapshot: "
+                + (result.stderr.strip() or f"restic exited with code {result.returncode}")
+            )
+
+        try:
+            snapshots = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Failed to resolve latest Restic snapshot: malformed JSON") from exc
+
+        if isinstance(snapshots, dict):
+            snapshots = [snapshots]
+        if not isinstance(snapshots, list) or len(snapshots) != 1 or not isinstance(snapshots[0], dict):
+            raise RuntimeError("Failed to resolve latest Restic snapshot: expected exactly one snapshot")
+
+        snapshot_id = snapshots[0].get("id")
+        if not isinstance(snapshot_id, str) or not snapshot_id:
+            raise RuntimeError("Failed to resolve latest Restic snapshot: snapshot has no id")
+        return snapshot_id
+
     @staticmethod
     def _in_place_include(source_path: str, include_path: str | None) -> str:
         """Join a selected relative subfolder to its backed-up source path."""
@@ -412,8 +446,16 @@ class ResticBackend(BackendBase):
                     size_val = float(old_match.group(2))
                     size_unit = old_match.group(3).upper() if old_match.group(3) else 'B'
                 else:
-                    size_val = 0
-                    size_unit = 'B'
+                    # Restic 0.19 uses: "Restored 6 files/dirs (66 B)"
+                    compact_pattern = r'Restored\s+(\d+)\s+files/dirs\s+\((\d+(?:\.\d+)?)\s*(\w*)\)'
+                    compact_match = re.search(compact_pattern, output)
+                    if compact_match:
+                        files_restored = int(compact_match.group(1))
+                        size_val = float(compact_match.group(2))
+                        size_unit = compact_match.group(3).upper() if compact_match.group(3) else 'B'
+                    else:
+                        size_val = 0
+                        size_unit = 'B'
 
             # Convert to bytes
             if size_val > 0:
@@ -423,6 +465,8 @@ class ResticBackend(BackendBase):
                     bytes_restored = int(size_val * 1024 * 1024)
                 elif 'GIB' in size_unit or 'GB' in size_unit:
                     bytes_restored = int(size_val * 1024 * 1024 * 1024)
+                elif 'TIB' in size_unit or 'TB' in size_unit:
+                    bytes_restored = int(size_val * 1024 * 1024 * 1024 * 1024)
                 else:
                     bytes_restored = int(size_val)
 
@@ -436,7 +480,7 @@ class ResticBackend(BackendBase):
                 errors=errors,
                 output=output,
                 return_code=result.returncode,
-                metadata={"snapshot": snapshot_id},
+                metadata={"snapshot": snapshot_id, "matched_items": files_restored},
             )
 
         except subprocess.TimeoutExpired:

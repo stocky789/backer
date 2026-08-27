@@ -42,6 +42,7 @@ The release workflow publishes the top section verbatim as the release notes.
 
 ### Bug Fixes
 
+- Restic clean restores now pin `latest` to one snapshot and roll back instead of replacing the destination when no snapshot items match.
 - The JWT signing secret was regenerated on every call, so freshly issued agent tokens could not be verified. It is now cached for the process lifetime.
 - Proxy backend no longer rewrites `proxys://host/repo/x` to port 8421: an omitted port means the scheme's default, and an explicit port is preserved.
 - The login page no longer advertises default credentials, and dropdown options are readable on the dark login and setup pages.

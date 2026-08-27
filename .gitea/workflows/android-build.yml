@@ -1,22 +1,6 @@
 name: Android Build
 
-on:
-  push:
-    branches:
-      - dev
-    paths:
-      - android/**
-      - .gitea/workflows/android-build.yml
-      - .gitea/workflows/release-validation.yml
-  pull_request:
-    branches:
-      - main
-      - dev
-    paths:
-      - android/**
-      - .gitea/workflows/android-build.yml
-      - .gitea/workflows/release-validation.yml
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   android-debug:
