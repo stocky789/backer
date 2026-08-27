@@ -139,7 +139,11 @@ def workflow_triggers(workflow_path: Path) -> dict:
 
 
 def test_github_and_gitea_have_rolling_release_workflows() -> None:
-    for path in (".github/workflows/release.yml", ".gitea/workflows/main-release.yml"):
+    for path in (
+        ".github/workflows/release.yml",
+        ".github/workflows/gitea-release.yml",
+        ".gitea/workflows/main-release.yml",
+    ):
         triggers = workflow_triggers(ROOT / path)
 
         assert triggers["push"]["branches"] == ["main", "dev"]
@@ -160,10 +164,16 @@ def test_branch_validation_workflows_do_not_publish_releases() -> None:
 
 
 def test_rolling_release_workflows_only_publish_after_pr_validation() -> None:
-    gitea = yaml.safe_load((ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8"))
     github = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    gitea_workflows = [
+        yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+        for path in (".github/workflows/gitea-release.yml", ".gitea/workflows/main-release.yml")
+    ]
 
-    for workflow, job_names in ((gitea, ("publish-release",)), (github, ("publish-release", "docker-publish"))):
+    for workflow, job_names in (
+        *((workflow, ("publish-release",)) for workflow in gitea_workflows),
+        (github, ("publish-release", "docker-publish")),
+    ):
         for job_name in job_names:
             guard = str(workflow["jobs"][job_name]["if"])
             assert "github.event_name != 'pull_request'" in guard or "github.event_name == 'push'" in guard
@@ -171,13 +181,18 @@ def test_rolling_release_workflows_only_publish_after_pr_validation() -> None:
 
 def test_rolling_release_permissions_are_scoped_to_publish_jobs() -> None:
     github = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    active_gitea = yaml.safe_load(
+        (ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8")
+    )
     gitea = yaml.safe_load((ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8"))
 
     assert github["permissions"] == {"contents": "read"}
+    assert active_gitea["permissions"] == {"contents": "read"}
     assert gitea["permissions"] == {"contents": "read"}
 
     assert github["jobs"]["publish-release"]["permissions"]["contents"] == "write"
     assert github["jobs"]["docker-publish"]["permissions"]["packages"] == "write"
+    assert active_gitea["jobs"]["publish-release"]["permissions"] == {"contents": "write"}
     assert gitea["jobs"]["publish-release"]["permissions"]["code"] == "write"
     assert gitea["jobs"]["publish-release"]["permissions"]["releases"] == "write"
     assert all(
@@ -189,59 +204,58 @@ def test_rolling_release_permissions_are_scoped_to_publish_jobs() -> None:
 
 def test_github_release_concurrency_keeps_branch_pushes_independent() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    gitea_workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8")
+    )
     concurrency = workflow["concurrency"]
+    gitea_concurrency = gitea_workflow["concurrency"]
 
     assert "github.ref" in str(concurrency["group"])
+    assert "github.ref" in str(gitea_concurrency["group"])
+    assert concurrency["group"] != gitea_concurrency["group"]
     cancel_in_progress = concurrency["cancel-in-progress"]
     assert cancel_in_progress is False or (
         "github.event_name" in str(cancel_in_progress) and "pull_request" in str(cancel_in_progress)
     )
 
 
-def test_release_workflow_uses_host_specific_artifact_actions() -> None:
+def test_github_release_workflow_is_github_only() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
 
+    assert jobs["release-info"]["if"] == "github.server_url == 'https://github.com'"
+    assert all(
+        "release-info" in (job["needs"] if isinstance(job["needs"], list) else [job["needs"]])
+        for name, job in jobs.items()
+        if name != "release-info"
+    )
+    assert [
+        step["uses"]
+        for job in jobs.values()
+        for step in job["steps"]
+        if step.get("uses", "").split("@", maxsplit=1)[0]
+        in {"actions/upload-artifact", "actions/download-artifact"}
+    ] == [
+        "actions/upload-artifact@v4",
+        "actions/upload-artifact@v4",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+    ]
     for job_name, artifact_name, artifact_path in (
         ("python-package", "python-release-files", "dist/*"),
         ("android-release", "android-release-files", "release-assets/*"),
         ("windows-agent-package", "windows-release-files", "release-assets/*"),
     ):
-        uploads = [
-            step
-            for step in workflow["jobs"][job_name]["steps"]
-            if step.get("uses", "").startswith("actions/upload-artifact@")
-        ]
-        assert len(uploads) == 2
-        github_upload = next(step for step in uploads if step.get("uses") == "actions/upload-artifact@v4")
-        gitea_upload = next(
-            step for step in uploads if step.get("uses") == "actions/upload-artifact@v3.2.2-node20"
-        )
-
-        assert github_upload["if"] == "github.server_url == 'https://github.com'"
-        assert gitea_upload["if"] == "github.server_url != 'https://github.com'"
-        assert github_upload["with"] == gitea_upload["with"] == {
+        upload = next(step for step in jobs[job_name]["steps"] if step.get("uses") == "actions/upload-artifact@v4")
+        assert upload["with"] == {
             "name": artifact_name,
             "path": artifact_path,
             "if-no-files-found": "error",
         }
 
-    github_release = workflow["jobs"]["publish-release"]
-    downloads = [
-        step for step in github_release["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
-    ]
-    assert len(downloads) == 1
-    download = downloads[0]
-    assert download["uses"] == "actions/download-artifact@v4"
-    assert download["with"] == {
-        "pattern": "*-release-files",
-        "path": "release-assets",
-        "merge-multiple": True,
-    }
-
-
-def test_release_workflow_publishes_on_the_matching_forge_only() -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-    jobs = workflow["jobs"]
+    metadata = next(step for step in jobs["release-info"]["steps"] if step.get("id") == "info")["run"]
+    assert "main) tag=release-main" in metadata
+    assert "dev) tag=release-dev" in metadata
 
     branch_guard = "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')"
     github_guard = (
@@ -251,29 +265,78 @@ def test_release_workflow_publishes_on_the_matching_forge_only() -> None:
     for job_name in ("docker-publish", "publish-release"):
         assert jobs[job_name]["if"] == github_guard
 
-    gitea_publish = next(job for job in jobs.values() if job.get("name") == "Publish Gitea Release")
+    download = next(
+        step for step in jobs["publish-release"]["steps"] if step.get("uses") == "actions/download-artifact@v4"
+    )
+    assert download["with"] == {
+        "pattern": "*-release-files",
+        "path": "release-assets",
+        "merge-multiple": True,
+    }
+
+
+def test_gitea_release_workflow_is_gitea_only() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    assert jobs["release-info"]["if"] == "github.server_url != 'https://github.com'"
+    assert all(
+        "release-info" in (job["needs"] if isinstance(job["needs"], list) else [job["needs"]])
+        for name, job in jobs.items()
+        if name != "release-info"
+    )
+    assert [
+        step["uses"]
+        for job in jobs.values()
+        for step in job["steps"]
+        if step.get("uses", "").split("@", maxsplit=1)[0]
+        in {"actions/upload-artifact", "actions/download-artifact"}
+    ] == [
+        "actions/upload-artifact@v3.2.2-node20",
+        "actions/upload-artifact@v3.2.2-node20",
+        "actions/upload-artifact@v3.2.2-node20",
+        "actions/download-artifact@v3-node20",
+    ]
+    for job_name, artifact_name, artifact_path in (
+        ("python-package", "python-release-files", "dist/*"),
+        ("android-release", "android-release-files", "release-assets/*"),
+        ("windows-agent-package", "windows-release-files", "release-assets/*"),
+    ):
+        upload = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if step.get("uses") == "actions/upload-artifact@v3.2.2-node20"
+        )
+        assert upload["with"] == {
+            "name": artifact_name,
+            "path": artifact_path,
+            "if-no-files-found": "error",
+        }
+
+    metadata = next(step for step in jobs["release-info"]["steps"] if step.get("id") == "version")["run"]
+    assert 'tag, title, prerelease = "release-main", f"Backer {version}", "false"' in metadata
+    assert 'tag, title, prerelease = "release-dev", f"Backer {version} dev (' in metadata
+
+    gitea_publish = jobs["publish-release"]
+    branch_guard = "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')"
     assert gitea_publish["if"] == (
         "always() && github.server_url != 'https://github.com' && "
         f"github.event_name != 'pull_request' && {branch_guard}"
     )
-    assert gitea_publish["permissions"]["contents"] == "write"
-
-    downloads = [
-        step for step in gitea_publish["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
-    ]
-    assert len(downloads) == 1
-    download = downloads[0]
-    assert download["uses"] == "actions/download-artifact@v3-node20"
+    assert gitea_publish["permissions"] == {"contents": "write"}
+    download = next(
+        step for step in gitea_publish["steps"] if step.get("uses") == "actions/download-artifact@v3-node20"
+    )
     assert download["with"] == {"path": "release-assets"}
     publish = next(step for step in gitea_publish["steps"] if "scripts/gitea_release.py" in step.get("run", ""))
     assert publish["env"]["GITEA_TOKEN"] == "${{ secrets.GITEA_TOKEN }}"
     assert "--prune" in publish["run"]
-    assert publish["env"]["RELEASE_TAG"] == "${{ needs.release-info.outputs.tag }}"
 
 
 def test_rolling_release_workflows_publish_expected_assets_and_channels() -> None:
     for path, artifact_version in (
         (".github/workflows/release.yml", "v4"),
+        (".github/workflows/gitea-release.yml", "v3"),
         (".gitea/workflows/main-release.yml", "v3"),
     ):
         workflow_text = (ROOT / path).read_text(encoding="utf-8")
@@ -291,9 +354,10 @@ def test_rolling_release_workflows_publish_expected_assets_and_channels() -> Non
         assert "backer-android.apk" in workflow_text
         assert "dist/" in workflow_text
 
-    gitea_release = (ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8")
-    assert "scripts/gitea_release.py" in gitea_release
-    assert "--prune" in gitea_release
+    for path in (".github/workflows/gitea-release.yml", ".gitea/workflows/main-release.yml"):
+        gitea_release = (ROOT / path).read_text(encoding="utf-8")
+        assert "scripts/gitea_release.py" in gitea_release
+        assert "--prune" in gitea_release
     github_release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert "$image:$version,$image:latest" in github_release
     assert "$image:dev,$image:dev-$shortsha" in github_release
@@ -419,9 +483,8 @@ def test_changelog_rejects_duplicate_release_versions() -> None:
 
 
 def test_release_notes_come_from_the_newest_changelog_section() -> None:
-    workflow_text = (ROOT / ".gitea" / "workflows" / "main-release.yml").read_text(encoding="utf-8")
-
-    assert "CHANGELOG.md" in workflow_text
+    for path in (".github/workflows/gitea-release.yml", ".gitea/workflows/main-release.yml"):
+        assert "CHANGELOG.md" in (ROOT / path).read_text(encoding="utf-8")
     for path in (".gitea/workflows/changelog.yml", ".github/workflows/changelog.yml"):
         workflow = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
         steps = workflow["jobs"]["changelog"]["steps"]
