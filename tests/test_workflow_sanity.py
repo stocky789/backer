@@ -198,6 +198,79 @@ def test_github_release_concurrency_keeps_branch_pushes_independent() -> None:
     )
 
 
+def test_release_workflow_uses_host_specific_artifact_actions() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+
+    for job_name, artifact_name, artifact_path in (
+        ("python-package", "python-release-files", "dist/*"),
+        ("android-release", "android-release-files", "release-assets/*"),
+        ("windows-agent-package", "windows-release-files", "release-assets/*"),
+    ):
+        uploads = [
+            step
+            for step in workflow["jobs"][job_name]["steps"]
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        ]
+        assert len(uploads) == 2
+        github_upload = next(step for step in uploads if step.get("uses") == "actions/upload-artifact@v4")
+        gitea_upload = next(
+            step for step in uploads if step.get("uses") == "actions/upload-artifact@v3.2.2-node20"
+        )
+
+        assert github_upload["if"] == "github.server_url == 'https://github.com'"
+        assert gitea_upload["if"] == "github.server_url != 'https://github.com'"
+        assert github_upload["with"] == gitea_upload["with"] == {
+            "name": artifact_name,
+            "path": artifact_path,
+            "if-no-files-found": "error",
+        }
+
+    github_release = workflow["jobs"]["publish-release"]
+    downloads = [
+        step for step in github_release["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+    ]
+    assert len(downloads) == 1
+    download = downloads[0]
+    assert download["uses"] == "actions/download-artifact@v4"
+    assert download["with"] == {
+        "pattern": "*-release-files",
+        "path": "release-assets",
+        "merge-multiple": True,
+    }
+
+
+def test_release_workflow_publishes_on_the_matching_forge_only() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    branch_guard = "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')"
+    github_guard = (
+        "github.server_url == 'https://github.com' && "
+        f"github.event_name != 'pull_request' && {branch_guard}"
+    )
+    for job_name in ("docker-publish", "publish-release"):
+        assert jobs[job_name]["if"] == github_guard
+
+    gitea_publish = next(job for job in jobs.values() if job.get("name") == "Publish Gitea Release")
+    assert gitea_publish["if"] == (
+        "always() && github.server_url != 'https://github.com' && "
+        f"github.event_name != 'pull_request' && {branch_guard}"
+    )
+    assert gitea_publish["permissions"]["contents"] == "write"
+
+    downloads = [
+        step for step in gitea_publish["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+    ]
+    assert len(downloads) == 1
+    download = downloads[0]
+    assert download["uses"] == "actions/download-artifact@v3-node20"
+    assert download["with"] == {"path": "release-assets"}
+    publish = next(step for step in gitea_publish["steps"] if "scripts/gitea_release.py" in step.get("run", ""))
+    assert publish["env"]["GITEA_TOKEN"] == "${{ secrets.GITEA_TOKEN }}"
+    assert "--prune" in publish["run"]
+    assert publish["env"]["RELEASE_TAG"] == "${{ needs.release-info.outputs.tag }}"
+
+
 def test_rolling_release_workflows_publish_expected_assets_and_channels() -> None:
     for path, artifact_version in (
         (".github/workflows/release.yml", "v4"),
