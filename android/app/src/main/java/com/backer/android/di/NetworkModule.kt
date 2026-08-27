@@ -1,7 +1,6 @@
 package com.backer.android.di
 
 import com.backer.android.data.api.BackerApiService
-import com.backer.android.data.repository.CredentialRepository
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import dagger.Module
 import dagger.Provides
@@ -14,7 +13,6 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import java.util.concurrent.TimeUnit
-import javax.inject.Named
 import javax.inject.Singleton
 
 /**
@@ -55,49 +53,6 @@ class ApiServiceFactory(private val json: Json) {
         }
 
         val client = OkHttpClient.Builder()
-            .addInterceptor(loggingInterceptor)
-            .readTimeout(35, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .build()
-
-        val retrofit = Retrofit.Builder()
-            .baseUrl(baseUrl.trimEnd('/') + "/")
-            .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-
-        return retrofit.create(BackerApiService::class.java)
-    }
-
-    /**
-     * Create an API service with authentication.
-     */
-    fun createAuthenticated(
-        baseUrl: String,
-        clientId: String,
-        clientSecret: String
-    ): BackerApiService {
-        // Use HEADERS level to avoid breaking @Streaming responses
-        val loggingInterceptor = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.HEADERS
-        }
-
-        val client = OkHttpClient.Builder()
-            .addInterceptor { chain ->
-                val request = chain.request()
-
-                // Don't add auth to registration or health check
-                val path = request.url.encodedPath
-                if (path.endsWith("/register") || path.endsWith("/health")) {
-                    return@addInterceptor chain.proceed(request)
-                }
-
-                val authenticatedRequest = request.newBuilder()
-                    .header("Authorization", Credentials.basic(clientId, clientSecret))
-                    .build()
-                chain.proceed(authenticatedRequest)
-            }
             .addInterceptor(loggingInterceptor)
             .readTimeout(35, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)

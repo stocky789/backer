@@ -10,9 +10,9 @@
 ;   iscc backer-agent.iss
 
 #define MyAppName "Backer Agent"
-#define MyAppVersion "0.7.1"
+#define MyAppVersion "0.7.2"
 #define MyAppPublisher "Backer"
-#define MyAppURL "https://github.com/stocky789/backer"
+#define MyAppURL "https://git.stockhome.com.au/stocky789/backer"
 #define MyAppExeName "backer-agent.exe"
 
 [Setup]
@@ -39,7 +39,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Close running instances before installing
 CloseApplications=force
-CloseApplicationsFilter=backer-agent.exe
+CloseApplicationsFilter=backer-agent.exe,backer-agent-service.exe
 RestartApplications=no
 ; Application icon
 SetupIconFile=..\assets\backer.ico
@@ -55,6 +55,8 @@ Name: "startupicon"; Description: "Start Backer Agent when Windows starts"; Grou
 [Files]
 ; Main executable
 Source: "..\dist\backer-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Dedicated unattended runner used by the boot task, never the Tk GUI.
+Source: "..\dist\backer-agent-service.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Application icon (for GUI window and shortcuts)
 Source: "..\assets\backer.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -79,8 +81,11 @@ Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: st
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Stop the service/process before uninstall
+; Stop and remove the boot task before uninstall. Commands tolerate absent tasks/processes.
+Filename: "schtasks"; Parameters: "/end /tn BackerAgentService"; Flags: runhidden; RunOnceId: "EndBackerTask"
 Filename: "taskkill"; Parameters: "/F /IM backer-agent.exe"; Flags: runhidden; RunOnceId: "StopBacker"
+Filename: "taskkill"; Parameters: "/F /IM backer-agent-service.exe"; Flags: runhidden; RunOnceId: "StopBackerService"
+Filename: "schtasks"; Parameters: "/delete /tn BackerAgentService /f"; Flags: runhidden; RunOnceId: "DeleteBackerTask"
 
 [Registry]
 ; Store install location
@@ -94,9 +99,11 @@ function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
 begin
-  // Kill any running backer-agent.exe processes before install
-  // This ensures the old PyInstaller temp files are released
+  // Stop the existing task before replacing its executable; retain it for the upgrade.
+  Exec('schtasks', '/end /tn BackerAgentService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Release both PyInstaller executables before install.
   Exec('taskkill', '/F /IM backer-agent.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM backer-agent-service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Wait a moment for process cleanup
   Sleep(1000);
   Result := True;

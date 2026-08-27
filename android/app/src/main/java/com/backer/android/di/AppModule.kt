@@ -1,6 +1,5 @@
 package com.backer.android.di
 
-import android.content.Context
 import com.backer.android.data.api.AuthInterceptor
 import com.backer.android.data.api.BackerApiService
 import com.backer.android.data.repository.CredentialRepository
@@ -8,7 +7,6 @@ import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFact
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
-import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -69,13 +67,5 @@ object AppModule {
     @Singleton
     fun provideBackerApiService(retrofit: Retrofit): BackerApiService {
         return retrofit.create(BackerApiService::class.java)
-    }
-
-    @Provides
-    @Singleton
-    fun provideCredentialRepository(
-        @ApplicationContext context: Context
-    ): CredentialRepository {
-        return CredentialRepository(context)
     }
 }

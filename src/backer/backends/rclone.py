@@ -15,13 +15,11 @@ from backer.backends.base import (
     BackupSource,
     OperationType,
 )
-from backer.backends.registry import BackendRegistry
 from backer.tools.manager import get_tool_manager
 
 logger = logging.getLogger(__name__)
 
 
-@BackendRegistry.register(BackendType.RCLONE)
 class RcloneBackend(BackendBase):
     """Backend for rclone cloud sync.
 
@@ -314,9 +312,20 @@ class RcloneBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
+        include_path: str | None = None,
     ) -> BackendResult:
         """Restore from rclone backup."""
         started_at = datetime.now()
+
+        if snapshot not in (None, "", "current"):
+            return BackendResult(
+                success=False,
+                operation=OperationType.RESTORE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=["rclone restores current state only; historical snapshots are not available"],
+                return_code=-1,
+            )
 
         try:
             cmd = self._build_command(

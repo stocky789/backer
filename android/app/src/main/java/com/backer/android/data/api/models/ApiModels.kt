@@ -12,7 +12,8 @@ data class RegisterRequest(
     val hostname: String,
     val version: String,
     @SerialName("os_info") val osInfo: String,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    @SerialName("enrollment_token") val enrollmentToken: String? = null
 )
 
 /**

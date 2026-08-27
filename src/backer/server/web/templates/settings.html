@@ -74,9 +74,9 @@ Server Settings
                     <div class="form-hint">This timezone is used for scheduling backups. Scheduled jobs will run according to this timezone.</div>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Public URL (for Reverse Proxy)</label>
+                    <label class="form-label">Public address for agents</label>
                     <input type="text" name="public_url" class="form-input" value="{{ public_url or 'http://localhost:8420' }}" placeholder="http://localhost:8420">
-                    <div class="form-hint">The public URL agents use to connect. Set this to your domain when using Cloudflare, nginx, or other reverse proxies. Used for Local Directory repositories.</div>
+                    <div class="form-hint">Use one public HTTPS address for WAN and LAN agents, for example <code>https://backer.example.com</code>. A reverse proxy normally receives port 443 and forwards internally to Backer on port 8420; do not add <code>:8420</code> here. Used for Local Directory repositories.</div>
                 </div>
                 <div style="display: flex; align-items: center; gap: 12px;">
                     <button type="submit" class="btn btn-primary">Save Settings</button>
@@ -106,7 +106,7 @@ Server Settings
                         <tr>
                             <td><strong>rclone</strong></td>
                             <td><span class="status-badge success">Supported</span></td>
-                            <td class="text-muted">Recommended for most use cases. Handles SMB, NFS, S3, and 50+ cloud providers.</td>
+                            <td class="text-muted">Mirror local paths and mounted SMB/NFS only.</td>
                         </tr>
                         <tr>
                             <td><strong>restic</strong></td>
@@ -129,18 +129,6 @@ Server Settings
             <div class="form-hint" style="margin-top: 12px;">
                 Backup tools (rclone, restic, kopia) are automatically downloaded to agents when they first connect.
             </div>
-        </div>
-    </div>
-
-    <div class="card mt-4" style="max-width: 800px;">
-        <div class="card-header">
-            <span class="card-title">Agent Registration</span>
-        </div>
-        <div class="card-body">
-            <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
-                To register a new agent, run the following command on the client machine:
-            </p>
-            <pre style="background: var(--bg-tertiary); padding: 12px; border-radius: 4px; font-size: 11px; overflow-x: auto;">backer-agent register --server {{ server_url }}</pre>
         </div>
     </div>
 

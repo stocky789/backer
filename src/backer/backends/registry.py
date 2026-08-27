@@ -1,74 +1,46 @@
-"""Backend registry for discovering and instantiating backends."""
+"""Backend lookup and instantiation."""
 
 from typing import Any
 
 from backer.backends.base import BackendBase, BackendType
+from backer.backends.kopia import KopiaBackend
+from backer.backends.proxy import ProxyBackend
+from backer.backends.rclone import RcloneBackend
+from backer.backends.restic import ResticBackend
+from backer.backends.rsync import RsyncBackend
+
+_BACKENDS: dict[BackendType, type[BackendBase]] = {
+    BackendType.KOPIA: KopiaBackend,
+    BackendType.PROXY: ProxyBackend,
+    BackendType.RCLONE: RcloneBackend,
+    BackendType.RESTIC: ResticBackend,
+    BackendType.RSYNC: RsyncBackend,
+}
 
 
 class BackendRegistry:
     """Registry for backup backends."""
 
-    _backends: dict[BackendType, type[BackendBase]] = {}
-    _backends_loaded = False
-
-    @classmethod
-    def _ensure_backends_loaded(cls):
-        """Ensure all backend modules are imported and registered."""
-        if cls._backends_loaded:
-            return
-
-        # Import backend modules to register them
-        backends_to_load = ['kopia', 'proxy', 'rclone', 'restic', 'rsync']
-
-        for backend_name in backends_to_load:
-            try:
-                __import__(f'backer.backends.{backend_name}', fromlist=[backend_name])
-            except ImportError as e:
-                # Log which backends fail to load but don't fail completely
-                # Some backends may not be available (missing dependencies, etc.)
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.debug(f"Backend '{backend_name}' failed to load: {e}")
-            except Exception as e:
-                # Catch other errors (syntax errors, etc.) and log them
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"Unexpected error loading backend '{backend_name}': {e}", exc_info=True)
-
-        cls._backends_loaded = True
-
-    @classmethod
-    def register(cls, backend_type: BackendType):
-        """Decorator to register a backend class."""
-
-        def decorator(backend_class: type[BackendBase]):
-            cls._backends[backend_type] = backend_class
-            return backend_class
-
-        return decorator
-
     @classmethod
     def get(cls, backend_type: BackendType, config: dict[str, Any] | None = None) -> BackendBase:
         """Get an instance of a backend by type."""
-        cls._ensure_backends_loaded()
-
-        if backend_type not in cls._backends:
-            available = ", ".join(b.value for b in cls._backends.keys())
+        if backend_type not in _BACKENDS:
+            available = ", ".join(b.value for b in _BACKENDS)
             raise ValueError(
                 f"Unknown backend type: {backend_type}. Available backends: {available}"
             )
-        return cls._backends[backend_type](config)
+        return _BACKENDS[backend_type](config)
 
     @classmethod
     def available_backends(cls) -> list[BackendType]:
         """List all registered backend types."""
-        return list(cls._backends.keys())
+        return list(_BACKENDS)
 
     @classmethod
     def check_all_available(cls) -> dict[BackendType, tuple[bool, str]]:
         """Check availability of all registered backends."""
         results = {}
-        for backend_type in cls._backends:
+        for backend_type in _BACKENDS:
             backend = cls.get(backend_type)
             results[backend_type] = backend.check_available()
         return results

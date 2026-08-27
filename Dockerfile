@@ -42,6 +42,7 @@ COPY README.md /app/
 # Install backer and dependencies
 RUN pip install --no-cache-dir ".[server]"
 
+# Tools are downloaded and checksum-verified on first use into this writable volume.
 # Create data directory for tools, logs, and local backups
 RUN mkdir -p /data/tools /data/logs /data/local-backups && \
     chown -R backer:backer /data

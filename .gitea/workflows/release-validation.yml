@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release candidate tag to validate, for example v0.7.1
+        description: Release candidate tag to validate, for example v0.7.2
         required: true
       build_android_release:
         description: Build Android release APK
@@ -45,6 +45,73 @@ jobs:
 
       - name: Test
         run: python -m pytest -q
+
+  protocol-contract:
+    name: Protocol Contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package with dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Install verified backup tools
+        run: backer setup --quiet
+
+      - name: Run protocol release gates
+        run: python -m pytest -q tests/test_protocol_contract.py tests/test_tools.py
+
+  s3-contract:
+    name: Restic S3 Contract
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Start S3-compatible test service
+        run: |
+          docker run -d --name backer-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=backer-access \
+            -e MINIO_ROOT_PASSWORD=backer-secret-key \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          exit 1
+
+      - name: Install package and verified backup tools
+        run: |
+          python -m pip install -e ".[dev]"
+          backer setup --quiet
+
+      - name: Run Restic S3 end-to-end contract
+        env:
+          BACKER_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          BACKER_TEST_S3_ACCESS_KEY: backer-access
+          BACKER_TEST_S3_SECRET_KEY: backer-secret-key
+        run: python -m pytest -q tests/test_s3.py -k minio_end_to_end
 
   verify-version:
     name: Verify Version Matches Tag
@@ -247,6 +314,8 @@ jobs:
     needs:
       - verify-version
       - python-ci
+      - protocol-contract
+      - s3-contract
       - docker-build
       - android-release
       - windows-agent-package
@@ -257,12 +326,14 @@ jobs:
         shell: bash
         env:
           PYTHON_CI_RESULT: ${{ needs.python-ci.result }}
+          PROTOCOL_CONTRACT_RESULT: ${{ needs.protocol-contract.result }}
+          S3_CONTRACT_RESULT: ${{ needs.s3-contract.result }}
           DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
           ANDROID_RELEASE_RESULT: ${{ needs.android-release.result }}
           WINDOWS_AGENT_PACKAGE_RESULT: ${{ needs.windows-agent-package.result }}
         run: |
           set -euo pipefail
-          for job in PYTHON_CI_RESULT DOCKER_BUILD_RESULT; do
+          for job in PYTHON_CI_RESULT PROTOCOL_CONTRACT_RESULT S3_CONTRACT_RESULT DOCKER_BUILD_RESULT; do
             result="${!job}"
             if [ "$result" != "success" ]; then
               echo "$job finished with $result"

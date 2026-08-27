@@ -217,7 +217,7 @@
 </div>
 
 <!-- Add Hypervisor Modal -->
-<div id="addHypervisorModal" class="modal" style="display: none;">
+<dialog id="addHypervisorModal" class="modal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
             <span class="modal-title">
@@ -392,10 +392,10 @@
             </form>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Cluster Permission Wizard Modal -->
-<div id="clusterPermissionWizard" class="modal" style="display: none;">
+<dialog id="clusterPermissionWizard" class="modal">
     <div class="modal-content modal-xl">
         <div class="modal-header">
             <span class="modal-title">
@@ -475,10 +475,10 @@
             <button type="button" class="btn btn-secondary" onclick="hideClusterWizard()">Cancel</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Skip Configuration Confirmation Modal -->
-<div id="skipConfigModal" class="modal" style="display: none;">
+<dialog id="skipConfigModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
             <span class="modal-title">
@@ -508,10 +508,10 @@
             <button type="button" class="btn btn-secondary" onclick="hideSkipModal()">No, Go Back</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- View Hypervisor Modal -->
-<div id="viewHypervisorModal" class="modal" style="display: none;">
+<dialog id="viewHypervisorModal" class="modal">
     <div class="modal-content modal-xl">
         <div class="modal-header">
             <span class="modal-title">
@@ -544,10 +544,10 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Add/Edit Job Modal -->
-<div id="jobModal" class="modal" style="display: none;">
+<dialog id="jobModal" class="modal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
             <span class="modal-title">
@@ -674,10 +674,10 @@
             </form>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Restore Modal -->
-<div id="restoreModal" class="modal" style="display: none;">
+<dialog id="restoreModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
             <span class="modal-title">
@@ -792,7 +792,7 @@
             </form>
         </div>
     </div>
-</div>
+</dialog>
 
 <style>
 /* Row States */
@@ -1096,7 +1096,7 @@ function filterTables() {
 // ========== Add Hypervisor ==========
 
 function showAddHypervisorModal() {
-    document.getElementById('addHypervisorModal').style.display = 'flex';
+    document.getElementById('addHypervisorModal').showModal();
     document.getElementById('addHypervisorForm').reset();
     document.getElementById('addHypervisorError').style.display = 'none';
     editingHypervisorId = null;
@@ -1110,7 +1110,7 @@ function showAddHypervisorModal() {
 }
 
 function hideAddHypervisorModal() {
-    document.getElementById('addHypervisorModal').style.display = 'none';
+    document.getElementById('addHypervisorModal').close();
 }
 
 function onHypervisorTypeChange() {
@@ -1291,17 +1291,13 @@ async function submitAddHypervisor(event) {
     }
 }
 
-document.getElementById('addHypervisorModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideAddHypervisorModal();
-});
-
 // ========== Edit Hypervisor ==========
 
 let editingHypervisorId = null;
 
 async function editHypervisor(hvId) {
     editingHypervisorId = hvId;
-    document.getElementById('addHypervisorModal').style.display = 'flex';
+    document.getElementById('addHypervisorModal').showModal();
     document.getElementById('addHypervisorError').style.display = 'none';
 
     // Update modal title
@@ -1422,7 +1418,7 @@ showAddHypervisorModal = function() {
 
 async function viewHypervisor(hvId) {
     currentHypervisorId = hvId;
-    document.getElementById('viewHypervisorModal').style.display = 'flex';
+    document.getElementById('viewHypervisorModal').showModal();
 
     document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.modal-tab-content').forEach(t => t.classList.remove('active'));
@@ -1437,7 +1433,7 @@ async function viewHypervisor(hvId) {
 }
 
 function hideViewHypervisorModal() {
-    document.getElementById('viewHypervisorModal').style.display = 'none';
+    document.getElementById('viewHypervisorModal').close();
     currentHypervisorId = null;
 }
 
@@ -1628,10 +1624,6 @@ async function loadBackups(hvId) {
     }
 }
 
-document.getElementById('viewHypervisorModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideViewHypervisorModal();
-});
-
 // ========== Hypervisor Actions ==========
 
 async function testHypervisor(hvId) {
@@ -1690,7 +1682,7 @@ function showAddJobModal() {
     document.getElementById('jobEnabled').checked = true;
     document.getElementById('jobGuestsList').innerHTML = '<div class="loading-state">Select a hypervisor first</div>';
     document.getElementById('jobError').style.display = 'none';
-    document.getElementById('jobModal').style.display = 'flex';
+    document.getElementById('jobModal').showModal();
     document.getElementById('jobCopiesToKeep').value = 0;
     document.getElementById('storageDetails').open = false;
     loadRepositories();
@@ -1725,7 +1717,7 @@ async function loadRepositories() {
 }
 
 function hideJobModal() {
-    document.getElementById('jobModal').style.display = 'none';
+    document.getElementById('jobModal').close();
     editingJobId = null;
 }
 
@@ -1892,7 +1884,7 @@ async function editHypervisorJob(jobId) {
     document.getElementById('jobModalTitle').textContent = 'Edit Backup Job';
     document.getElementById('jobSubmitBtn').textContent = 'Save Changes';
     document.getElementById('jobError').style.display = 'none';
-    document.getElementById('jobModal').style.display = 'flex';
+    document.getElementById('jobModal').showModal();
 
     await loadRepositories();
 
@@ -1957,7 +1949,7 @@ async function runHypervisorJob(jobId) {
 function viewJobBackups(jobId, hvId) {
     currentHypervisorId = hvId;
     currentJobId = jobId;
-    document.getElementById('viewHypervisorModal').style.display = 'flex';
+    document.getElementById('viewHypervisorModal').showModal();
 
     document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.modal-tab-content').forEach(t => {
@@ -2107,7 +2099,7 @@ function showRestoreFromRepoDialog(hvId, filename, guestType, vmid, backupFormat
     if (!isHyperV) {
         loadRestoreStorages(hvId);
     }
-    document.getElementById('restoreModal').style.display = 'flex';
+    document.getElementById('restoreModal').showModal();
 }
 
 async function toggleHypervisorJob(jobId) {
@@ -2170,10 +2162,6 @@ function deleteHypervisorJob(jobId, jobName) {
     });
 }
 
-document.getElementById('jobModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideJobModal();
-});
-
 // ========== Restore ==========
 
 function showRestoreDialog(hvId, volid, node, guestType = 'qemu') {
@@ -2193,11 +2181,11 @@ function showRestoreDialog(hvId, volid, node, guestType = 'qemu') {
     delete form.dataset.jobId;
 
     loadRestoreStorages(hvId);
-    document.getElementById('restoreModal').style.display = 'flex';
+    document.getElementById('restoreModal').showModal();
 }
 
 function hideRestoreModal() {
-    document.getElementById('restoreModal').style.display = 'none';
+    document.getElementById('restoreModal').close();
 }
 
 async function loadRestoreStorages(hvId) {
@@ -2355,10 +2343,6 @@ async function submitRestore(event) {
     delete form.dataset.restoreType;
     delete form.dataset.jobId;
 }
-
-document.getElementById('restoreModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideRestoreModal();
-});
 
 // ========== Hyper-V DR Hardening Functions ==========
 
@@ -2627,7 +2611,7 @@ async function showClusterPermissionWizard(formData) {
     wizardFormData = formData;
 
     // Show wizard modal
-    document.getElementById('clusterPermissionWizard').style.display = 'flex';
+    document.getElementById('clusterPermissionWizard').showModal();
 
     // Reset UI state
     document.getElementById('wizardLoading').style.display = 'block';
@@ -2870,11 +2854,11 @@ function showCopyFeedback() {
 }
 
 function showSkipModal() {
-    document.getElementById('skipConfigModal').style.display = 'flex';
+    document.getElementById('skipConfigModal').showModal();
 }
 
 function hideSkipModal() {
-    document.getElementById('skipConfigModal').style.display = 'none';
+    document.getElementById('skipConfigModal').close();
 }
 
 async function confirmSkipConfiguration() {
@@ -2917,9 +2901,14 @@ async function submitHypervisorWithPermissionStatus(permissionsConfigured) {
 
 function hideClusterWizard() {
     stopPermissionPolling();
-    document.getElementById('clusterPermissionWizard').style.display = 'none';
+    document.getElementById('clusterPermissionWizard').close();
     wizardFormData = null;
 }
+
+document.getElementById('clusterPermissionWizard').addEventListener('cancel', event => {
+    event.preventDefault();
+    hideClusterWizard();
+});
 
 // ===============================================
 // End Cluster Permission Wizard Functions

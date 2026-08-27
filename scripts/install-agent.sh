@@ -130,10 +130,10 @@ install_backer() {
 
     step "Installing Backer (this may take a moment)..."
     if [[ "$BACKER_VERSION" == "latest" ]]; then
-        pip install --no-cache-dir --force-reinstall -q "backer[client] @ git+https://github.com/stocky789/backer.git@$GIT_BRANCH" >/dev/null 2>&1 || \
+        pip install --no-cache-dir --force-reinstall -q "backer[client] @ git+https://git.stockhome.com.au/stocky789/backer.git@$GIT_BRANCH" >/dev/null 2>&1 || \
             error "Failed to install backer from branch $GIT_BRANCH"
     else
-        pip install --no-cache-dir --force-reinstall -q "backer[client] @ git+https://github.com/stocky789/backer.git@v$BACKER_VERSION" >/dev/null 2>&1 || \
+        pip install --no-cache-dir --force-reinstall -q "backer[client] @ git+https://git.stockhome.com.au/stocky789/backer.git@v$BACKER_VERSION" >/dev/null 2>&1 || \
             error "Failed to install backer version $BACKER_VERSION"
     fi
 
@@ -151,9 +151,8 @@ install_tools() {
 
     # Run backer setup to download the tools (suppress most output)
     # The tools are installed to ~/.local/share/backer/tools/ for root user
-    "$INSTALL_DIR/venv/bin/backer" setup --quiet 2>/dev/null || \
-        "$INSTALL_DIR/venv/bin/backer" setup 2>/dev/null || \
-        warn "Some tools may not have installed correctly"
+    BACKER_DATA_DIR="/opt/backer" "$INSTALL_DIR/venv/bin/backer" setup --quiet || \
+        error "Failed to install backup tools"
 
     step_done "Backup tools ready"
 }

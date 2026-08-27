@@ -14,7 +14,7 @@ Android backup agent for the Backer backup system.
 ## Requirements
 
 - Android 8.0 (API 26) or higher
-- Backer server v0.7.1 or higher
+- Backer server v0.7.2 or higher
 
 ## Building
 

@@ -9,9 +9,6 @@ import json
 import logging
 import ntpath
 import os
-import platform
-import socket
-import stat
 import subprocess
 import sys
 import threading
@@ -25,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from backer import __version__
-from backer.core.repo_metadata import RepositoryMetadata
 
 # Explicitly import backend modules for PyInstaller
 # PyInstaller's hiddenimports doesn't work reliably with dynamic __import__()
@@ -437,6 +433,7 @@ class AgentService:
 
         # Ensure tools directory exists
         self.tools_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault('BACKER_DATA_DIR', str(self.tools_dir.parent))
         logger.info(f"Tools directory: {self.tools_dir}")
 
         # Initialize tool manager for automatic tool downloads
@@ -670,17 +667,23 @@ class AgentService:
             else:
                 raise
 
-    def _redact_sensitive_data(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Redact sensitive data (passwords, secrets) from a dict for logging."""
-        redacted = {}
-        for key, value in data.items():
-            if isinstance(value, dict):
-                redacted[key] = self._redact_sensitive_data(value)
-            elif any(s in key.lower() for s in ['password', 'secret']):
-                redacted[key] = '***REDACTED***'
-            else:
-                redacted[key] = value
-        return redacted
+    def _redact_sensitive_data(self, data: Any) -> Any:
+        """Return a safe-to-log copy of command data."""
+        sensitive_parts = (
+            'password', 'token', 'secret', 'access_key', 'api_key', 'private_key',
+            'authorization', 'credential', 'capability',
+        )
+        if isinstance(data, dict):
+            return {
+                key: '***REDACTED***' if any(part in str(key).lower() for part in sensitive_parts)
+                else self._redact_sensitive_data(value)
+                for key, value in data.items()
+            }
+        if isinstance(data, list):
+            return [self._redact_sensitive_data(value) for value in data]
+        if isinstance(data, tuple):
+            return tuple(self._redact_sensitive_data(value) for value in data)
+        return data
 
     def _process_command(self, command: dict[str, Any]):
         """Process a command from the server."""
@@ -774,264 +777,23 @@ class AgentService:
         # If we get here, all attempts failed
         raise RuntimeError(f"Backup failed after {max_retries} attempts. Last error: {last_error}")
 
+    def _execute_with_shared_agent(self, payload: dict[str, Any], restore: bool) -> Any:
+        """Use the CLI agent executor for GUI/service commands too."""
+        from backer.client.agent import BackerAgent
+
+        executor = BackerAgent(self.server_url, self.client_id, self.client_secret)
+        if restore:
+            return executor.execute_restore(payload, dry_run=payload.get('dry_run', False))
+        report = executor.execute_backup(payload, dry_run=payload.get('dry_run', False))
+        return report['success']
+
     def _execute_backup(self, payload: dict[str, Any]):
         """Execute a backup command."""
-        run_id = payload.get('run_id')
-        job_name = payload.get('job_name')
-        source_path = payload.get('source_path')
-        destination_path = payload.get('destination_path')
-        backend = payload.get('backend', 'rclone')
-        excludes = payload.get('excludes', [])
-        backend_options = payload.get('backend_options', {})
-        dry_run = payload.get('dry_run', False)
-
-        # SMB credentials for metadata writing
-        smb_server = payload.get('smb_server')
-        smb_share = payload.get('smb_share')
-        smb_username = payload.get('smb_username')
-        smb_password = payload.get('smb_password')
-        smb_domain = payload.get('smb_domain')
-
-        self._update_status(f"Backing up: {job_name}")
-        logger.info(f"[BACKUP] Starting backup job '{job_name}' (run_id: {run_id})")
-        logger.info(f"[BACKUP] Source: {source_path}")
-        logger.info(f"[BACKUP] Destination: {destination_path}")
-        logger.info(f"[BACKUP] Backend: {backend}")
-        logger.info(f"[BACKUP] Tools directory: {self.tools_dir}")
-        logger.info(f"[BACKUP] Excludes: {excludes}")
-        logger.info(f"[BACKUP] Dry run: {dry_run}")
-        if smb_server:
-            logger.info(f"[BACKUP] SMB: //{smb_server}/{smb_share}")
-
-        started_at = datetime.now()
-
-        # Report progress: starting
-        self._report_progress(run_id, 'running', 0, 'Starting backup...')
-
-        try:
-            if backend == 'rclone':
-                result = self._run_rclone_sync(
-                    source_path, destination_path, excludes, dry_run, run_id
-                )
-            elif backend == 'restic':
-                result = self._run_restic_backup(
-                    source_path, destination_path, excludes, dry_run, run_id,
-                    backend_options=backend_options,
-                    smb_server=smb_server,
-                    smb_share=smb_share,
-                    smb_username=smb_username,
-                    smb_password=smb_password,
-                    smb_domain=smb_domain,
-                )
-            elif backend == 'kopia':
-                result = self._run_kopia_backup(
-                    source_path, destination_path, excludes, dry_run, run_id,
-                    backend_options=backend_options,
-                    smb_server=smb_server,
-                    smb_share=smb_share,
-                    smb_username=smb_username,
-                    smb_password=smb_password,
-                    smb_domain=smb_domain,
-                )
-            elif backend == 'proxy':
-                result = self._run_proxy_backup(
-                    source_path, destination_path, excludes, dry_run, run_id,
-                    backend_options=backend_options,
-                )
-            else:
-                raise ValueError(f"Unknown backend: {backend}")
-
-            finished_at = datetime.now()
-
-            # Report result
-            self._report_result(
-                run_id=run_id,
-                job_name=job_name,
-                success=result['success'],
-                started_at=started_at,
-                finished_at=finished_at,
-                bytes_transferred=result.get('bytes', 0),
-                files_transferred=result.get('files', 0),
-                output=result.get('output', ''),
-                error=result.get('error'),
-                snapshot_id=result.get('snapshot_id'),  # For restic backups
-            )
-
-            if result['success']:
-                self._update_status(f"Backup complete: {job_name}")
-                # Write metadata to repository for discovery
-                self._write_repo_metadata(
-                    repo_path=destination_path,
-                    job_name=job_name,
-                    run_id=run_id,
-                    source_path=source_path,
-                    backend=backend,
-                    result=result,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    smb_server=smb_server,
-                    smb_share=smb_share,
-                    smb_username=smb_username,
-                    smb_password=smb_password,
-                    smb_domain=smb_domain,
-                )
-            else:
-                self._update_status(f"Backup failed: {job_name}")
-                return False
-
-        except Exception as e:
-            self._report_result(
-                run_id=run_id,
-                job_name=job_name,
-                success=False,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                error=str(e),
-            )
-            self._update_status(f"Backup error: {e}")
-            raise
-
-        return True
+        return self._execute_with_shared_agent(payload, restore=False)
 
     def _execute_restore(self, payload: dict[str, Any]):
         """Execute a restore command."""
-        run_id = payload.get('run_id')
-        job_name = payload.get('job_name')
-        source_path = payload.get('source_path')
-        destination_path = payload.get('destination_path')
-        backend = payload.get('backend', 'rclone')
-        snapshot = payload.get('snapshot')  # For restic: snapshot ID or "latest"
-        source_subfolder = payload.get('source_subfolder', '')  # For restic: --include path
-        clean_restore = payload.get('clean_restore', False)
-        backend_options = payload.get('backend_options', {})
-        dry_run = payload.get('dry_run', False)
-
-        self._update_status(f"Restoring: {job_name}")
-        logger.info(f"Starting restore: {source_path} -> {destination_path}")
-        logger.info(f"Clean restore: {clean_restore}, Dry run: {dry_run}")
-
-        started_at = datetime.now()
-        self._report_progress(run_id, 'running', 0, 'Starting restore...')
-
-        try:
-            # For clean restore with restic/kopia/proxy, clear destination first
-            # (rclone sync already handles this automatically)
-            if clean_restore and backend in ('restic', 'kopia', 'proxy') and not dry_run:
-                dest_path = Path(destination_path)
-                if dest_path.exists():
-                    logger.info(f"[RESTORE] Clean restore: clearing destination {destination_path}")
-                    self._clear_destination_contents(dest_path)
-                    # Don't recreate the directory - let restic create it
-                    # This avoids metadata conflicts that can cause restore issues
-
-            if backend == 'rclone':
-                # rclone sync deletes files at dest that aren't in source
-                result = self._run_rclone_sync(
-                    source_path, destination_path, [], dry_run, run_id
-                )
-            elif backend == 'restic':
-                result = self._run_restic_restore(
-                    source_path, destination_path, snapshot, dry_run, run_id,
-                    backend_options=backend_options,
-                    include_path=source_subfolder,
-                )
-            elif backend == 'kopia':
-                result = self._run_kopia_restore(
-                    source_path, destination_path, snapshot, dry_run, run_id,
-                    backend_options=backend_options,
-                    include_path=source_subfolder,
-                )
-            elif backend == 'proxy':
-                result = self._run_proxy_restore(
-                    source_path, destination_path, snapshot, dry_run, run_id,
-                    backend_options=backend_options,
-                )
-            else:
-                raise ValueError(f"Restore not supported for backend: {backend}")
-
-            finished_at = datetime.now()
-
-            self._report_result(
-                run_id=run_id,
-                job_name=f"restore:{job_name}",
-                success=result['success'],
-                started_at=started_at,
-                finished_at=finished_at,
-                bytes_transferred=result.get('bytes', 0),
-                files_transferred=result.get('files', 0),
-                output=result.get('output', ''),
-                error=result.get('error'),
-            )
-
-            if result['success']:
-                self._update_status(f"Restore complete: {job_name}")
-                # Write restore metadata for audit trail (only for non-proxy)
-                if backend != 'proxy':
-                    try:
-                        self._write_restore_metadata(
-                            source_path=source_path,
-                            job_name=job_name,
-                            run_id=run_id,
-                            result=result,
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            snapshot=snapshot,
-                        )
-                    except Exception as meta_err:
-                        logger.warning(f"[RESTORE] Failed to write restore metadata: {meta_err}")
-            else:
-                self._update_status(f"Restore failed: {job_name}")
-
-        except Exception as e:
-            self._report_result(
-                run_id=run_id,
-                job_name=f"restore:{job_name}",
-                success=False,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                error=str(e),
-            )
-            raise
-
-    def _clear_destination_contents(self, dest_path: Path) -> None:
-        """Delete contents of a destination directory without removing the directory itself."""
-        for item in dest_path.iterdir():
-            try:
-                if item.is_dir():
-                    self._remove_path(item)
-                else:
-                    self._remove_file(item)
-            except Exception as exc:
-                logger.warning(f"[RESTORE] Failed to remove {item}: {exc}")
-
-    def _remove_file(self, path: Path) -> None:
-        """Remove a file, retrying after making it writable when needed."""
-        try:
-            path.unlink()
-        except PermissionError:
-            self._make_writable(path)
-            path.unlink()
-
-    def _remove_path(self, path: Path) -> None:
-        """Remove a directory tree, ensuring files are writable when needed."""
-        import shutil
-
-        def onerror(func, target, exc_info):
-            try:
-                self._make_writable(Path(target))
-                func(target)
-            except Exception:
-                raise
-
-        shutil.rmtree(path, onerror=onerror)
-
-    def _make_writable(self, path: Path) -> None:
-        """Ensure a path is writable (helps with Windows read-only files)."""
-        try:
-            mode = path.stat().st_mode
-            path.chmod(mode | stat.S_IWRITE)
-        except OSError as exc:
-            logger.debug(f"[RESTORE] Failed to chmod {path}: {exc}")
+        return self._execute_with_shared_agent(payload, restore=True)
 
     def _get_tool_path(self, tool_name: str) -> Path:
         """Get path to a backup tool, using tool manager if available."""
@@ -1054,7 +816,8 @@ class AgentService:
         if binary.exists():
             return binary
 
-        raise FileNotFoundError(f"{tool_name} not found. Run ensure_tools_installed() first.")
+        # Download only the executable required by the queued job.
+        return self._tool_manager.download(tool_name)
 
     def _get_restic_snapshot_paths(
         self,
@@ -2389,315 +2152,3 @@ class AgentService:
             )
         except Exception as e:
             logger.error(f"Failed to report result: {e}")
-
-    def _write_repo_metadata(
-        self,
-        repo_path: str,
-        job_name: str,
-        run_id: str,
-        source_path: str,
-        backend: str,
-        result: dict[str, Any],
-        started_at: datetime,
-        finished_at: datetime,
-        smb_server: str | None = None,
-        smb_share: str | None = None,
-        smb_username: str | None = None,
-        smb_password: str | None = None,
-        smb_domain: str | None = None,
-    ) -> None:
-        """Write backup metadata to the repository for discovery.
-
-        This enables a new Backer server to discover existing backups
-        when pointed to a repository.
-
-        For SMB shares on Linux, uses smbclient to write files directly.
-        For local paths or Windows, uses direct filesystem access.
-        """
-        try:
-            # Check if we need to use SMB for metadata writing (Linux with SMB credentials)
-            use_smb = (
-                sys.platform != 'win32'
-                and smb_server
-                and smb_share
-            )
-
-            logger.info(
-                f"[METADATA] Writing metadata: platform={sys.platform}, "
-                f"smb_server={smb_server}, smb_share={smb_share}, "
-                f"use_smb={use_smb}, repo_path={repo_path}"
-            )
-
-            if use_smb:
-                self._write_repo_metadata_smb(
-                    smb_server=smb_server,
-                    smb_share=smb_share,
-                    smb_username=smb_username,
-                    smb_password=smb_password,
-                    smb_domain=smb_domain,
-                    repo_path=repo_path,
-                    job_name=job_name,
-                    run_id=run_id,
-                    source_path=source_path,
-                    backend=backend,
-                    result=result,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                )
-            else:
-                # Use local filesystem (works on Windows with UNC paths)
-                self._write_repo_metadata_local(
-                    repo_path=repo_path,
-                    job_name=job_name,
-                    run_id=run_id,
-                    source_path=source_path,
-                    backend=backend,
-                    result=result,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                )
-
-        except Exception as e:
-            # Don't fail the backup just because metadata writing failed
-            logger.warning(f"[METADATA] Failed to write repository metadata: {e}")
-
-    def _write_repo_metadata_local(
-        self,
-        repo_path: str,
-        job_name: str,
-        run_id: str,
-        source_path: str,
-        backend: str,
-        result: dict[str, Any],
-        started_at: datetime,
-        finished_at: datetime,
-    ) -> None:
-        """Write metadata using local filesystem access."""
-        repo_path = self._normalize_windows_path(repo_path)
-        logger.info(f"[METADATA-LOCAL] Writing metadata to: {repo_path}")
-
-        try:
-            repo = RepositoryMetadata(repo_path)
-
-            # Initialize repository metadata if needed
-            if not repo.is_initialized():
-                logger.info(f"[METADATA-LOCAL] Initializing metadata directory at {repo.metadata_dir}")
-                repo.initialize()
-            else:
-                logger.info(f"[METADATA-LOCAL] Metadata already initialized at {repo.metadata_dir}")
-
-            # Save agent information
-            repo.save_agent(
-                agent_id=self.client_id,
-                agent_data={
-                    "hostname": socket.gethostname(),
-                    "platform": sys.platform,
-                    "os_info": f"{platform.system()} {platform.release()}",
-                    "python_version": platform.python_version(),
-                },
-            )
-            logger.debug(f"[METADATA-LOCAL] Saved agent info for {self.client_id}")
-
-            # Save job configuration
-            repo.save_job(
-                job_name=job_name,
-                job_config={
-                    "source_path": source_path,
-                    "backend": backend,
-                    "client_id": self.client_id,
-                },
-            )
-
-            # Save run record
-            run_data = {
-                "status": "success" if result.get("success") else "failed",
-                "started_at": started_at.isoformat(),
-                "finished_at": finished_at.isoformat(),
-                "bytes_transferred": result.get("bytes", 0),
-                "files_transferred": result.get("files", 0),
-                "snapshot_id": result.get("snapshot_id"),
-                "agent_id": self.client_id,
-                "hostname": socket.gethostname(),
-            }
-            repo.save_job_run(job_name, run_id, run_data)
-
-            # For restic/kopia, also save snapshot metadata
-            snapshot_id = result.get("snapshot_id")
-            if snapshot_id and backend in ("restic", "kopia"):
-                repo.save_snapshot(
-                    snapshot_id=snapshot_id,
-                    snapshot_data={
-                        "job_name": job_name,
-                        "run_id": run_id,
-                        "hostname": socket.gethostname(),
-                        "paths": [source_path],
-                        "time": finished_at.isoformat(),
-                        "backend": backend,
-                    },
-                )
-
-            logger.info(f"[METADATA-LOCAL] Successfully wrote metadata to: {repo_path}")
-
-        except Exception as e:
-            logger.error(f"[METADATA-LOCAL] Failed to write metadata to {repo_path}: {e}")
-
-    def _write_repo_metadata_smb(
-        self,
-        smb_server: str,
-        smb_share: str,
-        smb_username: str | None,
-        smb_password: str | None,
-        smb_domain: str | None,
-        repo_path: str,
-        job_name: str,
-        run_id: str,
-        source_path: str,
-        backend: str,
-        result: dict[str, Any],
-        started_at: datetime,
-        finished_at: datetime,
-    ) -> None:
-        """Write metadata to SMB share by mounting it temporarily (for Linux agents).
-
-        Uses CIFS mount like the backup does, then writes using local filesystem.
-        """
-        import tempfile
-
-        # Extract subpath from repo_path (e.g., //server/share/subpath -> subpath)
-        subpath = ""
-        if repo_path:
-            # Remove //server/share prefix to get subpath
-            path_parts = repo_path.replace("\\", "/").lstrip("/").split("/")
-            if len(path_parts) > 2:
-                subpath = "/".join(path_parts[2:])
-
-        logger.info(f"[METADATA-SMB] Writing metadata to //{smb_server}/{smb_share}/{subpath}")
-
-        # Check if mount.cifs is available
-        try:
-            subprocess.run(["which", "mount.cifs"], capture_output=True, check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.error("[METADATA-SMB] cifs-utils not installed - cannot mount SMB share")
-            logger.error("[METADATA-SMB] Install with: apt install cifs-utils")
-            return
-
-        # Create temporary mount point
-        mount_point = tempfile.mkdtemp(prefix="backer_meta_")
-
-        try:
-            # Build mount command (use sudo if not running as root)
-            smb_url = f"//{smb_server}/{smb_share}"
-            if os.geteuid() == 0:
-                cmd = ["mount", "-t", "cifs", smb_url, mount_point]
-            else:
-                cmd = ["sudo", "mount", "-t", "cifs", smb_url, mount_point]
-
-            # Build mount options
-            opts = ["rw"]
-            if smb_username:
-                opts.append(f"username={smb_username}")
-            if smb_password:
-                opts.append(f"password={smb_password}")
-            if smb_domain:
-                opts.append(f"domain={smb_domain}")
-            if not smb_username and not smb_password:
-                opts.append("guest")
-
-            cmd.extend(["-o", ",".join(opts)])
-
-            logger.info(f"[METADATA-SMB] Mounting {smb_url} to {mount_point}")
-            mount_result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if mount_result.returncode != 0:
-                logger.error(f"[METADATA-SMB] Failed to mount: {mount_result.stderr}")
-                return
-
-            logger.info("[METADATA-SMB] Mount successful")
-
-            # Build the local path for metadata
-            if subpath:
-                local_repo_path = os.path.join(mount_point, subpath)
-            else:
-                local_repo_path = mount_point
-
-            logger.info(f"[METADATA-SMB] Writing metadata to local path: {local_repo_path}")
-
-            # Use the local metadata writing method
-            self._write_repo_metadata_local(
-                repo_path=local_repo_path,
-                job_name=job_name,
-                run_id=run_id,
-                source_path=source_path,
-                backend=backend,
-                result=result,
-                started_at=started_at,
-                finished_at=finished_at,
-            )
-
-            logger.info(f"[METADATA-SMB] Successfully wrote metadata to //{smb_server}/{smb_share}")
-
-        except Exception as e:
-            logger.error(f"[METADATA-SMB] Error writing metadata: {e}")
-
-        finally:
-            # Unmount (use sudo if not running as root)
-            logger.info(f"[METADATA-SMB] Unmounting {mount_point}")
-            try:
-                if os.geteuid() == 0:
-                    subprocess.run(["umount", mount_point], capture_output=True, timeout=30)
-                else:
-                    subprocess.run(["sudo", "umount", mount_point], capture_output=True, timeout=30)
-            except Exception as e:
-                logger.warning(f"[METADATA-SMB] Unmount failed: {e}")
-
-            # Clean up mount point directory
-            try:
-                os.rmdir(mount_point)
-            except Exception:
-                pass
-
-    def _write_restore_metadata(
-        self,
-        source_path: str,
-        job_name: str,
-        run_id: str,
-        result: dict[str, Any],
-        started_at: datetime,
-        finished_at: datetime,
-        snapshot: str | None,
-    ) -> None:
-        """Write restore operation metadata to the repository for audit trail.
-
-        Tracks restore operations for compliance and debugging purposes.
-        """
-        try:
-            from backer.core.repo_metadata import RepositoryMetadata
-
-            # Normalize path for Windows
-            repo_path = self._normalize_windows_path(source_path)
-            logger.info(f"[RESTORE METADATA] Writing restore metadata to: {repo_path}")
-
-            repo = RepositoryMetadata(repo_path)
-
-            if not repo.is_initialized():
-                logger.info("[RESTORE METADATA] Repository metadata not initialized, skipping")
-                return
-
-            # Save restore operation record
-            restore_run_data = {
-                "operation_type": "restore",
-                "status": "success" if result.get('success') else "failed",
-                "started_at": started_at.isoformat(),
-                "finished_at": finished_at.isoformat(),
-                "bytes_transferred": result.get('bytes', 0),
-                "files_transferred": result.get('files', 0),
-                "snapshot_id": snapshot,
-                "agent_id": self.client_id,
-                "hostname": socket.gethostname(),
-            }
-            repo.save_job_run(job_name, run_id, restore_run_data)
-
-            logger.info(f"[RESTORE METADATA] Successfully wrote restore metadata for job '{job_name}'")
-
-        except Exception as e:
-            logger.warning(f"[RESTORE METADATA] Failed to write metadata: {e}")

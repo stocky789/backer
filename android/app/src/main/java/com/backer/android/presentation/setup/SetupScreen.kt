@@ -134,6 +134,16 @@ fun SetupScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            OutlinedTextField(
+                value = uiState.enrollmentToken,
+                onValueChange = viewModel::updateEnrollmentToken,
+                label = { Text(stringResource(R.string.enrollment_token_label)) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             // Test Connection button
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -157,7 +167,7 @@ fun SetupScreen(
 
                 Button(
                     onClick = viewModel::register,
-                    enabled = uiState.connectionStatus == ConnectionStatus.SUCCESS &&
+                    enabled = uiState.connectionStatus == ConnectionStatus.SUCCESS && uiState.enrollmentToken.isNotBlank() &&
                             uiState.registrationStatus != RegistrationStatus.REGISTERING,
                     modifier = Modifier.weight(1f)
                 ) {

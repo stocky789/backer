@@ -52,6 +52,8 @@ class RestoreWorker @AssistedInject constructor(
         val snapshot = inputData.getString("snapshot")
         val cleanRestore = inputData.getBoolean("clean_restore", false)
         val dryRun = inputData.getBoolean("dry_run", false)
+        val commandId = inputData.getInt("command_id", 0)
+        val proxyCapability = inputData.getString("proxy_capability")?.takeIf { it.isNotBlank() }
 
         val clientId = credentialRepository.getClientId() ?: return@withContext Result.failure()
         val credentials = credentialRepository.getCredentials() ?: return@withContext Result.failure()
@@ -66,6 +68,8 @@ class RestoreWorker @AssistedInject constructor(
         var output = ""
 
         try {
+            requireNotNull(proxyCapability) { "Android proxy restore missing required proxy_capability" }
+
             // Show foreground notification
             setForeground(createForegroundInfo(jobName, 0))
 
@@ -102,6 +106,7 @@ class RestoreWorker @AssistedInject constructor(
             val response = apiService.downloadRestore(
                 repoId = repoId,
                 subfolder = subfolder,
+                capability = proxyCapability,
                 snapshot = snapshot
             )
 
@@ -175,6 +180,7 @@ class RestoreWorker @AssistedInject constructor(
         )
 
         apiRepository.reportRestoreResult(result)
+        if (commandId != 0) apiRepository.acknowledgeCommand(commandId)
 
         // Update notification
         showCompletionNotification(jobName, success)

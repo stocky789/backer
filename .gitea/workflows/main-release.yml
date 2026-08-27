@@ -151,7 +151,7 @@ jobs:
           mkdir -p ../release-assets
           apk="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           test -n "$apk"
-          cp "$apk" "../release-assets/backer-android-${{ needs.release-info.outputs.version }}.apk"
+          cp "$apk" "../release-assets/backer-android.apk"
 
       - name: Upload Android release file
         uses: actions/upload-artifact@v3
@@ -271,9 +271,11 @@ jobs:
           RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
           RELEASE_TITLE: ${{ needs.release-info.outputs.title }}
         run: |
+          notes="$(awk '/^## [0-9]/{n++} n==1' CHANGELOG.md)"
+          body="$(printf '%s\nBuilt from %s.\n' "$notes" "$GITEA_COMMIT")"
           python scripts/gitea_release.py \
             --asset-dir release-assets \
-            --body "Automated main branch release for ${GITEA_COMMIT}." \
+            --body "$body" \
             --name "${RELEASE_TITLE}" \
             --tag "${RELEASE_TAG}" \
             --target "${GITEA_COMMIT}"

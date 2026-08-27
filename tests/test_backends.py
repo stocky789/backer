@@ -8,6 +8,7 @@ import pytest
 
 from backer.backends.base import BackendResult, BackupDestination, BackupSource, OperationType
 from backer.backends.kopia import KopiaBackend
+from backer.backends.proxy import ProxyBackend
 from backer.backends.rclone import RcloneBackend
 from backer.backends.registry import BackendRegistry, get_backend
 from backer.backends.restic import ResticBackend
@@ -40,6 +41,44 @@ class TestBackendRegistry:
         """Test listing available backends."""
         backends = BackendRegistry.available_backends()
         assert len(backends) >= 3  # At least rclone, restic, and kopia
+
+
+class TestProxyBackend:
+    def test_https_proxy_uses_standard_https_port_when_omitted(self) -> None:
+        backend = ProxyBackend({"location": "proxys://backer.example.com/repo/repo-123"})
+
+        assert backend.server_url == "https://backer.example.com"
+
+    def test_proxy_preserves_an_explicit_public_port(self) -> None:
+        backend = ProxyBackend({"location": "proxys://backer.example.com:8443/repo/repo-123"})
+
+        assert backend.server_url == "https://backer.example.com:8443"
+
+    def test_proxy_never_disables_tls_verification(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BACKER_SSL_VERIFY", "false")
+
+        backend = ProxyBackend({"location": "proxys://backer.example.com/repo/repo-123"})
+
+        assert backend.session.verify is True
+
+    def test_proxy_maintenance_operations_do_not_make_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ProxyBackend({"location": "proxy://backer.example.com/repo/repo-123"})
+        monkeypatch.setattr(
+            backend, "_request", lambda *_args, **_kwargs: pytest.fail("unexpected network request")
+        )
+        destination = BackupDestination(path="proxy://backer.example.com/repo/repo-123")
+
+        assert backend.list_snapshots(destination) == []
+        results = [backend.init_repo(destination), backend.prune(destination), backend.check(destination)]
+
+        assert [result.success for result in results] == [False, False, False]
+        assert [result.errors for result in results] == [
+            ["Proxy backend initialization is server-managed"],
+            ["Proxy backend pruning is not supported by agent proxy capabilities"],
+            ["Proxy backend integrity checks are not supported by agent proxy capabilities"],
+        ]
 
 
 class TestBackendResult:
@@ -125,6 +164,14 @@ class TestRcloneBackend:
             )
 
         assert "--dry-run" in cmd
+
+    def test_restore_rejects_historical_snapshot(self) -> None:
+        result = RcloneBackend().restore(
+            BackupDestination(path="/backup"), Path("/restore"), snapshot="abc123"
+        )
+
+        assert not result.success
+        assert "current state only" in result.errors[0]
 
 
 class TestResticBackend:
@@ -221,6 +268,14 @@ class TestKopiaBackend:
         """Test config file path is set from config."""
         backend = KopiaBackend(config={"config_file": "/path/to/config"})
         assert backend._env.get("KOPIA_CONFIG_PATH") == "/path/to/config"
+
+    def test_restore_dry_run_is_rejected_without_running_kopia(self) -> None:
+        result = KopiaBackend().restore(
+            BackupDestination(path="/backup"), Path("/restore"), dry_run=True
+        )
+
+        assert not result.success
+        assert result.errors == ["Kopia restore dry runs are not supported"]
 
     def test_get_repo_type_filesystem(self) -> None:
         """Test filesystem repository type detection."""

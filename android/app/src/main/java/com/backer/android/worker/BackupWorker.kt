@@ -54,6 +54,8 @@ class BackupWorker @AssistedInject constructor(
         val sourcePath = inputData.getString("source_path") ?: return@withContext Result.failure()
         val destinationPath = inputData.getString("destination_path") ?: return@withContext Result.failure()
         val excludesJson = inputData.getString("excludes") ?: "[]"
+        val commandId = inputData.getInt("command_id", 0)
+        val proxyCapability = inputData.getString("proxy_capability")?.takeIf { it.isNotBlank() }
 
         val clientId = credentialRepository.getClientId() ?: return@withContext Result.failure()
         val credentials = credentialRepository.getCredentials() ?: return@withContext Result.failure()
@@ -68,6 +70,8 @@ class BackupWorker @AssistedInject constructor(
         var output = ""
 
         try {
+            requireNotNull(proxyCapability) { "Android proxy backup missing required proxy_capability" }
+
             // Show foreground notification
             setForeground(createForegroundInfo(jobName, 0))
 
@@ -144,6 +148,7 @@ class BackupWorker @AssistedInject constructor(
                     repoId = repoId,
                     subfolder = subfolder,
                     sourcePath = sourcePath,
+                    capability = proxyCapability,
                     body = requestBody
                 )
 
@@ -189,6 +194,7 @@ class BackupWorker @AssistedInject constructor(
         )
 
         apiRepository.reportResult(result)
+        if (commandId != 0) apiRepository.acknowledgeCommand(commandId)
 
         // Update notification
         showCompletionNotification(jobName, success)

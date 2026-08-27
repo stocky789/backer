@@ -5,15 +5,15 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import re
-import socket
+import sys
 from pathlib import Path
-
-import yaml
 
 try:
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+except ImportError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,33 +72,15 @@ def test_docker_compose_exposes_server_port_and_persistent_data() -> None:
     assert "backer-data" in compose["volumes"]
 
 
-def test_public_url_default_is_not_silent_localhost_only_guidance() -> None:
+def test_public_url_is_configured_in_the_setup_wizard() -> None:
     compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    setup_template = (ROOT / "src/backer/server/web/templates/setup.html").read_text(encoding="utf-8")
 
-    assert "BACKER_PUBLIC_URL" in compose_text
-    assert "local repos will not work without this set" in compose_text
+    assert "BACKER_PUBLIC_URL" not in compose_text
+    assert "name=\"public_url\"" in setup_template
     assert "https://backer.example.com" in readme_text
     assert "http://192.168.1.100:8420" in readme_text
-
-
-def test_public_url_fallback_is_explicit_when_address_detection_fails(monkeypatch) -> None:
-    public_url = importlib.import_module("backer.server.public_url")
-
-    class FailingSocket:
-        def __enter__(self) -> FailingSocket:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def connect(self, *args: object) -> None:
-            raise OSError("network unavailable")
-
-    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: FailingSocket())
-    monkeypatch.setattr(socket, "gethostbyname", lambda hostname: "127.0.0.1")
-
-    assert public_url.get_default_public_url() == "http://localhost:8420"
 
 
 def test_repository_job_subfolder_replaces_unsafe_path_characters() -> None:
@@ -155,9 +137,12 @@ def test_gitea_replaces_github_workflows() -> None:
     github_workflows = ROOT / ".github" / "workflows"
     gitea_workflows = ROOT / ".gitea" / "workflows"
 
-    assert not github_workflows.exists() or not list(github_workflows.glob("*.yml"))
+    # Builds and releases run on Gitea only; the changelog check is mirrored to
+    # GitHub because the repository is also pushed there.
+    assert sorted(path.name for path in github_workflows.glob("*.yml")) == ["changelog.yml"]
     assert sorted(path.name for path in gitea_workflows.glob("*.yml")) == [
         "android-build.yml",
+        "changelog.yml",
         "docker-build.yml",
         "main-release.yml",
         "python-ci.yml",
@@ -203,7 +188,8 @@ def test_windows_agent_build_stages_installer_tool_files() -> None:
     build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
 
     assert 'DIST_TOOLS_DIR = DIST_DIR / "tools"' in build_script
-    assert 'normalized_path = TOOLS_DIR / "restic.exe"' in build_script
+    assert 'download_windows_tool(tool)' in build_script
+    assert '"kopia.exe"' in build_script
     assert "shutil.copy(src, DIST_TOOLS_DIR / tool)" in build_script
 
 
@@ -225,3 +211,45 @@ def test_release_workflow_checks_all_release_versions_and_manual_tag_ref() -> No
     assert "installer/backer-agent.iss" in release_workflow
     assert "android/app/build.gradle.kts" in release_workflow
     assert "versionCode" in release_workflow
+    assert "minio/minio:RELEASE.2025-09-07T16-13-09Z server /data" in release_workflow
+
+
+def test_changelog_follows_the_documented_format() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_changelog import check
+
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    assert check((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version) == []
+
+
+def test_changelog_rejects_release_without_recognized_entries() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_changelog import check
+
+    assert "0.7.2: no recognized section with entries" in check("## 0.7.2\n", "0.7.2")
+
+
+def test_changelog_rejects_duplicate_release_versions() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_changelog import check
+
+    changelog = "## 0.7.2\n\n### Bug Fixes\n\n- Fixed it\n\n## 0.7.2\n\n### Bug Fixes\n\n- Fixed it\n"
+    assert "duplicate release version '0.7.2'" in check(changelog, "0.7.2")
+
+
+def test_release_notes_come_from_the_newest_changelog_section() -> None:
+    workflow_text = (ROOT / ".gitea" / "workflows" / "main-release.yml").read_text(encoding="utf-8")
+
+    assert "CHANGELOG.md" in workflow_text
+    for path in (".gitea/workflows/changelog.yml", ".github/workflows/changelog.yml"):
+        workflow = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["changelog"]["steps"]
+        assert any("scripts/check_changelog.py" in step.get("run", "") for step in steps)
+
+
+def test_public_project_metadata_uses_gitea() -> None:
+    project_url = "https://git.stockhome.com.au/stocky789/backer"
+
+    assert all(url == project_url for url in read_pyproject()["project"]["urls"].values())
+    assert f'#define MyAppURL "{project_url}"' in (ROOT / "installer" / "backer-agent.iss").read_text(encoding="utf-8")
+    assert f"For more info, visit: {project_url}" in (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")

@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+from base64 import b64encode
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -78,8 +79,8 @@ def create_tray_icon_image():
     return img
 
 
-# GitHub repository URL
-GITHUB_REPO_URL = "https://github.com/stocky789/backer"
+# Backer repository URL
+REPOSITORY_URL = "https://git.stockhome.com.au/stocky789/backer"
 
 
 class BackerAgentApp:
@@ -218,6 +219,11 @@ class BackerAgentApp:
             foreground='gray'
         )
         help_label.pack(anchor=tk.W, pady=(0, 10))
+
+        token_label = ttk.Label(url_frame, text="Enrollment Token:")
+        token_label.pack(anchor=tk.W)
+        self.enrollment_token_var = tk.StringVar()
+        ttk.Entry(url_frame, textvariable=self.enrollment_token_var, width=50, show="*").pack(fill=tk.X, pady=(5, 5))
 
         # Connection buttons frame
         conn_btn_frame = ttk.Frame(url_frame)
@@ -369,11 +375,17 @@ class BackerAgentApp:
                 'hostname': hostname,
                 'version': __version__,
                 'os_info': f"{platform.system()} {platform.release()}",
+                'enrollment_token': self.enrollment_token_var.get(),
             }).encode('utf-8')
 
             req = urllib.request.Request(register_url, data=data, method='POST')
             req.add_header('Content-Type', 'application/json')
             req.add_header('User-Agent', f'Backer-Agent/{__version__}')
+            client_id = self.config.get('client_id')
+            client_secret = self.config.get('client_secret')
+            if client_id and client_secret:
+                credentials = b64encode(f'{client_id}:{client_secret}'.encode()).decode()
+                req.add_header('Authorization', f'Basic {credentials}')
 
             with urllib.request.urlopen(req, timeout=10) as response:
                 result = json.loads(response.read().decode('utf-8'))
@@ -553,24 +565,7 @@ class BackerAgentApp:
 
             logging.info(f"Agent tools directory: {self.service.tools_dir}")
 
-            # Automatically download/verify backup tools
-            self.root.after(0, lambda: self.status_var.set("Checking backup tools..."))
-
-            def tool_progress(msg: str):
-                """Update UI with tool download progress."""
-                self.root.after(0, lambda: self.agent_name_var.set(msg))
-
-            tool_results = self.service.ensure_tools_installed(progress_callback=tool_progress)
-
-            # Check if all tools are ready
-            failed_tools = [t for t, ready in tool_results.items() if not ready]
-            if failed_tools:
-                error_msg = f"Failed to install backup tools: {', '.join(failed_tools)}"
-                logging.error(error_msg)
-                self.root.after(0, lambda: self._start_agent_failed(error_msg))
-                return
-
-            # Tools are ready, start the service
+            # Tools are downloaded only for the backend selected by a queued job.
             self.root.after(0, lambda: self.status_var.set("Starting agent service..."))
             self.service.start()
 
@@ -740,9 +735,9 @@ class BackerAgentApp:
             messagebox.showinfo("Log Files", f"Log folder: {LOG_DIR}")
 
     def open_help(self):
-        """Open the GitHub repository in a web browser."""
+        """Open the Backer repository in a web browser."""
         import webbrowser
-        webbrowser.open(GITHUB_REPO_URL)
+        webbrowser.open(REPOSITORY_URL)
 
     def check_for_updates(self):
         """Check for updates and offer to install them."""
@@ -759,7 +754,7 @@ class BackerAgentApp:
         # Confirm update
         if not messagebox.askyesno(
             "Update Backer Agent",
-            "This will download and install the latest version of Backer Agent from GitHub.\n\n"
+            "This will download and install the latest version of Backer Agent.\n\n"
             "The application will restart after the update.\n\n"
             "Continue?"
         ):
@@ -790,7 +785,7 @@ class BackerAgentApp:
 
             if sys.platform == 'win32':
                 # Windows: Download the latest installer and run it
-                installer_url = f"{GITHUB_REPO_URL}/releases/latest/download/backer-agent-setup.exe"
+                installer_url = f"{REPOSITORY_URL}/releases/download/release-main/backer-agent-setup.exe"
                 installer_path = CONFIG_DIR / "backer-agent-setup.exe"
 
                 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -825,7 +820,7 @@ class BackerAgentApp:
 
                 result = subprocess.run(
                     [sys.executable, '-m', 'pip', 'install', '--upgrade',
-                     f'git+{GITHUB_REPO_URL}.git@main'],
+                     f'git+{REPOSITORY_URL}.git@main'],
                     capture_output=True,
                     text=True
                 )
@@ -881,7 +876,7 @@ class BackerAgentApp:
         messagebox.showerror(
             "Update Failed",
             f"Failed to update Backer Agent:\n\n{error}\n\n"
-            f"You can manually download the latest version from:\n{GITHUB_REPO_URL}/releases"
+            f"You can manually download the latest version from:\n{REPOSITORY_URL}/releases"
         )
 
     def install_as_service(self):

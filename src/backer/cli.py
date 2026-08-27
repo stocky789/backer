@@ -9,7 +9,7 @@ from rich.table import Table
 from backer import __version__
 
 # Import backends to register them
-from backer.backends import BackendRegistry, kopia, rclone, restic, rsync  # noqa: F401
+from backer.backends import BackendRegistry
 from backer.backends.base import BackupDestination, BackupSource
 
 console = Console()
@@ -37,7 +37,7 @@ def main(ctx: click.Context, config: Path | None) -> None:
 @click.option("--force", "-f", is_flag=True, help="Force reinstall even if already installed")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress output (for scripted installs)")
 def setup(force: bool, quiet: bool) -> None:
-    """Download and install backup tools (rclone, restic).
+    """Download and install backup tools (rclone, restic, kopia).
 
     This automatically downloads the required backup tools so you don't
     need to install them manually.
@@ -50,7 +50,8 @@ def setup(force: bool, quiet: bool) -> None:
         console.print("[bold]Backer Setup[/bold]")
         console.print(f"Tools directory: {manager.tools_dir}\n")
 
-    tools = ["rclone", "restic"]
+    tools = ["rclone", "restic", "kopia"]
+    failures = []
 
     for tool in tools:
         existing = manager.get_tool_path(tool)
@@ -71,8 +72,12 @@ def setup(force: bool, quiet: bool) -> None:
                     console.print(f"[green]✓[/green] {tool} installed: {version}")
                     console.print(f"  Path: {path}")
             except Exception as e:
+                failures.append(tool)
                 if not quiet:
                     console.print(f"[red]✗[/red] Failed to install {tool}: {e}")
+
+    if failures:
+        raise click.ClickException(f"Failed to install: {', '.join(failures)}")
 
     if not quiet:
         console.print("\n[bold]Setup complete![/bold]")
@@ -340,15 +345,15 @@ def server_update(dev: bool, version: str | None, yes: bool) -> None:
     if version:
         target = f"v{version}" if not version.startswith("v") else version
         source_desc = f"version {target}"
-        pip_spec = f"git+https://github.com/stocky789/backer.git@{target}"
+        pip_spec = f"git+https://git.stockhome.com.au/stocky789/backer.git@{target}"
     elif dev:
         target = "dev"
         source_desc = "dev branch (latest)"
-        pip_spec = "git+https://github.com/stocky789/backer.git@dev"
+        pip_spec = "git+https://git.stockhome.com.au/stocky789/backer.git@dev"
     else:
         target = "latest"
         source_desc = "latest stable release"
-        pip_spec = "git+https://github.com/stocky789/backer.git@main"
+        pip_spec = "git+https://git.stockhome.com.au/stocky789/backer.git@main"
 
     console.print("[bold]Backer Server Update[/bold]\n")
     console.print(f"Current version: {__version__}")
@@ -620,7 +625,8 @@ def agent_setup() -> None:
 
 @agent.command("register")
 @click.option("--server", "-s", required=True, help="Server URL (e.g., http://backup-server:8420)")
-def agent_register(server: str) -> None:
+@click.option("--token", envvar="BACKER_ENROLLMENT_TOKEN", help="Single-use enrollment token from the Agents page")
+def agent_register(server: str, token: str | None) -> None:
     """Register this machine as a backup client (use 'setup' for interactive mode)."""
     from backer.client.agent import BackerAgent
 
@@ -628,7 +634,7 @@ def agent_register(server: str) -> None:
 
     try:
         ag = BackerAgent(server_url=server)
-        client_id, _ = ag.register()
+        client_id, _ = ag.register(token)
         console.print("[green]✓ Registered successfully[/green]")
         console.print(f"  Client ID: {client_id}")
         console.print(f"  Config saved to: {ag.config_path}")
@@ -682,7 +688,8 @@ def agent_configure(server: str, client_id: str, client_secret: str) -> None:
 
 @agent.command("start")
 @click.option("--server", "-s", help="Server URL (uses saved config if not specified)")
-def agent_start(server: str | None) -> None:
+@click.option("--token", envvar="BACKER_ENROLLMENT_TOKEN", help="Enrollment token when registering a new agent")
+def agent_start(server: str | None, token: str | None) -> None:
     """Start the backup agent."""
     from backer.client.agent import BackerAgent
 
@@ -695,7 +702,7 @@ def agent_start(server: str | None) -> None:
             except FileNotFoundError:
                 console.print("No saved config found. Registering with server...")
                 ag = BackerAgent(server_url=server)
-                ag.register()
+                ag.register(token)
         else:
             ag = BackerAgent.from_config()
 
@@ -990,7 +997,9 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
 @agent.command("progress")
 @click.option("--server", "-s", help="Server URL (uses saved config if not specified)")
 @click.option("--refresh", "-r", default=1, help="Refresh interval in seconds (default: 1)")
-def agent_progress(server: str | None, refresh: int) -> None:
+@click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
+@click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
+def agent_progress(server: str | None, refresh: int, username: str | None, password: str | None) -> None:
     """Show live progress of running backup jobs.
 
     Displays a live-updating progress bar for any backups currently running
@@ -1030,7 +1039,10 @@ def agent_progress(server: str | None, refresh: int) -> None:
     def fetch_running_jobs() -> list[dict]:
         """Fetch currently running backup jobs from server."""
         try:
-            response = httpx.get(f"{server_url}/api/v1/running", timeout=10)
+            response = httpx.get(
+                f"{server_url}/api/v1/running", timeout=10,
+                auth=(username, password) if username and password else None,
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -1191,7 +1203,7 @@ def agent_update(dev: bool, yes: bool) -> None:
         console.print("  Menu > Update")
         console.print()
         console.print("Or download the latest installer from:")
-        console.print("  https://github.com/stocky789/backer/releases/latest")
+        console.print("  https://git.stockhome.com.au/stocky789/backer/releases/tag/release-main")
         raise SystemExit(0)
 
     # Check if running as root (needed for system-wide install)
@@ -1200,10 +1212,10 @@ def agent_update(dev: bool, yes: bool) -> None:
     # Determine source
     if dev:
         source_desc = "dev branch (latest)"
-        pip_spec = "git+https://github.com/stocky789/backer.git@dev"
+        pip_spec = "git+https://git.stockhome.com.au/stocky789/backer.git@dev"
     else:
         source_desc = "latest stable release"
-        pip_spec = "git+https://github.com/stocky789/backer.git@main"
+        pip_spec = "git+https://git.stockhome.com.au/stocky789/backer.git@main"
 
     console.print("[bold]Backer Agent Update[/bold]\n")
     console.print(f"Current version: {__version__}")
@@ -1378,14 +1390,16 @@ def job() -> None:
 
 @job.command("list")
 @click.option("--server", "-s", help="Server URL")
-def job_list(server: str | None) -> None:
+@click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
+@click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
+def job_list(server: str | None, username: str | None, password: str | None) -> None:
     """List all backup jobs."""
     import httpx
 
     server_url = server or "http://localhost:8420"
 
     try:
-        response = httpx.get(f"{server_url}/api/v1/jobs")
+        response = httpx.get(f"{server_url}/api/v1/jobs", auth=(username, password) if username and password else None)
         response.raise_for_status()
         jobs = response.json()
 
@@ -1435,6 +1449,8 @@ def job_list(server: str | None) -> None:
 @click.option("--backend", "-b", default="rclone", help="Backend to use")
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
 @click.option("--server", help="Server URL")
+@click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
+@click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
 def job_create(
     name: str,
     source: str,
@@ -1442,6 +1458,8 @@ def job_create(
     backend: str,
     schedule: str | None,
     server: str | None,
+    username: str | None,
+    password: str | None,
 ) -> None:
     """Create a new backup job."""
     import httpx
@@ -1457,7 +1475,10 @@ def job_create(
     }
 
     try:
-        response = httpx.post(f"{server_url}/api/v1/jobs", json=job_data)
+        response = httpx.post(
+            f"{server_url}/api/v1/jobs", json=job_data,
+            auth=(username, password) if username and password else None,
+        )
         response.raise_for_status()
 
         console.print(f"[green]✓ Job '{name}' created[/green]")
@@ -1477,7 +1498,9 @@ def job_create(
 @click.argument("name")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--server", help="Server URL")
-def job_run(name: str, dry_run: bool, server: str | None) -> None:
+@click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
+@click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
+def job_run(name: str, dry_run: bool, server: str | None, username: str | None, password: str | None) -> None:
     """Run a backup job."""
     import httpx
 
@@ -1487,6 +1510,7 @@ def job_run(name: str, dry_run: bool, server: str | None) -> None:
         response = httpx.post(
             f"{server_url}/api/v1/jobs/{name}/run",
             json={"dry_run": dry_run},
+            auth=(username, password) if username and password else None,
         )
         response.raise_for_status()
         result = response.json()

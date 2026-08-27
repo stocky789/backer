@@ -3,6 +3,7 @@
 Automatically downloads rclone, restic, etc. so users don't need to install them manually.
 """
 
+import hashlib
 import platform
 import shutil
 import stat
@@ -17,11 +18,14 @@ from backer import __version__
 
 # Tool download information
 # Note: rsync backend exists but is NOT currently supported for remote agents.
-# Only rclone and restic are supported for agent-based backups.
+# Downloads are pinned and verified against the publishers' release checksum
+# manifests. Signatures are not verified because this project does not ship the
+# publishers' signing keys; an unavailable or mismatched checksum fails closed.
 TOOL_INFO: dict[str, dict[str, Any]] = {
     "rclone": {
-        "version": "1.72.1",
+        "version": "1.75.0",
         "base_url": "https://downloads.rclone.org/v{version}/rclone-v{version}-{platform}-{arch}.{ext}",
+        "checksum_url": "https://downloads.rclone.org/v{version}/SHA256SUMS",
         "platforms": {
             "Linux": {"name": "linux", "ext": "zip"},
             "Darwin": {"name": "osx", "ext": "zip"},
@@ -36,12 +40,13 @@ TOOL_INFO: dict[str, dict[str, Any]] = {
         "binary_name": {"Linux": "rclone", "Darwin": "rclone", "Windows": "rclone.exe"},
     },
     "restic": {
-        "version": "0.17.3",
-        "base_url": "https://github.com/restic/restic/releases/download/v{version}/restic_{version}_{platform}_{arch}.bz2",
+        "version": "0.19.1",
+        "base_url": "https://github.com/restic/restic/releases/download/v{version}/restic_{version}_{platform}_{arch}.{ext}",
+        "checksum_url": "https://github.com/restic/restic/releases/download/v{version}/SHA256SUMS",
         "platforms": {
-            "Linux": {"name": "linux"},
-            "Darwin": {"name": "darwin"},
-            "Windows": {"name": "windows"},
+            "Linux": {"name": "linux", "ext": "bz2"},
+            "Darwin": {"name": "darwin", "ext": "bz2"},
+            "Windows": {"name": "windows", "ext": "zip"},
         },
         "arch_map": {
             "x86_64": "amd64",
@@ -52,8 +57,9 @@ TOOL_INFO: dict[str, dict[str, Any]] = {
         "binary_name": {"Linux": "restic", "Darwin": "restic", "Windows": "restic.exe"},
     },
     "kopia": {
-        "version": "0.22.3",
+        "version": "0.23.1",
         "base_url": "https://github.com/kopia/kopia/releases/download/v{version}/kopia-{version}-{platform}-{arch}.{ext}",
+        "checksum_url": "https://github.com/kopia/kopia/releases/download/v{version}/checksums.txt",
         "platforms": {
             "Linux": {"name": "linux", "ext": "tar.gz"},
             "Darwin": {"name": "macOS", "ext": "tar.gz"},
@@ -151,7 +157,7 @@ class ToolManager:
 
         try:
             result = subprocess.run(
-                [str(tool_path), "version"],
+                [str(tool_path), "--version" if tool_name == "kopia" else "version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -187,6 +193,21 @@ class ToolManager:
 
         return url
 
+    def _get_checksum_url(self, tool_name: str) -> str | None:
+        info = TOOL_INFO.get(tool_name)
+        if not info:
+            return None
+        return info["checksum_url"].format(version=info["version"])
+
+    def _archive_name(self, tool_name: str) -> str:
+        info = TOOL_INFO[tool_name]
+        platform_info = info["platforms"][self._system]
+        arch = info["arch_map"][self._machine]
+        return info["base_url"].format(
+            version=info["version"], platform=platform_info["name"], arch=arch,
+            ext=platform_info.get("ext", ""),
+        ).rsplit("/", 1)[-1]
+
     def download(self, tool_name: str, progress_callback: Any | None = None) -> Path:
         """Download and install a tool.
 
@@ -221,8 +242,9 @@ class ToolManager:
             tmpdir_path = Path(tmpdir)
 
             # Download the file
-            download_path = tmpdir_path / f"{tool_name}_download"
+            download_path = tmpdir_path / self._archive_name(tool_name)
             self._download_file(url, download_path)
+            self._verify_checksum(tool_name, download_path)
 
             # Extract based on tool type
             if tool_name == "rclone":
@@ -255,7 +277,7 @@ class ToolManager:
             headers={"User-Agent": f"Backer-Agent/{__version__}"}
         )
 
-        # Try with default SSL first, fall back to unverified for Windows cert issues
+        # Never weaken TLS verification: tool downloads execute code locally.
         ssl_context = None
         try:
             ssl_context = ssl.create_default_context()
@@ -272,17 +294,26 @@ class ToolManager:
             with urlopen(request, timeout=120, context=ssl_context) as response:
                 with open(dest, "wb") as f:
                     shutil.copyfileobj(response, f)
-        except ssl.SSLCertVerificationError:
-            # Windows often has certificate issues - use unverified context
-            # This is acceptable since we're downloading from known trusted URLs
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            with urlopen(request, timeout=120, context=ssl_context) as response:
-                with open(dest, "wb") as f:
-                    shutil.copyfileobj(response, f)
         except Exception as e:
             raise RuntimeError(f"Failed to download {url}: {e}")
+
+    def _verify_checksum(self, tool_name: str, archive_path: Path) -> None:
+        checksum_url = self._get_checksum_url(tool_name)
+        if not checksum_url:
+            raise RuntimeError(f"No checksum manifest configured for {tool_name}")
+        manifest_path = archive_path.with_name("checksums.txt")
+        self._download_file(checksum_url, manifest_path)
+        expected = None
+        for line in manifest_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.replace("*", " ").split()
+            if len(fields) >= 2 and fields[-1] == archive_path.name:
+                expected = fields[0].lower()
+                break
+        if not expected:
+            raise RuntimeError(f"Checksum missing for {archive_path.name}")
+        actual = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"Checksum verification failed for {archive_path.name}")
 
     def _extract_rclone(self, archive_path: Path, tmpdir: Path) -> Path:
         """Extract rclone from zip archive."""
@@ -296,8 +327,17 @@ class ToolManager:
         raise RuntimeError("Could not find rclone binary in archive")
 
     def _extract_restic(self, archive_path: Path, tmpdir: Path, binary_name: str) -> Path:
-        """Extract restic from bz2 archive."""
+        """Extract restic from its platform archive."""
         import bz2
+
+        if archive_path.suffix == ".zip":
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                for name in zf.namelist():
+                    filename = Path(name).name
+                    if filename.startswith("restic") and filename.endswith(".exe"):
+                        zf.extract(name, tmpdir)
+                        return tmpdir / name
+            raise RuntimeError("Could not find restic binary in zip archive")
 
         extracted_path = tmpdir / binary_name
 
