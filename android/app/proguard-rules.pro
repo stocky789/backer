@@ -33,4 +33,14 @@
 -dontwarn org.openjsse.**
 
 # Apache Commons Compress
--keep class org.apache.commons.compress.** { *; }
+# The Android app only uses tar.gz helpers. Commons Compress also declares optional
+# Brotli, Zstandard, XZ, SevenZip, and Pack200 integrations that are not bundled.
+-keep class org.apache.commons.compress.archivers.tar.** { *; }
+-keep class org.apache.commons.compress.compressors.gzip.** { *; }
+-dontwarn com.github.luben.zstd.**
+-dontwarn org.brotli.dec.**
+-dontwarn org.objectweb.asm.**
+-dontwarn org.tukaani.xz.**
+
+# AndroidX Security pulls Tink classes that reference compile-time annotations.
+-dontwarn com.google.errorprone.annotations.**

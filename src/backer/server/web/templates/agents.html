@@ -119,7 +119,7 @@
                     <div class="setup-step-num">1</div>
                     <div class="setup-step-content">
                         <div class="setup-step-title">Download the Installer</div>
-                        <a href="https://github.com/stocky789/backer/releases/latest" target="_blank" class="btn btn-primary btn-sm" style="margin-top: 8px;">
+                        <a href="https://git.stockhome.com.au/stocky789/backer/releases/download/release-main/backer-agent-setup.exe" target="_blank" class="btn btn-primary btn-sm" style="margin-top: 8px;">
                             <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                             Download backer-agent-setup.exe
                         </a>
@@ -135,12 +135,22 @@
                 <div class="setup-step">
                     <div class="setup-step-num">3</div>
                     <div class="setup-step-content">
-                        <div class="setup-step-title">Enter Server Address</div>
-                        <pre id="serverUrl" class="setup-code">Loading...</pre>
+                        <div class="setup-step-title">Generate Enrollment Key</div>
+                        <button class="btn btn-primary btn-sm" style="margin-top: 8px;" onclick="generateEnrollmentKey(this)">Generate Enrollment Key</button>
+                        <div class="enrollment-key-display">&mdash;&mdash;&mdash;&mdash;</div>
+                        <div class="setup-step-desc">Single use, expires in 15 minutes.</div>
                     </div>
                 </div>
                 <div class="setup-step">
                     <div class="setup-step-num">4</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Enter Server Address and Key</div>
+                        <pre id="serverUrl" class="setup-code">Loading...</pre>
+                        <div class="setup-step-desc">Type the key above into the agent.</div>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">5</div>
                     <div class="setup-step-content">
                         <div class="setup-step-title">Click Connect</div>
                         <div class="setup-step-desc">The agent will register and appear in the list above.</div>
@@ -153,7 +163,7 @@
         <div class="card">
             <div class="card-header">
                 <span class="card-title">
-                    <svg viewBox="0 0 24 24" style="width: 16px; height: 16px; margin-right: 6px; vertical-align: -3px;"><path fill="#FCC624" d="M12.504 0c-.155 0-.311.002-.465.006a19.92 19.92 0 0 0-.38.017C6.85.207 3.135 2.795 2.073 6.726c-.472 1.747-.34 3.396-.34 5.074 0 5.505 1.554 9.14 4.623 11.48 1.234.944 3.097 1.514 4.605.855 1.377-.603 1.858-2.296 2.532-3.506.453-.812.893-1.68 1.242-2.545l.05-.126c.143-.356.288-.714.436-1.07a8.89 8.89 0 0 1 1.38-.014c.396.03.789.09 1.176.178 1.644.374 2.903 1.276 4.054 2.405a7.06 7.06 0 0 0 .595.523c.222.169.456.323.7.46.11.06.224.116.34.168a2.347 2.347 0 0 0 1.073.23c.207-.01.411-.046.607-.107a1.858 1.858 0 0 0 .563-.293c.51-.41.654-1.114.58-1.748a4.848 4.848 0 0 0-.404-1.327c-.3-.614-.694-1.174-1.134-1.69-.865-1.013-1.905-1.878-3.03-2.578-.44-.274-.893-.522-1.357-.74a10.37 10.37 0 0 0-.479-.218l-.019-.008a15.22 15.22 0 0 0-.263-.108c-.336-.134-.68-.25-1.032-.35a9.06 9.06 0 0 0-.758-.173c-.12-.023-.242-.043-.364-.062l-.058-.008c-.033-.004-.067-.009-.1-.013a7.87 7.87 0 0 0-.39-.038 9.21 9.21 0 0 0-.456-.026c-.05-.002-.1-.003-.15-.004l-.073-.001a8.83 8.83 0 0 0-.314.002l-.05.001a8.92 8.92 0 0 0-.528.03l-.163.015c-.08.008-.16.018-.24.029a8.88 8.88 0 0 0-.422.068c.177-.5.326-1.013.436-1.535.124-.59.2-1.193.205-1.796.006-.7-.08-1.404-.316-2.068a4.02 4.02 0 0 0-.58-1.096 3.477 3.477 0 0 0-.895-.834 3.34 3.34 0 0 0-1.138-.486 4.073 4.073 0 0 0-.834-.1z"/></svg>
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/35/Tux.svg/250px-Tux.svg.png" alt="Tux, the Linux mascot" style="width: 16px; height: 16px; margin-right: 6px; vertical-align: -3px; object-fit: contain;">
                     Linux Agent
                 </span>
             </div>
@@ -168,8 +178,17 @@
                 <div class="setup-step">
                     <div class="setup-step-num">2</div>
                     <div class="setup-step-content">
+                        <div class="setup-step-title">Generate Enrollment Key</div>
+                        <button class="btn btn-primary btn-sm" style="margin-top: 8px;" onclick="generateEnrollmentKey(this)">Generate Enrollment Key</button>
+                        <div class="enrollment-key-display">&mdash;&mdash;&mdash;&mdash;</div>
+                        <div class="setup-step-desc">Single use, expires in 15 minutes.</div>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">3</div>
+                    <div class="setup-step-content">
                         <div class="setup-step-title">Register with Server</div>
-                        <pre id="linuxRegisterCmd" class="setup-code">sudo backer agent register --server [loading...]</pre>
+                        <pre id="linuxRegisterCmd" class="setup-code">Loading...</pre>
                     </div>
                 </div>
                 <div class="setup-note">
@@ -192,10 +211,19 @@
                     <div class="setup-step-num">1</div>
                     <div class="setup-step-content">
                         <div class="setup-step-title">Download the APK</div>
-                        <a href="https://github.com/stocky789/backer/releases/latest" target="_blank" class="btn btn-primary btn-sm" style="margin-top: 8px;">
-                            <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            Download backer-android.apk
-                        </a>
+                        <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
+                            <!-- QR encodes the release URL below; regenerate with:
+                                 python -c "import segno; segno.make('https://git.stockhome.com.au/stocky789/backer/releases/download/release-main/backer-android.apk', error='m').save('src/backer/server/web/static/android-apk-qr.svg', scale=8, border=3, dark='#111111', light='#ffffff', xmldecl=False, svgclass=None, lineclass=None)" -->
+                            <img src="/static/android-apk-qr.svg" alt="QR code linking to the Backer Android APK download"
+                                 width="128" height="128" style="border-radius: 6px; background: #fff; padding: 2px;">
+                            <div>
+                                <div class="setup-step-desc" style="margin-bottom: 8px;">Scan with your phone's camera to download, or use the link.</div>
+                                <a href="https://git.stockhome.com.au/stocky789/backer/releases/download/release-main/backer-android.apk" target="_blank" class="btn btn-primary btn-sm">
+                                    <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                    Download backer-android.apk
+                                </a>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="setup-step">
@@ -208,12 +236,22 @@
                 <div class="setup-step">
                     <div class="setup-step-num">3</div>
                     <div class="setup-step-content">
-                        <div class="setup-step-title">Enter Server Address</div>
-                        <pre id="androidServerUrl" class="setup-code">Loading...</pre>
+                        <div class="setup-step-title">Generate Enrollment Key</div>
+                        <button class="btn btn-primary btn-sm" style="margin-top: 8px;" onclick="generateEnrollmentKey(this)">Generate Enrollment Key</button>
+                        <div class="enrollment-key-display">&mdash;&mdash;&mdash;&mdash;</div>
+                        <div class="setup-step-desc">Single use, expires in 15 minutes.</div>
                     </div>
                 </div>
                 <div class="setup-step">
                     <div class="setup-step-num">4</div>
+                    <div class="setup-step-content">
+                        <div class="setup-step-title">Enter Server Address and Key</div>
+                        <pre id="androidServerUrl" class="setup-code">Loading...</pre>
+                        <div class="setup-step-desc">Type the server address and the key above into the app.</div>
+                    </div>
+                </div>
+                <div class="setup-step">
+                    <div class="setup-step-num">5</div>
                     <div class="setup-step-content">
                         <div class="setup-step-title">Register the Device</div>
                         <div class="setup-step-desc">Tap "Test Connection" then "Register Agent". The device will appear above.</div>
@@ -226,7 +264,7 @@
 </div>
 
 <!-- Credentials Modal -->
-<div id="credentialsModal" class="modal" style="display: none;">
+<dialog id="credentialsModal" class="modal">
     <div class="modal-content" style="max-width: 600px;">
         <div class="modal-header">
             <span class="modal-title">
@@ -276,7 +314,7 @@
             <button class="btn btn-secondary" onclick="closeCredentialsModal()">Close</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <style>
 .credentials-alert {
@@ -432,6 +470,18 @@
 .setup-note svg {
     stroke: var(--accent);
 }
+.enrollment-key-display {
+    font-family: var(--font-mono, monospace);
+    font-size: 22px;
+    letter-spacing: 2px;
+    color: var(--text-muted);
+    margin: 10px 0 4px;
+    user-select: all;
+}
+.enrollment-key-display.has-key {
+    color: var(--accent);
+    font-weight: 600;
+}
 @media (max-width: 1200px) {
     .setup-row {
         grid-template-columns: 1fr 1fr;
@@ -448,9 +498,44 @@
 {% block scripts %}
 <script>
 // Update server URL displays
-const serverUrl = window.location.origin;
+const serverUrl = {{ public_url | tojson }};
 document.getElementById('serverUrl').textContent = serverUrl;
-document.getElementById('linuxRegisterCmd').textContent = `sudo backer agent register --server ${serverUrl}`;
+let enrollmentKey = null;
+
+function renderEnrollmentKey() {
+    const key = enrollmentKey || 'TOKEN';
+    document.getElementById('linuxRegisterCmd').textContent =
+        `sudo backer agent register --server ${serverUrl} --token ${key}`;
+    document.querySelectorAll('.enrollment-key-display').forEach(el => {
+        el.textContent = enrollmentKey || '\u2014\u2014\u2014\u2014';
+        el.classList.toggle('has-key', !!enrollmentKey);
+    });
+}
+
+async function generateEnrollmentKey(button) {
+    button.disabled = true;
+    try {
+        const response = await fetch('/agents/enrollment-token', {method: 'POST'});
+        if (!response.ok) throw new Error(await response.text());
+        enrollmentKey = (await response.json()).token;
+        renderEnrollmentKey();
+        document.querySelectorAll('[onclick^="generateEnrollmentKey"]').forEach(b => {
+            b.textContent = 'Generate New Key';
+        });
+        try {
+            await navigator.clipboard.writeText(enrollmentKey);
+            Toast.success('Enrollment key generated and copied');
+        } catch {
+            Toast.success('Enrollment key generated');
+        }
+    } catch (e) {
+        Toast.error('Failed to generate enrollment key');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+renderEnrollmentKey();
 document.getElementById('androidServerUrl').textContent = serverUrl;
 
 // Filter agents table
@@ -508,7 +593,7 @@ async function resetCredentials(agentId, agentName) {
         confirmText: 'Reset Credentials',
         onConfirm: async () => {
             // Show modal with loading state
-            document.getElementById('credentialsModal').style.display = 'flex';
+            document.getElementById('credentialsModal').showModal();
             document.getElementById('credentialsLoading').style.display = 'block';
             document.getElementById('credentialsContent').style.display = 'none';
 
@@ -521,7 +606,6 @@ async function resetCredentials(agentId, agentName) {
                     const data = await response.json();
 
                     // Build the reconfigure command
-                    const serverUrl = window.location.origin;
                     currentCredentialsCommand = `sudo backer agent configure --server ${serverUrl} --client-id ${data.client_id} --client-secret ${data.client_secret}`;
 
                     // Update modal content
@@ -554,7 +638,7 @@ async function resetCredentials(agentId, agentName) {
 }
 
 function closeCredentialsModal() {
-    document.getElementById('credentialsModal').style.display = 'none';
+    document.getElementById('credentialsModal').close();
     currentCredentialsCommand = '';
 }
 
@@ -575,9 +659,5 @@ function copyCredentialsCommand() {
     }
 }
 
-// Close modal on background click
-document.getElementById('credentialsModal')?.addEventListener('click', function(e) {
-    if (e.target === this) closeCredentialsModal();
-});
 </script>
 {% endblock %}

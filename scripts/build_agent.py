@@ -2,8 +2,8 @@
 """Build script for Backer Windows Agent executable.
 
 This script:
-1. Downloads rclone and restic for Windows
-2. Builds the PyInstaller executable
+1. Downloads rclone, restic, and kopia for Windows
+2. Builds GUI and unattended service executables
 3. Creates a zip package with everything needed
 
 Usage:
@@ -13,78 +13,103 @@ Requirements:
     pip install pyinstaller
 """
 
-import os
 import platform
 import shutil
 import subprocess
 import sys
-import urllib.request
-import zipfile
 from pathlib import Path
 
 # Versions to bundle
-RCLONE_VERSION = "1.65.0"
-RESTIC_VERSION = "0.16.2"
 
 # Build directories
 BUILD_DIR = Path("build")
 DIST_DIR = Path("dist")
 TOOLS_DIR = BUILD_DIR / "tools"
+DIST_TOOLS_DIR = DIST_DIR / "tools"
+VERSION_FILE = BUILD_DIR / "backer-agent-version.txt"
 
 
-def download_file(url: str, dest: Path) -> None:
-    """Download a file with progress."""
-    print(f"  Downloading {url}...")
-    urllib.request.urlretrieve(url, dest)
-    print(f"  Saved to {dest}")
+def _version_parts(version: str) -> tuple[int, int, int, int]:
+    parts = [int(part) for part in version.split(".")]
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:4])
 
 
-def download_rclone_windows() -> Path:
-    """Download rclone for Windows."""
-    print("Downloading rclone...")
-    url = f"https://downloads.rclone.org/v{RCLONE_VERSION}/rclone-v{RCLONE_VERSION}-windows-amd64.zip"
-    zip_path = TOOLS_DIR / "rclone.zip"
+def write_pyinstaller_version_file() -> Path:
+    """Write Windows version metadata consumed by PyInstaller."""
+    from backer import __version__
 
-    download_file(url, zip_path)
+    filevers = _version_parts(__version__)
+    version_csv = ", ".join(str(part) for part in filevers)
+    version_text = f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({version_csv}),
+    prodvers=({version_csv}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'Backer'),
+          StringStruct('FileDescription', 'Backer Agent'),
+          StringStruct('FileVersion', '{__version__}'),
+          StringStruct('InternalName', 'backer-agent'),
+          StringStruct('OriginalFilename', 'backer-agent.exe'),
+          StringStruct('ProductName', 'Backer Agent'),
+          StringStruct('ProductVersion', '{__version__}')
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+    VERSION_FILE.write_text(version_text, encoding="utf-8")
+    return VERSION_FILE
 
-    # Extract
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(TOOLS_DIR)
 
-    # Find the exe
-    exe_path = TOOLS_DIR / f"rclone-v{RCLONE_VERSION}-windows-amd64" / "rclone.exe"
-    return exe_path
+def download_windows_tool(tool: str) -> Path:
+    """Download a checksum-verified Windows tool using the shared manager."""
+    sys.path.insert(0, str(Path("src").resolve()))
+    from backer.tools.manager import ToolManager
 
-
-def download_restic_windows() -> Path:
-    """Download restic for Windows."""
-    print("Downloading restic...")
-    url = f"https://github.com/restic/restic/releases/download/v{RESTIC_VERSION}/restic_{RESTIC_VERSION}_windows_amd64.zip"
-    zip_path = TOOLS_DIR / "restic.zip"
-
-    download_file(url, zip_path)
-
-    # Extract
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(TOOLS_DIR)
-
-    exe_path = TOOLS_DIR / "restic.exe"
-    # Sometimes it's in a subfolder
-    if not exe_path.exists():
-        exe_path = TOOLS_DIR / f"restic_{RESTIC_VERSION}_windows_amd64.exe"
-    return exe_path
+    manager = ToolManager(TOOLS_DIR)
+    manager._system = "Windows"
+    manager._machine = "AMD64"
+    return manager.download(tool)
 
 
 def build_pyinstaller() -> Path:
     """Build the PyInstaller executable."""
     print("Building executable with PyInstaller...")
 
-    result = subprocess.run(
+    write_pyinstaller_version_file()
+
+    subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--clean", "backer-agent.spec"],
         check=True,
     )
 
     return DIST_DIR / "backer-agent.exe"
+
+
+def build_service_executable() -> Path:
+    """Build the dedicated entry point used by the boot task."""
+    subprocess.run(
+        [sys.executable, "-m", "PyInstaller", "--clean", "--onefile", "--console",
+         "--name", "backer-agent-service", "src/backer/agent/service_entry.py"],
+        check=True,
+    )
+    return DIST_DIR / "backer-agent-service.exe"
 
 
 def create_package() -> Path:
@@ -93,17 +118,20 @@ def create_package() -> Path:
 
     package_dir = DIST_DIR / "backer-agent-windows"
     package_dir.mkdir(parents=True, exist_ok=True)
+    DIST_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Copy executable
     shutil.copy(DIST_DIR / "backer-agent.exe", package_dir / "backer-agent.exe")
+    shutil.copy(DIST_DIR / "backer-agent-service.exe", package_dir / "backer-agent-service.exe")
 
     # Copy tools if on Windows and they exist
     tools_subdir = package_dir / "tools"
     tools_subdir.mkdir(exist_ok=True)
 
-    for tool in ["rclone.exe", "restic.exe"]:
+    for tool in ["rclone.exe", "restic.exe", "kopia.exe"]:
         for src in TOOLS_DIR.rglob(tool):
             shutil.copy(src, tools_subdir / tool)
+            shutil.copy(src, DIST_TOOLS_DIR / tool)
             break
 
     # Create a simple batch launcher
@@ -140,7 +168,7 @@ The agent will:
 - Receive and execute backup jobs
 - Report status back to the server
 
-For more info, visit: https://github.com/stocky789/backer
+For more info, visit: https://git.stockhome.com.au/stocky789/backer
 ''')
 
     # Create zip
@@ -169,17 +197,19 @@ def main():
     BUILD_DIR.mkdir(exist_ok=True)
     TOOLS_DIR.mkdir(exist_ok=True)
     DIST_DIR.mkdir(exist_ok=True)
+    DIST_TOOLS_DIR.mkdir(exist_ok=True)
 
     # Only download Windows tools if building on Windows
     if platform.system() == "Windows":
-        download_rclone_windows()
-        download_restic_windows()
+        for tool in ["rclone", "restic", "kopia"]:
+            download_windows_tool(tool)
     else:
         print("Note: Not on Windows, skipping tool downloads")
         print("      (tools will be downloaded on first run)")
 
     # Build
     build_pyinstaller()
+    build_service_executable()
 
     # Package
     if platform.system() == "Windows":

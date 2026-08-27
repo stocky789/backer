@@ -53,11 +53,11 @@ class HeartbeatWorker @AssistedInject constructor(
                     heartbeatResponse.commands.forEach { command ->
                         Log.i(TAG, "Received command: ${command.commandType} (id=${command.id})")
 
-                        // Acknowledge the command
-                        apiRepository.acknowledgeCommand(command.id)
-
                         // Handle the command via CommandHandler
                         commandHandler.handle(command)
+                        if (command.commandType !in setOf("backup", "restore")) {
+                            apiRepository.acknowledgeCommand(command.id)
+                        }
                     }
 
                     // Schedule next heartbeat immediately to maintain continuous polling

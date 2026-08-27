@@ -44,12 +44,10 @@ from backer.backends.base import (
     BackupSource,
     OperationType,
 )
-from backer.backends.registry import BackendRegistry
 
 logger = logging.getLogger(__name__)
 
 
-@BackendRegistry.register(BackendType.PROXY)
 class ProxyBackend(BackendBase):
     """Backend that proxies operations to a remote Backer server.
 
@@ -69,6 +67,7 @@ class ProxyBackend(BackendBase):
         self.password: str | None = None
         self.client_id: str | None = None
         self.client_secret: str | None = None
+        self.capability: str | None = self.config.get("proxy_capability")
         self.timeout: int = 300  # 5 minutes for large transfers
         self.chunk_size: int = 1024 * 1024 * 5  # 5MB chunks
         self.verify_ssl: bool | str = True  # SSL verification (True, False, or path to CA bundle)
@@ -85,15 +84,11 @@ class ProxyBackend(BackendBase):
         self.client_id = self.config.get("client_id") or os.getenv("BACKER_CLIENT_ID")
         self.client_secret = self.config.get("client_secret") or os.getenv("BACKER_CLIENT_SECRET")
 
-        # Get SSL verification from config or environment
-        # Can be: True (verify), False (insecure), or path to CA bundle
+        # TLS verification is mandatory; this may only select a custom CA bundle.
         ssl_verify = os.getenv("BACKER_SSL_VERIFY", "true").lower()
-        if ssl_verify == "false":
-            self.verify_ssl = False
-        elif ssl_verify == "true":
+        if ssl_verify == "true":
             self.verify_ssl = True
         else:
-            # Assume it's a path to CA bundle
             if os.path.exists(ssl_verify):
                 self.verify_ssl = ssl_verify
             else:
@@ -124,8 +119,8 @@ class ProxyBackend(BackendBase):
 
             # Build server URL
             host = parsed.hostname or "localhost"
-            port = parsed.port or (8421 if protocol == "https" else 8420)
-            self.server_url = f"{protocol}://{host}:{port}"
+            port = f":{parsed.port}" if parsed.port else ""
+            self.server_url = f"{protocol}://{host}{port}"
 
             # Extract repo ID from path (/repo/{id})
             path_parts = parsed.path.strip("/").split("/")
@@ -156,6 +151,8 @@ class ProxyBackend(BackendBase):
             "Content-Type": "application/json",
             "User-Agent": "backer-agent/proxy",
         }
+        if self.capability:
+            headers["X-Backer-Capability"] = self.capability
 
         # Prefer JWT bearer token if available
         if self.bearer_token:
@@ -290,7 +287,7 @@ class ProxyBackend(BackendBase):
         except requests.exceptions.SSLError as e:
             logger.error(f"[PROXY] SSL verification failed: {e}")
             if self.verify_ssl is True:
-                logger.error("[PROXY] Set BACKER_SSL_VERIFY=false to disable verification (dev only)")
+                logger.error("[PROXY] Set BACKER_SSL_VERIFY to a trusted CA bundle path if required")
             raise
         except requests.exceptions.Timeout:
             logger.error(f"[PROXY] Request timeout after {timeout}s: {url}")
@@ -319,36 +316,18 @@ class ProxyBackend(BackendBase):
             return False, f"Proxy server unavailable: {e}"
 
     def init_repo(self, destination: BackupDestination) -> BackendResult:
-        """Initialize repository on server."""
+        """Proxy repositories are initialized by the server, not agents."""
         started_at = datetime.now()
-
-        try:
-            # Send init request to server
-            response = self._request(
-                "POST",
-                "/init",
-                json_data={"password": self.password},
-            )
-            result = response.json()
-
-            return BackendResult(
-                success=result.get("success", True),
-                operation=OperationType.BACKUP,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                output=result.get("output", "Repository initialized"),
-                return_code=0 if result.get("success") else 1,
-            )
-        except Exception as e:
-            logger.error(f"[PROXY] Init failed: {e}")
-            return BackendResult(
-                success=False,
-                operation=OperationType.BACKUP,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                errors=[str(e)],
-                return_code=1,
-            )
+        error = "Proxy backend initialization is server-managed"
+        logger.warning(f"[PROXY] {error}")
+        return BackendResult(
+            success=False,
+            operation=OperationType.BACKUP,
+            started_at=started_at,
+            finished_at=datetime.now(),
+            errors=[error],
+            return_code=1,
+        )
 
     def backup(
         self,
@@ -530,6 +509,7 @@ class ProxyBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
+        include_path: str | None = None,
     ) -> BackendResult:
         """Stream restore data from server with memory-safe chunked reading.
 
@@ -676,14 +656,9 @@ class ProxyBackend(BackendBase):
             )
 
     def list_snapshots(self, destination: BackupDestination) -> list[dict[str, Any]]:
-        """List snapshots on server."""
-        try:
-            response = self._request("GET", "/snapshots")
-            data = response.json()
-            return data.get("snapshots", [])
-        except Exception as e:
-            logger.error(f"[PROXY] Failed to list snapshots: {e}")
-            return []
+        """Proxy capabilities do not authorize repository-wide snapshot listing."""
+        logger.warning("[PROXY] Listing snapshots is not supported by agent proxy capabilities")
+        return []
 
     def prune(
         self,
@@ -691,35 +666,18 @@ class ProxyBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
     ) -> BackendResult:
-        """Prune repository on server."""
+        """Proxy capabilities do not authorize repository-wide pruning."""
         started_at = datetime.now()
-
-        try:
-            response = self._request(
-                "POST",
-                "/prune",
-                json_data={"dry_run": dry_run},
-            )
-            result = response.json()
-
-            return BackendResult(
-                success=result.get("success", True),
-                operation=OperationType.PRUNE,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                output=result.get("output", "Pruned"),
-                return_code=0 if result.get("success") else 1,
-            )
-        except Exception as e:
-            logger.error(f"[PROXY] Prune failed: {e}")
-            return BackendResult(
-                success=False,
-                operation=OperationType.PRUNE,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                errors=[str(e)],
-                return_code=1,
-            )
+        error = "Proxy backend pruning is not supported by agent proxy capabilities"
+        logger.warning(f"[PROXY] {error}")
+        return BackendResult(
+            success=False,
+            operation=OperationType.PRUNE,
+            started_at=started_at,
+            finished_at=datetime.now(),
+            errors=[error],
+            return_code=1,
+        )
 
     def check(
         self,
@@ -727,35 +685,18 @@ class ProxyBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
     ) -> BackendResult:
-        """Check repository integrity on server."""
+        """Repository-wide integrity checks are not agent proxy operations."""
         started_at = datetime.now()
-
-        try:
-            response = self._request(
-                "POST",
-                "/check-integrity",
-                json_data={"dry_run": dry_run},
-            )
-            result = response.json()
-
-            return BackendResult(
-                success=result.get("success", True),
-                operation=OperationType.CHECK,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                output=result.get("output", "Check passed"),
-                return_code=0 if result.get("success") else 1,
-            )
-        except Exception as e:
-            logger.error(f"[PROXY] Check failed: {e}")
-            return BackendResult(
-                success=False,
-                operation=OperationType.CHECK,
-                started_at=started_at,
-                finished_at=datetime.now(),
-                errors=[str(e)],
-                return_code=1,
-            )
+        error = "Proxy backend integrity checks are not supported by agent proxy capabilities"
+        logger.warning(f"[PROXY] {error}")
+        return BackendResult(
+            success=False,
+            operation=OperationType.CHECK,
+            started_at=started_at,
+            finished_at=datetime.now(),
+            errors=[error],
+            return_code=1,
+        )
     def cleanup(self) -> None:
         """Close the persistent HTTP session."""
         if hasattr(self, "session") and self.session:

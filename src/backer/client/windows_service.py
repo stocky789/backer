@@ -9,11 +9,13 @@ Supports multiple installation methods:
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 
 def is_windows() -> bool:
@@ -26,18 +28,52 @@ def get_python_path() -> str:
     return sys.executable
 
 
-def get_executable_path() -> str:
-    """Get path to the backer agent executable.
+def get_service_executable_path() -> str:
+    """Return the dedicated non-interactive service executable."""
+    if getattr(sys, "frozen", False):
+        candidate = Path(sys.executable).with_name("backer-agent-service.exe")
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
 
-    Returns the frozen exe path if running as PyInstaller bundle,
-    otherwise returns the Python command to run the module.
-    """
-    if getattr(sys, 'frozen', False):
-        # Running as PyInstaller bundle
-        return sys.executable
-    else:
-        # Running from Python
-        return sys.executable
+
+def _prepare_service_config() -> None:
+    """Copy the interactive user's registered agent config for SYSTEM."""
+    config_dir = os.environ.get("BACKER_CONFIG_DIR")
+    source = Path(config_dir) if config_dir else Path(os.environ.get("APPDATA", "")) / "Backer"
+    config = source / "agent.yaml"
+    if not config.exists():
+        raise FileNotFoundError("Agent config not found; register the agent before installing the service")
+    target = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
+    target_existed = target.exists()
+    target.mkdir(parents=True, exist_ok=True)
+    target_config = target / "agent.yaml"
+    shutil.copy2(config, target_config)
+    result = subprocess.run(
+        [
+            "icacls",
+            str(target),
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "/remove:g",
+            "*S-1-5-32-545",
+            "/t",
+            "/c",
+        ],
+        capture_output=True,
+        creationflags=get_subprocess_flags(),
+    )
+    if result.returncode != 0:
+        target_config.unlink(missing_ok=True)
+        if not target_existed:
+            try:
+                target.rmdir()
+            except OSError:
+                pass
+        raise OSError("Failed to restrict service config permissions")
 
 
 def get_startup_folder() -> Path:
@@ -73,39 +109,6 @@ def get_subprocess_flags() -> int:
 # =============================================================================
 
 
-def create_windows_service(server_url: str | None = None) -> tuple[bool, str]:
-    """Create a proper Windows Service that runs at boot.
-
-    This is the most robust method for running the agent in the background.
-    The service runs under the SYSTEM account and survives:
-    - User lockscreen
-    - User logoff
-    - User switching
-    - System restart (auto-start)
-
-    Requires Administrator privileges to install.
-
-    Note: This delegates to create_background_scheduled_task() which uses
-    Task Scheduler with SYSTEM account - simpler and more reliable than
-    a true Windows Service for Python applications.
-
-    Args:
-        server_url: Optional server URL to connect to
-
-    Returns:
-        Tuple of (success, message)
-    """
-    if not is_windows():
-        return False, "Windows service only available on Windows"
-
-    if not is_admin():
-        return False, "Administrator privileges required to install Windows Service"
-
-    # Use Task Scheduler with SYSTEM account (simpler, more reliable)
-    # This achieves the same goal without needing a service wrapper
-    return create_background_scheduled_task(server_url)
-
-
 def create_background_scheduled_task(server_url: str | None = None) -> tuple[bool, str]:
     """Create a scheduled task that runs at system startup under SYSTEM account.
 
@@ -131,23 +134,25 @@ def create_background_scheduled_task(server_url: str | None = None) -> tuple[boo
     if not is_admin():
         return False, "Administrator privileges required. Run as Administrator."
 
+    try:
+        _prepare_service_config()
+    except OSError as e:
+        return False, f"Failed to prepare service config: {e}"
+
     task_name = "BackerAgentService"
 
     # Determine the command to run
     if getattr(sys, 'frozen', False):
         # Running as PyInstaller exe
-        exe_path = sys.executable
-        if server_url:
-            cmd = f'"{exe_path}" --server "{server_url}"'
-        else:
-            cmd = f'"{exe_path}"'
+        command = get_service_executable_path()
+        arguments = ""
     else:
         # Running from Python
-        python_exe = get_python_path()
+        command = get_python_path()
         if server_url:
-            cmd = f'"{python_exe}" -m backer agent start --server "{server_url}"'
+            arguments = f'-m backer agent start --server "{server_url}"'
         else:
-            cmd = f'"{python_exe}" -m backer agent start'
+            arguments = "-m backer agent start"
 
     # Delete existing task if any
     subprocess.run(
@@ -203,8 +208,8 @@ def create_background_scheduled_task(server_url: str | None = None) -> tuple[boo
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{cmd.split()[0].strip('"')}</Command>
-      <Arguments>{' '.join(cmd.split()[1:]).replace('"', '&quot;') if len(cmd.split()) > 1 else ''}</Arguments>
+      <Command>{escape(command)}</Command>
+      <Arguments>{escape(arguments)}</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -258,10 +263,7 @@ def _create_background_task_simple(server_url: str | None = None) -> tuple[bool,
 
     # Determine the command to run
     if getattr(sys, 'frozen', False):
-        exe_path = sys.executable
-        cmd = [exe_path]
-        if server_url:
-            cmd.extend(["--server", server_url])
+        cmd = [get_service_executable_path()]
     else:
         python_exe = get_python_path()
         cmd = [python_exe, "-m", "backer", "agent", "start"]
@@ -578,7 +580,7 @@ def uninstall_service() -> tuple[bool, str]:
 
 
 def get_service_status() -> dict[str, Any]:
-    """Get comprehensive status of all installation methods.
+    """Get status for each Windows installation method.
 
     Returns:
         Dictionary with status information for all methods

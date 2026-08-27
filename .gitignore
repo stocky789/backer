@@ -33,6 +33,8 @@ ENV/
 *.swp
 *.swo
 *~
+.claude/
+.fuse_hidden*
 
 # ----- Testing & linting -----
 .tox/

@@ -93,6 +93,7 @@ interface BackerApiService {
      * Headers:
      * - X-Backup-Subfolder: e.g., "Agents/jobname"
      * - X-Source-Path: original source path being backed up
+     * - X-Backer-Capability: required proxy operation capability
      */
     @POST("/api/repo/{repoId}/backup")
     @Streaming
@@ -100,6 +101,7 @@ interface BackerApiService {
         @Path("repoId") repoId: String,
         @Header("X-Backup-Subfolder") subfolder: String,
         @Header("X-Source-Path") sourcePath: String,
+        @Header("X-Backer-Capability") capability: String,
         @Body body: RequestBody
     ): Response<ResponseBody>
 
@@ -110,6 +112,7 @@ interface BackerApiService {
      * The endpoint is /api/repo/{repoId}/restore
      * Headers:
      * - X-Restore-Subfolder: e.g., "Agents/jobname"
+     * - X-Backer-Capability: required proxy operation capability
      * Query parameters:
      * - snapshot: snapshot identifier (optional, defaults to latest)
      */
@@ -118,6 +121,7 @@ interface BackerApiService {
     suspend fun downloadRestore(
         @Path("repoId") repoId: String,
         @Header("X-Restore-Subfolder") subfolder: String,
+        @Header("X-Backer-Capability") capability: String,
         @Query("snapshot") snapshot: String? = null
     ): Response<ResponseBody>
 }

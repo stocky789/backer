@@ -173,7 +173,7 @@
 </div>
 
 <!-- Edit Job Modal -->
-<div id="editModal" class="modal" style="display: none;">
+<dialog id="editModal" class="modal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
             <span class="modal-title">
@@ -207,7 +207,6 @@
                         <option value="rclone">rclone</option>
                         <option value="restic">restic</option>
                         <option value="kopia">kopia</option>
-                        <option value="rsync">rsync</option>
                     </select>
                 </div>
 
@@ -239,10 +238,10 @@
             </form>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Quick Restore Modal -->
-<div id="restoreModal" class="modal" style="display: none;">
+<dialog id="restoreModal" class="modal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
             <span class="modal-title">
@@ -360,10 +359,10 @@
             </form>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Delete Job Modal -->
-<div id="deleteModal" class="modal" style="display: none;">
+<dialog id="deleteModal" class="modal">
     <div class="modal-content" style="max-width: 450px;">
         <div class="modal-header">
             <span class="modal-title">
@@ -393,10 +392,10 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Agent Selection Modal (for disaster recovery / agent reassignment) -->
-<div id="agentSelectModal" class="modal" style="display: none;">
+<dialog id="agentSelectModal" class="modal">
     <div class="modal-content" style="max-width: 500px;">
         <div class="modal-header">
             <span class="modal-title">
@@ -456,7 +455,7 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <style>
 /* Agent Selection Modal Styles */
@@ -714,7 +713,7 @@ async function editJob(jobName) {
         document.getElementById('editError').style.display = 'none';
 
         onEditBackendChange();
-        document.getElementById('editModal').style.display = 'flex';
+        document.getElementById('editModal').showModal();
     } catch (e) {
         Toast.error('Error loading job: ' + e.message);
     }
@@ -734,7 +733,7 @@ function onEditBackendChange() {
 }
 
 function hideEditModal() {
-    document.getElementById('editModal').style.display = 'none';
+    document.getElementById('editModal').close();
 }
 
 async function saveJob(event) {
@@ -755,7 +754,7 @@ async function saveJob(event) {
 
     if (backend === 'restic' || backend === 'kopia') {
         if (resticPassword) {
-            data.backend_options = { restic_password: resticPassword };
+            data.backend_options = { repository_password: resticPassword };
         }
     } else {
         data.backend_options = {};
@@ -781,10 +780,6 @@ async function saveJob(event) {
     }
 }
 
-document.getElementById('editModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideEditModal();
-});
-
 // Quick Restore Functions
 async function quickRestore(jobName, clientId, sourcePath, repository) {
     // Populate info panel
@@ -808,7 +803,7 @@ async function quickRestore(jobName, clientId, sourcePath, repository) {
     }
 
     // Show modal immediately for better UX
-    document.getElementById('restoreModal').style.display = 'flex';
+    document.getElementById('restoreModal').showModal();
 
     try {
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}/backups`);
@@ -833,7 +828,7 @@ async function quickRestore(jobName, clientId, sourcePath, repository) {
 }
 
 function hideRestoreModal() {
-    document.getElementById('restoreModal').style.display = 'none';
+    document.getElementById('restoreModal').close();
 }
 
 async function submitRestore(event) {
@@ -892,21 +887,17 @@ async function submitRestore(event) {
     }
 }
 
-document.getElementById('restoreModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideRestoreModal();
-});
-
 // Delete job functions
 function showDeleteModal(jobName) {
     document.getElementById('deleteJobName').textContent = jobName;
     document.getElementById('deleteJobNameInput').value = jobName;
     document.getElementById('deleteSnapshots').checked = false;
     document.getElementById('deleteError').style.display = 'none';
-    document.getElementById('deleteModal').style.display = 'flex';
+    document.getElementById('deleteModal').showModal();
 }
 
 function hideDeleteModal() {
-    document.getElementById('deleteModal').style.display = 'none';
+    document.getElementById('deleteModal').close();
 }
 
 async function confirmDeleteJob() {
@@ -942,10 +933,6 @@ async function confirmDeleteJob() {
     }
 }
 
-document.getElementById('deleteModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideDeleteModal();
-});
-
 // Agent Selection Modal Functions
 function showAgentSelectModal(jobName, action, errorMsg) {
     document.getElementById('agentSelectJobName').value = jobName;
@@ -972,11 +959,11 @@ function showAgentSelectModal(jobName, action, errorMsg) {
             `The original agent for this restore is no longer connected. Select a connected agent to restore files to.`;
     }
 
-    document.getElementById('agentSelectModal').style.display = 'flex';
+    document.getElementById('agentSelectModal').showModal();
 }
 
 function hideAgentSelectModal() {
-    document.getElementById('agentSelectModal').style.display = 'none';
+    document.getElementById('agentSelectModal').close();
 }
 
 async function confirmAgentSelection() {
@@ -1002,13 +989,10 @@ async function confirmAgentSelection() {
         // Update the restore form's client ID and resubmit
         document.getElementById('restoreClientId').value = selectedAgent;
         // Re-show restore modal so user can confirm
-        document.getElementById('restoreModal').style.display = 'flex';
+        document.getElementById('restoreModal').showModal();
         Toast.info('Agent updated. Click "Start Restore" to continue.');
     }
 }
 
-document.getElementById('agentSelectModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideAgentSelectModal();
-});
 </script>
 {% endblock %}

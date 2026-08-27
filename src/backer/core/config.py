@@ -130,3 +130,4 @@ def load_config(path: Path | None = None) -> BackerConfig:
         return BackerConfig.load(path)
 
     return BackerConfig()
+

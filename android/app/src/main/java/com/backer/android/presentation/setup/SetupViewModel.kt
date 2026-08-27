@@ -51,6 +51,10 @@ class SetupViewModel @Inject constructor(
         )
     }
 
+    fun updateEnrollmentToken(token: String) {
+        _uiState.value = _uiState.value.copy(enrollmentToken = token, errorMessage = null)
+    }
+
     fun testConnection() {
         val serverUrl = normalizeUrl(_uiState.value.serverUrl)
 
@@ -103,7 +107,8 @@ class SetupViewModel @Inject constructor(
                     hostname = Build.MODEL,
                     version = BuildConfig.VERSION_NAME,
                     osInfo = "Android ${Build.VERSION.RELEASE}",
-                    tags = listOf("android")
+                    tags = listOf("android"),
+                    enrollmentToken = _uiState.value.enrollmentToken
                 )
 
                 val response = apiService.register(request)
@@ -162,6 +167,7 @@ class SetupViewModel @Inject constructor(
 
 data class SetupUiState(
     val serverUrl: String = "",
+    val enrollmentToken: String = "",
     val connectionStatus: ConnectionStatus = ConnectionStatus.IDLE,
     val registrationStatus: RegistrationStatus = RegistrationStatus.IDLE,
     val serverVersion: String? = null,

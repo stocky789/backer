@@ -312,7 +312,7 @@ if [ -d "$INSTALL_DIR/.git" ]; then
     git pull --quiet origin "$GIT_BRANCH"
 else
     info "Cloning Backer repository (branch: $GIT_BRANCH)..."
-    git clone --quiet --branch "$GIT_BRANCH" https://github.com/stocky789/backer.git "$INSTALL_DIR"
+    git clone --quiet --branch "$GIT_BRANCH" https://git.stockhome.com.au/stocky789/backer.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 success "Source code ready (branch: $GIT_BRANCH)"
@@ -359,10 +359,10 @@ if ! "$INSTALL_DIR/venv/bin/python" -c "import backer; import backer.server" 2>/
 fi
 success "Installation verified"
 
-# Download backup tools (rclone + restic)
+# Download backup tools (rclone, restic, kopia)
 info "Downloading backup tools..."
-"$INSTALL_DIR/venv/bin/backer" setup --data-dir "$DATA_DIR" 2>/dev/null || \
-    "$INSTALL_DIR/venv/bin/backer" setup 2>/dev/null || true
+BACKER_DATA_DIR="$DATA_DIR" "$INSTALL_DIR/venv/bin/backer" setup --quiet || \
+    error "Failed to install backup tools"
 success "Backup tools ready"
 
 # Set permissions

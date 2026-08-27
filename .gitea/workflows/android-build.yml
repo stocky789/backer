@@ -1,0 +1,54 @@
+name: Android Build
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - android/**
+      - .gitea/workflows/android-build.yml
+      - .gitea/workflows/release-validation.yml
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - android/**
+      - .gitea/workflows/android-build.yml
+      - .gitea/workflows/release-validation.yml
+  workflow_dispatch:
+
+jobs:
+  android-debug:
+    name: Assemble Debug APK
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: backer-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

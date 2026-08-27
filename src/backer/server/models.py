@@ -1,9 +1,8 @@
 """Data models for the server API."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
@@ -25,7 +24,7 @@ class Client(BaseModel):
     ip_address: str | None = None
     status: ClientStatus = ClientStatus.UNKNOWN
     last_seen: datetime | None = None
-    registered_at: datetime = Field(default_factory=lambda: datetime.now(ZoneInfo("UTC")))
+    registered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     version: str | None = None
     os_info: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -41,6 +40,7 @@ class JobCreate(BaseModel):
     excludes: list[str] = Field(default_factory=list)
     schedule_cron: str | None = None
     client_id: str | None = None
+    repository_id: str | None = None
     enabled: bool = True
     tags: list[str] = Field(default_factory=list)
     backend_options: dict[str, Any] = Field(default_factory=dict)
@@ -86,6 +86,7 @@ class ClientRegisterRequest(BaseModel):
     version: str
     os_info: str | None = None
     tags: list[str] = Field(default_factory=list)
+    enrollment_token: str | None = None
 
 
 class ClientRegisterResponse(BaseModel):
@@ -104,19 +105,6 @@ class ClientHeartbeat(BaseModel):
     current_job: str | None = None
     jobs_completed: int = 0
     jobs_failed: int = 0
-
-
-class BackupCommand(BaseModel):
-    """Command sent from server to client to initiate backup."""
-
-    command: str = "backup"  # backup, restore, status
-    job_name: str
-    source_path: str
-    destination_path: str
-    backend: str
-    excludes: list[str] = Field(default_factory=list)
-    backend_options: dict[str, Any] = Field(default_factory=dict)
-    dry_run: bool = False
 
 
 class BackupResult(BaseModel):

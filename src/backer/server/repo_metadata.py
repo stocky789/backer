@@ -238,7 +238,7 @@ def import_repository_metadata(
             # Check if agent already exists
             existing = storage.get_client(agent_id)
             if not existing:
-                # Note: We can't fully import agents without their secrets
+                # Agents need their secrets before we can import them.
                 # Just log that they exist
                 logger.info(f"Discovered agent {agent_id} ({agent.get('hostname')})")
                 imported["agents"] += 1

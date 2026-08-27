@@ -14,8 +14,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -54,6 +54,8 @@ class CommandHandler @Inject constructor(
         val sourcePath = payload["source_path"]?.jsonPrimitive?.content ?: ""
         val destinationPath = payload["destination_path"]?.jsonPrimitive?.content ?: ""
         val backend = payload["backend"]?.jsonPrimitive?.content ?: "proxy"
+        val proxyCapability = (payload["backend_options"] as? JsonObject)
+            ?.get("proxy_capability")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
 
         // Extract excludes as a comma-separated string
         val excludes = payload["excludes"]?.toString() ?: "[]"
@@ -77,8 +79,15 @@ class CommandHandler @Inject constructor(
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to report error", e)
+                } finally {
+                    apiRepository.acknowledgeCommand(command.id)
                 }
             }
+            return
+        }
+
+        if (proxyCapability == null) {
+            reportMissingProxyCapability(runId, "backup", command.id)
             return
         }
 
@@ -89,6 +98,7 @@ class CommandHandler @Inject constructor(
             .putString("source_path", sourcePath)
             .putString("destination_path", destinationPath)
             .putString("backend", backend)
+            .putString("proxy_capability", proxyCapability)
             .putString("excludes", excludes)
             .putInt("command_id", command.id)
             .build()
@@ -99,7 +109,7 @@ class CommandHandler @Inject constructor(
 
         workManager.enqueueUniqueWork(
             "backup_$jobName",
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             backupRequest
         )
 
@@ -114,6 +124,8 @@ class CommandHandler @Inject constructor(
         val sourcePath = payload["source_path"]?.jsonPrimitive?.content ?: ""
         val destinationPath = payload["destination_path"]?.jsonPrimitive?.content ?: ""
         val backend = payload["backend"]?.jsonPrimitive?.content ?: "proxy"
+        val proxyCapability = (payload["backend_options"] as? JsonObject)
+            ?.get("proxy_capability")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
         val snapshot = payload["snapshot"]?.jsonPrimitive?.content
         val cleanRestore = payload["clean_restore"]?.jsonPrimitive?.boolean ?: false
         val dryRun = payload["dry_run"]?.jsonPrimitive?.boolean ?: false
@@ -137,8 +149,15 @@ class CommandHandler @Inject constructor(
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to report error", e)
+                } finally {
+                    apiRepository.acknowledgeCommand(command.id)
                 }
             }
+            return
+        }
+
+        if (proxyCapability == null) {
+            reportMissingProxyCapability(runId, "restore", command.id)
             return
         }
 
@@ -148,6 +167,7 @@ class CommandHandler @Inject constructor(
             .putString("run_id", runId)
             .putString("source_path", sourcePath)
             .putString("destination_path", destinationPath)
+            .putString("proxy_capability", proxyCapability)
             .putString("snapshot", snapshot)
             .putBoolean("clean_restore", cleanRestore)
             .putBoolean("dry_run", dryRun)
@@ -160,11 +180,32 @@ class CommandHandler @Inject constructor(
 
         workManager.enqueueUniqueWork(
             "restore_$jobName",
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             restoreRequest
         )
 
         Log.d(TAG, "Restore work enqueued for job: $jobName")
+    }
+
+    private fun reportMissingProxyCapability(runId: String, operation: String, commandId: Int) {
+        val message = "Android proxy $operation command missing required proxy_capability"
+        Log.e(TAG, message)
+        scope.launch {
+            try {
+                apiRepository.reportProgress(
+                    com.backer.android.data.api.models.ProgressReport(
+                        runId = runId,
+                        status = "failed",
+                        progressPercent = 0,
+                        message = message
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to report error", e)
+            } finally {
+                apiRepository.acknowledgeCommand(commandId)
+            }
+        }
     }
 
     private fun handleBrowseCommand(command: BackupCommand) {

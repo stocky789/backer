@@ -974,11 +974,11 @@ exit 1
         return rc == 0 and "SUCCESS" in stdout
 
     def capture_vm_config(self, vm_name: str) -> dict[str, Any] | None:
-        """Capture comprehensive VM configuration for backup/restore.
+        """Capture VM configuration for backup and restore.
 
-        Captures ALL VM settings including firmware, processor, memory,
+        Captures VM settings including firmware, processor, memory,
         network adapters, security, GPU assignments, and cluster status.
-        This config can be used to fully recreate a VM with identical settings.
+        Restore code uses this config to recreate a VM with matching settings.
 
         Args:
             vm_name: VM name to capture config from
@@ -993,7 +993,7 @@ $vmName = '{vm_name}'
 try {{
     $vm = Get-VM -Name $vmName -ErrorAction Stop
 
-    # Build comprehensive config object
+    # Build the config object used by restore planning.
     $config = @{{
         capture_version = "2.0"
         captured_at = (Get-Date).ToString('o')
@@ -1376,7 +1376,7 @@ try {{
             if "Error" in config:
                 logger.error(f"VM config capture error: {config['Error']}")
                 return None
-            logger.info(f"Captured comprehensive config for VM: {vm_name}")
+            logger.info(f"Captured VM config for VM: {vm_name}")
             return config
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse VM config JSON: {e}")
@@ -1389,7 +1389,7 @@ try {{
         config: dict[str, Any],
         network_mapping: dict[str, str] | None = None,
     ) -> tuple[bool, list[str]]:
-        """Apply comprehensive configuration to an existing VM.
+        """Apply saved configuration to an existing VM.
 
         This method applies all captured settings from a vm_full_config.json
         to an existing VM. The VM should already exist and be in Off state.
@@ -2222,7 +2222,7 @@ try {{
         }}
 
     # Final verification: ensure the export path is completely empty
-    # This catches any edge cases where cleanup didn't fully succeed
+    # This catches leftover files from partial cleanup.
     $remainingItems = Get-ChildItem -Path $localExportPath -ErrorAction SilentlyContinue
     if ($remainingItems) {{
         # Something is still in the export folder - remove it
@@ -3622,7 +3622,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
     ) -> dict[str, Any]:
         """Generate a dry-run result showing what restore would do without executing.
 
-        Returns a comprehensive plan of all operations that would be performed,
+        Returns a plan of restore operations,
         files that would be copied, settings that would be applied, and potential
         issues that might occur.
 
@@ -4513,8 +4513,8 @@ Write-Host ("=" * 70) -ForegroundColor Cyan
                     {"status": "starting", "vm": vm_name, "mode": backup_mode}
                 )
 
-            # Capture comprehensive VM configuration BEFORE any changes
-            # This ensures we capture the exact state including firmware, GPU, etc.
+            # Capture VM configuration before any changes.
+            # Restore needs the exact state, including firmware and GPU assignments.
             if progress_callback:
                 progress_callback(
                     {"status": "capturing_config", "vm": vm_name}
@@ -4523,10 +4523,10 @@ Write-Host ("=" * 70) -ForegroundColor Cyan
             vm_config = self.api.capture_vm_config(vm_name)
             if vm_config:
                 result["vm_config"] = vm_config
-                logger.info(f"Captured comprehensive config for VM: {vm_name}")
+                logger.info(f"Captured VM config for VM: {vm_name}")
             else:
                 logger.warning(
-                    f"Failed to capture comprehensive config for VM: {vm_name}, "
+                    f"Failed to capture VM config for VM: {vm_name}, "
                     "backup will continue but restore may be limited"
                 )
 
@@ -4608,7 +4608,7 @@ if (Test-Path $path) {{
                     except ValueError:
                         pass
 
-                # Save comprehensive VM config to backup location
+                # Save VM config to backup location.
                 # This is saved alongside the VM export for full restore capability
                 if vm_config:
                     if progress_callback:
@@ -4943,7 +4943,7 @@ Write-Output "SUCCESS"
         dry_run: bool = False,
         preflight_only: bool = False,
     ) -> dict[str, Any]:
-        """Restore a Hyper-V VM from a backup with comprehensive settings recovery.
+        """Restore a Hyper-V VM from a backup with saved settings.
 
         Supports multiple restore modes:
         - auto: Try in-place if VM exists, then import, then rebuild (recommended)
@@ -5022,7 +5022,7 @@ Write-Output "SUCCESS"
                     result["errors"].append("Invalid UNC path format")
                     return result
 
-            # Step 1: Load comprehensive config if available
+            # Step 1: Load saved config if available
             if progress_callback:
                 progress_callback({"status": "loading_config", "path": import_path})
 
@@ -5032,7 +5032,7 @@ Write-Output "SUCCESS"
             )
             if full_config:
                 cfg_ver = full_config.get('capture_version', '1.0')
-                logger.info(f"Loaded comprehensive config from backup (version {cfg_ver})")
+                logger.info(f"Loaded VM config from backup (version {cfg_ver})")
                 result["config_loaded"] = True
             else:
                 logger.info("No vm_full_config.json found, will use limited restore")
@@ -5198,7 +5198,7 @@ Write-Output "SUCCESS"
                     result["errors"].append(rebuild_result.get("error", "Rebuild failed"))
                     return result
 
-            # Step 4: Apply comprehensive config if available and restore succeeded
+            # Step 4: Apply saved config if available and restore succeeded
             if result["success"] and full_config and actual_mode in ("import", "rebuild"):
                 if progress_callback:
                     progress_callback({"status": "applying_config", "vm": result["vm_name"]})
@@ -5790,7 +5790,7 @@ try {{
     }}
 
     # Step 3: Clean up any leftover VM folders by searching all known storage locations
-    # This is fully dynamic - discovers paths from cluster, VMs, and VMHost config
+    # Discover paths from cluster, VMs, and VMHost config.
     $pathsToCheck = @()
 
     # Get paths from Cluster Shared Volumes (if this is a cluster node)
@@ -7672,7 +7672,7 @@ try {{
         return False, f"Could not find owner node for VM '{vm_name}'"
 
     def capture_vm_config(self, vm_name: str) -> dict[str, Any] | None:
-        """Capture comprehensive VM configuration from the owner node.
+        """Capture VM configuration from the owner node.
 
         Routes to the owner node and adds cluster-specific config.
 

@@ -8,6 +8,7 @@
     <string name="setup_description">Enter your Backer server URL to register this device as a backup agent.</string>
     <string name="server_url_label">Server URL</string>
     <string name="server_url_placeholder">https://backer.example.com:8420</string>
+    <string name="enrollment_token_label">Enrollment token</string>
     <string name="test_connection">Test Connection</string>
     <string name="register_agent">Register Agent</string>
     <string name="connection_success">Connected to server</string>

@@ -2,41 +2,57 @@
 
 Open-source backup management with a web UI. Supports agent-based backups for Windows/Linux machines and Proxmox VE hypervisor integration.
 
-**Default Login**: `admin` / `admin`
+On first start, Backer opens a setup wizard. Create the administrator account there; no password is stored in an environment file.
 
 ## Quick Start
 
 ### Docker Compose (fastest)
 
 ```bash
-git clone https://github.com/stocky789/backer.git
+git clone https://git.stockhome.com.au/stocky789/backer.git
 cd backer
-sudo docker-compose up -d
+sudo docker compose up -d --build
 ```
 
 Access the web UI at `http://localhost:8420` (or `http://your-server:8420` on remote VM).
 
-**Default login:** `admin` / `admin`
+Get the one-time setup token from the startup logs, then open the URL and complete the setup wizard:
+
+```bash
+sudo docker compose logs backer | grep 'First-run setup token'
+```
+
+For the Linux installer, use `sudo journalctl -u backer -b` and find the same line.
+Set `BACKER_SETUP_TOKEN` in the server environment before first start to use an
+operator-chosen token. Enter the address agents will use to reach Backer (for example,
+`http://192.168.1.100:8420` or `https://backer.example.com`).
 
 ### Linux Installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
+curl -fsSL https://git.stockhome.com.au/stocky789/backer/raw/branch/main/install.sh | sudo bash
 ```
 
 Access the web UI at `http://your-server:8420`.
 
+Complete the setup wizard at the displayed address to create your administrator account.
+Find its setup token with `sudo journalctl -u backer -b`; set `BACKER_SETUP_TOKEN`
+before first start to choose it yourself.
+
 ## Development Status
 
 ### Agent Backups
-- **Windows**: ✅ Operational (backup & restore)
-- **Linux**: ✅ Operational (backup & restore)
-- **Metadata Discovery**: ✅ Can adopt existing jobs from storage repositories
+- **Windows**: Supported for backup and restore. SMB targets need administrator permissions and one credential set per server.
+- **Linux**: Supported for backup and restore.
+- **Metadata discovery**: Supported for adopting existing jobs from storage repositories.
 
 ### Hypervisor Backups
-- **Proxmox Standalone Nodes**: ✅ Fully functional (backup & restore)
-- **Hyper-V Clusters**: ⚠️ Operational (backup & restore), auto-discovery from existing storage repos requires more testing
-- **Unraid**: 🚧 Next implementation
+- **Proxmox standalone nodes**: Supported for VM and LXC backup and restore.
+- **Hyper-V clusters**: Experimental. Backup and restore paths exist, but storage auto-discovery still needs validation.
+- **Unraid**: Experimental. Do not treat it as release-ready yet.
+
+### Mobile
+- **Android agent**: Experimental. The project contains an Android client, but local validation currently requires Android SDK setup.
 
 ## Installation
 
@@ -44,29 +60,30 @@ Access the web UI at `http://your-server:8420`.
 
 ```bash
 # Stable release
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/install.sh | sudo bash
+curl -fsSL https://git.stockhome.com.au/stocky789/backer/raw/branch/main/install.sh | sudo bash
 
-# Development branch (latest features)
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/install.sh | sudo bash -s -- --branch dev
+# Development branch
+curl -fsSL https://git.stockhome.com.au/stocky789/backer/raw/branch/dev/install.sh | sudo bash -s -- --branch dev
 ```
 
 Access the web UI at `http://your-server:8420`
 
 ### Docker
 
-The Docker image includes pre-installed backup tools (rclone, restic, kopia) for immediate use. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
+Docker downloads rclone, Restic, and Kopia on first use into its persistent data volume, verifying each release checksum. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
 
 **Docker Compose** is the recommended way to run Backer server. See Quick Start above.
 
 #### Docker Run (Alternative)
 
 ```bash
+docker build -t backer:0.7.2 .
 docker run -d --name backer \
   -p 8420:8420 \
   -v backer-data:/data \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
-  ghcr.io/stocky789/backer:latest
+  backer:0.7.2
 ```
 
 #### Docker Security Notes
@@ -74,20 +91,20 @@ docker run -d --name backer \
 - `SYS_ADMIN` capability is required for mounting SMB/NFS shares inside the container
 - `apparmor:unconfined` allows the container to perform mount operations
 - The `backer` user runs with minimal privileges (non-root)
-- Backup tools are downloaded on first use and cached in the persistent volume
+- Backup tools are downloaded on first use, checksum-verified, and cached in the persistent volume
 
 ### Windows Agent
 
-Download `backer-agent-setup.exe` from [Releases](https://github.com/stocky789/backer/releases).
+Download `backer-agent-setup.exe` from [Releases](https://git.stockhome.com.au/stocky789/backer/releases/tag/release-main).
 
 ### Linux Agent
 
 ```bash
 # Stable
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/main/scripts/install-agent.sh | sudo bash
+curl -fsSL https://git.stockhome.com.au/stocky789/backer/raw/branch/main/scripts/install-agent.sh | sudo bash
 
 # Development branch
-curl -fsSL https://raw.githubusercontent.com/stocky789/backer/dev/scripts/install-agent.sh | sudo bash -s -- --branch dev
+curl -fsSL https://git.stockhome.com.au/stocky789/backer/raw/branch/dev/scripts/install-agent.sh | sudo bash -s -- --branch dev
 ```
 
 ## CLI Usage
@@ -113,7 +130,9 @@ backer restore /backup /destination
 - Agent-based backups for Windows and Linux
 - Proxmox VE hypervisor backup (VMs and LXC containers)
 - Multiple backends: rclone, restic, kopia
-- Storage: SMB, NFS, local, S3
+- Storage: SMB, NFS, local, and S3-compatible storage through Restic only
+
+S3 support is a managed Restic configuration (endpoint, region, path style, and encrypted provider credentials). rclone and Kopia cloud remotes are not configured by Backer.
 - Cron scheduling with retention policies
 - Web dashboard with backup history
 
@@ -133,13 +152,13 @@ Backer supports multiple storage backend types for backup destinations:
 - Requires mount permissions (root or passwordless sudo)
 
 ### Local Directory (Docker/Server-Side)
-**New**: Store backups directly on the Backer server filesystem using local paths.
+Store backups directly on the Backer server filesystem using local paths.
 
 #### Why Local Directory?
-- **Docker-friendly**: No complex SMB/NFS mounts inside containers
-- **Cross-platform**: Works seamlessly with Windows and Linux agents
-- **Simplified permissions**: No network share authentication needed
-- **Reverse proxy compatible**: Works with Cloudflare, nginx, Traefik, etc.
+- **Docker-friendly**: Avoids SMB/NFS mounts inside containers
+- **Agent support**: Works with Windows and Linux agents
+- **Simpler permissions**: No network share authentication needed
+- **Reverse proxy compatible**: Works with Cloudflare, nginx, Traefik, and similar proxies
 
 #### How It Works
 Agents stream backup data to the server via HTTP using the "proxy backend". The server executes the actual backup tool (restic/kopia/rclone) locally on the configured path.
@@ -149,7 +168,7 @@ Agents stream backup data to the server via HTTP using the "proxy backend". The 
 # docker-compose.yml
 services:
   backer:
-    image: ghcr.io/stocky789/backer:latest
+    build: .
     volumes:
       - backer-data:/data
       # Mount your backup destination into the container
@@ -158,11 +177,6 @@ services:
       - ./backups:/data/backups               # Local folder
       # OR
       - /path/to/external:/data/external      # External drive
-    environment:
-      # Set your public URL for reverse proxy support
-      BACKER_PUBLIC_URL: https://backer.example.com
-      # Or for local network:
-      # BACKER_PUBLIC_URL: http://192.168.1.100:8420
 ```
 
 #### Usage
@@ -175,10 +189,7 @@ services:
 The agents will automatically stream data to the server, which writes it to the mounted path.
 
 #### Reverse Proxy Configuration
-If using a reverse proxy (Cloudflare, nginx, etc.), set `BACKER_PUBLIC_URL` to your external domain:
-```bash
-BACKER_PUBLIC_URL: https://backer.example.com
-```
+If using a reverse proxy (Cloudflare, nginx, etc.), enter its external address in **Settings** → **Public URL** (or in the setup wizard on first start).
 
 Agents will use this URL to connect and stream backup data.
 
@@ -237,9 +248,8 @@ Connection pool benefits:
 
 ## Links
 
-- [Releases](https://github.com/stocky789/backer/releases)
-- [Issues](https://github.com/stocky789/backer/issues)
-- [Development Branch](https://github.com/stocky789/backer/tree/dev)
+- [Releases](https://git.stockhome.com.au/stocky789/backer/releases/tag/release-main)
+- [Repository](https://git.stockhome.com.au/stocky789/backer)
 
 ## License
 

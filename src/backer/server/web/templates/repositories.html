@@ -84,7 +84,7 @@
                             {% elif repo.repo_type == 'nfs' %}
                             <span class="status-badge info">NFS</span>
                             {% elif repo.repo_type == 'local' %}
-                            <span class="status-badge success">Local</span>
+                            <span class="status-badge success">Proxy / Kopia</span>
                             {% else %}
                             <span class="status-badge muted">{{ repo.repo_type }}</span>
                             {% endif %}
@@ -227,7 +227,7 @@
 </div>
 
 <!-- Adopt Orphaned Backups Modal -->
-<div id="adoptOrphanedModal" class="modal" style="display: none;">
+<dialog id="adoptOrphanedModal" class="modal">
     <div class="modal-content" style="max-width: 600px;">
         <div class="modal-header">
             <span class="modal-title">Adopt Orphaned Backups</span>
@@ -267,10 +267,10 @@
             <button class="btn btn-primary" onclick="executeAdoptBackups()">Adopt Backups</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Adoption History Modal -->
-<div id="adoptionHistoryModal" class="modal" style="display: none;">
+<dialog id="adoptionHistoryModal" class="modal">
     <div class="modal-content" style="max-width: 700px;">
         <div class="modal-header">
             <span class="modal-title">Adoption History</span>
@@ -285,10 +285,10 @@
             <button class="btn btn-secondary" onclick="hideAdoptionHistoryModal()">Close</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Add Repository Modal -->
-<div id="addModal" class="modal" style="display: none;">
+<dialog id="addModal" class="modal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
             <span class="modal-title">
@@ -306,6 +306,7 @@
                         <option value="smb">SMB/CIFS (Windows Shares)</option>
                         <option value="nfs">NFS (Linux/Unix)</option>
                         <option value="local">Local Directory (Server Path)</option>
+                        <option value="s3">S3-compatible (Restic)</option>
                     </select>
                 </div>
 
@@ -326,6 +327,18 @@
                         <input type="text" id="localRepoName" class="form-input" placeholder="My Local Backups">
                         <div class="form-hint">A friendly name for this repository</div>
                     </div>
+                </div>
+
+                <div id="s3Config" style="display: none;">
+                    <div class="form-group"><label class="form-label">Repository Name</label><input type="text" id="s3Name" class="form-input" placeholder="Offsite S3"></div>
+                    <div class="form-group"><label class="form-label">Endpoint</label><input type="url" id="s3Endpoint" class="form-input" placeholder="https://s3.example.com"></div>
+                    <div class="form-group"><label class="form-label">Region</label><input type="text" id="s3Region" class="form-input" value="us-east-1"></div>
+                    <div class="form-group"><label class="form-label">Bucket</label><input type="text" id="s3Bucket" class="form-input"></div>
+                    <div class="form-group"><label class="form-label">Prefix (optional)</label><input type="text" id="s3Prefix" class="form-input" placeholder="backer"></div>
+                    <div class="form-group"><label class="form-label">Access Key ID</label><input type="text" id="s3AccessKey" class="form-input"></div>
+                    <div class="form-group"><label class="form-label">Secret Access Key</label><input type="password" id="s3SecretKey" class="form-input"></div>
+                    <div class="form-group"><label><input type="checkbox" id="s3PathStyle" checked> Use path-style bucket access</label></div>
+                    <div class="form-group"><label class="form-label">Repository Password</label><input type="password" id="s3RepositoryPassword" class="form-input"><div class="form-hint">Encrypts the Restic repository; it is not your S3 secret.</div></div>
                 </div>
 
                 <div id="smbCredentials">
@@ -405,10 +418,10 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Scan Results Modal -->
-<div id="scanModal" class="modal" style="display: none;">
+<dialog id="scanModal" class="modal">
     <div class="modal-content modal-xl">
         <div class="modal-header">
             <span class="modal-title">
@@ -427,7 +440,7 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <style>
 /* Wizard Breadcrumb */
@@ -722,12 +735,12 @@ function filterRepos() {
 }
 
 function showAddModal() {
-    document.getElementById('addModal').style.display = 'flex';
+    document.getElementById('addModal').showModal();
     resetWizard();
 }
 
 function hideAddModal() {
-    document.getElementById('addModal').style.display = 'none';
+    document.getElementById('addModal').close();
 }
 
 function resetWizard() {
@@ -738,6 +751,13 @@ function resetWizard() {
     document.getElementById('username').value = '';
     document.getElementById('password').value = '';
     document.getElementById('domain').value = '';
+    document.getElementById('s3Name').value = '';
+    document.getElementById('s3Endpoint').value = '';
+    document.getElementById('s3Bucket').value = '';
+    document.getElementById('s3Prefix').value = '';
+    document.getElementById('s3AccessKey').value = '';
+    document.getElementById('s3SecretKey').value = '';
+    document.getElementById('s3RepositoryPassword').value = '';
     document.getElementById('discoverError').style.display = 'none';
     currentServer = '';
     currentShare = '';
@@ -748,15 +768,17 @@ function onTypeChange() {
     currentType = document.getElementById('repoType').value;
     const isLocal = currentType === 'local';
     const isSmb = currentType === 'smb';
+    const isS3 = currentType === 's3';
 
     // Show/hide fields based on type
     document.getElementById('smbCredentials').style.display = isSmb ? 'block' : 'none';
-    document.getElementById('serverGroup').style.display = isLocal ? 'none' : 'block';
+    document.getElementById('serverGroup').style.display = (isLocal || isS3) ? 'none' : 'block';
     document.getElementById('localPathGroup').style.display = isLocal ? 'block' : 'none';
+    document.getElementById('s3Config').style.display = isS3 ? 'block' : 'none';
 
     // Update the button text
     const discoverBtn = document.getElementById('discoverBtn');
-    discoverBtn.textContent = isLocal ? 'Save Local Repository' : 'Connect & Browse Shares';
+    discoverBtn.textContent = isLocal ? 'Save Local Repository' : (isS3 ? 'Save & Test S3' : 'Connect & Browse Shares');
 }
 
 function handleDiscoverClick() {
@@ -764,9 +786,33 @@ function handleDiscoverClick() {
     const repoType = document.getElementById('repoType').value;
     if (repoType === 'local') {
         saveLocalRepository();
+    } else if (repoType === 's3') {
+        saveS3Repository();
     } else {
         discoverShares();
     }
+}
+
+async function saveS3Repository() {
+    const name = document.getElementById('s3Name').value.trim();
+    const required = ['s3Endpoint', 's3Region', 's3Bucket', 's3AccessKey', 's3SecretKey', 's3RepositoryPassword'];
+    if (!name || required.some(id => !document.getElementById(id).value.trim())) {
+        showError('discoverError', 'Name, endpoint, region, bucket, credentials, and repository password are required');
+        return;
+    }
+    const response = await fetch('/api/v1/repositories', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, type: 's3', backend: 'restic', repository_password: document.getElementById('s3RepositoryPassword').value,
+            s3: {endpoint: document.getElementById('s3Endpoint').value, region: document.getElementById('s3Region').value,
+                bucket: document.getElementById('s3Bucket').value, prefix: document.getElementById('s3Prefix').value,
+                access_key_id: document.getElementById('s3AccessKey').value, secret_access_key: document.getElementById('s3SecretKey').value,
+                use_path_style: document.getElementById('s3PathStyle').checked}}),
+    });
+    const data = await response.json();
+    if (!response.ok) return showError('discoverError', data.detail || 'Failed to save S3 repository');
+    hideAddModal();
+    Toast.success(`S3 repository '${name}' saved; connection test started.`);
+    setTimeout(() => location.reload(), 1000);
 }
 
 function backToStep1() {
@@ -1257,19 +1303,14 @@ async function deleteRepo(repoId, repoName) {
     });
 }
 
-// Close modal on background click
-document.getElementById('addModal')?.addEventListener('click', function(e) {
-    if (e.target === this) hideAddModal();
-});
-
 // ============ Repository Scanning ============
 
 function showScanModal() {
-    document.getElementById('scanModal').style.display = 'flex';
+    document.getElementById('scanModal').showModal();
 }
 
 function hideScanModal() {
-    document.getElementById('scanModal').style.display = 'none';
+    document.getElementById('scanModal').close();
 }
 
 function closeScanModalAndRefresh() {
@@ -1593,10 +1634,6 @@ async function importMetadata() {
     btn.disabled = false;
 }
 
-document.getElementById('scanModal')?.addEventListener('click', function(e) {
-    if (e.target === this) closeScanModalAndRefresh();
-});
-
 // ============ Repository Wipe ============
 
 function wipeRepo(repoId, repoName) {
@@ -1872,7 +1909,7 @@ async function showAdoptOrphanedModal(preselectedHypervisorId) {
 
         document.getElementById('adopt-vm-count').textContent = selectedOrphanedVMs.size;
 
-        document.getElementById('adoptOrphanedModal').style.display = 'flex';
+        document.getElementById('adoptOrphanedModal').showModal();
     } catch (error) {
         console.error('Failed to load hypervisors:', error);
         Toast.error('Failed to load hypervisors: ' + error.message);
@@ -1880,7 +1917,7 @@ async function showAdoptOrphanedModal(preselectedHypervisorId) {
 }
 
 function hideAdoptOrphanedModal() {
-    document.getElementById('adoptOrphanedModal').style.display = 'none';
+    document.getElementById('adoptOrphanedModal').close();
 }
 
 async function executeAdoptBackups() {
@@ -2020,11 +2057,11 @@ function showAdoptionHistory(vmid) {
         content.innerHTML = historyHtml;
     }
 
-    document.getElementById('adoptionHistoryModal').style.display = 'flex';
+    document.getElementById('adoptionHistoryModal').showModal();
 }
 
 function hideAdoptionHistoryModal() {
-    document.getElementById('adoptionHistoryModal').style.display = 'none';
+    document.getElementById('adoptionHistoryModal').close();
 }
 
 // Auto-load orphaned backups when user clicks "Scan" on a repository

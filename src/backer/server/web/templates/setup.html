@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Set up Backer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-page">
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <div class="login-logo"><img src="/static/logo.svg" alt="Backer"></div>
+                <h1>Set up Backer</h1>
+                <p>Create the administrator account and agent connection address.</p>
+            </div>
+            <div class="login-body">
+                {% if error %}<div class="login-alert"><span>{{ error }}</span></div>{% endif %}
+                <form method="POST" action="/setup">
+                    <div class="form-group">
+                        <label class="form-label" for="setup_token">Setup token</label>
+                        <input class="form-input" id="setup_token" name="setup_token" type="password" required autocomplete="one-time-code">
+                        <div class="form-hint">Find this token in the server startup logs.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="username">Administrator username</label>
+                        <input class="form-input" id="username" name="username" required autofocus value="{{ username }}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="display_name">Display name</label>
+                        <input class="form-input" id="display_name" name="display_name" required value="{{ display_name }}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="password">Password</label>
+                        <input class="form-input" id="password" name="password" type="password" minlength="12" required autocomplete="new-password">
+                        <div class="form-hint">Use at least 12 characters.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="confirm_password">Confirm password</label>
+                        <input class="form-input" id="confirm_password" name="confirm_password" type="password" minlength="12" required autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="public_url">Public address for agents</label>
+                        <input class="form-input" id="public_url" name="public_url" type="url" required value="{{ public_url }}" placeholder="https://backer.example.com" inputmode="url">
+                        <div class="form-hint">
+                            <strong>Recommended:</strong> <code>https://backer.example.com</code><br>
+                            For WAN or mixed LAN/WAN clients, use one public HTTPS address. A reverse proxy receives HTTPS on port 443 and forwards internally to Backer on port 8420—do not add <code>:8420</code> here. Only include a port when your public HTTPS endpoint deliberately uses a non-standard one.<br>
+                            Your NAS remains private: agents connect to Backer, which writes to its mounted local storage.
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="timezone">Timezone</label>
+                        <select class="form-input" id="timezone" name="timezone">
+                            {% for value in timezones %}
+                            <option value="{{ value }}" {% if timezone == value %}selected{% endif %}>{{ value | replace('_', ' ') }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <button type="submit" class="btn-login">Create administrator account</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

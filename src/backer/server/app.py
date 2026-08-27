@@ -6,11 +6,13 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import socket
 import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,8 +24,18 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from backer import __version__
+from backer.core.repo_metadata import file_lock
 from backer.server import timezone as tz
-from backer.server.auth import generate_agent_token, verify_agent_token
+from backer.server.auth import (
+    enrollment_code_expired,
+    generate_agent_token,
+    generate_proxy_capability,
+    hash_enrollment_code,
+    verify_agent_token,
+    verify_expired_proxy_capability,
+    verify_proxy_capability,
+)
+from backer.server.capabilities import validate_job_backend
 from backer.server.models import (
     BackupResult,
     Client,
@@ -36,12 +48,35 @@ from backer.server.models import (
     JobRunRequest,
     JobRunResponse,
 )
+from backer.server.repository_paths import get_job_subfolder as _get_job_subfolder
 from backer.server.scheduler import BackupScheduler
 from backer.server.storage import Storage
 from backer.server.tasks import Task, get_task_manager
 from backer.server.web.routes import router as web_router
 
 logger = logging.getLogger(__name__)
+
+_SECRET_KEYS = {
+    "password", "restic_password", "kopia_password", "repository_password", "storage_password", "client_secret",
+    "proxy_capability", "access_key_id", "secret_access_key",
+}
+
+
+def _redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: ("***" if key.lower() in _SECRET_KEYS else _redact_secrets(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
+
+
+def _serialized_kopia_operation(method):
+    """Serialize each connect/use/disconnect sequence for one repository."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with file_lock(self.repo_path.resolve() / ".backer-kopia.lock"):
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class ServerKopia:
@@ -120,6 +155,7 @@ class ServerKopia:
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"Command timed out: {' '.join(args)}")
 
+    @_serialized_kopia_operation
     def ensure_repo(self) -> bool:
         """Ensure kopia repository exists, creating if necessary.
 
@@ -173,6 +209,7 @@ class ServerKopia:
         except Exception:
             pass
 
+    @_serialized_kopia_operation
     def snapshot_create(
         self,
         source_dir: str | Path,
@@ -234,7 +271,7 @@ class ServerKopia:
         finally:
             self._disconnect()
 
-    def snapshot_list(self, job_name: str | None = None) -> list[dict[str, Any]]:
+    def _snapshot_list(self, job_name: str | None = None) -> list[dict[str, Any]]:
         """List snapshots, optionally filtered by job name.
 
         Args:
@@ -305,6 +342,11 @@ class ServerKopia:
         finally:
             self._disconnect()
 
+    @_serialized_kopia_operation
+    def snapshot_list(self, job_name: str | None = None) -> list[dict[str, Any]]:
+        return self._snapshot_list(job_name)
+
+    @_serialized_kopia_operation
     def snapshot_restore(
         self,
         snapshot_id: str,
@@ -350,6 +392,7 @@ class ServerKopia:
         finally:
             self._disconnect()
 
+    @_serialized_kopia_operation
     def find_latest_snapshot(self, job_name: str) -> str | None:
         """Find the latest snapshot ID for a job.
 
@@ -359,10 +402,21 @@ class ServerKopia:
         Returns:
             Snapshot ID or None
         """
-        snapshots = self.snapshot_list(job_name)
+        snapshots = self._snapshot_list(job_name)
         if snapshots:
             return snapshots[0].get("full_id")
         return None
+
+    @_serialized_kopia_operation
+    def maintenance(self, args: list[str]) -> dict[str, Any]:
+        """Run a non-secret Kopia maintenance command against this repo."""
+        if not self._connect():
+            return {"success": False, "error": "Failed to connect to repository"}
+        try:
+            rc, stdout, stderr = self._run_cmd(args, timeout=3600, check=False)
+            return {"success": rc == 0, "output": stdout, "error": stderr or None}
+        finally:
+            self._disconnect()
 
 
 # Characters not allowed in job names (prevent path traversal and shell injection)
@@ -460,55 +514,6 @@ def get_storage() -> Storage:
     return _storage
 
 
-def _get_default_public_url() -> str:
-    """Auto-detect the server's local IP address for the default public URL.
-
-    This is used on fresh installs so agents can connect without manual config.
-    Falls back to localhost if IP detection fails.
-    """
-    import socket
-
-    try:
-        # Create a socket to determine the local IP that would route to external addresses
-        # This doesn't actually make a connection, just determines the local interface
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # Use Google DNS as target (doesn't actually connect)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-
-        # Validate it's not a loopback address
-        if local_ip and not local_ip.startswith("127."):
-            return f"http://{local_ip}:8420"
-    except Exception:
-        pass  # Fall through to default
-
-    # Fallback: try to get hostname-based IP
-    try:
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
-        if local_ip and not local_ip.startswith("127."):
-            return f"http://{local_ip}:8420"
-    except Exception:
-        pass
-
-    # Final fallback
-    return "http://localhost:8420"
-
-
-def _get_job_subfolder(job_name: str) -> str:
-    """Get a safe subfolder name for a job.
-
-    Each job gets its own subfolder within the repository to prevent conflicts
-    between different backup jobs (especially important for restic/kopia which
-    initialize the repository on first use).
-    """
-    # Sanitize job name for use as folder name
-    # Replace any unsafe characters with underscores
-    import re
-    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', job_name)
-    return safe_name
-
-
 def _build_backup_command_payload(
     job: dict[str, Any],
     job_name: str,
@@ -526,8 +531,7 @@ def _build_backup_command_payload(
     Each job automatically gets its own subfolder within the destination
     to prevent conflicts between different backup jobs.
 
-    For Android agents, all repository types (SMB, NFS, local) are automatically
-    routed through the proxy backend since Android cannot mount network shares.
+    Android agents support local repositories through the proxy backend.
     """
     storage = storage or _storage
     if storage is None:
@@ -571,62 +575,32 @@ def _build_backup_command_payload(
 
     # If job has a repository, include credentials for agents
     repository_id = job.get("repository_id")
+    if is_android_client and not repository_id:
+        raise ValueError("Android agents support local repositories only")
     if repository_id:
         repo = storage.get_repository(repository_id)
         if repo:
             repo_type = repo.get("repo_type", "")
+            if is_android_client and repo_type != "local":
+                raise ValueError("Android agents support local repositories only")
 
-            # Get decrypted repository password
+            # Transport and encryption credentials are deliberately distinct.
+            storage_password = storage.get_storage_password(repository_id)
             repo_password = storage.get_repository_password(repository_id)
 
             if repo_type == "smb":
-                if is_android_client:
-                    # Android cannot mount SMB shares, route through proxy
-                    # Server will mount the SMB share and store the backup
-                    public_url = storage.get_setting("public_url", "http://localhost:8420")
-                    if public_url.startswith("https://"):
-                        proxy_scheme = "proxys"
-                        host_part = public_url[8:]
-                    else:
-                        proxy_scheme = "proxy"
-                        host_part = public_url[7:]
-
-                    proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
-                    payload["destination_path"] = proxy_uri
-                    payload["backend"] = "proxy"
-                    if repo_password:
-                        payload["backend_options"]["password"] = repo_password
-                    logger.debug(f"[BACKUP] Android client using proxy for SMB repo: {proxy_uri}")
-                else:
-                    # Include SMB connection info for agents that can mount shares
-                    payload["smb_server"] = repo.get("server")
-                    payload["smb_share"] = repo.get("share")
-                    payload["smb_username"] = repo.get("username")
-                    payload["smb_domain"] = repo.get("domain")
-                    if repo_password:
-                        payload["smb_password"] = repo_password
+                # Include SMB connection info for agents that can mount shares.
+                payload["smb_server"] = repo.get("server")
+                payload["smb_share"] = repo.get("share")
+                payload["smb_username"] = repo.get("username")
+                payload["smb_domain"] = repo.get("domain")
+                if storage_password:
+                    payload["smb_password"] = storage_password
 
             elif repo_type == "nfs":
-                if is_android_client:
-                    # Android cannot mount NFS shares, route through proxy
-                    public_url = storage.get_setting("public_url", "http://localhost:8420")
-                    if public_url.startswith("https://"):
-                        proxy_scheme = "proxys"
-                        host_part = public_url[8:]
-                    else:
-                        proxy_scheme = "proxy"
-                        host_part = public_url[7:]
-
-                    proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
-                    payload["destination_path"] = proxy_uri
-                    payload["backend"] = "proxy"
-                    if repo_password:
-                        payload["backend_options"]["password"] = repo_password
-                    logger.debug(f"[BACKUP] Android client using proxy for NFS repo: {proxy_uri}")
-                else:
-                    # NFS info (no password needed typically)
-                    payload["nfs_server"] = repo.get("server")
-                    payload["nfs_export"] = repo.get("share")
+                # NFS info (no password needed typically)
+                payload["nfs_server"] = repo.get("server")
+                payload["nfs_export"] = repo.get("share")
 
             elif repo_type == "local":
                 # For local repositories, use proxy backend
@@ -655,34 +629,129 @@ def _build_backup_command_payload(
 
                 # Override backend to use proxy
                 payload["backend"] = "proxy"
-
-                # Include repository password for proxy backend
-                if repo_password:
-                    payload["backend_options"]["password"] = repo_password
+                payload["backend_options"]["proxy_capability"] = generate_proxy_capability(
+                    client_id=client_id or "", repo_id=repository_id, job_name=job_name,
+                    run_id=run_id, subfolder=f"Agents/{job_subfolder}", operation="backup",
+                )
 
                 logger.debug(f"[BACKUP] Using proxy for local repo: {proxy_uri} (scheme={proxy_scheme})")
+
+            elif repo_type == "s3":
+                from backer.server.s3 import parse_s3_config
+
+                s3 = {
+                    **repo.get("config", {}).get("s3", {}),
+                    **(storage.get_repository_provider_credentials(repository_id) or {}),
+                }
+                if backend != "restic":
+                    raise ValueError("S3 repositories are supported only with Restic")
+                payload["backend_options"]["s3"] = s3
+                payload["destination_path"] = parse_s3_config(s3).restic_repository
 
             # For restic/kopia backends, include the repository password
             # This is needed for the agent to authenticate with the backup repository
             if backend in ("restic", "kopia") and repo_password:
                 # Only set if not already provided in backend_options
-                if "password" not in backend_options:
-                    payload["backend_options"]["password"] = repo_password
+                if "repository_password" not in backend_options:
+                    payload["backend_options"]["repository_password"] = repo_password
                     logger.debug(f"[BACKUP] Added repository password to backend_options for {backend} backend")
 
     # Also check if password is directly in job's backend_options (legacy/manual config)
     # This handles cases where the password was set directly on the job config
     if backend in ("restic", "kopia"):
-        if "password" not in payload["backend_options"]:
+        if "repository_password" not in payload["backend_options"]:
             # Check for password in job's backend_options
             # Note: UI stores this as "restic_password" for both restic and kopia
-            job_password = job.get("backend_options", {}).get("password")
+            job_options = job.get("backend_options", {})
+            job_password = job_options.get("repository_password") or job_options.get("password")
             if not job_password:
                 job_password = job.get("backend_options", {}).get("restic_password")
             if job_password:
-                payload["backend_options"]["password"] = job_password
+                payload["backend_options"]["repository_password"] = job_password
 
     return payload
+
+
+def _validate_job_config(config: dict[str, Any], storage: Storage) -> None:
+    """Reject unsupported backend/repository combinations before persistence."""
+    backend = config.get("backend", "rclone")
+    repo_type = None
+    if repo_id := config.get("repository_id"):
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=400, detail="Repository not found")
+        repo_type = repo.get("repo_type")
+    error = validate_job_backend(backend, repo_type)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    if (client_id := config.get("client_id")):
+        client = storage.get_client(client_id)
+        if client and (client.os_info or "").lower().startswith("android"):
+            if repo_type != "local":
+                raise HTTPException(status_code=400, detail="Android agents support local repositories only")
+
+
+def _restore_redacted_secrets(value: Any, existing: Any) -> Any:
+    """Keep secrets hidden by GET unchanged when its response is PUT back."""
+    if isinstance(value, list) and isinstance(existing, list):
+        return [
+            _restore_redacted_secrets(item, existing[index] if index < len(existing) else None)
+            for index, item in enumerate(value)
+        ]
+    if not isinstance(value, dict) or not isinstance(existing, dict):
+        return value
+    return {
+        key: (
+            existing[key]
+            if key.lower() in _SECRET_KEYS and item == "***" and key in existing
+            else _restore_redacted_secrets(item, existing.get(key))
+        )
+        for key, item in value.items()
+    }
+
+
+def _refresh_proxy_capabilities(commands: list[dict[str, Any]], client_id: str) -> list[dict[str, Any]]:
+    """Mint short-lived proxy credentials when a queued command is delivered."""
+    for command in commands:
+        payload = command.get("payload", {})
+        operation = command.get("command_type")
+        if payload.get("backend") != "proxy" or operation not in {"backup", "restore"}:
+            continue
+        proxy_path = payload.get("destination_path" if operation == "backup" else "source_path", "")
+        match = re.search(r"/repo/([^/]+)/(.+)$", proxy_path)
+        if not match:
+            continue
+        repo_id, subfolder = match.groups()
+        payload.setdefault("backend_options", {})["proxy_capability"] = generate_proxy_capability(
+            client_id=client_id, repo_id=repo_id, job_name=payload.get("job_name", ""),
+            run_id=payload.get("run_id", ""), subfolder=subfolder, operation=operation,
+        )
+    return commands
+
+
+def _pending_proxy_command_authorizes(
+    storage: Storage, client_id: str, claims: dict[str, Any], operation: str,
+) -> bool:
+    """An expired capability is usable only while its exact command is queued."""
+    command_operation = claims.get("operation")
+    if claims.get("sub") != client_id or (
+        command_operation != operation
+        and not (operation == "check" and command_operation in {"backup", "restore"})
+    ):
+        return False
+    for command in storage.get_pending_commands(client_id):
+        payload = command["payload"]
+        if command["command_type"] != command_operation or payload.get("backend") != "proxy":
+            continue
+        path = payload.get("destination_path" if command_operation == "backup" else "source_path", "")
+        match = re.search(r"/repo/([^/]+)/(.+)$", path)
+        if match and (
+            match.group(1), payload.get("job_name"), payload.get("run_id"), match.group(2), command_operation,
+        ) == (
+            claims.get("repo"), claims.get("job"), claims.get("run"), claims.get("subfolder"), claims.get("operation"),
+        ):
+            return True
+    return False
 
 
 def trigger_job_internal(job_name: str) -> None:
@@ -697,6 +766,12 @@ def trigger_job_internal(job_name: str) -> None:
     job = _storage.get_job(job_name)
     if not job:
         logger.error(f"Job not found: {job_name}")
+        return
+
+    try:
+        _validate_job_config(job, _storage)
+    except HTTPException as exc:
+        logger.error(f"Job {job_name} cannot run: {exc.detail}")
         return
 
     client_id = job.get("client_id")
@@ -904,7 +979,7 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
             credentials_file = None
 
             if repo_type == "smb":
-                repo_password = _storage.get_repository_password(repository_id)
+                repo_password = _storage.get_storage_password(repository_id)
                 repo_username = repository.get("username", "guest")
                 repo_domain = repository.get("domain", "")
 
@@ -1146,7 +1221,7 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         # Write metadata to repository
         try:
             # Get repository password for metadata writing
-            repo_password = _storage.get_repository_password(repository_id)
+            repo_password = _storage.get_storage_password(repository_id)
             repo_with_password = {**repository, "password": repo_password}
 
             _write_backup_metadata_to_repo(
@@ -1242,7 +1317,7 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
         # Get repository password for SMB storage
         repo_password = None
         if repo_type == "smb" and repository.get("has_password"):
-            repo_password = _storage.get_repository_password(repository_id)
+            repo_password = _storage.get_storage_password(repository_id)
 
         # Create repository dict with password for ensure_backer_storage
         repo_with_password = {**repository, "password": repo_password}
@@ -1571,7 +1646,7 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
 
         # Get SMB credentials for authentication (required for WinRM double-hop)
         smb_username = repository.get("username", "")
-        smb_password = _storage.get_repository_password(repository_id)
+        smb_password = _storage.get_storage_password(repository_id)
         smb_domain = repository.get("domain", "")
 
         # Start job progress tracking for activity panel
@@ -1734,7 +1809,7 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     if copies_to_keep > 0:
                         logger.info(f"Enforcing copies_to_keep={copies_to_keep} for VM {guest_name}")
                         try:
-                            repo_password = _storage.get_repository_password(repository_id)
+                            repo_password = _storage.get_storage_password(repository_id)
                             repo_with_password = {**repository, "password": repo_password}
                             _enforce_copies_limit(
                                 repository=repo_with_password,
@@ -1790,7 +1865,7 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         # Write metadata to repository
         try:
             # Get repository password for metadata writing
-            repo_password = _storage.get_repository_password(repository_id)
+            repo_password = _storage.get_storage_password(repository_id)
             repo_with_password = {**repository, "password": repo_password}
 
             _write_backup_metadata_to_repo(
@@ -1906,7 +1981,7 @@ def _trigger_hyperv_cluster_backup_job(job_id: str, job: dict, hypervisor: dict)
 
         # Get SMB credentials
         smb_username = repository.get("username", "")
-        smb_password = _storage.get_repository_password(repository_id)
+        smb_password = _storage.get_storage_password(repository_id)
         smb_domain = repository.get("domain", "")
 
         # Start job progress tracking
@@ -2059,7 +2134,7 @@ def _trigger_hyperv_cluster_backup_job(job_id: str, job: dict, hypervisor: dict)
                     if copies_to_keep > 0:
                         logger.info(f"Enforcing copies_to_keep={copies_to_keep} for VM {guest_name}")
                         try:
-                            repo_password = _storage.get_repository_password(repository_id)
+                            repo_password = _storage.get_storage_password(repository_id)
                             repo_with_password = {**repository, "password": repo_password}
                             _enforce_copies_limit(
                                 repository=repo_with_password,
@@ -2112,7 +2187,7 @@ def _trigger_hyperv_cluster_backup_job(job_id: str, job: dict, hypervisor: dict)
 
         # Write metadata to repository
         try:
-            repo_password = _storage.get_repository_password(repository_id)
+            repo_password = _storage.get_storage_password(repository_id)
             repo_with_password = {**repository, "password": repo_password}
 
             _write_backup_metadata_to_repo(
@@ -3086,22 +3161,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Startup
         logger.info("Starting Backer server...")
 
-        # Load PUBLIC_URL from environment if set (for reverse proxy support)
-        public_url = os.getenv("BACKER_PUBLIC_URL")
-        if public_url:
-            _storage.set_setting("public_url", public_url)
-            logger.info(f"Public URL configured: {public_url}")
-        else:
-            # Fall back to database setting or auto-detect
-            existing_url = _storage.get_setting("public_url")
-            if existing_url:
-                logger.info(f"Using stored public URL: {existing_url}")
-            else:
-                # Auto-detect local IP for fresh installs
-                default_url = _get_default_public_url()
-                _storage.set_setting("public_url", default_url)
-                logger.info(f"Auto-detected public URL: {default_url}")
-
         if _scheduler:
             _scheduler.start()
         yield
@@ -3173,34 +3232,56 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/v1/clients/register", response_model=ClientRegisterResponse)
     def register_client(
-        request: ClientRegisterRequest, req: Request, storage: Storage = Depends(get_storage)
+        request: ClientRegisterRequest,
+        req: Request,
+        credentials: HTTPBasicCredentials | None = Depends(security),
+        storage: Storage = Depends(get_storage),
     ) -> ClientRegisterResponse:
-        """Register a new client or re-register existing one by hostname."""
+        """Register a new client or rotate an existing client's credentials."""
         # Check if client with this hostname already exists
         existing_client = storage.get_client_by_hostname(request.hostname)
 
-        if existing_client:
-            # Re-register: generate new secret for existing client
-            client_secret = secrets.token_urlsafe(32)
-            secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
-            storage.update_client_secret(existing_client.id, secret_hash)
+        if existing_client and credentials:
+            # Re-registration is allowed only to the existing client. A
+            # hostname is not a credential and must not permit a takeover.
+            secret_hash = storage.get_client_secret_hash(existing_client.id)
+            provided_hash = hashlib.sha256((credentials.password if credentials else "").encode()).hexdigest()
+            if credentials.username == existing_client.id and secrets.compare_digest(
+                secret_hash or "", provided_hash
+            ):
+                client_secret = secrets.token_urlsafe(32)
+                secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
+                storage.update_client_secret(existing_client.id, secret_hash)
 
-            # Update client status to online
-            storage.update_client_status(
-                existing_client.id,
-                ClientStatus.ONLINE,
-                ip_address=req.client.host if req.client else None,
-            )
+                storage.update_client_status(
+                    existing_client.id,
+                    ClientStatus.ONLINE,
+                    ip_address=req.client.host if req.client else None,
+                )
 
-            logger.info(f"Re-registered existing client: {existing_client.id} ({request.hostname})")
+                logger.info(f"Re-registered existing client: {existing_client.id} ({request.hostname})")
+                return ClientRegisterResponse(
+                    client_id=existing_client.id,
+                    client_secret=client_secret,
+                    server_version=__version__,
+                )
+        elif existing_client:
+            token_hash = hash_enrollment_code(request.enrollment_token)
+            if not secrets.compare_digest(
+                storage.get_setting("agent_enrollment_token_hash", ""), token_hash
+            ) or enrollment_code_expired(storage.get_setting("agent_enrollment_token_expires")):
+                raise HTTPException(status_code=401, detail="Existing client credentials required")
 
-            return ClientRegisterResponse(
-                client_id=existing_client.id,
-                client_secret=client_secret,
-                server_version=__version__,
-            )
+        # New clients need an admin-issued, single-use enrollment key. Duplicate
+        # hostnames are display labels, not identities, so a valid token creates
+        # a separate record instead of replacing the existing client.
+        if not storage.consume_setting(
+            "agent_enrollment_token_hash", hash_enrollment_code(request.enrollment_token)
+        ):
+            raise HTTPException(status_code=403, detail="Valid enrollment key required")
+        if enrollment_code_expired(storage.get_setting("agent_enrollment_token_expires")):
+            raise HTTPException(status_code=403, detail="Enrollment key expired")
 
-        # New client registration
         client_id = str(uuid4())[:8]
         client_secret = secrets.token_urlsafe(32)
         secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
@@ -3347,7 +3428,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "share": repo.get("share", ""),
                     "path": repo.get("path", ""),
                     "username": repo.get("username"),
-                    "password": storage.get_repository_password(repo_id) if repo_id else None,
+                    "password": storage.get_storage_password(repo_id) if repo_id else None,
                     "domain": repo.get("domain"),
                 })
 
@@ -3470,9 +3551,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         commands = storage.get_pending_commands(client.id)
         if commands:
             logger.info(f"[HEARTBEAT] Agent '{client.id}' receiving {len(commands)} command(s)")
-            for cmd in commands:
-                logger.debug(f"[HEARTBEAT] Command: {cmd}")
-            return {"status": "ok", "commands": commands}
+            return {"status": "ok", "commands": _refresh_proxy_capabilities(commands, client.id)}
 
         # Long-polling: wait up to 25 seconds for a command to arrive
         # Check every 0.5 seconds for new commands
@@ -3481,9 +3560,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             commands = storage.get_pending_commands(client.id)
             if commands:
                 logger.info(f"[HEARTBEAT] Agent '{client.id}' receiving {len(commands)} command(s) (long-poll)")
-                for cmd in commands:
-                    logger.debug(f"[HEARTBEAT] Command: {cmd}")
-                return {"status": "ok", "commands": commands}
+                return {"status": "ok", "commands": _refresh_proxy_capabilities(commands, client.id)}
 
         # No commands after timeout - return empty
         return {"status": "ok", "commands": []}
@@ -3502,6 +3579,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="Job already exists")
 
         config = job.model_dump()
+        _validate_job_config(config, storage)
         storage.save_job(job.name, config)
 
         return JobResponse(
@@ -3553,7 +3631,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         job = storage.get_job(job_name)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        return {"name": job_name, **job}
+        return {"name": job_name, **_redact_secrets(job)}
 
     @app.put("/api/v1/jobs/{job_name}")
     async def update_job(
@@ -3567,6 +3645,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
 
         data = await request.json()
+        data = _restore_redacted_secrets(data, existing)
 
         # Special handling for nested dicts that should be merged, not replaced
         # Merge backend_options if both exist and incoming is not empty
@@ -3586,9 +3665,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Merge updates with existing config
         updated_config = {**existing, **data}
+        _validate_job_config(updated_config, storage)
         storage.save_job(job_name, updated_config)
 
-        return {"name": job_name, "status": "updated", **updated_config}
+        return {"name": job_name, "status": "updated", **_redact_secrets(updated_config)}
 
     @app.patch("/api/v1/jobs/{job_name}/toggle")
     def toggle_job(job_name: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
@@ -3637,7 +3717,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "share": repo.get("share", ""),
                     "path": repo.get("path", ""),
                     "username": repo.get("username"),
-                    "password": storage.get_repository_password(repo_id),
+                    "password": storage.get_storage_password(repo_id),
                     "domain": repo.get("domain"),
                     "mount_point": repo.get("mount_point"),
                 }
@@ -3866,6 +3946,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
 
+        run_config = {**job, "client_id": client_id}
+        _validate_job_config(run_config, storage)
+
         # If user wants to update the job with the new agent, do so
         if override_client_id and update_job_agent:
             job["client_id"] = override_client_id
@@ -3962,8 +4045,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "finished_at": run.get("finished_at"),
             "bytes_transferred": run.get("bytes_transferred", 0),
             "files_transferred": run.get("files_transferred", 0),
-            "errors": errors,
-            "output": run.get("output", ""),
+            "errors": _redact_secrets(errors),
+            "output": _redact_secrets(run.get("output", "")),
             "snapshot_id": run.get("snapshot_id"),
         }
 
@@ -4179,6 +4262,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not client:
             raise HTTPException(status_code=400, detail=f"Agent '{client_id}' not found")
 
+        _validate_job_config({**job, "client_id": client_id}, storage)
+
         # Get backup source path (this is the backup destination in the job)
         # Note: This is the base path from job config, we need to add job subfolder
         backup_source = job.get("destination_path")
@@ -4212,6 +4297,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         backend = job.get("backend", "rclone")
         source_subfolder = data.get("source_subfolder", "")
+
+        if backend == "rclone" and (data.get("run_id") or data.get("snapshot")):
+            raise HTTPException(status_code=400, detail="rclone restores only the current state")
+        if backend == "kopia" and data.get("dry_run"):
+            raise HTTPException(status_code=400, detail="Kopia restore dry runs are not supported")
+        if data.get("clean_restore") and data.get("dry_run"):
+            raise HTTPException(status_code=400, detail="clean_restore cannot be combined with dry_run")
 
         # For rclone, append subfolder to source path
         # For restic, subfolder is handled separately via --include flag
@@ -4270,55 +4362,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repo = storage.get_repository(repository_id)
             if repo:
                 repo_type = repo.get("repo_type", "")
+                storage_password = storage.get_storage_password(repository_id)
                 repo_password = storage.get_repository_password(repository_id)
 
                 if repo_type == "smb":
-                    if is_android_client:
-                        # Android cannot mount SMB shares, route through proxy
-                        public_url = storage.get_setting("public_url", "http://localhost:8420")
-                        if public_url.startswith("https://"):
-                            proxy_scheme = "proxys"
-                            host_part = public_url[8:]
-                        else:
-                            proxy_scheme = "proxy"
-                            host_part = public_url[7:]
-
-                        proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
-                        command_payload["source_path"] = proxy_uri
-                        command_payload["backend"] = "proxy"
-                        if repo_password:
-                            command_payload["backend_options"]["password"] = repo_password
-                        logger.debug(f"[RESTORE] Android client using proxy for SMB repo: {proxy_uri}")
-                    else:
-                        # Include SMB connection info for agents that can mount shares
-                        command_payload["smb_server"] = repo.get("server")
-                        command_payload["smb_share"] = repo.get("share")
-                        command_payload["smb_username"] = repo.get("username")
-                        command_payload["smb_domain"] = repo.get("domain")
-                        if repo_password:
-                            command_payload["smb_password"] = repo_password
+                    # Include SMB connection info for agents that can mount shares.
+                    command_payload["smb_server"] = repo.get("server")
+                    command_payload["smb_share"] = repo.get("share")
+                    command_payload["smb_username"] = repo.get("username")
+                    command_payload["smb_domain"] = repo.get("domain")
+                    if storage_password:
+                        command_payload["smb_password"] = storage_password
 
                 elif repo_type == "nfs":
-                    if is_android_client:
-                        # Android cannot mount NFS shares, route through proxy
-                        public_url = storage.get_setting("public_url", "http://localhost:8420")
-                        if public_url.startswith("https://"):
-                            proxy_scheme = "proxys"
-                            host_part = public_url[8:]
-                        else:
-                            proxy_scheme = "proxy"
-                            host_part = public_url[7:]
-
-                        proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
-                        command_payload["source_path"] = proxy_uri
-                        command_payload["backend"] = "proxy"
-                        if repo_password:
-                            command_payload["backend_options"]["password"] = repo_password
-                        logger.debug(f"[RESTORE] Android client using proxy for NFS repo: {proxy_uri}")
-                    else:
-                        # NFS info (no password needed typically)
-                        command_payload["nfs_server"] = repo.get("server")
-                        command_payload["nfs_export"] = repo.get("share")
+                    # NFS info (no password needed typically)
+                    command_payload["nfs_server"] = repo.get("server")
+                    command_payload["nfs_export"] = repo.get("share")
 
                 elif repo_type == "local":
                     # For local repositories, use proxy backend for restore
@@ -4343,16 +4402,29 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # Override backend to use proxy
                     # Agent will use its own credentials for authentication
                     command_payload["backend"] = "proxy"
-
-                    if repo_password:
-                        command_payload["backend_options"]["password"] = repo_password
+                    command_payload["backend_options"]["proxy_capability"] = generate_proxy_capability(
+                        client_id=client_id, repo_id=repository_id, job_name=job_name,
+                        run_id=f"restore_{restore_id}", subfolder=f"Agents/{job_subfolder}", operation="restore",
+                    )
 
                     logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
 
+                elif repo_type == "s3":
+                    from backer.server.s3 import parse_s3_config
+
+                    s3 = {
+                        **repo.get("config", {}).get("s3", {}),
+                        **(storage.get_repository_provider_credentials(repository_id) or {}),
+                    }
+                    if backend != "restic":
+                        raise HTTPException(status_code=400, detail="S3 repositories are supported only with Restic")
+                    command_payload["source_path"] = parse_s3_config(s3).restic_repository
+                    command_payload["backend_options"]["s3"] = s3
+
                 # For restic/kopia backends, include the repository password
                 if backend in ("restic", "kopia") and repo_password:
-                    if "password" not in backend_options:
-                        command_payload["backend_options"]["password"] = repo_password
+                    if "repository_password" not in backend_options:
+                        command_payload["backend_options"]["repository_password"] = repo_password
 
         storage.queue_command(
             client_id=client_id,
@@ -4597,6 +4669,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         repo_id = str(uuid4())[:8]
         repo_type = data.get("type", "smb")
+        config: dict[str, Any] | None = None
+        provider_credentials_encrypted = None
+        if repo_type == "s3":
+            if data.get("backend", "restic") != "restic":
+                raise HTTPException(status_code=400, detail="S3 repositories are supported only with Restic")
+            from backer.server.s3 import S3ConfigError, parse_s3_config
+
+            try:
+                s3 = parse_s3_config(data.get("s3") or {})
+            except S3ConfigError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            if not data.get("repository_password"):
+                raise HTTPException(status_code=400, detail="Repository password required for S3")
+            data["share"], data["path"] = s3.bucket, s3.prefix
+            config = {"backend_type": "restic", "s3": s3.public_config}
+            provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(json.dumps({
+                "access_key_id": s3.access_key_id, "secret_access_key": s3.secret_access_key,
+            }))
 
         # Validate local repository paths
         if repo_type == "local":
@@ -4657,11 +4747,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 logger.error(f"[CREATE REPO] Failed to validate local path '{local_path}': {e}", exc_info=True)
                 raise HTTPException(status_code=400, detail=f"Invalid local path: {str(e)}")
 
-        password = data.get("password")
-        password_encrypted = None
-        if password:
-            secrets = get_secrets_manager(storage.db_path.parent)
-            password_encrypted = secrets.encrypt(password)
+        storage_password = data.get("storage_password") or (
+            data.get("password") if repo_type == "smb" else None
+        )
+        repository_password = data.get("repository_password") or (
+            data.get("password") if repo_type == "local" else None
+        )
+        if repo_type == "local" and not repository_password:
+            repository_password = secrets.token_urlsafe(32)
+        storage_password_encrypted = repository_password_encrypted = None
+        if storage_password or repository_password:
+            secrets_manager = get_secrets_manager(storage.db_path.parent)
+            storage_password_encrypted = secrets_manager.encrypt(storage_password) if storage_password else None
+            repository_password_encrypted = (
+                secrets_manager.encrypt(repository_password) if repository_password else None
+            )
 
         storage.add_repository(
             repo_id=repo_id,
@@ -4671,14 +4771,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             share=data.get("share"),
             path=data.get("path", ""),
             username=data.get("username"),
-            password_encrypted=password_encrypted,
+            storage_password_encrypted=storage_password_encrypted,
+            repository_password_encrypted=repository_password_encrypted,
+            backend_type=(config or {}).get(
+                "backend_type", "kopia" if repo_type == "local" else data.get("backend_type", "restic")
+            ),
             domain=data.get("domain"),
+            config=config,
+            provider_credentials_encrypted=provider_credentials_encrypted,
         )
 
         # Initialize kopia repository for LOCAL repos
         if repo_type == "local":
             local_path = data.get("share")
-            kopia_password = password or "backer-default-password"
+            kopia_password = repository_password or "backer-default-password"
             try:
                 kopia = ServerKopia(local_path, kopia_password)
                 if kopia.ensure_repo():
@@ -4698,9 +4804,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             test_result = test_repository(repo_id, storage)
             test_task_id = test_result.get("task_id")
 
-            # Start scan task (will run after test)
-            scan_result = scan_repository(repo_id, storage)
-            scan_task_id = scan_result.get("task_id")
+            if repo_type != "s3":
+                scan_result = scan_repository(repo_id, storage)
+                scan_task_id = scan_result.get("task_id")
         except Exception as e:
             logger.warning(f"Failed to auto-trigger test/scan for repository {repo_id}: {e}")
 
@@ -4763,7 +4869,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id)
+        password = (
+            storage.get_storage_password(repo_id)
+            if repo_type == "smb"
+            else storage.get_repository_password(repo_id)
+        )
         domain = repo.get("domain")
 
         def test_connection(task: Task) -> dict[str, Any]:
@@ -4801,6 +4911,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     task.message = f"Testing local path {local_path}..."
                     task.progress = 40
                     success, message = LocalBrowser.test_connection(local_path)
+                elif repo_type == "s3":
+                    from backer.backends.base import BackupDestination
+                    from backer.backends.restic import ResticBackend
+                    from backer.server.s3 import parse_s3_config
+
+                    s3 = {
+                        **repo.get("config", {}).get("s3", {}),
+                        **(storage.get_repository_provider_credentials(repo_id) or {}),
+                    }
+                    success, message = ResticBackend({"repository_password": password, "s3": s3}).test_connection(
+                        BackupDestination(path=parse_s3_config(s3).restic_repository)
+                    )
                 else:
                     success, message = False, "Test not supported for this repository type"
 
@@ -4842,7 +4964,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id)
+        password = storage.get_storage_password(repo_id)
         domain = repo.get("domain")
 
         try:
@@ -5003,7 +5125,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id)
+        password = storage.get_storage_password(repo_id)
         domain = repo.get("domain")
         mount_point = repo.get("mount_point")
 
@@ -5708,7 +5830,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id)
+        password = storage.get_storage_password(repo_id)
         domain = repo.get("domain")
 
         try:
@@ -5728,7 +5850,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # For LOCAL repos, also import jobs from kopia snapshots
                 if repo_type == "local":
                     try:
-                        kopia_password = password or "backer-default-password"
+                        kopia_password = storage.get_repository_password(repo_id) or "backer-default-password"
                         kopia = ServerKopia(repo_path, kopia_password)
 
                         kopia_repo_path = Path(repo_path) / ".kopia-repo"
@@ -6005,7 +6127,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id)
+        password = storage.get_storage_password(repo_id)
         domain = repo.get("domain")
 
         imported = {"hypervisors": 0, "jobs": 0, "guests": 0, "skipped_jobs": 0}
@@ -6415,7 +6537,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             server = repo.get("server", "")
             share = repo.get("share") or repo.get("export", "")
             username = repo.get("username")
-            password = storage.get_repository_password(repo_id)
+            password = storage.get_storage_password(repo_id)
             domain = repo.get("domain")
 
             # Determine repo_path based on type and platform
@@ -6537,7 +6659,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             server = repo.get("server", "")
             share = repo.get("share") or repo.get("export", "")
             username = repo.get("username")
-            password = storage.get_repository_password(repository_id)
+            password = storage.get_storage_password(repository_id)
             domain = repo.get("domain")
 
             # Determine repo_path based on type and platform
@@ -6632,7 +6754,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id)
+        password = storage.get_storage_password(repo_id)
         domain = repo.get("domain")
         repo_name = repo.get("name", repo_id)
 
@@ -8254,7 +8376,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 share = repository.get("share", "")
                 subpath = repository.get("path", "")
                 username = repository.get("username")
-                password = storage.get_repository_password(repository_id)
+                password = storage.get_storage_password(repository_id)
                 domain = repository.get("domain")
 
                 # Path to .backer/ in the hypervisor folder
@@ -8490,7 +8612,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 share = repository.get("share", "")
                 username = repository.get("username")
                 domain = repository.get("domain")
-                repo_password = storage.get_repository_password(repository_id)
+                repo_password = storage.get_storage_password(repository_id)
 
                 if not server or not share:
                     logger.warning("Cannot clean up SMB: missing server or share")
@@ -8526,7 +8648,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             subdir = repository.get("path", "").strip("/")
             username = repository.get("username")
             domain = repository.get("domain")
-            repo_password = storage.get_repository_password(repository_id)
+            repo_password = storage.get_storage_password(repository_id)
 
             if not server or not share:
                 logger.warning("Cannot clean up SMB: missing server or share")
@@ -8587,7 +8709,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             subdir = repository.get("path", "").strip("/")
             username = repository.get("username")
             domain = repository.get("domain")
-            repo_password = storage.get_repository_password(repository_id)
+            repo_password = storage.get_storage_password(repository_id)
 
             if not server or not share:
                 logger.warning("Cannot clean up SMB metadata: missing server or share")
@@ -9350,7 +9472,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             subdir = repository.get("path", "").strip("/")
             username = repository.get("username")
             domain = repository.get("domain")
-            repo_password = storage.get_repository_password(repository_id)
+            repo_password = storage.get_storage_password(repository_id)
 
             if not server or not share:
                 logger.warning("Cannot clean up SMB: missing server or share")
@@ -9974,7 +10096,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get repository password for SMB storage
         repo_password = None
         if repo_type == "smb" and repository.get("has_password"):
-            repo_password = storage.get_repository_password(repository_id)
+            repo_password = storage.get_storage_password(repository_id)
 
         # Create repository dict with password for ensure_backer_storage
         repo_with_password = {**repository, "password": repo_password}
@@ -10619,7 +10741,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 repository = storage.get_repository(repository_id)
                 if not repository:
                     continue
-                repo_password = storage.get_repository_password(repository_id)
+                repo_password = storage.get_storage_password(repository_id)
                 try:
                     job_backups = _get_hyperv_job_backups(
                         job=job,
@@ -10761,7 +10883,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         domain = repository.get("domain")
 
         # Get repository password
-        repo_password = storage.get_repository_password(repository_id)
+        repo_password = storage.get_storage_password(repository_id)
 
         # Check hypervisor type for type-specific backup listing
         hypervisor_type = hypervisor.get("hypervisor_type", "proxmox")
@@ -11173,7 +11295,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Get credentials
         hv_password = storage.get_hypervisor_password(hypervisor["id"])
-        repo_password = storage.get_repository_password(repository["id"])
+        repo_password = storage.get_storage_password(repository["id"])
 
         # Get domain from hypervisor
         hv_domain = hypervisor.get("domain") or hypervisor.get("config", {}).get("domain")
@@ -11474,7 +11596,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         hv_password = storage.get_hypervisor_password(hypervisor_id)
         repo_password = None
         if repository.get("repo_type") == "smb" and repository.get("has_password"):
-            repo_password = storage.get_repository_password(repository_id)
+            repo_password = storage.get_storage_password(repository_id)
 
         auth_method = ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
 
@@ -11832,7 +11954,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if repository and repository.get("repo_type") == "smb":
                 smb_username = repository.get("username", "")
-                smb_password = storage.get_repository_password(repository_id)
+                smb_password = storage.get_storage_password(repository_id)
                 smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
@@ -11985,7 +12107,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if repository and repository.get("repo_type") == "smb":
                 smb_username = repository.get("username", "")
-                smb_password = storage.get_repository_password(repository_id)
+                smb_password = storage.get_storage_password(repository_id)
                 smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
@@ -12103,7 +12225,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if repository and repository.get("repo_type") == "smb":
                 smb_username = repository.get("username", "")
-                smb_password = storage.get_repository_password(repository_id)
+                smb_password = storage.get_storage_password(repository_id)
                 smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
@@ -12167,7 +12289,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if repository and repository.get("repo_type") == "smb":
                 smb_username = repository.get("username", "")
-                smb_password = storage.get_repository_password(repository_id)
+                smb_password = storage.get_storage_password(repository_id)
                 smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
@@ -12234,7 +12356,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if repository and repository.get("repo_type") == "smb":
                 smb_username = repository.get("username", "")
-                smb_password = storage.get_repository_password(repository_id)
+                smb_password = storage.get_storage_password(repository_id)
                 smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
@@ -12304,7 +12426,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repository = storage.get_repository(repository_id)
             if repository and repository.get("repo_type") == "smb":
                 smb_username = repository.get("username", "")
-                smb_password = storage.get_repository_password(repository_id)
+                smb_password = storage.get_storage_password(repository_id)
                 smb_domain = repository.get("domain", "")
 
         api = HyperVAPI(
@@ -12503,6 +12625,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         credentials: HTTPBasicCredentials | None,
         storage: Storage,
         authorization: str | None = None,
+        *,
+        operation: str,
+        subfolder: str = "",
+        capability: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Verify that an agent has access to a repository.
 
@@ -12521,13 +12647,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if repo.get("repo_type") != "local":
             raise HTTPException(status_code=400, detail="Repository is not local type")
 
+        client_id: str | None = None
         # Check for bearer token first (preferred method)
         if authorization and authorization.startswith("Bearer "):
             token = authorization[7:]  # Remove "Bearer " prefix
             claims = verify_agent_token(token)
             if not claims:
                 raise HTTPException(status_code=401, detail="Invalid or expired token")
-            logger.debug(f"[AUTH] Repo access verified via JWT for {claims.get('sub')}")
+            client_id = claims.get("sub")
         # Fall back to HTTP Basic auth
         elif credentials:
             client = storage.get_client(credentials.username)
@@ -12539,9 +12666,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             if not secrets.compare_digest(secret_hash or "", provided_hash):
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            logger.debug(f"[AUTH] Repo access verified via Basic auth for {credentials.username}")
+            client_id = credentials.username
         else:
             raise HTTPException(status_code=401, detail="Auth required (Bearer or Basic)")
+
+        claims = verify_proxy_capability(capability or "")
+        if not claims:
+            expired_claims = verify_expired_proxy_capability(capability or "")
+            if expired_claims and _pending_proxy_command_authorizes(storage, client_id, expired_claims, operation):
+                claims = expired_claims
+        if not claims or any((
+            claims.get("repo") != repo_id,
+            claims.get("sub") != client_id,
+            claims.get("operation") != operation
+            and not (operation == "check" and claims.get("operation") in {"backup", "restore"}),
+            bool(subfolder) and claims.get("subfolder") != subfolder,
+        )):
+            raise HTTPException(status_code=403, detail="Missing, expired, or invalid proxy capability")
 
         # Get repository password (secure)
         password = storage.get_repository_password(repo_id) or ""
@@ -12557,7 +12698,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Check if a repository is available (health check for proxy backend)."""
         auth_header = request.headers.get("authorization")
-        repo, _ = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, _ = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="check", capability=request.headers.get("X-Backer-Capability"),
+        )
 
         # Check if local path exists and is readable
         # For local repos, the path is stored in the 'share' field
@@ -12586,7 +12730,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Initialize a backup repository on the server."""
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, repo_password = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="init", capability=request.headers.get("X-Backer-Capability"),
+        )
 
         # Parse request body (password may be sent for verification)
         try:
@@ -12609,10 +12756,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return {"success": False, "error": f"Failed to create/access directory: {e}"}
 
         # Get the actual backend type to use (stored in config)
-        config = json.loads(repo.get("config", "{}"))
-        backend_type = config.get("backend_type", "restic")
+        config = repo.get("config") or {}
+        backend_type = config.get("backend_type", "kopia" if repo.get("repo_type") == "local" else "restic")
 
         try:
+            if repo.get("repo_type") == "local":
+                kopia = ServerKopia(str(path), repo_password or "backer-default-password")
+                return {"success": kopia.ensure_repo(), "integrity": "repository validation"}
             # Import here to avoid circular imports
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
@@ -12647,7 +12797,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             job: Optional job name to filter snapshots (LOCAL repos only)
         """
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, repo_password = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="list", capability=request.headers.get("X-Backer-Capability"),
+        )
 
         try:
             local_path = repo.get("share")
@@ -12672,7 +12825,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            config = json.loads(repo.get("config", "{}"))
+            config = repo.get("config") or {}
             backend_type = config.get("backend_type", "restic")
 
             backend = get_backend(backend_type, {
@@ -12696,7 +12849,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Prune the repository to remove unused data."""
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, repo_password = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="prune", capability=request.headers.get("X-Backer-Capability"),
+        )
 
         try:
             body = await request.json()
@@ -12705,11 +12861,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             dry_run = False
 
         try:
+            local_path = repo.get("share")
+            if repo.get("repo_type") == "local":
+                kopia = ServerKopia(str(local_path), repo_password or "backer-default-password")
+                if not kopia.ensure_repo():
+                    return {"success": False, "error": "Kopia repository not initialized"}
+                return kopia.maintenance(["snapshot", "expire", "--delete"])
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            local_path = repo.get("share")
-            config = json.loads(repo.get("config", "{}"))
+            config = repo.get("config") or {}
             backend_type = config.get("backend_type", "restic")
 
             backend = get_backend(backend_type, {
@@ -12737,7 +12898,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Check repository integrity."""
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        repo, repo_password = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="check", capability=request.headers.get("X-Backer-Capability"),
+        )
 
         try:
             body = await request.json()
@@ -12746,11 +12910,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             dry_run = False
 
         try:
+            local_path = repo.get("share")
+            if repo.get("repo_type") == "local":
+                kopia = ServerKopia(str(local_path), repo_password or "backer-default-password")
+                if not kopia.ensure_repo():
+                    return {
+                        "success": False,
+                        "error": "Kopia repository not initialized",
+                        "integrity": "repository validation",
+                    }
+                result = kopia.maintenance(["repository", "status"])
+                return {**result, "integrity": "repository validation"}
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            local_path = repo.get("share")
-            config = json.loads(repo.get("config", "{}"))
+            config = repo.get("config") or {}
             backend_type = config.get("backend_type", "restic")
 
             backend = get_backend(backend_type, {
@@ -12764,6 +12938,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "success": result.success,
                 "output": result.output,
                 "error": result.errors[0] if result.errors else None,
+                "integrity": "accessibility only" if backend_type == "rclone" else "repository validation",
             }
         except Exception as e:
             logger.error(f"Failed to check repository {repo_id}: {e}")
@@ -12788,7 +12963,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import tempfile
 
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        subfolder = request.headers.get("X-Backup-Subfolder", "").strip("/\\").replace("\\", "/")
+        repo, repo_password = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="backup", subfolder=subfolder, capability=request.headers.get("X-Backer-Capability"),
+        )
 
         local_path = repo.get("share")
         if not local_path:
@@ -12818,6 +12997,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         local_base = Path(local_path)
         backup_dir = local_base / "Agents" / job_name / "contents"
         tmp_path = None
+        staging_dir: Path | None = None
 
         try:
             # Stream body to temp file
@@ -12830,37 +13010,98 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             logger.info(f"[PROXY BACKUP] Received {bytes_received / 1024 / 1024:.1f}MB")
 
-            # Create the backup directory structure
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"[PROXY BACKUP] Backup directory: {backup_dir}")
+            # Validate and extract into a sibling staging directory.  A failed
+            # upload must never leave a partly-updated live backup behind.
+            backup_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging_dir = Path(tempfile.mkdtemp(prefix=".backer-stage-", dir=backup_dir.parent))
+            members = safe_tar_extract(tmp_path, staging_dir)
 
-            # Extract tar archive to the proper backup location (with path traversal protection)
-            members = safe_tar_extract(tmp_path, backup_dir)
+            # The lock survives workers and process restarts, unlike an asyncio
+            # lock. It lives outside contents and rollback-directory globs.
+            transaction_lock = local_base / ".backer-locks" / (
+                f"proxy-{hashlib.sha256(job_name.encode()).hexdigest()}.lock"
+            )
+            # One repository/job has one live contents directory. Keep the old
+            # tree until Kopia accepts the replacement, then discard it.
+            with file_lock(transaction_lock):
+                previous_dir = backup_dir.parent / f".backer-previous-{uuid4().hex}"
+                failed_dir = backup_dir.parent / f".backer-failed-{uuid4().hex}"
+                replaced = False
+                previous_moved = False
+                try:
+                    if backup_dir.exists():
+                        os.replace(backup_dir, previous_dir)
+                        previous_moved = True
+                    os.replace(staging_dir, backup_dir)
+                    staging_dir = None
+                    replaced = True
 
-            logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {backup_dir}")
+                    logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {backup_dir}")
+                    password = repo_password or "backer-default-password"
+                    kopia = ServerKopia(local_path, password)
+                    if not kopia.ensure_repo():
+                        raise RuntimeError("Failed to initialize kopia repository")
+                    result = kopia.snapshot_create(
+                        source_dir=backup_dir, job_name=job_name, source_path=source_path,
+                    )
+                    if not result.get("success"):
+                        raise RuntimeError(result.get("error", "Snapshot creation failed"))
+                except Exception as snapshot_error:
+                    rollback_error = None
+                    if replaced:
+                        try:
+                            os.replace(backup_dir, failed_dir)
+                        except Exception as move_error:
+                            rollback_error = RuntimeError(
+                                "CRITICAL: rollback could not preserve rejected contents; "
+                                f"previous contents remain at {previous_dir}: {move_error}"
+                            )
+                        else:
+                            if previous_moved:
+                                try:
+                                    os.replace(previous_dir, backup_dir)
+                                except Exception as restore_error:
+                                    rollback_error = RuntimeError(
+                                        "CRITICAL: rollback could not restore previous contents; "
+                                        f"previous contents retained at {previous_dir}: {restore_error}"
+                                    )
+                            try:
+                                shutil.rmtree(failed_dir)
+                            except Exception as cleanup_error:
+                                logger.warning(
+                                    "[PROXY BACKUP] Failed to clean rejected contents %s: %s",
+                                    failed_dir, cleanup_error,
+                                )
+                    elif previous_moved:
+                        try:
+                            os.replace(previous_dir, backup_dir)
+                        except Exception as restore_error:
+                            rollback_error = RuntimeError(
+                                "CRITICAL: rollback could not restore previous contents; "
+                                f"previous contents retained at {previous_dir}: {restore_error}"
+                            )
+                    if rollback_error:
+                        logger.critical("[PROXY BACKUP] %s", rollback_error)
+                        raise rollback_error from snapshot_error
+                    raise
+                else:
+                    if previous_dir.exists():
+                        try:
+                            shutil.rmtree(previous_dir)
+                        except Exception as cleanup_error:
+                            logger.warning(
+                                "[PROXY BACKUP] Snapshot committed but failed to clean previous contents %s: %s",
+                                previous_dir, cleanup_error,
+                            )
 
             # Clean up tar file
-            Path(tmp_path).unlink()
+            try:
+                Path(tmp_path).unlink()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "[PROXY BACKUP] Snapshot committed but failed to clean upload archive: %s", cleanup_error,
+                )
             tmp_path = None
-
-            # Get repository password (use default if not set)
-            password = repo_password or "backer-default-password"
-
-            # Initialize kopia and create snapshot from the backup directory
-            # This provides versioning/point-in-time restore while keeping files accessible
-            kopia = ServerKopia(local_path, password)
-
-            if not kopia.ensure_repo():
-                return {"success": False, "error": "Failed to initialize kopia repository"}
-
-            result = kopia.snapshot_create(
-                source_dir=backup_dir,
-                job_name=job_name,
-                source_path=source_path,
-            )
-
-            if not result.get("success"):
-                return {"success": False, "error": result.get("error", "Snapshot creation failed")}
 
             snapshot_id = result.get("snapshot_id", "unknown")
             logger.info(f"[PROXY BACKUP] Created kopia snapshot: {snapshot_id}")
@@ -12945,15 +13186,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return {"success": False, "error": str(e)}
 
         finally:
-            # Note: We don't delete backup_dir - files are stored there permanently
-            # Only clean up the temp tar file if it still exists
-
+            if staging_dir:
+                try:
+                    shutil.rmtree(staging_dir)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "[PROXY BACKUP] Failed to clean staging directory %s: %s", staging_dir, cleanup_error,
+                    )
             # Clean up temp tar file if it still exists
             if tmp_path:
                 try:
                     Path(tmp_path).unlink()
-                except Exception:
-                    pass
+                except Exception as cleanup_error:
+                    logger.warning("[PROXY BACKUP] Failed to clean upload archive %s: %s", tmp_path, cleanup_error)
 
     @app.get("/api/repo/{repo_id}/restore")
     async def proxy_repo_restore(
@@ -12977,7 +13222,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import tempfile
 
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(repo_id, credentials, storage, auth_header)
+        subfolder = request.headers.get("X-Restore-Subfolder", "").strip("/\\").replace("\\", "/")
+        repo, repo_password = _verify_repo_access(
+            repo_id, credentials, storage, auth_header,
+            operation="restore", subfolder=subfolder, capability=request.headers.get("X-Backer-Capability"),
+        )
 
         local_path = repo.get("share")
         if not local_path:
@@ -13163,11 +13412,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     # Add web authentication middleware
-    from backer.server.web.auth import AuthMiddleware, ensure_default_user
+    from backer.server.web.auth import AuthMiddleware
     app.add_middleware(AuthMiddleware)
-
-    # Ensure default admin user exists
-    ensure_default_user(_storage)
 
     # Include web UI routes
     app.include_router(web_router)

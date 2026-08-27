@@ -1,23 +1,35 @@
 """Web UI routes for Backer server."""
 
-from datetime import datetime
+import re
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from typing import Any
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from backer import __version__
 from backer.server import timezone as tz
+from backer.server.auth import (
+    ENROLLMENT_CODE_TTL,
+    enrollment_code_expiry,
+    generate_enrollment_code,
+    hash_enrollment_code,
+)
+from backer.server.capabilities import validate_job_backend
 from backer.server.storage import Storage
 from backer.server.web.auth import (
     clear_session_cookie,
     create_session,
     get_current_user,
     hash_password,
+    needs_password_rehash,
     set_session_cookie,
     verify_password,
+    verify_setup_token,
 )
 
 router = APIRouter()
@@ -30,18 +42,29 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.globals["backer_version"] = __version__
 
 
+TIMEZONES = sorted(available_timezones())
+
+
+def render_template(request: Request, name: str, context: dict[str, Any]):
+    """Render a Jinja template using Starlette's current request-first API."""
+    context.setdefault("request", request)
+    return templates.TemplateResponse(request, name, context)
+
+
 def get_storage(request: Request) -> Storage:
     """Get storage from app state."""
     return request.app.state.storage
 
 
-def get_timezone(storage: Storage) -> ZoneInfo:
+def get_timezone(storage: Storage) -> tzinfo:
     """Get configured timezone from storage."""
     tz_name = storage.get_setting("timezone", "UTC")
     try:
-        return ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+        return UTC if not tz_name or tz_name.upper() == "UTC" else ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return UTC
     except Exception:
-        return ZoneInfo("UTC")
+        return UTC
 
 
 def time_ago(dt: datetime | str | None) -> str:
@@ -205,7 +228,7 @@ async def dashboard(request: Request):
         "total_hv_jobs": len(hv_jobs),
     }
 
-    return templates.TemplateResponse("dashboard.html", {
+    return render_template(request, "dashboard.html", {
         "request": request,
         "active": "dashboard",
         "stats": stats,
@@ -223,6 +246,9 @@ async def dashboard(request: Request):
 async def agents_page(request: Request):
     """Agents management page."""
     storage = get_storage(request)
+    public_url = (
+        storage.get_setting("public_url") or f"{request.url.scheme}://{request.url.netloc}"
+    ).strip().rstrip("/")
 
     agents_raw = storage.list_clients()
     agents = []
@@ -239,10 +265,11 @@ async def agents_page(request: Request):
             "last_seen_ago": time_ago(a.last_seen),
         })
 
-    return templates.TemplateResponse("agents.html", {
+    return render_template(request, "agents.html", {
         "request": request,
         "active": "agents",
         "agents": agents,
+        "public_url": public_url,
         "user": get_current_user(request),
     })
 
@@ -286,7 +313,7 @@ async def hypervisors_page(request: Request):
             "last_run_ago": time_ago(latest.get("started_at")) if latest else None,
         })
 
-    return templates.TemplateResponse("hypervisors.html", {
+    return render_template(request, "hypervisors.html", {
         "request": request,
         "active": "hypervisors",
         "hypervisors": hypervisors,
@@ -335,7 +362,7 @@ async def jobs_page(request: Request):
     # Get agents for edit modal
     agents = storage.list_clients()
 
-    return templates.TemplateResponse("jobs.html", {
+    return render_template(request, "jobs.html", {
         "request": request,
         "active": "jobs",
         "jobs": jobs,
@@ -351,7 +378,7 @@ async def jobs_new_page(request: Request):
     agents = storage.list_clients()
     repositories = storage.list_repositories()
 
-    return templates.TemplateResponse("jobs_new.html", {
+    return render_template(request, "jobs_new.html", {
         "request": request,
         "active": "jobs",
         "agents": [{"id": a.id, "name": a.name, "hostname": a.hostname} for a in agents],
@@ -395,6 +422,11 @@ async def jobs_create(
     repo = storage.get_repository(repository_id)
     if not repo:
         return RedirectResponse("/jobs/new?error=invalid_repo", status_code=303)
+    if validate_job_backend(backend, repo.get("repo_type")):
+        return RedirectResponse("/jobs/new?error=unsupported_backend", status_code=303)
+    client = storage.get_client(client_id)
+    if client and (client.os_info or "").lower().startswith("android") and repo.get("repo_type") != "local":
+        return RedirectResponse("/jobs/new?error=android_local_repositories_only", status_code=303)
 
     # Build full destination path based on repository type
     repo_type = repo.get("repo_type", "smb")
@@ -407,9 +439,13 @@ async def jobs_create(
         if repo.get("path"):
             destination_path += "/" + repo["path"]
     elif repo_type == "s3":
-        destination_path = f"s3://{repo['share']}"
-        if repo.get("path"):
-            destination_path += "/" + repo["path"]
+        from backer.server.s3 import parse_s3_config
+
+        # The command payload supplies encrypted credentials separately.
+        destination_path = parse_s3_config({
+            **repo.get("config", {}).get("s3", {}),
+            **(storage.get_repository_provider_credentials(repository_id) or {}),
+        }).restic_repository
     elif repo_type == "local":
         destination_path = repo.get("share", "") or repo.get("path", "")
     else:
@@ -444,7 +480,7 @@ async def jobs_create(
     # Build backend options (for restic/kopia password, etc.)
     backend_options = {}
     if backend in ("restic", "kopia") and restic_password:
-        backend_options["restic_password"] = restic_password
+        backend_options["repository_password"] = restic_password
 
     job_config = {
         "source_path": source_path,
@@ -552,7 +588,7 @@ async def history_page(request: Request):
         logger.error(f"Error loading history page: {e}", exc_info=True)
         all_runs = []
 
-    return templates.TemplateResponse("history.html", {
+    return render_template(request, "history.html", {
         "request": request,
         "active": "history",
         "runs": all_runs,
@@ -566,7 +602,7 @@ async def storage_page(request: Request):
     storage = get_storage(request)
     repositories = storage.list_repositories()
 
-    return templates.TemplateResponse("repositories.html", {
+    return render_template(request, "repositories.html", {
         "request": request,
         "active": "storage",
         "repositories": repositories,
@@ -577,7 +613,7 @@ async def storage_page(request: Request):
 @router.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request):
     """Server logs page."""
-    return templates.TemplateResponse("logs.html", {
+    return render_template(request, "logs.html", {
         "request": request,
         "active": "logs",
         "user": get_current_user(request),
@@ -605,7 +641,7 @@ async def settings_page(request: Request):
     # Check if settings were just saved
     settings_saved = request.query_params.get("saved") == "1"
 
-    return templates.TemplateResponse("settings.html", {
+    return render_template(request, "settings.html", {
         "request": request,
         "active": "settings",
         "version": __version__,
@@ -635,6 +671,16 @@ async def settings_save(
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 
+@router.post("/agents/enrollment-token")
+async def generate_enrollment_token(request: Request):
+    """Generate a single-use token for enrolling one new agent."""
+    code = generate_enrollment_code()
+    storage = get_storage(request)
+    storage.set_setting("agent_enrollment_token_hash", hash_enrollment_code(code))
+    storage.set_setting("agent_enrollment_token_expires", enrollment_code_expiry())
+    return JSONResponse({"token": code, "expires_in_minutes": int(ENROLLMENT_CODE_TTL.total_seconds() // 60)})
+
+
 @router.get("/restore", response_class=HTMLResponse)
 async def restore_page(request: Request):
     """Restore page."""
@@ -660,7 +706,7 @@ async def restore_page(request: Request):
     all_runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
     recent_restores = all_runs[:10]
 
-    return templates.TemplateResponse("restore.html", {
+    return render_template(request, "restore.html", {
         "request": request,
         "active": "restore",
         "jobs": jobs,
@@ -671,6 +717,87 @@ async def restore_page(request: Request):
 
 
 # Authentication routes
+@router.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    """Show the one-time first-run setup form."""
+    storage = get_storage(request)
+    if storage.count_users():
+        return RedirectResponse(url="/", status_code=303)
+    return render_template(request, "setup.html", {
+        "request": request,
+        "username": "admin",
+        "display_name": "Administrator",
+        "timezone": "UTC",
+        "timezones": TIMEZONES,
+        "public_url": storage.get_setting("public_url") or f"{request.url.scheme}://{request.url.netloc}",
+        "error": None,
+    })
+
+
+@router.post("/setup", response_class=HTMLResponse)
+async def setup_submit(
+    request: Request,
+    username: str = Form(...),
+    display_name: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    setup_token: str = Form(""),
+    timezone: str = Form("UTC"),
+    public_url: str = Form(...),
+):
+    """Create the first administrator and save initial server settings."""
+    storage = get_storage(request)
+    username = username.strip()
+    display_name = display_name.strip()
+    timezone = timezone.strip()
+    public_url = public_url.strip().rstrip("/")
+    error = None
+    if not verify_setup_token(setup_token):
+        error = "Invalid setup token."
+    elif not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
+        error = "Username must be 3–64 letters, numbers, dots, dashes, or underscores."
+    elif not display_name:
+        error = "Display name is required."
+    elif len(password) < 12:
+        error = "Use a password of at least 12 characters."
+    elif password != confirm_password:
+        error = "Passwords do not match."
+    elif not _valid_timezone(timezone):
+        error = "Choose a valid timezone."
+    elif not _valid_public_url(public_url):
+        error = "Public URL must be a complete http:// or https:// address."
+
+    if error:
+        return render_template(request, "setup.html", {
+            "request": request, "username": username, "display_name": display_name,
+            "timezone": timezone, "timezones": TIMEZONES, "public_url": public_url, "error": error,
+        })
+
+    user_id = storage.create_initial_admin(username, hash_password(password), display_name)
+    if user_id is None:
+        return RedirectResponse(url="/login", status_code=303)
+    storage.set_setting("timezone", timezone)
+    storage.set_setting("public_url", public_url)
+    tz.clear_cache()
+    token = create_session(user_id, username, display_name)
+    response = RedirectResponse(url="/", status_code=303)
+    set_session_cookie(response, token, secure=request.url.scheme == "https")
+    return response
+
+
+def _valid_timezone(value: str) -> bool:
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError:
+        return False
+    return True
+
+
+def _valid_public_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     """Login page."""
@@ -684,7 +811,7 @@ async def login_page(request: Request):
         "required": "Please log in to continue",
     }
 
-    return templates.TemplateResponse("login.html", {
+    return render_template(request, "login.html", {
         "request": request,
         "error": error_messages.get(error),
         "username": "",
@@ -703,11 +830,14 @@ async def login_submit(
     # Look up user
     user = storage.get_user_by_username(username)
     if not user or not verify_password(password, user.get("password_hash", "")):
-        return templates.TemplateResponse("login.html", {
+        return render_template(request, "login.html", {
             "request": request,
             "error": "Invalid username or password",
             "username": username,
         })
+
+    if needs_password_rehash(user["password_hash"]):
+        storage.update_user(user_id=user["id"], password_hash=hash_password(password))
 
     # Create session
     token = create_session(
@@ -721,7 +851,7 @@ async def login_submit(
 
     # Redirect to dashboard with session cookie
     response = RedirectResponse(url="/", status_code=303)
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, secure=request.url.scheme == "https")
     return response
 
 
@@ -756,7 +886,7 @@ async def profile_page(request: Request):
     saved = request.query_params.get("saved") == "1"
     password_changed = request.query_params.get("password_changed") == "1"
 
-    return templates.TemplateResponse("profile.html", {
+    return render_template(request, "profile.html", {
         "request": request,
         "active": "profile",
         "user": user,
@@ -798,7 +928,7 @@ async def profile_update(
     elif action == "change_password":
         # Verify current password
         if not current_password or not verify_password(current_password, user.get("password_hash", "")):
-            return templates.TemplateResponse("profile.html", {
+            return render_template(request, "profile.html", {
                 "request": request,
                 "active": "profile",
                 "user": user,
@@ -807,7 +937,7 @@ async def profile_update(
 
         # Check new passwords match
         if not new_password or new_password != confirm_password:
-            return templates.TemplateResponse("profile.html", {
+            return render_template(request, "profile.html", {
                 "request": request,
                 "active": "profile",
                 "user": user,
@@ -816,7 +946,7 @@ async def profile_update(
 
         # Check password length
         if len(new_password) < 4:
-            return templates.TemplateResponse("profile.html", {
+            return render_template(request, "profile.html", {
                 "request": request,
                 "active": "profile",
                 "user": user,

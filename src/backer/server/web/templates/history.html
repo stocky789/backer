@@ -144,7 +144,7 @@
 </div>
 
 <!-- Job Logs Modal -->
-<div id="logsModal" class="modal" style="display: none;">
+<dialog id="logsModal" class="modal">
     <div class="modal-content modal-xl">
         <div class="modal-header">
             <span class="modal-title">
@@ -203,7 +203,7 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <style>
 .loading-state {
@@ -309,7 +309,7 @@ async function showJobLogs(runId) {
     const loading = document.getElementById('logsLoading');
     const content = document.getElementById('logsContent');
 
-    modal.style.display = 'flex';
+    modal.showModal();
     loading.style.display = 'block';
     content.style.display = 'none';
 
@@ -367,7 +367,7 @@ async function showHypervisorLogs(runId, hypervisorId) {
     const loading = document.getElementById('logsLoading');
     const content = document.getElementById('logsContent');
 
-    modal.style.display = 'flex';
+    modal.showModal();
     loading.style.display = 'block';
     content.style.display = 'none';
 
@@ -431,16 +431,8 @@ async function showHypervisorLogs(runId, hypervisorId) {
 }
 
 function closeLogsModal() {
-    document.getElementById('logsModal').style.display = 'none';
+    document.getElementById('logsModal').close();
 }
-
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeLogsModal();
-});
-
-document.getElementById('logsModal')?.addEventListener('click', (e) => {
-    if (e.target === document.getElementById('logsModal')) closeLogsModal();
-});
 
 document.querySelectorAll('.run-row').forEach(row => {
     const runId = row.dataset.runId;

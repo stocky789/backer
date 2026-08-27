@@ -18,7 +18,6 @@ class BackendType(str, Enum):
     RSYNC = "rsync"
     RCLONE = "rclone"
     RESTIC = "restic"
-    BORG = "borg"
     KOPIA = "kopia"
     PROXY = "proxy"  # Proxy to remote server (for local directory storage)
 
@@ -28,7 +27,6 @@ class OperationType(str, Enum):
 
     BACKUP = "backup"
     RESTORE = "restore"
-    LIST = "list"
     PRUNE = "prune"
     CHECK = "check"
 
@@ -192,6 +190,7 @@ class BackendBase(ABC):
         dry_run: bool = False,
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
+        include_path: str | None = None,
     ) -> BackendResult:
         """Restore from a backup.
 
@@ -202,6 +201,7 @@ class BackendBase(ABC):
             dry_run: If True, simulate the restore without making changes
             progress_callback: Optional callback for progress updates
             original_source_path: The original path that was backed up (for kopia/restic snapshot lookup)
+            include_path: Optional path within the selected snapshot to restore.
 
         Returns:
             BackendResult with operation details

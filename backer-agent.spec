@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path('src').absolute()))
 
 block_cipher = None
+version_file = Path('build/backer-agent-version.txt')
 
 # Collect all backer modules
 a = Analysis(
@@ -129,5 +130,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets/backer.ico' if os.path.exists('assets/backer.ico') else None,
-    version=None,
+    version=str(version_file) if version_file.exists() else None,
 )

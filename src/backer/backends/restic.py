@@ -17,13 +17,11 @@ from backer.backends.base import (
     BackupSource,
     OperationType,
 )
-from backer.backends.registry import BackendRegistry
 from backer.tools.manager import get_tool_manager
 
 logger = logging.getLogger(__name__)
 
 
-@BackendRegistry.register(BackendType.RESTIC)
 class ResticBackend(BackendBase):
     """Backend for restic deduplicated backups.
 
@@ -45,7 +43,8 @@ class ResticBackend(BackendBase):
         # Set repository password from config if provided
         # Check multiple keys for compatibility (UI uses restic_password)
         password = (
-            self.config.get("password")
+            self.config.get("repository_password")
+            or self.config.get("password")
             or self.config.get("restic_password")
         )
         if password:
@@ -56,6 +55,34 @@ class ResticBackend(BackendBase):
             # Use default password if none provided - allows auto-initialization
             self._env["RESTIC_PASSWORD"] = "backer-default-password"
             logger.debug("[RESTIC] Using default repository password")
+
+        # S3 is intentionally the only managed cloud provider. Its credentials
+        # stay in the command environment, never the repository URL.
+        s3 = self.config.get("s3")
+        if isinstance(s3, dict):
+            from backer.server.s3 import parse_s3_config
+
+            s3_config = parse_s3_config(s3)
+            self._env.update(s3_config.environment)
+            self._s3_options = s3_config.restic_options
+        else:
+            self._s3_options: list[str] = []
+
+    def _repo_args(self, repository: str) -> list[str]:
+        return ["--repo", repository, *self._s3_options]
+
+    @staticmethod
+    def _in_place_include(source_path: str, include_path: str | None) -> str:
+        """Join a selected relative subfolder to its backed-up source path."""
+        if not include_path:
+            return source_path
+
+        normalized = include_path.replace("\\", "/")
+        parts = normalized.split("/")
+        if normalized.startswith("/") or any(part == ".." for part in parts):
+            raise ValueError("Restore include path must be relative and cannot contain '..'")
+
+        return str(Path(source_path, *(part for part in parts if part not in ("", "."))))
 
     def _get_binary(self, auto_install: bool = True) -> Path:
         """Get path to restic binary, downloading if necessary."""
@@ -101,7 +128,7 @@ class ResticBackend(BackendBase):
         try:
             binary = self._get_binary()
             result = subprocess.run(
-                [str(binary), "init", "--repo", destination.path],
+                [str(binary), "init", *self._repo_args(destination.path)],
                 capture_output=True,
                 text=True,
                 env=self._env,
@@ -137,7 +164,7 @@ class ResticBackend(BackendBase):
     ) -> list[str]:
         """Build restic backup command."""
         binary = self._get_binary()
-        cmd = [str(binary), "backup", "--repo", repo, "--json"]
+        cmd = [str(binary), "backup", *self._repo_args(repo), "--json"]
 
         if dry_run:
             cmd.append("--dry-run")
@@ -181,7 +208,7 @@ class ResticBackend(BackendBase):
         # Check if repository exists, initialize if not
         try:
             binary = self._get_binary()
-            check_cmd = [str(binary), "-r", destination.path, "snapshots", "--json"]
+            check_cmd = [str(binary), "snapshots", *self._repo_args(destination.path), "--json"]
             check_result = subprocess.run(
                 check_cmd,
                 capture_output=True,
@@ -281,6 +308,7 @@ class ResticBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
+        include_path: str | None = None,
     ) -> BackendResult:
         """Restore from restic snapshot.
 
@@ -309,7 +337,7 @@ class ResticBackend(BackendBase):
         # Restic stores absolute paths, so restoring with --target /dest creates /dest/original/path
         # If restoring to the original location, use --target / to restore to absolute paths
         target = str(destination)
-        include_path = None
+        restore_include = include_path
 
         print(f"[RESTIC] original_source_path: {original_source_path}")
         print(f"[RESTIC] destination: {destination}")
@@ -325,7 +353,7 @@ class ResticBackend(BackendBase):
             if dest_normalized == orig_normalized or dest_normalized.rstrip('/') == orig_normalized.rstrip('/'):
                 # Restoring to original location - use / as target so files go to absolute paths
                 target = "/"
-                include_path = original_source_path
+                restore_include = self._in_place_include(original_source_path, include_path)
                 print("[RESTIC] Detected restore to original location, using --target /")
             else:
                 # Restoring to different location
@@ -336,14 +364,14 @@ class ResticBackend(BackendBase):
 
         cmd = [
             str(binary), "restore",
-            "--repo", source.path,
+            *self._repo_args(source.path),
             "--target", target,
             snapshot_id,
         ]
 
         # Include only the original source path if specified
-        if include_path:
-            cmd.extend(["--include", include_path])
+        if restore_include:
+            cmd.extend(["--include", restore_include])
 
         print(f"[RESTIC] Running command: {' '.join(cmd)}")
 
@@ -435,7 +463,7 @@ class ResticBackend(BackendBase):
         try:
             binary = self._get_binary()
             result = subprocess.run(
-                [str(binary), "snapshots", "--repo", destination.path, "--json"],
+                [str(binary), "snapshots", *self._repo_args(destination.path), "--json"],
                 capture_output=True,
                 text=True,
                 env=self._env,
@@ -459,6 +487,22 @@ class ResticBackend(BackendBase):
             logger.warning(f"[RESTIC] Failed to list snapshots: {e}")
 
         return []
+
+    def test_connection(self, destination: BackupDestination) -> tuple[bool, str]:
+        """Test S3 access without creating a repository."""
+        try:
+            binary = self._get_binary()
+            result = subprocess.run(
+                [str(binary), "snapshots", *self._repo_args(destination.path), "--json"],
+                capture_output=True, text=True, env=self._env, timeout=60,
+            )
+            if result.returncode == 0:
+                return True, "Repository is accessible"
+            if "repository does not exist" in result.stderr.lower():
+                return True, "S3 is accessible; repository will be initialized on first backup"
+            return False, result.stderr.strip() or "S3 connection failed"
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
+            return False, str(exc)
 
     def prune(
         self,
@@ -484,7 +528,7 @@ class ResticBackend(BackendBase):
                 return_code=-1,
             )
 
-        cmd = [str(binary), "forget", "--repo", destination.path, "--prune"]
+        cmd = [str(binary), "forget", *self._repo_args(destination.path), "--prune"]
 
         if dry_run:
             cmd.append("--dry-run")
@@ -538,7 +582,7 @@ class ResticBackend(BackendBase):
         try:
             binary = self._get_binary()
             result = subprocess.run(
-                [str(binary), "check", "--repo", destination.path],
+                [str(binary), "check", *self._repo_args(destination.path)],
                 capture_output=True,
                 text=True,
                 env=self._env,

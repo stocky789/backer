@@ -45,55 +45,6 @@ def check_existing_config() -> dict[str, Any] | None:
     return None
 
 
-def discover_servers() -> list[str]:
-    """Try to discover Backer servers on the network.
-
-    Uses common patterns and mDNS if available.
-    """
-    discovered = []
-
-    # Try common hostnames/ports
-    common_hosts = [
-        "localhost:8420",
-        "backer:8420",
-        "backer-server:8420",
-        "backup:8420",
-    ]
-
-    # Also try the local hostname's domain
-    try:
-        fqdn = socket.getfqdn()
-        if "." in fqdn:
-            domain = ".".join(fqdn.split(".")[1:])
-            common_hosts.append(f"backer.{domain}:8420")
-    except Exception:
-        pass
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Scanning for Backer servers...", total=len(common_hosts))
-
-        for host in common_hosts:
-            progress.update(task, advance=1, description=f"Trying {host}...")
-            try:
-                response = httpx.get(
-                    f"http://{host}/health",
-                    timeout=2.0,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("status") == "ok":
-                        discovered.append(f"http://{host}")
-            except Exception:
-                pass
-
-    return discovered
-
-
 def test_server_connection(url: str) -> tuple[bool, str]:
     """Test connection to a Backer server.
 
@@ -125,7 +76,7 @@ def test_server_connection(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def register_agent(server_url: str) -> tuple[bool, str, dict[str, Any] | None]:
+def register_agent(server_url: str, enrollment_token: str) -> tuple[bool, str, dict[str, Any] | None]:
     """Register this machine as an agent with the server.
 
     Returns:
@@ -143,6 +94,7 @@ def register_agent(server_url: str) -> tuple[bool, str, dict[str, Any] | None]:
                 "version": __version__,
                 "os_info": os_info,
                 "tags": [],
+                "enrollment_token": enrollment_token,
             },
             timeout=30.0,
         )
@@ -247,6 +199,7 @@ def run_wizard() -> bool:
     # Step 2: Register agent
     console.print("[bold]Step 2:[/bold] Register Agent")
     console.print(f"[dim]Registering this machine ({socket.gethostname()}) with the server.[/dim]")
+    enrollment_token = Prompt.ask("Enter the enrollment key from the Agents page", password=True)
     console.print()
 
     with Progress(
@@ -256,7 +209,7 @@ def run_wizard() -> bool:
         transient=True,
     ) as progress:
         progress.add_task("Registering agent...", total=None)
-        success, message, credentials = register_agent(server_url)
+        success, message, credentials = register_agent(server_url, enrollment_token)
 
     if not success:
         console.print(f"[red]{message}[/red]")

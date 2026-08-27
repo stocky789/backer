@@ -3,9 +3,9 @@
 import logging
 import threading
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from croniter import croniter
@@ -54,7 +54,7 @@ class BackupScheduler:
         self._last_hypervisor_run_times: dict[str, datetime] = {}
 
         # Timezone caching to avoid database hits on every _now() call
-        self._cached_timezone: ZoneInfo | None = None
+        self._cached_timezone: tzinfo | None = None
         self._timezone_cache_time: datetime | None = None
         self._timezone_cache_ttl = 300  # Refresh timezone cache every 5 minutes
 
@@ -62,13 +62,13 @@ class BackupScheduler:
         self._last_cleanup: datetime | None = None
         self._cleanup_interval = 300  # Run cleanup every 5 minutes
 
-    def _get_timezone(self) -> ZoneInfo:
+    def _get_timezone(self) -> tzinfo:
         """Get the configured timezone from storage with caching.
 
         Returns ZoneInfo for the configured timezone, or UTC if not set or invalid.
         Uses a cache to avoid hitting the database on every call.
         """
-        now = datetime.now(ZoneInfo("UTC"))
+        now = datetime.now(UTC)
 
         # Check if cache is valid
         if (
@@ -81,10 +81,13 @@ class BackupScheduler:
         # Cache miss or expired - fetch from storage
         tz_name = self.storage.get_setting("timezone", "UTC")
         try:
-            tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+            tz = UTC if not tz_name or tz_name.upper() == "UTC" else ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(f"Invalid timezone '{tz_name}', using UTC")
+            tz = UTC
         except Exception:
             logger.warning(f"Invalid timezone '{tz_name}', using UTC")
-            tz = ZoneInfo("UTC")
+            tz = UTC
 
         # Update cache
         self._cached_timezone = tz
@@ -136,7 +139,7 @@ class BackupScheduler:
 
     def _run_cleanup_if_due(self) -> None:
         """Run periodic cleanup tasks if enough time has passed."""
-        now = datetime.now(ZoneInfo("UTC"))
+        now = datetime.now(UTC)
 
         # Check if cleanup is due
         if self._last_cleanup is not None:
@@ -328,57 +331,3 @@ class BackupScheduler:
             status.append(job_status)
 
         return status
-
-
-def format_cron_human(cron_expr: str) -> str:
-    """Convert a cron expression to human-readable format.
-
-    Examples:
-        "0 2 * * *" -> "Daily at 2:00 AM"
-        "0 3 * * 0" -> "Weekly on Sunday at 3:00 AM"
-        "0 */6 * * *" -> "Every 6 hours"
-    """
-    if not cron_expr:
-        return "Manual only"
-
-    # Common presets
-    presets = {
-        "0 2 * * *": "Daily at 2:00 AM",
-        "0 3 * * 0": "Weekly on Sunday at 3:00 AM",
-        "0 1 * * 1-5": "Weekdays at 1:00 AM",
-        "0 */6 * * *": "Every 6 hours",
-        "0 */12 * * *": "Every 12 hours",
-        "0 0 * * *": "Daily at midnight",
-        "0 0 1 * *": "Monthly on the 1st",
-    }
-
-    if cron_expr in presets:
-        return presets[cron_expr]
-
-    # Parse and describe
-    try:
-        parts = cron_expr.split()
-        if len(parts) != 5:
-            return cron_expr
-
-        minute, hour, day, month, weekday = parts
-
-        # Every X hours
-        if hour.startswith("*/") and minute == "0" and day == "*" and month == "*" and weekday == "*":
-            interval = hour[2:]
-            return f"Every {interval} hours"
-
-        # Daily at specific time
-        if day == "*" and month == "*" and weekday == "*":
-            if minute.isdigit() and hour.isdigit():
-                h = int(hour)
-                m = int(minute)
-                am_pm = "AM" if h < 12 else "PM"
-                h12 = h if h <= 12 else h - 12
-                h12 = 12 if h12 == 0 else h12
-                time_str = f"{h12}:{m:02d} {am_pm}"
-                return f"Daily at {time_str}"
-
-        return cron_expr
-    except Exception:
-        return cron_expr

@@ -5,10 +5,9 @@ import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from backer.server import timezone as tz
 from backer.server.models import Client, ClientStatus
@@ -91,6 +90,9 @@ class Storage:
                     path TEXT DEFAULT '',
                     username TEXT,
                     password_encrypted TEXT,
+                    storage_password_encrypted TEXT,
+                    repository_password_encrypted TEXT,
+                    backend_type TEXT,
                     domain TEXT,
                     mount_point TEXT,
                     status TEXT DEFAULT 'disconnected',
@@ -253,6 +255,9 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_hv ON vm_bitmap_state(hypervisor_id);
                 CREATE INDEX IF NOT EXISTS idx_vm_bitmap_state_vm ON vm_bitmap_state(hypervisor_id, vmid);
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(repositories)")}
+            if "provider_credentials_encrypted" not in columns:
+                conn.execute("ALTER TABLE repositories ADD COLUMN provider_credentials_encrypted TEXT")
 
             # Migration: Add copies_to_keep column if it doesn't exist
             try:
@@ -262,6 +267,26 @@ class Storage:
                 )
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Repository credentials used to share one ambiguous column. Keep
+            # legacy data readable, but split it exactly once by repository role.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(repositories)")}
+            for column in ("storage_password_encrypted", "repository_password_encrypted", "backend_type"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE repositories ADD COLUMN {column} TEXT")
+            conn.execute("""
+                UPDATE repositories SET storage_password_encrypted = password_encrypted
+                WHERE repo_type = 'smb' AND storage_password_encrypted IS NULL AND password_encrypted IS NOT NULL
+            """)
+            conn.execute("""
+                UPDATE repositories SET repository_password_encrypted = password_encrypted
+                WHERE repo_type IN ('local', 'nfs')
+                    AND repository_password_encrypted IS NULL AND password_encrypted IS NOT NULL
+            """)
+            conn.execute("""
+                UPDATE repositories SET backend_type = CASE WHEN repo_type = 'local' THEN 'kopia' ELSE 'restic' END
+                WHERE backend_type IS NULL
+            """)
 
             # Migration: Convert delete_before_backup to copies_to_keep
             # If delete_before_backup was 1, set copies_to_keep to 1
@@ -433,11 +458,11 @@ class Storage:
             last_seen = datetime.fromisoformat(row["last_seen"])
             if last_seen.tzinfo is None:
                 # Assume UTC if naive
-                last_seen = last_seen.replace(tzinfo=ZoneInfo("UTC"))
+                last_seen = last_seen.replace(tzinfo=UTC)
 
         registered_at = datetime.fromisoformat(row["registered_at"])
         if registered_at.tzinfo is None:
-            registered_at = registered_at.replace(tzinfo=ZoneInfo("UTC"))
+            registered_at = registered_at.replace(tzinfo=UTC)
 
         return Client(
             id=row["id"],
@@ -455,6 +480,7 @@ class Storage:
     # Job operations
     def save_job(self, name: str, config: dict[str, Any]) -> None:
         """Save or update a job configuration."""
+        config = self._encrypt_job_repository_password(config)
         now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -470,13 +496,50 @@ class Storage:
         """Get a job configuration by name."""
         with self._connect() as conn:
             row = conn.execute("SELECT config FROM jobs WHERE name = ?", (name,)).fetchone()
-            return json.loads(row["config"]) if row else None
+            if not row:
+                return None
+            stored_config = json.loads(row["config"])
+            config = self._encrypt_job_repository_password(stored_config)
+            if config != stored_config:
+                conn.execute("UPDATE jobs SET config = ? WHERE name = ?", (json.dumps(config), name))
+            return self._decrypt_job_repository_password(config)
 
     def list_jobs(self) -> list[dict[str, Any]]:
         """List all job configurations."""
         with self._connect() as conn:
             rows = conn.execute("SELECT name, config FROM jobs ORDER BY name").fetchall()
-            return [{"name": row["name"], **json.loads(row["config"])} for row in rows]
+            result = []
+            for row in rows:
+                stored_config = json.loads(row["config"])
+                config = self._encrypt_job_repository_password(stored_config)
+                if config != stored_config:
+                    conn.execute("UPDATE jobs SET config = ? WHERE name = ?", (json.dumps(config), row["name"]))
+                result.append({"name": row["name"], **self._decrypt_job_repository_password(config)})
+            return result
+
+    def _encrypt_job_repository_password(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Migrate legacy restic_password values into encrypted job config."""
+        if config.get("backend") not in {"restic", "kopia"}:
+            return config
+        result = {**config, "backend_options": dict(config.get("backend_options") or {})}
+        options = result["backend_options"]
+        password = (
+            options.pop("repository_password", None)
+            or options.pop("restic_password", None)
+            or options.pop("password", None)
+        )
+        if password and not options.get("repository_password_encrypted"):
+            options["repository_password_encrypted"] = get_secrets_manager(self.db_path.parent).encrypt(password)
+        return result
+
+    def _decrypt_job_repository_password(self, config: dict[str, Any]) -> dict[str, Any]:
+        result = {**config, "backend_options": dict(config.get("backend_options") or {})}
+        encrypted = result["backend_options"].pop("repository_password_encrypted", None)
+        if encrypted:
+            password = get_secrets_manager(self.db_path.parent).decrypt(encrypted)
+            if password:
+                result["backend_options"]["repository_password"] = password
+        return result
 
     def delete_job(self, name: str) -> bool:
         """Delete a job and all associated records.
@@ -733,16 +796,21 @@ class Storage:
         path: str = "",
         username: str | None = None,
         password_encrypted: str | None = None,
+        storage_password_encrypted: str | None = None,
+        repository_password_encrypted: str | None = None,
+        backend_type: str | None = None,
         domain: str | None = None,
         config: dict[str, Any] | None = None,
+        provider_credentials_encrypted: str | None = None,
     ) -> None:
         """Add a new storage repository."""
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO repositories (id, name, repo_type, server, share, path,
-                    username, password_encrypted, domain, created_at, config)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    username, password_encrypted, storage_password_encrypted, repository_password_encrypted,
+                    backend_type, domain, created_at, config, provider_credentials_encrypted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     repo_id,
@@ -753,9 +821,13 @@ class Storage:
                     path,
                     username,
                     password_encrypted,
+                    storage_password_encrypted,
+                    repository_password_encrypted,
+                    backend_type or ("kopia" if repo_type == "local" else "restic"),
                     domain,
                     tz.get_now().isoformat(),
                     json.dumps(config or {}),
+                    provider_credentials_encrypted,
                 ),
             )
 
@@ -828,7 +900,15 @@ class Storage:
             "share": row["share"],
             "path": row["path"],
             "username": row["username"],
-            "has_password": bool(row["password_encrypted"]),
+            "backend_type": row["backend_type"] or ("kopia" if row["repo_type"] == "local" else "restic"),
+            "has_storage_password": bool(row["storage_password_encrypted"] or row["password_encrypted"]),
+            "has_repository_password": bool(row["repository_password_encrypted"]),
+            "has_password": bool(
+                row["storage_password_encrypted"]
+                or row["repository_password_encrypted"]
+                or row["password_encrypted"]
+            ),
+            "has_provider_credentials": bool(row["provider_credentials_encrypted"]),
             "domain": row["domain"],
             "mount_point": row["mount_point"],
             "status": row["status"],
@@ -847,42 +927,41 @@ class Storage:
 
         return repo
 
+    def _get_encrypted_secret(self, repo_id: str, column: str, legacy: bool = False) -> str | None:
+        """Read one encrypted repository secret, converting legacy base64 once."""
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT {column}, password_encrypted FROM repositories WHERE id = ?", (repo_id,)
+            ).fetchone()
+            if not row:
+                return None
+            encrypted_value = row[column] or (row["password_encrypted"] if legacy else None)
+            if not encrypted_value:
+                return None
+            secrets = get_secrets_manager(self.db_path.parent)
+            if secrets.is_encrypted(encrypted_value):
+                return secrets.decrypt(encrypted_value)
+            import base64
+            try:
+                plaintext = base64.b64decode(encrypted_value).decode()
+                conn.execute(
+                    f"UPDATE repositories SET {column} = ? WHERE id = ?", (secrets.encrypt(plaintext), repo_id)
+                )
+                return plaintext
+            except Exception:
+                return None
+
+    def get_storage_password(self, repo_id: str) -> str | None:
+        """Return SMB transport credentials; never use these for encryption."""
+        return self._get_encrypted_secret(repo_id, "storage_password_encrypted", legacy=True)
+
     def get_repository_password(self, repo_id: str) -> str | None:
         """Get repository password (for internal use only).
 
         Handles both new Fernet-encrypted passwords and legacy base64 passwords.
         Legacy passwords are automatically migrated to encrypted format.
         """
-        from backer.server.secrets import get_secrets_manager
-
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT password_encrypted FROM repositories WHERE id = ?", (repo_id,)
-            ).fetchone()
-
-            if not row or not row["password_encrypted"]:
-                return None
-
-            encrypted_value = row["password_encrypted"]
-            secrets = get_secrets_manager(self.db_path.parent)
-
-            # Check if it's Fernet-encrypted (new format)
-            if secrets.is_encrypted(encrypted_value):
-                return secrets.decrypt(encrypted_value)
-
-            # Legacy base64 format - migrate to encrypted
-            import base64
-            try:
-                plaintext = base64.b64decode(encrypted_value).decode()
-                # Migrate to new encrypted format
-                new_encrypted = secrets.encrypt(plaintext)
-                conn.execute(
-                    "UPDATE repositories SET password_encrypted = ? WHERE id = ?",
-                    (new_encrypted, repo_id),
-                )
-                return plaintext
-            except Exception:
-                return None
+        return self._get_encrypted_secret(repo_id, "repository_password_encrypted")
 
     def set_repository_password(self, repo_id: str, password: str) -> None:
         """Set repository password using Fernet encryption."""
@@ -893,9 +972,28 @@ class Storage:
 
         with self._connect() as conn:
             conn.execute(
-                "UPDATE repositories SET password_encrypted = ? WHERE id = ?",
+                "UPDATE repositories SET repository_password_encrypted = ? WHERE id = ?",
                 (encrypted, repo_id),
             )
+
+    def set_storage_password(self, repo_id: str, password: str) -> None:
+        encrypted = get_secrets_manager(self.db_path.parent).encrypt(password)
+        with self._connect() as conn:
+            conn.execute("UPDATE repositories SET storage_password_encrypted = ? WHERE id = ?", (encrypted, repo_id))
+
+    def get_repository_provider_credentials(self, repo_id: str) -> dict[str, Any] | None:
+        """Return encrypted provider credentials for an operation, never an API response."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT provider_credentials_encrypted FROM repositories WHERE id = ?", (repo_id,)
+            ).fetchone()
+        if not row or not row["provider_credentials_encrypted"]:
+            return None
+        plaintext = get_secrets_manager(self.db_path.parent).decrypt(row["provider_credentials_encrypted"])
+        try:
+            return json.loads(plaintext) if plaintext else None
+        except json.JSONDecodeError:
+            return None
 
     # Progress tracking operations
     def start_job_progress(
@@ -1035,6 +1133,12 @@ class Storage:
                 (key, value, now, value, now),
             )
 
+    def consume_setting(self, key: str, value: str) -> bool:
+        """Atomically consume a setting only when its value matches."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM settings WHERE key = ? AND value = ?", (key, value))
+            return cursor.rowcount == 1
+
     def get_all_settings(self) -> dict[str, str]:
         """Get all settings as a dictionary."""
         with self._connect() as conn:
@@ -1138,6 +1242,24 @@ class Storage:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (username, password_hash, display_name, email, role, now, now),
+            )
+            return cursor.lastrowid or 0
+
+    def create_initial_admin(
+        self, username: str, password_hash: str, display_name: str
+    ) -> int | None:
+        """Create the first admin only when no account exists yet."""
+        now = tz.get_now().isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                return None
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, password_hash, display_name, role, created_at, updated_at)
+                VALUES (?, ?, ?, 'admin', ?, ?)
+                """,
+                (username, password_hash, display_name, now, now),
             )
             return cursor.lastrowid or 0
 

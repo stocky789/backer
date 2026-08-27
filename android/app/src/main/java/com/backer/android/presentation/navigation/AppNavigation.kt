@@ -16,7 +16,6 @@ import com.backer.android.presentation.status.StatusViewModel
 sealed class Screen(val route: String) {
     data object Setup : Screen("setup")
     data object Status : Screen("status")
-    data object Browse : Screen("browse")
     data object Settings : Screen("settings")
 }
 
@@ -70,8 +69,5 @@ fun BackerNavHost() {
             )
         }
 
-        composable(Screen.Browse.route) {
-            // TODO: Implement BrowseScreen
-        }
     }
 }

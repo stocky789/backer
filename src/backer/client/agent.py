@@ -22,6 +22,30 @@ from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
 from backer.core.repo_metadata import RepositoryMetadata
 
+_SENSITIVE_OPTION_PARTS = (
+    "password", "token", "secret", "access_key", "api_key", "private_key", "authorization",
+    "credential", "proxy_capability",
+)
+
+
+def _redact_backend_options(value: Any) -> Any:
+    """Return a safe-to-log copy of backend options."""
+    if isinstance(value, dict):
+        return {
+            key: "***" if any(part in str(key).lower() for part in _SENSITIVE_OPTION_PARTS)
+            else _redact_backend_options(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_backend_options(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_backend_options(item) for item in value)
+    return value
+
+
+def _log_backend_options(operation: str, options: dict[str, Any]) -> None:
+    print(f"[{operation}] Backend options: {_redact_backend_options(options)}")
+
 
 def get_config_dir() -> Path:
     """Get platform-appropriate config directory.
@@ -89,6 +113,7 @@ class BackerAgent:
 
         self._heartbeat_thread: threading.Thread | None = None
         self._http_client: httpx.Client | None = None
+        self._smb_manager: Any | None = None
 
     def _get_client(self) -> httpx.Client:
         """Get or create HTTP client (thread-safe)."""
@@ -104,7 +129,7 @@ class BackerAgent:
                 )
             return self._http_client
 
-    def register(self) -> tuple[str, str]:
+    def register(self, enrollment_token: str | None = None) -> tuple[str, str]:
         """Register this agent with the server.
 
         Returns:
@@ -119,6 +144,7 @@ class BackerAgent:
                 "version": __version__,
                 "os_info": f"{platform.system()} {platform.release()}",
                 "tags": [],
+                "enrollment_token": enrollment_token,
             },
         )
         response.raise_for_status()
@@ -236,15 +262,12 @@ class BackerAgent:
                 with self._active_jobs_lock:
                     if job_name in self._active_jobs:
                         print(f"[WARN] Job '{job_name}' is already running, skipping duplicate")
-                        # Still acknowledge to prevent server from re-sending
-                        if cmd_id:
-                            self._acknowledge_command(cmd_id)
                         return
                     self._active_jobs.add(job_name)
 
                 backup_thread = threading.Thread(
                     target=self._run_backup_worker,
-                    args=(job_data, dry_run, job_name),
+                    args=(job_data, dry_run, job_name, cmd_id),
                     daemon=True,
                     name=f"backup-{job_name}"
                 )
@@ -260,14 +283,12 @@ class BackerAgent:
                     restore_key = f"restore-{job_name}"
                     if restore_key in self._active_jobs:
                         print(f"[WARN] Restore '{job_name}' is already running, skipping duplicate")
-                        if cmd_id:
-                            self._acknowledge_command(cmd_id)
                         return
                     self._active_jobs.add(restore_key)
 
                 restore_thread = threading.Thread(
                     target=self._run_restore_worker,
-                    args=(payload, dry_run, restore_key),
+                    args=(payload, dry_run, restore_key, cmd_id),
                     daemon=True,
                     name=f"restore-{job_name}"
                 )
@@ -280,14 +301,14 @@ class BackerAgent:
                 print(f"Unknown command: {cmd_type}")
                 return
 
-            # Acknowledge command was received (not completed - that happens in worker)
-            if cmd_id:
+            # Synchronous commands are complete; workers acknowledge themselves.
+            if cmd_id and cmd_type not in {"backup", "restore"}:
                 self._acknowledge_command(cmd_id)
 
         except Exception as e:
             print(f"Command {cmd_id} failed: {e}")
 
-    def _run_backup_worker(self, job_data: dict[str, Any], dry_run: bool, job_name: str) -> None:
+    def _run_backup_worker(self, job_data: dict[str, Any], dry_run: bool, job_name: str, cmd_id: int | None) -> None:
         """Worker thread for executing backups without blocking heartbeat."""
         try:
             self.execute_backup(job_data, dry_run=dry_run)
@@ -296,11 +317,13 @@ class BackerAgent:
             import traceback
             traceback.print_exc()
         finally:
+            if cmd_id:
+                self._acknowledge_command(cmd_id)
             # Remove from active jobs when done
             with self._active_jobs_lock:
                 self._active_jobs.discard(job_name)
 
-    def _run_restore_worker(self, payload: dict[str, Any], dry_run: bool, restore_key: str) -> None:
+    def _run_restore_worker(self, payload: dict[str, Any], dry_run: bool, restore_key: str, cmd_id: int | None) -> None:
         """Worker thread for executing restores without blocking heartbeat."""
         try:
             self.execute_restore(payload, dry_run=dry_run)
@@ -309,6 +332,8 @@ class BackerAgent:
             import traceback
             traceback.print_exc()
         finally:
+            if cmd_id:
+                self._acknowledge_command(cmd_id)
             # Remove from active jobs when done
             with self._active_jobs_lock:
                 self._active_jobs.discard(restore_key)
@@ -599,6 +624,7 @@ class BackerAgent:
             )
 
         mount_point = Path(tempfile.mkdtemp(prefix="backer_smb_"))
+        credentials_path: Path | None = None
 
         try:
             # Build mount command
@@ -607,12 +633,26 @@ class BackerAgent:
 
             # Build mount options
             opts = ["rw"]
-            if username:
-                opts.append(f"username={username}")
-            if password:
-                opts.append(f"password={password}")
-            if domain:
-                opts.append(f"domain={domain}")
+            if username or password or domain:
+                fd, credentials_name = tempfile.mkstemp(prefix="backer_smb_credentials_")
+                os.close(fd)
+                credentials_path = Path(credentials_name)
+                credentials_path.write_text(
+                    "\n".join(
+                        filter(
+                            None,
+                            (
+                                f"username={username}" if username else "",
+                                f"password={password}" if password else "",
+                                f"domain={domain}" if domain else "",
+                            ),
+                        )
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                credentials_path.chmod(0o600)
+                opts.append(f"credentials={credentials_path}")
             if not username and not password:
                 opts.append("guest")
 
@@ -648,6 +688,8 @@ class BackerAgent:
                 mount_point.rmdir()
             except Exception:
                 pass
+            if credentials_path:
+                credentials_path.unlink(missing_ok=True)
 
     @contextmanager
     def _nfs_mount_context(
@@ -735,8 +777,12 @@ class BackerAgent:
         if backend_name == "proxy" or dest_path.startswith(("proxy://", "proxys://")):
             return dest_path, None
 
-        # Windows can use UNC paths directly
+        # Windows can use UNC paths directly, but does not support the NFS
+        # destination format used by the agent protocol.
         if sys.platform == "win32":
+            if self._is_nfs_path(dest_path) or (job.get("nfs_server") and job.get("nfs_export")):
+                raise RuntimeError("NFS destinations are not supported on Windows")
+            self._prepare_windows_smb(dest_path, job)
             return dest_path, None
 
         # Handle SMB paths
@@ -889,14 +935,7 @@ class BackerAgent:
                 backend_options["client_secret"] = self.client_secret
                 print(f"[BACKUP] Proxy backend configured with location: {backend_options['location']}")
 
-            # Log backend options (without password/secrets)
-            safe_options = {k: v for k, v in backend_options.items()
-                           if k not in ("password", "client_secret")}
-            if "password" in backend_options:
-                safe_options["password"] = "***"
-            if "client_secret" in backend_options:
-                safe_options["client_secret"] = "***"
-            print(f"[BACKUP] Backend options: {safe_options}")
+            _log_backend_options("BACKUP", backend_options)
 
             backend = get_backend(
                 backend_name,  # rclone default (rsync not supported for agents)
@@ -1096,8 +1135,12 @@ class BackerAgent:
             print(f"[RESTORE] Using proxy URI directly: {source_path}")
             return source_path, None
 
-        # Windows can use UNC paths directly and doesn't need mount handling
+        # Windows can use UNC paths directly, but does not support the NFS
+        # source format used by the agent protocol.
         if sys.platform == "win32":
+            if self._is_nfs_path(source_path) or (job.get("nfs_server") and job.get("nfs_export")):
+                raise RuntimeError("NFS restores are not supported on Windows")
+            self._prepare_windows_smb(source_path, job)
             return source_path, None
 
         # Check if NFS credentials were passed (job linked to NFS repository)
@@ -1142,6 +1185,19 @@ class BackerAgent:
 
         # Local path, use as-is
         return source_path, None
+
+    def _prepare_windows_smb(self, path: str, job: dict[str, Any]) -> None:
+        """Open the SMB session once before either backup or restore uses a UNC path."""
+        if not self._is_smb_path(path):
+            return
+        server, share, _ = self._parse_smb_path(path)
+        if self._smb_manager is None:
+            from backer.agent.service import SMBConnectionManager
+            self._smb_manager = SMBConnectionManager()
+        if not self._smb_manager.connect(
+            server, share, job.get("smb_username"), job.get("smb_password"), job.get("smb_domain")
+        ):
+            raise RuntimeError(f"Failed to connect to SMB share: \\\\{server}\\{share}")
 
     def _prepare_smb_source(
         self,
@@ -1255,14 +1311,7 @@ class BackerAgent:
                 backend_options["client_secret"] = self.client_secret
                 print(f"[RESTORE] Proxy backend configured with location: {backend_options['location']}")
 
-            # Log backend options (without password/secrets)
-            safe_options = {k: v for k, v in backend_options.items()
-                           if k not in ("password", "client_secret")}
-            if "password" in backend_options:
-                safe_options["password"] = "***"
-            if "client_secret" in backend_options:
-                safe_options["client_secret"] = "***"
-            print(f"[RESTORE] Backend options: {safe_options}")
+            _log_backend_options("RESTORE", backend_options)
 
             backend = get_backend(
                 backend_name,
@@ -1291,45 +1340,136 @@ class BackerAgent:
             source = BackupDestination(path=source_path)
             destination = Path(job["destination_path"])
 
-            # Handle clean restore - wipe destination directory first
+            # Validate the selected repository/snapshot before a clean restore
+            # removes anything.  A dry-run is non-mutating for the supported
+            # backends except Kopia, which explicitly rejects it.
             clean_restore = job.get("clean_restore", False)
+            staged_destination: Path | None = None
             if clean_restore and not dry_run:
-                print(f"[RESTORE] Clean restore enabled - wiping destination: {destination}")
+                if backend_name == "proxy":
+                    raise RuntimeError(
+                        "Clean restore is not supported for proxy backends because "
+                        "the server cannot yet validate a restore without modifying files"
+                    )
+                if backend_name == "kopia":
+                    snapshots = backend.list_snapshots(source)
+                    selected = job.get("snapshot")
+                    if not snapshots or (selected and selected != "latest" and not any(
+                        selected in (item.get("id"), item.get("full_id")) for item in snapshots
+                    )):
+                        raise RuntimeError(
+                            "Clean restore requires an accessible Kopia repository and selected snapshot"
+                        )
+                else:
+                    validation = backend.restore(
+                        source=source,
+                        destination=destination,
+                        snapshot=job.get("snapshot"),
+                        dry_run=True,
+                        original_source_path=job.get("original_source_path"),
+                        include_path=job.get("source_subfolder") or None,
+                    )
+                    if not validation.success:
+                        raise RuntimeError("Clean restore validation failed: " + "; ".join(validation.errors))
+
+                resolved_destination = destination.resolve()
+                if resolved_destination == resolved_destination.parent:
+                    raise RuntimeError("Clean restore refuses to replace a filesystem root")
+
+                print(f"[RESTORE] Clean restore enabled - staging destination: {destination}")
                 self._report_progress(
                     run_id=run_id,
                     status="running",
                     progress_percent=3,
-                    message="Clean restore: removing existing files...",
+                    message="Clean restore: staging existing files...",
                 )
                 try:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
                     if destination.exists():
-                        # Remove all contents but keep the directory
-                        for item in destination.iterdir():
-                            if item.is_dir():
-                                shutil.rmtree(item)
-                            else:
-                                item.unlink()
-                        print("[RESTORE] Wiped destination directory contents")
+                        if destination.is_symlink() or not destination.is_dir():
+                            raise RuntimeError("Clean restore destination must be a non-symlink directory")
+                        destination_mode = destination.stat().st_mode & 0o7777
+                        staged_destination = Path(tempfile.mkdtemp(
+                            prefix=".backer-restore-", dir=destination.parent
+                        ))
+                        staged_destination.rmdir()
+                        destination.replace(staged_destination)
+                        try:
+                            destination.mkdir(mode=destination_mode)
+                            destination.chmod(destination_mode)
+                        except Exception as setup_err:
+                            try:
+                                if destination.exists():
+                                    destination.rmdir()
+                                staged_destination.replace(destination)
+                            except Exception as rollback_err:
+                                raise RuntimeError(
+                                    "Clean restore setup rollback failed; original destination remains at "
+                                    f"{staged_destination}: {rollback_err}"
+                                ) from rollback_err
+                            raise RuntimeError(
+                                f"Clean restore failed to prepare destination: {setup_err}"
+                            ) from setup_err
+                        print("[RESTORE] Staged destination directory contents")
                     else:
-                        # Create the directory if it doesn't exist
                         destination.mkdir(parents=True, exist_ok=True)
                         print("[RESTORE] Created destination directory")
-                except Exception as wipe_err:
-                    print(f"[RESTORE] Warning: Failed to wipe destination: {wipe_err}")
-                    # Continue with restore anyway - better to have extra files than fail
+                except Exception as setup_err:
+                    raise RuntimeError(f"Clean restore failed to prepare destination: {setup_err}") from setup_err
 
             # Pass original_source_path for kopia/restic snapshot lookup
             original_source_path = job.get("original_source_path")
             if original_source_path:
                 print(f"[RESTORE] Original source path for snapshot lookup: {original_source_path}")
 
-            result = backend.restore(
-                source=source,
-                destination=destination,
-                snapshot=job.get("snapshot"),
-                dry_run=dry_run,
-                original_source_path=original_source_path,
-            )
+            try:
+                result = backend.restore(
+                    source=source,
+                    destination=destination,
+                    snapshot=job.get("snapshot"),
+                    dry_run=dry_run,
+                    original_source_path=original_source_path,
+                    include_path=job.get("source_subfolder") or None,
+                )
+            except Exception:
+                if clean_restore and not dry_run:
+                    try:
+                        if destination.exists():
+                            if destination.is_dir() and not destination.is_symlink():
+                                shutil.rmtree(destination)
+                            else:
+                                destination.unlink()
+                        if staged_destination:
+                            staged_destination.replace(destination)
+                    except Exception as rollback_err:
+                        raise RuntimeError(
+                            "Clean restore rollback failed; original destination remains at "
+                            f"{staged_destination}: {rollback_err}"
+                        ) from rollback_err
+                raise
+
+            if clean_restore and not dry_run and not result.success:
+                try:
+                    if destination.exists():
+                        if destination.is_dir() and not destination.is_symlink():
+                            shutil.rmtree(destination)
+                        else:
+                            destination.unlink()
+                    if staged_destination:
+                        staged_destination.replace(destination)
+                except Exception as rollback_err:
+                    result.errors.append(
+                        "Clean restore rollback failed; original destination remains at "
+                        f"{staged_destination}: {rollback_err}"
+                    )
+            elif staged_destination:
+                try:
+                    shutil.rmtree(staged_destination)
+                except Exception as cleanup_err:
+                    result.warnings.append(
+                        "Clean restore succeeded but could not remove staged files at "
+                        f"{staged_destination}: {cleanup_err}"
+                    )
 
             finished_at = datetime.now()
 
@@ -1341,6 +1481,9 @@ class BackerAgent:
             )
 
             # Report result to server
+            output = getattr(result, "output", "")
+            if result.warnings:
+                output = "\n".join((output, *(f"WARNING: {warning}" for warning in result.warnings)))
             report = {
                 "run_id": run_id,
                 "job_name": f"restore:{job_name}",
@@ -1351,7 +1494,7 @@ class BackerAgent:
                 "bytes_transferred": getattr(result, "bytes_transferred", 0),
                 "files_transferred": result.files_transferred,
                 "errors": result.errors,
-                "output": getattr(result, "output", "")[:5000],
+                "output": output[:5000],
             }
 
             try:

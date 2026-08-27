@@ -1,6 +1,8 @@
 """Tests for the tool manager."""
 
+import hashlib
 import sys
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -81,6 +83,43 @@ class TestToolManager:
         assert "linux" in url
         assert "amd64" in url
 
+    @pytest.mark.parametrize("tool", TOOL_INFO)
+    @pytest.mark.parametrize("system,machine", [
+        ("Linux", "x86_64"), ("Linux", "aarch64"),
+        ("Darwin", "x86_64"), ("Darwin", "arm64"),
+        ("Windows", "AMD64"), ("Windows", "arm64"),
+    ])
+    def test_release_asset_url_exists_for_supported_platform_arch(
+        self, tmp_path: Path, tool: str, system: str, machine: str
+    ) -> None:
+        manager = ToolManager(tmp_path / "tools")
+        manager._system, manager._machine = system, machine
+        url = manager._get_download_url(tool)
+        assert url and url.startswith("https://")
+        assert manager._get_checksum_url(tool).startswith("https://")
+
+    def test_restic_windows_zip_extraction(self, tmp_path: Path) -> None:
+        archive = tmp_path / "restic.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("restic_0.19.1_windows_amd64.exe", b"restic")
+        extracted = ToolManager(tmp_path / "tools")._extract_restic(
+            archive, tmp_path / "out", "restic.exe"
+        )
+        assert extracted.read_bytes() == b"restic"
+
+    def test_checksum_mismatch_fails_closed(self, tmp_path: Path) -> None:
+        manager = ToolManager(tmp_path / "tools")
+        archive = tmp_path / "rclone.zip"
+        archive.write_bytes(b"untrusted")
+        checksum = hashlib.sha256(b"different").hexdigest()
+        with patch.object(
+            manager,
+            "_download_file",
+            side_effect=lambda _url, dest: dest.write_text(f"{checksum}  rclone.zip\n"),
+        ):
+            with pytest.raises(RuntimeError, match="Checksum verification failed"):
+                manager._verify_checksum("rclone", archive)
+
     def test_get_download_url_unsupported_platform(self, tmp_path: Path) -> None:
         """Test URL returns None for unsupported platform."""
         manager = ToolManager(tmp_path / "tools")
@@ -135,4 +174,5 @@ class TestToolInfo:
         for tool_name, info in TOOL_INFO.items():
             platforms = info["platforms"]
             assert "Linux" in platforms, f"{tool_name} missing Linux support"
-            # Darwin and Windows are nice to have but not required
+            assert "Darwin" in platforms, f"{tool_name} missing Darwin support"
+            assert "Windows" in platforms, f"{tool_name} missing Windows support"

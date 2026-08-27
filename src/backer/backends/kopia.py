@@ -16,13 +16,11 @@ from backer.backends.base import (
     BackupSource,
     OperationType,
 )
-from backer.backends.registry import BackendRegistry
 from backer.tools.manager import get_tool_manager
 
 logger = logging.getLogger(__name__)
 
 
-@BackendRegistry.register(BackendType.KOPIA)
 class KopiaBackend(BackendBase):
     """Backend for Kopia deduplicated backups.
 
@@ -46,7 +44,8 @@ class KopiaBackend(BackendBase):
         # Set repository password from config if provided
         # Check multiple keys for compatibility (UI uses restic_password for both backends)
         password = (
-            self.config.get("password")
+            self.config.get("repository_password")
+            or self.config.get("password")
             or self.config.get("restic_password")
             or self.config.get("kopia_password")
         )
@@ -438,9 +437,20 @@ class KopiaBackend(BackendBase):
         dry_run: bool = False,
         progress_callback: Any | None = None,
         original_source_path: str | None = None,
+        include_path: str | None = None,
     ) -> BackendResult:
         """Restore from kopia snapshot."""
         started_at = datetime.now()
+
+        if dry_run:
+            return BackendResult(
+                success=False,
+                operation=OperationType.RESTORE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=["Kopia restore dry runs are not supported"],
+                return_code=-1,
+            )
 
         try:
             binary = self._get_binary()
@@ -488,6 +498,9 @@ class KopiaBackend(BackendBase):
                     snapshot_id = "latest"
             else:
                 print(f"[KOPIA] Using user-specified snapshot: {snapshot_id}")
+
+            if include_path:
+                snapshot_id = f"{snapshot_id.rstrip('/')}/{include_path.lstrip('/')}"
 
             # Kopia restore syntax: kopia snapshot restore <snapshot-id> <target-path>
             # Add flags to overwrite existing files and restore all content
