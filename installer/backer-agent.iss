@@ -4,7 +4,7 @@
 ; Build requirements:
 ;   - Inno Setup 6.x (https://jrsoftware.org/isinfo.php)
 ;   - backer-agent.exe (built with PyInstaller)
-;   - rclone.exe and restic.exe (downloaded separately)
+;   - kopia.exe (downloaded separately)
 ;
 ; Build command:
 ;   iscc backer-agent.iss
@@ -61,9 +61,7 @@ Source: "..\dist\backer-agent-service.exe"; DestDir: "{app}"; Flags: ignoreversi
 ; Application icon (for GUI window and shortcuts)
 Source: "..\assets\backer.ico"; DestDir: "{app}"; Flags: ignoreversion
 
-; Backup tools (rclone, restic, and kopia)
-Source: "..\dist\tools\rclone.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
-Source: "..\dist\tools\restic.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
+; Backup tool (Kopia)
 Source: "..\dist\tools\kopia.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; License and readme

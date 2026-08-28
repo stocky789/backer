@@ -28,7 +28,7 @@ from backer import __version__
 # These imports ensure the backends are registered before the registry is used
 # Import each individually so one failure doesn't prevent others from loading
 _backend_logger = logging.getLogger(__name__)
-for _backend in ['kopia', 'proxy', 'rclone', 'restic']:
+for _backend in ['kopia', 'proxy']:
     try:
         __import__(f'backer.backends.{_backend}')
         _backend_logger.info(f"Backend '{_backend}' loaded successfully")
@@ -422,7 +422,7 @@ class AgentService:
                 # Check in app directory first, then AppData
                 if getattr(sys, 'frozen', False):
                     app_dir = Path(sys.executable).parent
-                    if (app_dir / 'tools' / 'rclone.exe').exists():
+                    if (app_dir / 'tools' / 'kopia.exe').exists():
                         self.tools_dir = app_dir / 'tools'
                     else:
                         self.tools_dir = Path(os.environ.get('APPDATA', '')) / 'Backer' / 'tools'
@@ -447,7 +447,7 @@ class AgentService:
         self._thread: threading.Thread | None = None
 
     def ensure_tools_installed(self, progress_callback: Callable[[str], None] | None = None) -> dict[str, bool]:
-        """Ensure backup tools (rclone, restic) are installed.
+        """Ensure Kopia is installed.
 
         Downloads tools automatically if not present.
 
@@ -467,7 +467,7 @@ class AgentService:
         results = {}
 
         # List of required tools
-        required_tools = ['rclone', 'restic', 'kopia']
+        required_tools = ['kopia']
 
         for tool_name in required_tools:
             try:
@@ -993,8 +993,12 @@ class AgentService:
                     'files_transferred': files_transferred,
                     'output': output[:5000],  # Limit output size
                     'errors': [error] if error else [],
-                    'snapshot_id': snapshot_id,  # For restic backups
+                    'snapshot_id': snapshot_id,
                 },
             )
         except Exception as e:
             logger.error(f"Failed to report result: {e}")
+    def _ensure_repository_parent_directory(self, repository_path: str) -> None:
+        """Create a Windows UNC repository parent before initializing Kopia."""
+        if sys.platform == "win32":
+            Path(ntpath.dirname(repository_path)).mkdir(parents=True, exist_ok=True)

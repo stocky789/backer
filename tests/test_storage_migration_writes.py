@@ -63,7 +63,7 @@ def test_job_reads_do_not_migrate_legacy_configs(
     tmp_path: Path, read_jobs: Callable[[Storage, str], object]
 ) -> None:
     storage = Storage(tmp_path / "backer.db")
-    storage.save_job("migrated", {"backend": "restic", "backend_options": {"repository_password": "secret"}})
+    storage.save_job("migrated", {"repository_id": "repo-1"})
 
     statements: list[str] = []
     original_connect = storage._connect
@@ -83,7 +83,7 @@ def test_job_reads_do_not_migrate_legacy_configs(
             "INSERT INTO jobs (name, config, created_at, updated_at) VALUES (?, ?, ?, ?)",
             (
                 "legacy",
-                json.dumps({"backend": "restic", "backend_options": {"restic_password": "secret"}}),
+                json.dumps({"repository_id": "repo-1"}),
                 "now",
                 "now",
             ),
@@ -95,4 +95,4 @@ def test_job_reads_do_not_migrate_legacy_configs(
     assert not updates
     with original_connect() as conn:
         config = conn.execute("SELECT config FROM jobs WHERE name = 'legacy'").fetchone()["config"]
-    assert "restic_password" in config
+    assert "repository_id" in config

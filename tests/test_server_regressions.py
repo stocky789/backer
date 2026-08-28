@@ -402,12 +402,11 @@ def test_android_s3_job_create_is_rejected_before_queueing(tmp_path: Path):
                 "name": "no-repository",
                 "source_path": "/src",
                 "destination_path": "/dst",
-                "backend": "rclone",
                 "client_id": "agent",
             },
             auth=("owner", "test-admin-password"),
         )
-    assert response.status_code == 422
+    assert response.status_code == 400
 
     _client(storage, "desktop", "desktop", "Linux")
     with TestClient(app) as client:
@@ -436,7 +435,6 @@ def test_android_remote_job_is_rejected_by_web_run_and_restore(tmp_path: Path):
             "name": "photos",
             "source_path": "/src",
             "destination_path": "//nas/backups",
-            "backend": "restic",
             "repository_id": "smb-1",
         },
     )
@@ -449,7 +447,6 @@ def test_android_remote_job_is_rejected_by_web_run_and_restore(tmp_path: Path):
                 "name": "web-photos",
                 "source_path": "/src",
                 "repository_id": "smb-1",
-                "backend": "restic",
                 "client_id": "android",
             },
             follow_redirects=False,

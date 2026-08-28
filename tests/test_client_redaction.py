@@ -1,7 +1,7 @@
 from backer.client import agent as client_agent
 
 
-def test_backend_option_logging_redacts_nested_secrets(capsys) -> None:
+def test_repository_option_logging_redacts_nested_secrets(capsys) -> None:
     secrets = (
         "repo-password", "proxy-token", "s3-key", "s3-secret", "api-key", "private-key",
         "authorization-value", "credential-value",
@@ -18,7 +18,7 @@ def test_backend_option_logging_redacts_nested_secrets(capsys) -> None:
         "targets": [{"name": "primary", "token": "nested-token"}],
     }
 
-    client_agent._log_backend_options("BACKUP", options)
+    client_agent._log_repository_options("BACKUP", options)
 
     output = capsys.readouterr().out
     assert all(secret not in output for secret in (*secrets, "nested-token"))

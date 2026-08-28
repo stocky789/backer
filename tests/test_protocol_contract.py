@@ -66,7 +66,7 @@ def test_job_contract_rejects_removed_backend_fields(field: str) -> None:
             "name": "photos",
             "source_path": "/photos",
             "repository_id": "repo-1",
-            field: "restic" if field == "backend" else {},
+            field: "obsolete" if field == "backend" else {},
         })
 
 
@@ -90,7 +90,7 @@ def test_job_update_rejects_removed_backend_fields(tmp_path: Path, field: str) -
         _complete_setup(client)
         response = client.put(
             "/api/v1/jobs/photos",
-            json={field: "restic" if field == "backend" else {}},
+            json={field: "obsolete" if field == "backend" else {}},
         )
 
     assert response.status_code == 422
@@ -106,7 +106,7 @@ def test_repository_api_rejects_removed_backend_fields(tmp_path: Path, field: st
             "type": "local",
             "share": str(tmp_path / "backups"),
             "repository_password": "secret",
-            field: "restic" if field != "backend_options" else {},
+            field: "obsolete" if field != "backend_options" else {},
         })
 
     assert response.status_code == 422
@@ -131,11 +131,9 @@ def test_backup_payload_keeps_smb_and_repository_passwords_separate() -> None:
 
     payload = _build_backup_command_payload(
         {
-            "backend": "restic",
             "repository_id": "repo-1",
             "source_path": "/source",
             "destination_path": "//nas/backups",
-            "backend_options": {"repository_password": "repository-only-secret"},
         },
         "photos",
         "run-1",
@@ -143,8 +141,8 @@ def test_backup_payload_keeps_smb_and_repository_passwords_separate() -> None:
     )
 
     assert payload["smb_password"] == "smb-only-secret"
-    assert payload["backend_options"]["repository_password"] == "repository-only-secret"
-    assert "password" not in payload["backend_options"]
+    assert payload["repository_options"]["repository_password"] == "repository-only-secret"
+    assert "password" not in payload["repository_options"]
 
 
 def test_agent_payload_redaction_covers_both_password_classes(tmp_path: Path) -> None:
@@ -163,6 +161,7 @@ def test_proxy_capability_denies_a_token_scoped_to_another_job(tmp_path: Path) -
     storage_path.mkdir()
     storage = app.state.storage
     storage.add_repository("repo-1", "local", "local", share=str(storage_path))
+    storage.set_repository_password("repo-1", "test-password")
     storage.add_client(
         Client(
             id="agent-1",
@@ -246,6 +245,7 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
     storage_path.mkdir()
     storage = app.state.storage
     storage.add_repository("repo-1", "local", "local", share=str(storage_path))
+    storage.set_repository_password("repo-1", "test-password")
     storage.add_client(
         Client(
             id="agent-1", name="agent-1", hostname="agent-1", ip_address="127.0.0.1",
@@ -330,54 +330,6 @@ def _run(
     if check:
         assert result.returncode == 0, f"{' '.join(command)}\n{result.stdout}\n{result.stderr}"
     return result
-
-
-def test_rclone_local_mirror_contract(tmp_path: Path) -> None:
-    rclone = _tool("rclone")
-    source, repository, restored = tmp_path / "source", tmp_path / "repository", tmp_path / "restored"
-    source.mkdir()
-    (source / "keep.txt").write_text("v1")
-    (source / "deleted.txt").write_text("remove")
-    _run([rclone, "sync", str(source), str(repository)])
-
-    (source / "keep.txt").write_text("v2")
-    (source / "deleted.txt").unlink()
-    _run([rclone, "sync", "--dry-run", str(source), str(repository)])
-    assert (repository / "deleted.txt").exists()
-    _run([rclone, "sync", str(source), str(repository)])
-    assert not (repository / "deleted.txt").exists()
-    assert _run([rclone, "lsf", str(repository)]).stdout.splitlines() == ["keep.txt"]
-    _run([rclone, "sync", str(repository), str(restored)])
-    assert (restored / "keep.txt").read_text() == "v2"
-
-
-def test_restic_local_repository_contract(tmp_path: Path) -> None:
-    restic = _tool("restic")
-    source, repository, restored = tmp_path / "source", tmp_path / "repository", tmp_path / "restored"
-    source.mkdir()
-    (source / "keep.txt").write_text("v1")
-    (source / "deleted.txt").write_text("remove")
-    env = {**os.environ, "RESTIC_PASSWORD": "test-password"}
-    _run([restic, "init", "--repo", str(repository)], env=env)
-    _run([restic, "backup", "--repo", str(repository), str(source)], env=env)
-    (source / "keep.txt").write_text("v2")
-    (source / "deleted.txt").unlink()
-    _run([restic, "backup", "--repo", str(repository), str(source)], env=env)
-    snapshots = json.loads(_run([restic, "snapshots", "--json", "--repo", str(repository)], env=env).stdout)
-    assert len(snapshots) == 2
-    _run([restic, "restore", "latest", "--repo", str(repository), "--target", str(restored)], env=env)
-    assert next(restored.rglob("keep.txt")).read_text() == "v2"
-    assert not list(restored.rglob("deleted.txt"))
-    sentinel = restored / "sentinel.txt"
-    sentinel.write_text("do not delete")
-    _run(
-        [restic, "restore", "not-a-snapshot", "--repo", str(repository), "--target", str(restored)],
-        env=env,
-        check=False,
-    )
-    assert sentinel.read_text() == "do not delete"
-    _run([restic, "check", "--repo", str(repository)], env=env)
-    _run([restic, "forget", "--keep-last", "1", "--prune", "--repo", str(repository)], env=env)
 
 
 def test_kopia_local_repository_contract(tmp_path: Path) -> None:

@@ -36,8 +36,6 @@ a = Analysis(
         'backer.agent.gui.app',
         'backer.agent.service',
         'backer.backends',
-        'backer.backends.rclone',
-        'backer.backends.restic',
         'backer.backends.kopia',
         'backer.backends.proxy',
         'backer.backends.base',

@@ -42,42 +42,23 @@ echo -e "${YELLOW}2. Checking available tools...${NC}"
 backer tools
 echo ""
 
-# Test rclone backup (local to local)
-echo -e "${YELLOW}3. Testing rclone backend (local sync)...${NC}"
-mkdir -p "$TEST_DIR/dest-rclone"
-if backer backup "$TEST_DIR/source" "$TEST_DIR/dest-rclone" -b rclone; then
-    echo -e "${GREEN}✓ rclone backup succeeded${NC}"
-    ls -la "$TEST_DIR/dest-rclone/"
-else
-    echo -e "${RED}✗ rclone backup failed${NC}"
-fi
+echo -e "${YELLOW}3. Testing Kopia backup with exclusions...${NC}"
+REPOSITORY="$TEST_DIR/repository"
+PASSWORD="test-password"
+backer backup "$TEST_DIR/source" "$REPOSITORY" --repository-password "$PASSWORD" -e "*.bin"
+echo -e "${GREEN}✓ Kopia backup succeeded${NC}"
 echo ""
 
-# Test dry run
-echo -e "${YELLOW}4. Testing dry run...${NC}"
-backer backup "$TEST_DIR/source" "$TEST_DIR/dest-dryrun" -b rclone --dry-run
-echo -e "${GREEN}✓ Dry run completed${NC}"
-echo ""
-
-# Test with excludes
-echo -e "${YELLOW}5. Testing backup with excludes...${NC}"
-mkdir -p "$TEST_DIR/dest-exclude"
-backer backup "$TEST_DIR/source" "$TEST_DIR/dest-exclude" -b rclone -e "*.bin"
-echo "Files in destination (*.bin should be excluded):"
-ls -la "$TEST_DIR/dest-exclude/"
-echo ""
-
-# Test restore
-echo -e "${YELLOW}6. Testing restore...${NC}"
+echo -e "${YELLOW}4. Testing restore...${NC}"
 mkdir -p "$TEST_DIR/restored"
-backer restore "$TEST_DIR/dest-rclone" "$TEST_DIR/restored" -b rclone
+backer restore "$REPOSITORY" "$TEST_DIR/restored" --repository-password "$PASSWORD"
 echo -e "${GREEN}✓ Restore completed${NC}"
 echo "Restored files:"
 ls -la "$TEST_DIR/restored/"
 echo ""
 
 # Verify restore
-echo -e "${YELLOW}7. Verifying restored files...${NC}"
+echo -e "${YELLOW}5. Verifying restored files...${NC}"
 if diff "$TEST_DIR/source/file1.txt" "$TEST_DIR/restored/file1.txt" > /dev/null; then
     echo -e "${GREEN}✓ File content matches${NC}"
 else

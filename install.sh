@@ -359,11 +359,11 @@ if ! "$INSTALL_DIR/venv/bin/python" -c "import backer; import backer.server" 2>/
 fi
 success "Installation verified"
 
-# Download backup tools (rclone, restic, kopia)
-info "Downloading backup tools..."
+# Download Kopia
+info "Downloading Kopia..."
 BACKER_DATA_DIR="$DATA_DIR" "$INSTALL_DIR/venv/bin/backer" setup --quiet || \
     error "Failed to install backup tools"
-success "Backup tools ready"
+success "Kopia ready"
 
 # Set permissions
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"

@@ -116,4 +116,4 @@ class BackupResult(BaseModel):
     files_transferred: int = 0
     errors: list[str] = Field(default_factory=list)
     output: str = ""
-    snapshot_id: str | None = None  # For restic backups
+    snapshot_id: str | None = None

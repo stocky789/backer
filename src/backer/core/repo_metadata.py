@@ -17,7 +17,7 @@ Metadata Structure in Repository:
     │       └── runs/
     │           └── {run_id}.json  # Individual run records
     └── snapshots/
-        └── {snapshot_id}.json  # Snapshot metadata (restic)
+        └── {snapshot_id}.json  # Snapshot metadata
 """
 
 import json
@@ -521,17 +521,17 @@ class RepositoryMetadata:
         runs = self.get_job_runs(job_name, limit=1)
         return runs[0] if runs else None
 
-    # Snapshot methods (for restic)
+    # Snapshot methods
     def save_snapshot(self, snapshot_id: str, snapshot_data: dict[str, Any]) -> bool:
         """Save snapshot metadata to repository.
 
         Args:
-            snapshot_id: Restic snapshot ID
+            snapshot_id: Kopia snapshot ID
             snapshot_data: Snapshot information
         """
         self._ensure_dirs()
 
-        # Use first 12 chars of snapshot ID for filename (like restic does)
+        # Use the first 12 chars of the snapshot ID for the filename.
         short_id = snapshot_id[:12] if len(snapshot_id) > 12 else snapshot_id
         snapshot_path = self.metadata_dir / "snapshots" / f"{short_id}.json"
 

@@ -117,12 +117,12 @@ def test_windows_nfs_is_rejected_before_mounting(tmp_path: Path, monkeypatch: py
 
     with pytest.raises(RuntimeError, match="NFS destinations are not supported"):
         agent._prepare_destination_for_backend(
-            {"destination_path": "nas:/exports/backups"}, "rclone"
+            {"destination_path": "nas:/exports/backups"}, "kopia"
         )
 
     with pytest.raises(RuntimeError, match="NFS restores are not supported"):
         agent._prepare_source_for_backend(
-            {"source_path": "nas:/exports/backups"}, "rclone"
+            {"source_path": "nas:/exports/backups"}, "kopia"
         )
 
 
@@ -140,8 +140,8 @@ def test_windows_smb_is_prepared_for_backup_and_restore(tmp_path: Path, monkeypa
     monkeypatch.setattr(gui_service, "SMBConnectionManager", SMBConnectionManager)
     job = {"smb_username": "user", "smb_password": "secret"}
 
-    agent._prepare_destination_for_backend({**job, "destination_path": "//nas/backups/repo"}, "rclone")
-    agent._prepare_source_for_backend({**job, "source_path": "//nas/backups/repo"}, "rclone")
+    agent._prepare_destination_for_backend({**job, "destination_path": "//nas/backups/repo"}, "kopia")
+    agent._prepare_source_for_backend({**job, "source_path": "//nas/backups/repo"}, "kopia")
 
     assert connections == [("nas", "backups"), ("nas", "backups")]
 
@@ -190,7 +190,7 @@ def test_clean_restore_keeps_destination_when_validation_fails(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -205,7 +205,7 @@ def test_clean_restore_keeps_destination_when_validation_fails(
     ("requested_snapshot", "expected_snapshot", "resolver_calls"),
     [(None, "a" * 64, 1), ("latest", "a" * 64, 1), ("chosen", "chosen", 0)],
 )
-def test_clean_restic_restore_uses_one_immutable_snapshot(
+def test_clean_kopia_restore_uses_one_immutable_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     requested_snapshot: str | None,
@@ -222,7 +222,7 @@ def test_clean_restic_restore_uses_one_immutable_snapshot(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "snapshot": requested_snapshot,
@@ -234,7 +234,7 @@ def test_clean_restic_restore_uses_one_immutable_snapshot(
     assert backend.snapshots == [requested_snapshot]
 
 
-def test_clean_restic_restore_keeps_destination_when_no_files_match(
+def test_clean_kopia_restore_keeps_destination_when_no_files_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "restore"
@@ -250,7 +250,7 @@ def test_clean_restic_restore_keeps_destination_when_no_files_match(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -261,7 +261,7 @@ def test_clean_restic_restore_keeps_destination_when_no_files_match(
     assert backend.dry_runs == [False]
 
 
-def test_clean_restic_restore_rolls_back_when_actual_restore_matches_nothing(
+def test_clean_kopia_restore_rolls_back_when_actual_restore_matches_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "restore"
@@ -281,7 +281,7 @@ def test_clean_restic_restore_rolls_back_when_actual_restore_matches_nothing(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -308,7 +308,7 @@ def test_clean_restore_validates_before_clearing_destination(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -373,7 +373,7 @@ def test_clean_restore_restores_destination_after_preparation_failure(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -400,7 +400,7 @@ def test_clean_restore_restores_destination_after_backend_failure(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -425,7 +425,7 @@ def test_clean_restore_removes_partial_new_destination_after_backend_failure(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -458,7 +458,7 @@ def test_clean_restore_reports_rollback_failure(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,
@@ -481,7 +481,7 @@ def test_clean_restore_refuses_filesystem_root(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": tmp_path.anchor,
         "clean_restore": True,
@@ -513,7 +513,7 @@ def test_clean_restore_refuses_symlink_destination(
     report = agent.execute_restore({
         "run_id": "run-1",
         "job_name": "job",
-        "backend": "restic",
+        "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
         "clean_restore": True,

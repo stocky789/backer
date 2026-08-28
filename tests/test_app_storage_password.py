@@ -9,7 +9,7 @@ def _endpoint(app, path: str):
     return next(route.endpoint for route in app.routes if route.path == path)
 
 
-def test_smb_transport_uses_storage_password_while_restic_uses_repository_password(
+def test_smb_transport_uses_storage_password_while_kopia_uses_repository_password(
     tmp_path, monkeypatch
 ) -> None:
     import backer.hypervisors.hyperv as hyperv_module

@@ -91,19 +91,9 @@ def test_repository_job_subfolder_replaces_unsafe_path_characters() -> None:
 
 def test_expected_backend_names_are_registered() -> None:
     from backer.backends.base import BackendType
-    from backer.backends.registry import get_backend
+    from backer.backends.registry import BackendRegistry
 
-    expected_backends = {
-        BackendType.KOPIA,
-        BackendType.PROXY,
-        BackendType.RCLONE,
-        BackendType.RESTIC,
-        BackendType.RSYNC,
-    }
-
-    loaded_backends = {get_backend(backend_type).backend_type for backend_type in expected_backends}
-
-    assert loaded_backends == expected_backends
+    assert set(BackendRegistry.available_backends()) == {BackendType.KOPIA, BackendType.PROXY}
 
 
 def test_server_route_modules_import_without_creating_app() -> None:

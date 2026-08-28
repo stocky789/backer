@@ -2,7 +2,7 @@
 """Build script for Backer Windows Agent executable.
 
 This script:
-1. Downloads rclone, restic, and kopia for Windows
+1. Downloads Kopia for Windows
 2. Builds GUI and unattended service executables
 3. Creates a zip package with everything needed
 
@@ -128,7 +128,7 @@ def create_package() -> Path:
     tools_subdir = package_dir / "tools"
     tools_subdir.mkdir(exist_ok=True)
 
-    for tool in ["rclone.exe", "restic.exe", "kopia.exe"]:
+    for tool in ["kopia.exe"]:
         for src in TOOLS_DIR.rglob(tool):
             shutil.copy(src, tools_subdir / tool)
             shutil.copy(src, DIST_TOOLS_DIR / tool)
@@ -201,7 +201,7 @@ def main():
 
     # Only download Windows tools if building on Windows
     if platform.system() == "Windows":
-        for tool in ["rclone", "restic", "kopia"]:
+        for tool in ["kopia"]:
             download_windows_tool(tool)
     else:
         print("Note: Not on Windows, skipping tool downloads")

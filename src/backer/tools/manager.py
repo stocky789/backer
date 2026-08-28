@@ -1,7 +1,4 @@
-"""Tool manager for downloading and managing backup tool binaries.
-
-Automatically downloads rclone, restic, etc. so users don't need to install them manually.
-"""
+"""Tool manager for downloading and managing the Kopia binary."""
 
 import hashlib
 import platform
@@ -17,45 +14,10 @@ from urllib.request import Request, urlopen
 from backer import __version__
 
 # Tool download information
-# Note: rsync backend exists but is NOT currently supported for remote agents.
 # Downloads are pinned and verified against the publishers' release checksum
 # manifests. Signatures are not verified because this project does not ship the
 # publishers' signing keys; an unavailable or mismatched checksum fails closed.
 TOOL_INFO: dict[str, dict[str, Any]] = {
-    "rclone": {
-        "version": "1.75.0",
-        "base_url": "https://downloads.rclone.org/v{version}/rclone-v{version}-{platform}-{arch}.{ext}",
-        "checksum_url": "https://downloads.rclone.org/v{version}/SHA256SUMS",
-        "platforms": {
-            "Linux": {"name": "linux", "ext": "zip"},
-            "Darwin": {"name": "osx", "ext": "zip"},
-            "Windows": {"name": "windows", "ext": "zip"},
-        },
-        "arch_map": {
-            "x86_64": "amd64",
-            "AMD64": "amd64",
-            "aarch64": "arm64",
-            "arm64": "arm64",
-        },
-        "binary_name": {"Linux": "rclone", "Darwin": "rclone", "Windows": "rclone.exe"},
-    },
-    "restic": {
-        "version": "0.19.1",
-        "base_url": "https://github.com/restic/restic/releases/download/v{version}/restic_{version}_{platform}_{arch}.{ext}",
-        "checksum_url": "https://github.com/restic/restic/releases/download/v{version}/SHA256SUMS",
-        "platforms": {
-            "Linux": {"name": "linux", "ext": "bz2"},
-            "Darwin": {"name": "darwin", "ext": "bz2"},
-            "Windows": {"name": "windows", "ext": "zip"},
-        },
-        "arch_map": {
-            "x86_64": "amd64",
-            "AMD64": "amd64",
-            "aarch64": "arm64",
-            "arm64": "arm64",
-        },
-        "binary_name": {"Linux": "restic", "Darwin": "restic", "Windows": "restic.exe"},
-    },
     "kopia": {
         "version": "0.23.1",
         "base_url": "https://github.com/kopia/kopia/releases/download/v{version}/kopia-{version}-{platform}-{arch}.{ext}",
@@ -73,7 +35,6 @@ TOOL_INFO: dict[str, dict[str, Any]] = {
         },
         "binary_name": {"Linux": "kopia", "Darwin": "kopia", "Windows": "kopia.exe"},
     },
-    # rsync is NOT supported for agent backups - only for local server-side operations
 }
 
 
@@ -157,7 +118,7 @@ class ToolManager:
 
         try:
             result = subprocess.run(
-                [str(tool_path), "--version" if tool_name == "kopia" else "version"],
+                [str(tool_path), "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -212,7 +173,7 @@ class ToolManager:
         """Download and install a tool.
 
         Args:
-            tool_name: Name of the tool to download (rclone, restic)
+            tool_name: Name of the tool to download
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -246,15 +207,7 @@ class ToolManager:
             self._download_file(url, download_path)
             self._verify_checksum(tool_name, download_path)
 
-            # Extract based on tool type
-            if tool_name == "rclone":
-                extracted = self._extract_rclone(download_path, tmpdir_path)
-            elif tool_name == "restic":
-                extracted = self._extract_restic(download_path, tmpdir_path, binary_name)
-            elif tool_name == "kopia":
-                extracted = self._extract_kopia(download_path, tmpdir_path, binary_name)
-            else:
-                raise RuntimeError(f"Don't know how to extract {tool_name}")
+            extracted = self._extract_kopia(download_path, tmpdir_path, binary_name)
 
             # Move to final location
             shutil.move(str(extracted), str(target_path))
@@ -315,37 +268,6 @@ class ToolManager:
         if actual != expected:
             raise RuntimeError(f"Checksum verification failed for {archive_path.name}")
 
-    def _extract_rclone(self, archive_path: Path, tmpdir: Path) -> Path:
-        """Extract rclone from zip archive."""
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            # Find the rclone binary in the archive
-            for name in zf.namelist():
-                if name.endswith("/rclone") or name.endswith("/rclone.exe"):
-                    zf.extract(name, tmpdir)
-                    return tmpdir / name
-
-        raise RuntimeError("Could not find rclone binary in archive")
-
-    def _extract_restic(self, archive_path: Path, tmpdir: Path, binary_name: str) -> Path:
-        """Extract restic from its platform archive."""
-        import bz2
-
-        if archive_path.suffix == ".zip":
-            with zipfile.ZipFile(archive_path, "r") as zf:
-                for name in zf.namelist():
-                    filename = Path(name).name
-                    if filename.startswith("restic") and filename.endswith(".exe"):
-                        zf.extract(name, tmpdir)
-                        return tmpdir / name
-            raise RuntimeError("Could not find restic binary in zip archive")
-
-        extracted_path = tmpdir / binary_name
-
-        with bz2.open(archive_path, "rb") as f_in:
-            with open(extracted_path, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-
-        return extracted_path
 
     def _extract_kopia(self, archive_path: Path, tmpdir: Path, binary_name: str) -> Path:
         """Extract kopia from tar.gz or zip archive."""

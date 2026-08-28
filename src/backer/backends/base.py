@@ -69,8 +69,7 @@ class BackupDestination:
 class BackendBase(ABC):
     """Abstract base class for backup backends.
 
-    Each backend wraps a specific backup tool (rsync, rclone, restic, etc.)
-    and provides a unified interface for backup operations.
+    Each backend provides a unified interface for backup operations.
     """
 
     backend_type: BackendType
@@ -196,7 +195,7 @@ class BackendBase(ABC):
             snapshot: Specific snapshot/version to restore (if supported)
             dry_run: If True, simulate the restore without making changes
             progress_callback: Optional callback for progress updates
-            original_source_path: The original path that was backed up (for kopia/restic snapshot lookup)
+            original_source_path: The original path that was backed up for Kopia snapshot lookup.
             include_path: Optional path within the selected snapshot to restore.
 
         Returns:

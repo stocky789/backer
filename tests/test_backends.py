@@ -2,30 +2,17 @@
 
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from backer.backends.base import BackendResult, BackupDestination, BackupSource, OperationType
+from backer.backends.base import BackendResult, BackendType, BackupDestination, BackupSource, OperationType
 from backer.backends.kopia import KopiaBackend
 from backer.backends.proxy import ProxyBackend
-from backer.backends.rclone import RcloneBackend
 from backer.backends.registry import BackendRegistry, get_backend
-from backer.backends.restic import ResticBackend
 
 
 class TestBackendRegistry:
     """Tests for the backend registry."""
-
-    def test_get_backend_rclone(self) -> None:
-        """Test getting rclone backend."""
-        backend = get_backend("rclone")
-        assert isinstance(backend, RcloneBackend)
-
-    def test_get_backend_restic(self) -> None:
-        """Test getting restic backend."""
-        backend = get_backend("restic")
-        assert isinstance(backend, ResticBackend)
 
     def test_get_backend_kopia(self) -> None:
         """Test getting kopia backend."""
@@ -40,7 +27,7 @@ class TestBackendRegistry:
     def test_available_backends(self) -> None:
         """Test listing available backends."""
         backends = BackendRegistry.available_backends()
-        assert len(backends) >= 3  # At least rclone, restic, and kopia
+        assert set(backends) == {BackendType.KOPIA, BackendType.PROXY}
 
 
 class TestProxyBackend:
@@ -113,112 +100,6 @@ class TestBackendResult:
         assert result.warnings == []
         assert result.output == ""
         assert result.return_code == 0
-
-
-class TestRcloneBackend:
-    """Tests for rclone backend."""
-
-    def test_build_command_basic(self) -> None:
-        """Test basic command building."""
-        backend = RcloneBackend()
-        binary_path = Path('/usr/bin/rclone')
-
-        with patch.object(backend, '_get_binary', return_value=binary_path):
-            cmd = backend._build_command(
-                operation="sync",
-                source="/source",
-                destination="/dest",
-            )
-
-        assert cmd[0] == str(binary_path)
-        assert cmd[1] == "sync"
-        assert "/source" in cmd
-        assert "/dest" in cmd
-
-    def test_build_command_with_excludes(self) -> None:
-        """Test command building with excludes."""
-        backend = RcloneBackend()
-
-        with patch.object(backend, '_get_binary', return_value=Path('/usr/bin/rclone')):
-            cmd = backend._build_command(
-                operation="sync",
-                source="/source",
-                destination="/dest",
-                excludes=["*.tmp", ".cache"],
-            )
-
-        assert "--exclude" in cmd
-        assert "*.tmp" in cmd
-        assert ".cache" in cmd
-
-    def test_build_command_dry_run(self) -> None:
-        """Test command building with dry run."""
-        backend = RcloneBackend()
-
-        with patch.object(backend, '_get_binary', return_value=Path('/usr/bin/rclone')):
-            cmd = backend._build_command(
-                operation="sync",
-                source="/source",
-                destination="/dest",
-                dry_run=True,
-            )
-
-        assert "--dry-run" in cmd
-
-    def test_restore_rejects_historical_snapshot(self) -> None:
-        result = RcloneBackend().restore(
-            BackupDestination(path="/backup"), Path("/restore"), snapshot="abc123"
-        )
-
-        assert not result.success
-        assert "current state only" in result.errors[0]
-
-
-class TestResticBackend:
-    """Tests for restic backend."""
-
-    def test_password_from_config(self) -> None:
-        """Test password is set from config."""
-        backend = ResticBackend(config={"password": "test_password"})
-        assert backend._env.get("RESTIC_PASSWORD") == "test_password"
-
-    def test_password_file_from_config(self) -> None:
-        """Test password file is set from config."""
-        backend = ResticBackend(config={"password_file": "/path/to/password"})
-        assert backend._env.get("RESTIC_PASSWORD_FILE") == "/path/to/password"
-
-    def test_build_backup_command(self) -> None:
-        """Test backup command building."""
-        backend = ResticBackend()
-        binary_path = Path('/usr/bin/restic')
-
-        with patch.object(backend, '_get_binary', return_value=binary_path):
-            cmd = backend._build_backup_command(
-                repo="/backup/repo",
-                source="/data",
-            )
-
-        assert cmd[0] == str(binary_path)
-        assert "backup" in cmd
-        assert "--repo" in cmd
-        assert "/backup/repo" in cmd
-        assert "/data" in cmd
-        assert "--json" in cmd
-
-    def test_build_backup_command_with_excludes(self) -> None:
-        """Test backup command with excludes."""
-        backend = ResticBackend()
-
-        with patch.object(backend, '_get_binary', return_value=Path('/usr/bin/restic')):
-            cmd = backend._build_backup_command(
-                repo="/backup/repo",
-                source="/data",
-                excludes=["*.log", "temp/"],
-            )
-
-        assert "--exclude" in cmd
-        exclude_indices = [i for i, x in enumerate(cmd) if x == "--exclude"]
-        assert len(exclude_indices) == 2
 
 
 class TestBackupSource:

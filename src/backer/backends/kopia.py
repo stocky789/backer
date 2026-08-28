@@ -588,7 +588,7 @@ class KopiaBackend(BackendBase):
                     snapshots = json.loads(result.stdout)
                     return [
                         {
-                            "id": snap.get("id", "unknown")[:12],  # Short ID like restic
+                            "id": snap.get("id", "unknown")[:12],
                             "full_id": snap.get("id"),
                             "timestamp": snap.get("startTime"),
                             "hostname": snap.get("hostname"),

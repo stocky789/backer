@@ -576,39 +576,6 @@ class BackerAgent:
             import shutil
             return shutil.which("mount.nfs") is not None
 
-    def _rclone_obscure_password(self, password: str) -> str | None:
-        """Obscure a password for use with rclone on-the-fly backends.
-
-        Rclone requires passwords to be "obscured" when used in connection strings.
-        This runs 'rclone obscure <password>' to get the obscured form.
-        """
-        try:
-            from backer.tools.manager import get_tool_manager
-            tool_manager = get_tool_manager()
-
-            # Use ensure_installed to auto-download rclone if not present
-            try:
-                rclone_path = tool_manager.ensure_installed("rclone")
-            except Exception as e:
-                print(f"[SMB] Warning: Failed to get rclone: {e}")
-                return None
-
-            result = subprocess.run(
-                [str(rclone_path), "obscure", password],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                return result.stdout.strip()
-            else:
-                print(f"[SMB] Warning: rclone obscure failed: {result.stderr}")
-                return None
-        except Exception as e:
-            print(f"[SMB] Warning: Failed to obscure password: {e}")
-            return None
-
     @contextmanager
     def _smb_mount_context(
         self,
@@ -620,7 +587,7 @@ class BackerAgent:
     ) -> Generator[Path, None, None]:
         """Context manager that mounts an SMB share and yields the mount path.
 
-        Used for restic/kopia on Linux, which need a local filesystem path.
+        Used by Kopia on Linux, which needs a local filesystem path.
         Requires cifs-utils to be installed.
         """
         # Check if cifs-utils is available
@@ -708,7 +675,7 @@ class BackerAgent:
     ) -> Generator[Path, None, None]:
         """Context manager that mounts an NFS export and yields the mount path.
 
-        Used for restic/kopia on Linux, which need a local filesystem path.
+        Used by Kopia on Linux, which needs a local filesystem path.
         Requires nfs-common (Debian/Ubuntu) or nfs-utils (RHEL/Fedora) to be installed.
         """
         # Check if NFS tools are available
@@ -771,9 +738,7 @@ class BackerAgent:
         """Prepare the destination path for the backend.
 
         On Linux, SMB and NFS paths need special handling:
-        - For rclone with SMB: Use on-the-fly SMB backend config
-        - For rclone with NFS: Mount the export first
-        - For restic/kopia: Mount the share/export first
+        - For Kopia: Mount the share/export first
         - For proxy backend: Use destination_path as-is (it's a proxy:// URI)
 
         Returns:
@@ -850,9 +815,8 @@ class BackerAgent:
         smb_password = job.get("smb_password")
         smb_domain = job.get("smb_domain")
 
-        if backend_name in ("rclone", "restic", "kopia"):
-            # All backends use mounted filesystem path for SMB on Linux
-            # (rclone's on-the-fly SMB has compatibility issues with some NAS devices)
+        if backend_name == "kopia":
+            # Kopia uses a mounted filesystem path for SMB on Linux.
             print(f"[SMB] Mounting share for {backend_name} backend")
             ctx = self._smb_mount_context(
                 server=server,
@@ -880,19 +844,8 @@ class BackerAgent:
         """Prepare NFS destination path for the backend."""
         server, export_path, subpath = self._parse_nfs_path(dest_path)
 
-        if backend_name == "rclone":
-            # For rclone with NFS, we need to mount first as rclone doesn't have
-            # native NFS support (unlike SMB). Could use SFTP if SSH is available,
-            # but mounting is more reliable.
-            print("[NFS] Mounting NFS export for rclone backend")
-            ctx = self._nfs_mount_context(server=server, export_path=export_path)
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            print(f"[NFS] Using mounted path: {full_path}")
-            return full_path, ctx
-
-        elif backend_name in ("restic", "kopia"):
-            # restic and kopia need a mounted filesystem path
+        if backend_name == "kopia":
+            # Kopia needs a mounted filesystem path.
             print(f"[NFS] Mounting NFS export for {backend_name} backend")
             ctx = self._nfs_mount_context(server=server, export_path=export_path)
             mount_path = ctx.__enter__()
@@ -944,7 +897,8 @@ class BackerAgent:
 
             _log_repository_options("BACKUP", repository_options)
             backend = _backend_for_location(job.get("destination_path", ""), repository_options)
-            backend_name = "proxy" if job.get("destination_path", "").lower().startswith(("proxy://", "proxys://")) else "kopia"
+            is_proxy = job.get("destination_path", "").lower().startswith(("proxy://", "proxys://"))
+            backend_name = "proxy" if is_proxy else "kopia"
 
             print("[BACKUP] Checking backend availability...")
             available, message = backend.check_available()
@@ -1032,7 +986,7 @@ class BackerAgent:
             )
 
             # Report result to server
-            # Extract snapshot_id from backend metadata (for kopia/restic)
+            # Extract snapshot_id from backend metadata.
             snapshot_id = None
             if hasattr(result, "metadata") and result.metadata:
                 snapshot_id = result.metadata.get("snapshot_id")
@@ -1217,31 +1171,8 @@ class BackerAgent:
         smb_password = job.get("smb_password")
         smb_domain = job.get("smb_domain")
 
-        if backend_name == "rclone":
-            # rclone on-the-fly SMB backend format
-            smb_opts = [f"host={server}", f"share={share}"]
-            if smb_username:
-                smb_opts.append(f"user={smb_username}")
-            if smb_password:
-                obscured_pass = self._rclone_obscure_password(smb_password)
-                if obscured_pass:
-                    smb_opts.append(f"pass={obscured_pass}")
-                else:
-                    print("[RESTORE] Warning: Could not obscure password, trying plaintext")
-                    smb_opts.append(f"pass={smb_password}")
-            if smb_domain:
-                smb_opts.append(f"domain={smb_domain}")
-
-            if subpath and subpath.strip():
-                rclone_path = f":smb,{','.join(smb_opts)}:/{subpath}"
-            else:
-                rclone_path = f":smb,{','.join(smb_opts)}:/"
-
-            print(f"[RESTORE] Using rclone SMB backend for //{server}/{share}/{subpath or ''}")
-            return rclone_path, None
-
-        elif backend_name in ("restic", "kopia"):
-            # restic and kopia need a mounted filesystem path
+        if backend_name == "kopia":
+            # Kopia needs a mounted filesystem path.
             print(f"[RESTORE] Mounting SMB share for {backend_name} backend")
             ctx = self._smb_mount_context(
                 server=server,
@@ -1315,7 +1246,8 @@ class BackerAgent:
 
             _log_repository_options("RESTORE", repository_options)
             backend = _backend_for_location(job.get("source_path", ""), repository_options)
-            backend_name = "proxy" if job.get("source_path", "").lower().startswith(("proxy://", "proxys://")) else "kopia"
+            is_proxy = job.get("source_path", "").lower().startswith(("proxy://", "proxys://"))
+            backend_name = "proxy" if is_proxy else "kopia"
 
             print("[RESTORE] Checking backend availability...")
             available, message = backend.check_available()
@@ -1371,8 +1303,6 @@ class BackerAgent:
                     )
                     if not validation.success:
                         raise RuntimeError("Clean restore validation failed: " + "; ".join(validation.errors))
-                    matched_items = validation.metadata.get("matched_items", validation.files_transferred)
-
                 resolved_destination = destination.resolve()
                 if resolved_destination == resolved_destination.parent:
                     raise RuntimeError("Clean restore refuses to replace a filesystem root")
@@ -1418,7 +1348,7 @@ class BackerAgent:
                 except Exception as setup_err:
                     raise RuntimeError(f"Clean restore failed to prepare destination: {setup_err}") from setup_err
 
-            # Pass original_source_path for kopia/restic snapshot lookup
+            # Pass original_source_path for Kopia snapshot lookup.
             original_source_path = job.get("original_source_path")
             if original_source_path:
                 print(f"[RESTORE] Original source path for snapshot lookup: {original_source_path}")
@@ -1673,8 +1603,8 @@ class BackerAgent:
         }
         repo.save_job_run(job_name, run_id, run_data)
 
-        # For restic/kopia, also save snapshot metadata
-        if snapshot_id and backend_name in ("restic", "kopia"):
+        # Save Kopia snapshot metadata.
+        if snapshot_id and backend_name == "kopia":
             repo.save_snapshot(
                 snapshot_id=snapshot_id,
                 snapshot_data={

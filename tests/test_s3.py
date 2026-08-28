@@ -99,11 +99,10 @@ def test_s3_api_encrypts_credentials_and_builds_kopia_agent_payload(tmp_path, mo
     }
 
     payload = _build_backup_command_payload({
-        "repository_id": repo_id, "backend": "rclone", "source_path": "/source", "destination_path": "ignored",
+        "repository_id": repo_id, "source_path": "/source", "destination_path": "ignored",
     }, "daily", "run-1", storage=storage)
-    assert payload["backend"] == "kopia"
     assert payload["destination_path"] == "s3://backer-test/agents/host-one"
-    assert payload["backend_options"] == {
+    assert payload["repository_options"] == {
         "repository_password": "repo-password",
         "s3": {
             "bucket": "backer-test", "prefix": "agents/host-one",

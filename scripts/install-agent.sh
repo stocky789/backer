@@ -145,16 +145,16 @@ install_backer() {
     step_done "Backer installed"
 }
 
-# Install backup tools (rclone, restic, kopia)
+# Install Kopia
 install_tools() {
-    step "Downloading backup tools (rclone, restic, kopia)..."
+    step "Downloading Kopia..."
 
     # Run backer setup to download the tools (suppress most output)
     # The tools are installed to ~/.local/share/backer/tools/ for root user
     BACKER_DATA_DIR="/opt/backer" "$INSTALL_DIR/venv/bin/backer" setup --quiet || \
         error "Failed to install backup tools"
 
-    step_done "Backup tools ready"
+    step_done "Kopia ready"
 }
 
 # Create systemd service

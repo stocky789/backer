@@ -1,4 +1,4 @@
-"""Backup backends - wrappers around rsync, rclone, restic, kopia, etc."""
+"""Backup backends."""
 
 # Import backend modules to register them
 from backer.backends.base import BackendBase, BackendResult

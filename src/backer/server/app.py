@@ -56,7 +56,7 @@ from backer.server.web.routes import router as web_router
 logger = logging.getLogger(__name__)
 
 _SECRET_KEYS = {
-    "password", "restic_password", "kopia_password", "repository_password", "storage_password", "client_secret",
+    "password", "kopia_password", "repository_password", "storage_password", "client_secret",
     "proxy_capability", "access_key_id", "secret_access_key",
 }
 
@@ -4003,7 +4003,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             files_transferred=result.files_transferred,
             errors=result.errors,
             output=result.output[:10000],  # Limit output size
-            snapshot_id=result.snapshot_id,  # For restic backups
+            snapshot_id=result.snapshot_id,
         )
         # Mark progress as complete
         storage.finish_job_progress(
@@ -4150,7 +4150,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         - destination_path: Where to restore files to (defaults to original source path)
         - run_id: Specific backup run to restore from (defaults to latest)
         - source_subfolder: Subfolder within backup to restore
-        - snapshot: For restic, specific snapshot ID to restore (defaults to latest)
+        - snapshot: Specific snapshot ID to restore (defaults to latest)
         - dry_run: If true, don't actually restore
         """
         data = await request.json()
@@ -4355,7 +4355,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "finished_at": r.get("finished_at"),
                 "bytes_transferred": r.get("bytes_transferred", 0),
                 "files_transferred": r.get("files_transferred", 0),
-                "snapshot_id": r.get("snapshot_id"),  # For restic backups
+                "snapshot_id": r.get("snapshot_id"),
             }
             for r in runs
             if r.get("status") == "success" and not r.get("run_id", "").startswith("restore_")

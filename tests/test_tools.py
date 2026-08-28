@@ -2,7 +2,6 @@
 
 import hashlib
 import sys
-import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,38 +23,37 @@ class TestToolManager:
         """Test get_tool_path returns None when tool not installed."""
         manager = ToolManager(tmp_path / "tools")
         with patch("shutil.which", return_value=None):
-            assert manager.get_tool_path("rclone") is None
+            assert manager.get_tool_path("kopia") is None
 
     def test_get_tool_path_system_installed(self, tmp_path: Path) -> None:
         """Test get_tool_path returns system path when available."""
         manager = ToolManager(tmp_path / "tools")
-        with patch("shutil.which", return_value="/usr/bin/rclone"):
-            path = manager.get_tool_path("rclone")
-            assert path == Path("/usr/bin/rclone")
+        with patch("shutil.which", return_value="/usr/bin/kopia"):
+            path = manager.get_tool_path("kopia")
+            assert path == Path("/usr/bin/kopia")
 
     def test_get_tool_path_managed(self, tmp_path: Path) -> None:
         """Test get_tool_path returns managed path when installed."""
         tools_dir = tmp_path / "tools"
         tools_dir.mkdir()
 
-        # Create a fake rclone binary (with .exe on Windows)
-        binary_name = "rclone.exe" if sys.platform == "win32" else "rclone"
-        rclone_path = tools_dir / binary_name
-        rclone_path.write_text("#!/bin/bash\necho rclone")
+        binary_name = "kopia.exe" if sys.platform == "win32" else "kopia"
+        kopia_path = tools_dir / binary_name
+        kopia_path.write_text("#!/bin/bash\necho kopia")
 
         manager = ToolManager(tools_dir)
-        path = manager.get_tool_path("rclone")
-        assert path == rclone_path
+        path = manager.get_tool_path("kopia")
+        assert path == kopia_path
 
     def test_is_installed(self, tmp_path: Path) -> None:
         """Test is_installed method."""
         manager = ToolManager(tmp_path / "tools")
 
         with patch("shutil.which", return_value=None):
-            assert not manager.is_installed("rclone")
+            assert not manager.is_installed("kopia")
 
-        with patch("shutil.which", return_value="/usr/bin/rclone"):
-            assert manager.is_installed("rclone")
+        with patch("shutil.which", return_value="/usr/bin/kopia"):
+            assert manager.is_installed("kopia")
 
     def test_list_tools(self, tmp_path: Path) -> None:
         """Test list_tools returns all supported tools."""
@@ -64,9 +62,7 @@ class TestToolManager:
         with patch("shutil.which", return_value=None):
             tools = manager.list_tools()
 
-            assert "rclone" in tools
-            assert "restic" in tools
-            assert "kopia" in tools
+            assert set(tools) == {"kopia"}
 
             for name, info in tools.items():
                 assert "installed" in info
@@ -78,10 +74,10 @@ class TestToolManager:
         manager._system = "Linux"
         manager._machine = "x86_64"
 
-        url = manager._get_download_url("rclone")
+        url = manager._get_download_url("kopia")
         assert url is not None
         assert "linux" in url
-        assert "amd64" in url
+        assert "x64" in url
 
     @pytest.mark.parametrize("tool", TOOL_INFO)
     @pytest.mark.parametrize("system,machine", [
@@ -98,27 +94,18 @@ class TestToolManager:
         assert url and url.startswith("https://")
         assert manager._get_checksum_url(tool).startswith("https://")
 
-    def test_restic_windows_zip_extraction(self, tmp_path: Path) -> None:
-        archive = tmp_path / "restic.zip"
-        with zipfile.ZipFile(archive, "w") as zf:
-            zf.writestr("restic_0.19.1_windows_amd64.exe", b"restic")
-        extracted = ToolManager(tmp_path / "tools")._extract_restic(
-            archive, tmp_path / "out", "restic.exe"
-        )
-        assert extracted.read_bytes() == b"restic"
-
     def test_checksum_mismatch_fails_closed(self, tmp_path: Path) -> None:
         manager = ToolManager(tmp_path / "tools")
-        archive = tmp_path / "rclone.zip"
+        archive = tmp_path / "kopia.zip"
         archive.write_bytes(b"untrusted")
         checksum = hashlib.sha256(b"different").hexdigest()
         with patch.object(
             manager,
             "_download_file",
-            side_effect=lambda _url, dest: dest.write_text(f"{checksum}  rclone.zip\n"),
+            side_effect=lambda _url, dest: dest.write_text(f"{checksum}  kopia.zip\n"),
         ):
             with pytest.raises(RuntimeError, match="Checksum verification failed"):
-                manager._verify_checksum("rclone", archive)
+                manager._verify_checksum("kopia", archive)
 
     def test_get_download_url_unsupported_platform(self, tmp_path: Path) -> None:
         """Test URL returns None for unsupported platform."""
@@ -126,7 +113,7 @@ class TestToolManager:
         manager._system = "UnknownOS"
         manager._machine = "unknown_arch"
 
-        url = manager._get_download_url("rclone")
+        url = manager._get_download_url("kopia")
         assert url is None
 
     def test_unknown_tool(self, tmp_path: Path) -> None:
@@ -142,23 +129,8 @@ class TestToolManager:
 class TestToolInfo:
     """Tests for tool information constants."""
 
-    def test_rclone_info_complete(self) -> None:
-        """Test rclone info has all required fields."""
-        info = TOOL_INFO["rclone"]
-        assert "version" in info
-        assert "base_url" in info
-        assert "platforms" in info
-        assert "arch_map" in info
-        assert "binary_name" in info
-
-    def test_restic_info_complete(self) -> None:
-        """Test restic info has all required fields."""
-        info = TOOL_INFO["restic"]
-        assert "version" in info
-        assert "base_url" in info
-        assert "platforms" in info
-        assert "arch_map" in info
-        assert "binary_name" in info
+    def test_only_kopia_is_downloadable(self) -> None:
+        assert set(TOOL_INFO) == {"kopia"}
 
     def test_kopia_info_complete(self) -> None:
         """Test kopia info has all required fields."""

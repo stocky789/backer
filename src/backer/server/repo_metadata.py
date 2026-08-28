@@ -1,20 +1,12 @@
 """Server-side repository scanning and metadata import.
 
-This module provides server-specific functionality for:
-- Scanning restic repositories for existing snapshots
-- Importing repository metadata into the server database
+This module imports repository metadata into the server database.
 
 For the core RepositoryMetadata class, see backer.core.repo_metadata.
 """
 
-import json
 import logging
-import os
-import shutil
-import subprocess
-import sys
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 # Import shared classes from core
@@ -37,164 +29,8 @@ __all__ = [
     "METADATA_VERSION",
     "RepositoryMetadata",
     "RepositoryMetadataError",
-    "ResticRepositoryScanner",
     "import_repository_metadata",
 ]
-
-
-class ResticRepositoryScanner:
-    """Scans restic repositories to discover existing snapshots.
-
-    This complements RepositoryMetadata by querying restic directly
-    for snapshot information that may not be in our metadata.
-    """
-
-    def __init__(self, repo_path: str, password: str, restic_path: str | Path | None = None):
-        """Initialize scanner.
-
-        Args:
-            repo_path: Path to restic repository
-            password: Repository password
-            restic_path: Optional path to restic binary
-        """
-        self.repo_path = repo_path
-        self.password = password
-        self.restic_path = restic_path or self._find_restic()
-
-    def _find_restic(self) -> str:
-        """Find restic binary."""
-        # Check common locations
-        if sys.platform == "win32":
-            candidates = ["restic.exe", "C:\\Program Files\\Backer Agent\\tools\\restic.exe"]
-        else:
-            candidates = ["restic", "/usr/bin/restic", "/usr/local/bin/restic"]
-
-        for candidate in candidates:
-            if Path(candidate).exists() or self._which(candidate):
-                return candidate
-
-        return "restic"  # Hope it's in PATH
-
-    def _which(self, cmd: str) -> str | None:
-        """Find command in PATH."""
-        return shutil.which(cmd)
-
-    def _run_restic(self, *args: str) -> tuple[int, str, str]:
-        """Run a restic command."""
-        env = os.environ.copy()
-        env["RESTIC_PASSWORD"] = self.password
-
-        cmd = [str(self.restic_path), "-r", self.repo_path, *args]
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=300,  # 5 minute timeout
-            )
-            return result.returncode, result.stdout, result.stderr
-        except subprocess.TimeoutExpired:
-            return -1, "", "Command timed out"
-        except Exception as e:
-            return -1, "", str(e)
-
-    def is_restic_repo(self) -> bool:
-        """Check if path is a valid restic repository."""
-        returncode, _, _ = self._run_restic("cat", "config")
-        return returncode == 0
-
-    def list_snapshots(self) -> list[dict[str, Any]]:
-        """List all snapshots in the restic repository."""
-        returncode, stdout, stderr = self._run_restic("snapshots", "--json")
-
-        if returncode != 0:
-            logger.error(f"Failed to list snapshots: {stderr}")
-            return []
-
-        try:
-            snapshots = json.loads(stdout) if stdout else []
-            return snapshots
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse snapshots: {e}")
-            return []
-
-    def get_snapshot_stats(self, snapshot_id: str) -> dict[str, Any] | None:
-        """Get statistics for a specific snapshot."""
-        returncode, stdout, stderr = self._run_restic("stats", snapshot_id, "--json")
-
-        if returncode != 0:
-            logger.warning(f"Failed to get stats for {snapshot_id}: {stderr}")
-            return None
-
-        try:
-            return json.loads(stdout) if stdout else None
-        except json.JSONDecodeError:
-            return None
-
-    def scan_and_sync(self, repo_metadata: RepositoryMetadata) -> dict[str, Any]:
-        """Scan restic repository and sync metadata.
-
-        Discovers all snapshots and updates the repository metadata.
-
-        Args:
-            repo_metadata: RepositoryMetadata instance to sync with
-
-        Returns:
-            Summary of discovered/synced data
-        """
-        if not self.is_restic_repo():
-            return {"error": "Not a valid restic repository"}
-
-        snapshots = self.list_snapshots()
-
-        synced = 0
-        for snapshot in snapshots:
-            snapshot_id = snapshot.get("id") or snapshot.get("short_id")
-            if not snapshot_id:
-                continue
-
-            # Check if we already have this snapshot
-            existing = repo_metadata.get_snapshot(snapshot_id)
-            if not existing:
-                # Save new snapshot metadata
-                snapshot_data = {
-                    "snapshot_id": snapshot_id,
-                    "short_id": snapshot.get("short_id", snapshot_id[:8]),
-                    "time": snapshot.get("time"),
-                    "hostname": snapshot.get("hostname"),
-                    "username": snapshot.get("username"),
-                    "paths": snapshot.get("paths", []),
-                    "tags": snapshot.get("tags", []),
-                }
-                repo_metadata.save_snapshot(snapshot_id, snapshot_data)
-                synced += 1
-
-                # Try to associate with an agent
-                hostname = snapshot.get("hostname")
-                if hostname:
-                    agents = repo_metadata.list_agents()
-                    matching_agent = next(
-                        (a for a in agents if a.get("hostname") == hostname),
-                        None
-                    )
-                    if not matching_agent:
-                        # Create agent entry
-                        repo_metadata.save_agent(
-                            agent_id=f"discovered_{hostname}",
-                            agent_data={
-                                "hostname": hostname,
-                                "discovered": True,
-                                "source": "restic_scan",
-                            }
-                        )
-
-        return {
-            "total_snapshots": len(snapshots),
-            "new_snapshots_synced": synced,
-            "already_tracked": len(snapshots) - synced,
-        }
 
 
 def import_repository_metadata(

@@ -2,7 +2,7 @@
 
 The proxy backend allows agents to use server-side local directories as backup
 destinations. Agents stream backup data to the server via HTTP, which then
-executes the actual backend (restic/kopia/etc.) locally on a configured path.
+executes Kopia locally on a configured path.
 
 This enables:
 - Docker containers to use server-local paths without complex mounts

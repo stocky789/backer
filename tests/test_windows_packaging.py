@@ -6,6 +6,13 @@ import pytest
 ROOT = Path(__file__).parents[1]
 
 
+def test_windows_builder_bundles_only_kopia() -> None:
+    source = Path("scripts/build_agent.py").read_text()
+    assert '["kopia"]' in source
+    assert "restic" not in source.lower()
+    assert "rclone" not in source.lower()
+
+
 def test_frozen_service_entry_uses_its_install_directory_for_tools() -> None:
     source = (ROOT / "src/backer/agent/service_entry.py").read_text()
 

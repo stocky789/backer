@@ -29,7 +29,7 @@ def _import_backends():
     """Import all backend modules, logging any failures."""
     import logging as _logging
     _logger = _logging.getLogger(__name__)
-    backends = ['kopia', 'proxy', 'rclone', 'restic']
+    backends = ['kopia', 'proxy']
     for backend in backends:
         try:
             __import__(f'backer.backends.{backend}')
