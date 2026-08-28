@@ -77,6 +77,9 @@ Repository = "https://git.stockhome.com.au/stocky789/backer"
 [tool.hatch.build.targets.wheel]
 packages = ["src/backer"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["/.chunkhound", "/docs", "/serverless-backups.md"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
