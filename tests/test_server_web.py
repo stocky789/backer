@@ -63,6 +63,12 @@ def test_repository_page_uses_product_language(authenticated_client) -> None:
     assert "path-style" not in html.lower()
 
 
+def test_repository_connection_step_always_requests_encryption_password(authenticated_client) -> None:
+    html = authenticated_client.get("/storage").text
+    connection_step = html.split('<div id="step1">', 1)[1].split('<!-- Step 2:', 1)[0]
+    assert 'id="repositoryPassword"' in connection_step
+
+
 def test_new_server_requires_setup_before_login(tmp_path: Path) -> None:
     app = create_app(tmp_path)
 

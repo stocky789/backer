@@ -360,6 +360,12 @@
                     </div>
                 </div>
 
+                <div class="form-group" id="networkRepositoryPasswordGroup">
+                    <label class="form-label">Encryption password</label>
+                    <input type="password" id="repositoryPassword" class="form-input" required>
+                    <div class="form-hint">Needed to recover this repository if the Backer server is lost.</div>
+                </div>
+
                 <div class="modal-footer">
                     <button class="btn btn-primary" id="discoverBtn" onclick="handleDiscoverClick()">
                         Connect & Browse Shares
@@ -412,12 +418,6 @@
                 <div class="form-group">
                     <label class="form-label">Selected Path</label>
                     <input type="text" id="selectedPath" class="form-input" readonly>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Encryption password</label>
-                    <input type="password" id="repositoryPassword" class="form-input" required>
-                    <div class="form-hint">Needed to recover this repository if the Backer server is lost.</div>
                 </div>
 
                 <div class="modal-footer">
@@ -784,6 +784,7 @@ function onTypeChange() {
 
     // Show/hide fields based on type
     document.getElementById('smbCredentials').style.display = isSmb ? 'block' : 'none';
+    document.getElementById('networkRepositoryPasswordGroup').style.display = (isSmb || currentType === 'nfs') ? 'block' : 'none';
     document.getElementById('serverGroup').style.display = (isLocal || isS3) ? 'none' : 'block';
     document.getElementById('localPathGroup').style.display = isLocal ? 'block' : 'none';
     document.getElementById('s3Config').style.display = isS3 ? 'block' : 'none';

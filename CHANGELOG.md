@@ -29,6 +29,10 @@ The release workflow publishes the top section verbatim as the release notes.
 - S3-compatible repositories are supported with native Kopia configuration.
 - Each repository has its own encryption password.
 
+### Bug Fixes
+
+- SMB and NFS repository setup now requests the encryption password before connection testing.
+
 ## 0.7.2
 
 ### Major Features
