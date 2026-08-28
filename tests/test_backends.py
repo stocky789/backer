@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -149,6 +150,20 @@ class TestKopiaBackend:
         success, message = KopiaBackend()._connect_repo("/backup/repo")
         assert not success
         assert message == "Repository encryption password is required"
+
+    def test_backup_sets_kopia_ignore_policy_for_excludes(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        assert backend.backup(BackupSource(tmp_path, excludes=["*.ignore"]), BackupDestination("repo")).success
+        assert ["kopia", "policy", "set", str(tmp_path), "--add-ignore", "*.ignore"] in calls
 
     def test_restore_dry_run_is_rejected_without_running_kopia(self) -> None:
         result = KopiaBackend().restore(

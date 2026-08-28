@@ -283,10 +283,24 @@ class KopiaBackend(BackendBase):
             if dry_run:
                 cmd.append("--dry-run")
 
-            # Add excludes - use --exclude-path for glob patterns
-            # Note: Kopia uses --exclude-path for simple globs, --ignore-rules for .gitignore-style rules
+            # Persist job excludes in Kopia's source policy before creating the snapshot.
             for exclude in source.excludes or []:
-                cmd.extend(["--exclude-path", exclude])
+                policy = subprocess.run(
+                    [str(binary), "policy", "set", str(source.path), "--add-ignore", exclude],
+                    capture_output=True,
+                    text=True,
+                    env=self._env,
+                    timeout=self.config.get("timeout", 86400),
+                )
+                if policy.returncode != 0:
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.BACKUP,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=[line for line in policy.stderr.split("\n") if line.strip()],
+                        return_code=policy.returncode,
+                    )
 
             # Add tags from config
             for tag in self.config.get("tags", []):
