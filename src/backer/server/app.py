@@ -3972,6 +3972,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
         return storage.get_job_runs(job_name, limit)
 
+    @app.get("/api/v1/runs")
+    def get_all_runs(limit: int = 50, storage: Storage = Depends(get_storage)) -> list[dict[str, Any]]:
+        """List recent runs for the History live-update view."""
+        return storage.get_all_job_runs(limit=limit)
+
     @app.get("/api/v1/runs/{run_id}")
     def get_run_details(run_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
         """Get details for a specific job run including logs and output."""

@@ -69,6 +69,10 @@ def test_repository_connection_step_always_requests_encryption_password(authenti
     assert 'id="repositoryPassword"' in connection_step
 
 
+def test_history_live_update_endpoint_exists(authenticated_client) -> None:
+    assert authenticated_client.get("/api/v1/runs?limit=50").status_code == 200
+
+
 def test_new_server_requires_setup_before_login(tmp_path: Path) -> None:
     app = create_app(tmp_path)
 
