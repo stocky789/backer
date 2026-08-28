@@ -3584,6 +3584,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             source_path=job.source_path,
             destination_path=job.destination_path,
             client_id=job.client_id,
+            enabled=True,
             schedule_cron=job.schedule_cron,
             last_run=None,
             last_status=None,
@@ -3639,17 +3640,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Job not found")
 
         data = await request.json()
+        if {"backend", "backend_type", "backend_options"} & data.keys():
+            raise HTTPException(status_code=422, detail="Backup engine fields are not supported")
         data = _restore_redacted_secrets(data, existing)
-
-        # Special handling for nested dicts that should be merged, not replaced
-        # Merge backend_options if both exist and incoming is not empty
-        # Empty dict {} means "clear all", non-empty means "merge"
-        if "backend_options" in data:
-            if data["backend_options"] and "backend_options" in existing:
-                # Non-empty: merge with existing
-                merged_backend_options = {**existing.get("backend_options", {}), **data["backend_options"]}
-                data["backend_options"] = merged_backend_options
-            # If data["backend_options"] is empty {}, it will replace existing (clearing it)
 
         # Merge retention if both exist and incoming is not empty
         if "retention" in data:

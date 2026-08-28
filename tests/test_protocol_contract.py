@@ -70,6 +70,32 @@ def test_job_contract_rejects_removed_backend_fields(field: str) -> None:
         })
 
 
+def test_job_api_creates_an_enabled_engine_free_job(tmp_path: Path) -> None:
+    app = create_app(tmp_path)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.post("/api/v1/jobs", json={"name": "photos", "source_path": "/photos"})
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+
+
+@pytest.mark.parametrize("field", ["backend", "backend_options"])
+def test_job_update_rejects_removed_backend_fields(tmp_path: Path, field: str) -> None:
+    app = create_app(tmp_path)
+    app.state.storage.save_job("photos", {"source_path": "/photos"})
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.put(
+            "/api/v1/jobs/photos",
+            json={field: "restic" if field == "backend" else {}},
+        )
+
+    assert response.status_code == 422
+
+
 @pytest.mark.parametrize("field", ["backend", "backend_type", "backend_options"])
 def test_repository_api_rejects_removed_backend_fields(tmp_path: Path, field: str) -> None:
     app = create_app(tmp_path)
