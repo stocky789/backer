@@ -481,3 +481,19 @@ def test_android_local_job_uses_proxy_payload(tmp_path: Path):
 
     assert payload["destination_path"].startswith("proxy://")
     assert payload["repository_options"]["proxy_capability"]
+
+
+def test_imported_smb_restore_builds_repository_source_before_queueing(tmp_path: Path):
+    app = create_app(tmp_path)
+    storage = app.state.storage
+    _client(storage)
+    storage.add_repository("repo", "smb", "smb", server="nas", share="backups")
+    storage.set_repository_password("repo", "secret")
+    storage.save_job("photos", {"name": "photos", "source_path": "/photos", "repository_id": "repo"})
+
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.post("/api/v1/restore", json={"job_name": "photos", "client_id": "agent"})
+
+    assert response.status_code == 200
+    assert storage.get_pending_commands("agent")[0]["payload"]["source_path"] == "//nas/backups/Agents/photos"

@@ -4188,10 +4188,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if repo:
                 repo_type = repo.get("repo_type", "smb")
                 if repo_type == "smb":
-                    command_payload["source_path"] = f"//{repo.get('server')}/{repo.get('share')}/Agents/{job_subfolder}"
                     backup_source = f"//{repo['server']}/{repo['share']}"
                 elif repo_type == "nfs":
-                    command_payload["source_path"] = f"{repo.get('server')}:{repo.get('share')}/Agents/{job_subfolder}"
                     backup_source = f"{repo['server']}:{repo['share']}"
                 else:
                     backup_source = repo.get("share", "") or repo.get("path", "")
