@@ -101,10 +101,7 @@ class BackupJob:
         )
 
         try:
-            backend = get_backend(
-                self.config.destination.backend,
-                self.config.backend_options,
-            )
+            backend = get_backend("kopia", self.config.backend_options)
 
             available, message = backend.check_available()
             if not available:
@@ -149,19 +146,13 @@ class BackupJob:
         dry_run: bool = False,
     ) -> BackendResult:
         """Restore from this job's backup destination."""
-        backend = get_backend(
-            self.config.destination.backend,
-            self.config.backend_options,
-        )
+        backend = get_backend("kopia", self.config.backend_options)
         source = BackupDestination(path=self.config.destination.path)
         return backend.restore(source=source, destination=target_path, snapshot=snapshot, dry_run=dry_run)
 
     def list_snapshots(self) -> list[dict[str, Any]]:
         """List available snapshots for this job."""
-        backend = get_backend(
-            self.config.destination.backend,
-            self.config.backend_options,
-        )
+        backend = get_backend("kopia", self.config.backend_options)
         destination = BackupDestination(path=self.config.destination.path)
         return backend.list_snapshots(destination)
 

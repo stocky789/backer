@@ -28,23 +28,32 @@ _SENSITIVE_OPTION_PARTS = (
 )
 
 
-def _redact_backend_options(value: Any) -> Any:
+def _redact_repository_options(value: Any) -> Any:
     """Return a safe-to-log copy of backend options."""
     if isinstance(value, dict):
         return {
             key: "***" if any(part in str(key).lower() for part in _SENSITIVE_OPTION_PARTS)
-            else _redact_backend_options(item)
+            else _redact_repository_options(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact_backend_options(item) for item in value]
+        return [_redact_repository_options(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_backend_options(item) for item in value)
+        return tuple(_redact_repository_options(item) for item in value)
     return value
 
 
-def _log_backend_options(operation: str, options: dict[str, Any]) -> None:
-    print(f"[{operation}] Backend options: {_redact_backend_options(options)}")
+def _log_repository_options(operation: str, options: dict[str, Any]) -> None:
+    print(f"[{operation}] Repository options: {_redact_repository_options(options)}")
+
+
+def _backend_for_location(location: str, options: dict[str, Any]):
+    lowered = location.lower()
+    if lowered.startswith(("proxy://", "proxys://")):
+        return get_backend("proxy", {**options, "location": location})
+    if "://" in location and not lowered.startswith("s3://"):
+        raise RuntimeError(f"Unsupported repository location: {location}")
+    return get_backend("kopia", options)
 
 
 def get_config_dir() -> Path:
@@ -909,7 +918,7 @@ class BackerAgent:
         run_id = job.get("run_id") or datetime.now().strftime("%Y%m%d_%H%M%S")
         started_at = datetime.now()
         job_name = job.get("job_name", "unknown")
-        backend_name = job.get("backend", "rclone")
+        backend_name = "repository"
 
         print(f"[BACKUP] Starting job '{job_name}' with backend '{backend_name}'")
         print(f"[BACKUP] Source: {job.get('source_path')}")
@@ -925,22 +934,17 @@ class BackerAgent:
 
         smb_cleanup_ctx = None
         try:
-            backend_options = job.get("backend_options", {}).copy()
+            repository_options = job.get("repository_options", {}).copy()
 
             # For proxy backend, destination_path IS the location URI
             # Also include agent credentials for authentication
-            if backend_name == "proxy":
-                backend_options["location"] = job.get("destination_path", "")
-                backend_options["client_id"] = self.client_id
-                backend_options["client_secret"] = self.client_secret
-                print(f"[BACKUP] Proxy backend configured with location: {backend_options['location']}")
+            if job.get("destination_path", "").lower().startswith(("proxy://", "proxys://")):
+                repository_options["client_id"] = self.client_id
+                repository_options["client_secret"] = self.client_secret
 
-            _log_backend_options("BACKUP", backend_options)
-
-            backend = get_backend(
-                backend_name,  # rclone default (rsync not supported for agents)
-                backend_options,
-            )
+            _log_repository_options("BACKUP", repository_options)
+            backend = _backend_for_location(job.get("destination_path", ""), repository_options)
+            backend_name = "proxy" if job.get("destination_path", "").lower().startswith(("proxy://", "proxys://")) else "kopia"
 
             print("[BACKUP] Checking backend availability...")
             available, message = backend.check_available()
@@ -1285,7 +1289,7 @@ class BackerAgent:
         run_id = job.get("run_id") or f"restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         started_at = datetime.now()
         job_name = job.get("job_name", "unknown")
-        backend_name = job.get("backend", "rclone")
+        backend_name = "repository"
 
         print(f"[RESTORE] Starting restore for job '{job_name}' with backend '{backend_name}'")
         print(f"[RESTORE] Source (backup repo): {job.get('source_path')}")
@@ -1301,22 +1305,17 @@ class BackerAgent:
 
         mount_cleanup_ctx = None
         try:
-            backend_options = job.get("backend_options", {}).copy()
+            repository_options = job.get("repository_options", {}).copy()
 
             # For proxy backend, source_path IS the location URI
             # Also include agent credentials for authentication
-            if backend_name == "proxy":
-                backend_options["location"] = job.get("source_path", "")
-                backend_options["client_id"] = self.client_id
-                backend_options["client_secret"] = self.client_secret
-                print(f"[RESTORE] Proxy backend configured with location: {backend_options['location']}")
+            if job.get("source_path", "").lower().startswith(("proxy://", "proxys://")):
+                repository_options["client_id"] = self.client_id
+                repository_options["client_secret"] = self.client_secret
 
-            _log_backend_options("RESTORE", backend_options)
-
-            backend = get_backend(
-                backend_name,
-                backend_options,
-            )
+            _log_repository_options("RESTORE", repository_options)
+            backend = _backend_for_location(job.get("source_path", ""), repository_options)
+            backend_name = "proxy" if job.get("source_path", "").lower().startswith(("proxy://", "proxys://")) else "kopia"
 
             print("[RESTORE] Checking backend availability...")
             available, message = backend.check_available()
@@ -1347,8 +1346,6 @@ class BackerAgent:
             restore_snapshot = job.get("snapshot")
             staged_destination: Path | None = None
             if clean_restore and not dry_run:
-                if backend_name == "restic" and restore_snapshot in (None, "", "latest"):
-                    restore_snapshot = backend.resolve_latest_snapshot(source)
                 if backend_name == "proxy":
                     raise RuntimeError(
                         "Clean restore is not supported for proxy backends because "
@@ -1375,8 +1372,6 @@ class BackerAgent:
                     if not validation.success:
                         raise RuntimeError("Clean restore validation failed: " + "; ".join(validation.errors))
                     matched_items = validation.metadata.get("matched_items", validation.files_transferred)
-                    if backend_name == "restic" and matched_items == 0:
-                        raise RuntimeError("Clean restore found no files in the selected Restic snapshot")
 
                 resolved_destination = destination.resolve()
                 if resolved_destination == resolved_destination.parent:
@@ -1453,15 +1448,6 @@ class BackerAgent:
                             f"{staged_destination}: {rollback_err}"
                         ) from rollback_err
                 raise
-
-            if (
-                clean_restore
-                and not dry_run
-                and backend_name == "restic"
-                and result.metadata.get("matched_items", result.files_transferred) == 0
-            ):
-                result.success = False
-                result.errors.append("Clean restore found no files in the selected Restic snapshot")
 
             if clean_restore and not dry_run and not result.success:
                 try:

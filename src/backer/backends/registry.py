@@ -5,16 +5,10 @@ from typing import Any
 from backer.backends.base import BackendBase, BackendType
 from backer.backends.kopia import KopiaBackend
 from backer.backends.proxy import ProxyBackend
-from backer.backends.rclone import RcloneBackend
-from backer.backends.restic import ResticBackend
-from backer.backends.rsync import RsyncBackend
 
 _BACKENDS: dict[BackendType, type[BackendBase]] = {
     BackendType.KOPIA: KopiaBackend,
     BackendType.PROXY: ProxyBackend,
-    BackendType.RCLONE: RcloneBackend,
-    BackendType.RESTIC: ResticBackend,
-    BackendType.RSYNC: RsyncBackend,
 }
 
 

@@ -14,7 +14,7 @@ def test_service_backup_uses_shared_agent_executor(tmp_path: Path, monkeypatch) 
 
 def test_service_redacts_nested_capabilities_and_sequence_tokens(tmp_path: Path) -> None:
     payload = {
-        "backend_options": {"proxy_capability": "nested-capability"},
+        "repository_options": {"proxy_capability": "nested-capability"},
         "targets": [{"token": "list-token"}],
     }
 
@@ -23,4 +23,4 @@ def test_service_redacts_nested_capabilities_and_sequence_tokens(tmp_path: Path)
 
     assert "nested-capability" not in repr(safe)
     assert "list-token" not in repr(safe)
-    assert payload["backend_options"]["proxy_capability"] == "nested-capability"
+    assert payload["repository_options"]["proxy_capability"] == "nested-capability"

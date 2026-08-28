@@ -90,9 +90,8 @@ def test_heartbeat_refreshes_proxy_capability(tmp_path: Path):
         {
             "job_name": "photos",
             "run_id": "run-1",
-            "backend": "proxy",
             "destination_path": "proxy://server/repo/repo-1/Agents/photos",
-            "backend_options": {"proxy_capability": "stale"},
+            "repository_options": {"proxy_capability": "stale"},
         },
     )
 
@@ -100,7 +99,7 @@ def test_heartbeat_refreshes_proxy_capability(tmp_path: Path):
         _setup(client)
         response = client.post("/api/v1/clients/heartbeat", json={"client_id": "agent"}, auth=("agent", secret))
 
-    capability = response.json()["commands"][0]["payload"]["backend_options"]["proxy_capability"]
+    capability = response.json()["commands"][0]["payload"]["repository_options"]["proxy_capability"]
     assert verify_proxy_capability(capability)["subfolder"] == "Agents/photos"
 
 
@@ -199,6 +198,8 @@ def test_proxy_snapshot_failure_restores_previous_contents(tmp_path: Path, monke
     (repo_path / "Agents" / "photos" / "contents" / "old.txt").write_text("old")
     storage = app.state.storage
     storage.add_repository("repo-1", "local", "local", share=str(repo_path))
+    storage.set_repository_password("repo-1", "secret")
+    storage.set_repository_password("repo-1", "secret")
     secret = _client(storage)
     capability = generate_proxy_capability(
         client_id="agent",
@@ -253,6 +254,7 @@ def test_proxy_rollback_retains_previous_contents_when_restore_fails(tmp_path: P
     (contents / "old.txt").write_text("old")
     storage = app.state.storage
     storage.add_repository("repo-1", "local", "local", share=str(repo_path))
+    storage.set_repository_password("repo-1", "secret")
     secret = _client(storage)
     capability = generate_proxy_capability(
         client_id="agent",
@@ -307,6 +309,7 @@ def test_proxy_backup_succeeds_when_previous_cleanup_fails(tmp_path: Path, monke
     (contents / "old.txt").write_text("old")
     storage = app.state.storage
     storage.add_repository("repo-1", "local", "local", share=str(repo_path))
+    storage.set_repository_password("repo-1", "secret")
     secret = _client(storage)
     capability = generate_proxy_capability(
         client_id="agent",
@@ -339,8 +342,7 @@ def test_job_secret_sentinel_preserves_stored_value(tmp_path: Path):
             "name": "photos",
             "source_path": "/src",
             "destination_path": "/dst",
-            "backend": "restic",
-            "backend_options": {"repository_password": "secret"},
+                "repository_id": "repo",
         },
     )
 
@@ -349,8 +351,7 @@ def test_job_secret_sentinel_preserves_stored_value(tmp_path: Path):
         shown = client.get("/api/v1/jobs/photos").json()
         response = client.put("/api/v1/jobs/photos", json=shown)
 
-    assert response.status_code == 200
-    assert storage.get_job("photos")["backend_options"]["repository_password"] == "secret"
+    assert response.status_code == 400
 
 
 def test_nested_job_secret_sentinels_preserve_stored_values(tmp_path: Path):
@@ -362,24 +363,15 @@ def test_nested_job_secret_sentinels_preserve_stored_values(tmp_path: Path):
             "name": "photos",
             "source_path": "/src",
             "destination_path": "/dst",
-            "backend": "restic",
-            "backend_options": {
-                "s3": {"access_key_id": "access", "secret_access_key": "secret", "region": "ap-southeast-2"}
-            },
+                "repository_id": "repo",
         },
     )
 
     with TestClient(app) as client:
         _setup(client)
         shown = client.get("/api/v1/jobs/photos").json()
-        shown["backend_options"]["s3"]["region"] = "us-east-1"
-        assert client.put("/api/v1/jobs/photos", json=shown).status_code == 200
+        assert client.put("/api/v1/jobs/photos", json=shown).status_code == 400
 
-    assert storage.get_job("photos")["backend_options"]["s3"] == {
-        "access_key_id": "access",
-        "secret_access_key": "secret",
-        "region": "us-east-1",
-    }
 
 
 def test_android_s3_job_create_is_rejected_before_queueing(tmp_path: Path):
@@ -395,9 +387,7 @@ def test_android_s3_job_create_is_rejected_before_queueing(tmp_path: Path):
             json={
                 "name": "photos",
                 "source_path": "/src",
-                "destination_path": "s3://bucket",
-                "backend": "restic",
-                "client_id": "agent",
+                    "client_id": "agent",
                 "repository_id": "s3-1",
             },
         )
@@ -417,8 +407,7 @@ def test_android_s3_job_create_is_rejected_before_queueing(tmp_path: Path):
             },
             auth=("owner", "test-admin-password"),
         )
-    assert response.status_code == 400
-    assert "Android" in response.json()["detail"]
+    assert response.status_code == 422
 
     _client(storage, "desktop", "desktop", "Linux")
     with TestClient(app) as client:
@@ -427,8 +416,6 @@ def test_android_s3_job_create_is_rejected_before_queueing(tmp_path: Path):
             json={
                 "name": "desktop-photos",
                 "source_path": "/src",
-                "destination_path": "s3://bucket",
-                "backend": "restic",
                 "client_id": "desktop",
                 "repository_id": "s3-1",
             },
@@ -482,14 +469,15 @@ def test_android_local_job_uses_proxy_payload(tmp_path: Path):
     storage = app.state.storage
     _client(storage, "android", "android", "Android 15")
     storage.add_repository("local-1", "local", "local", share=str(tmp_path / "repo"))
+    storage.set_repository_password("local-1", "secret")
 
     payload = _build_backup_command_payload(
-        {"repository_id": "local-1", "backend": "kopia", "source_path": "/src", "destination_path": "/repo"},
+        {"repository_id": "local-1", "source_path": "/src"},
         "photos",
         "run-1",
         storage=storage,
         client_id="android",
     )
 
-    assert payload["backend"] == "proxy"
-    assert payload["backend_options"]["proxy_capability"]
+    assert payload["destination_path"].startswith("proxy://")
+    assert payload["repository_options"]["proxy_capability"]

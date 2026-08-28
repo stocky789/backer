@@ -64,9 +64,30 @@ def test_smb_transport_uses_storage_password_while_restic_uses_repository_passwo
     storage.add_hypervisor_job("job", "job", "hyperv", [], "repo")
     _endpoint(app, "/api/v1/hypervisors/{hypervisor_id}/backups")("hyperv", storage=storage)
 
-    payload = _build_backup_command_payload(
-        {"repository_id": "repo", "backend": "restic"}, "job", "run", storage=storage
-    )
+    payload = _build_backup_command_payload({"repository_id": "repo"}, "job", "run", storage=storage)
     assert captured == ["storage-secret", "storage-secret", "storage-secret"]
     assert payload["smb_password"] == "storage-secret"
-    assert payload["backend_options"]["repository_password"] == "repository-secret"
+    assert payload["repository_options"]["repository_password"] == "repository-secret"
+
+
+def test_backup_payload_has_no_engine_selector() -> None:
+    class Storage:
+        def get_client(self, client_id: str) -> None:
+            return None
+
+        def get_repository(self, repo_id: str) -> dict[str, str]:
+            assert repo_id == "repo"
+            return {"repo_type": "smb", "server": "nas", "share": "backups"}
+
+        def get_storage_password(self, repo_id: str) -> None:
+            return None
+
+        def get_repository_password(self, repo_id: str) -> str:
+            return "secret"
+
+    payload = _build_backup_command_payload(
+        {"repository_id": "repo", "source_path": "/photos"}, "photos", "run-1", storage=Storage()
+    )
+    assert "backend" not in payload
+    assert "backend_options" not in payload
+    assert payload["repository_options"]["repository_password"] == "secret"

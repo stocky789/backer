@@ -15,9 +15,6 @@ logger = logging.getLogger(__name__)
 class BackendType(str, Enum):
     """Supported backend types."""
 
-    RSYNC = "rsync"
-    RCLONE = "rclone"
-    RESTIC = "restic"
     KOPIA = "kopia"
     PROXY = "proxy"  # Proxy to remote server (for local directory storage)
 
@@ -66,8 +63,7 @@ class BackupSource:
 class BackupDestination:
     """Destination definition for a backup."""
 
-    path: str  # Can be local path or remote URI (rclone remote:path, etc.)
-    backend_type: BackendType = BackendType.RCLONE  # Default to rclone (rsync not supported for agents)
+    path: str
 
 
 class BackendBase(ABC):

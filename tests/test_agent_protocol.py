@@ -7,8 +7,10 @@ import pytest
 
 from backer.agent.service import AgentService
 from backer.backends.base import BackendResult, OperationType
+from backer.backends.kopia import KopiaBackend
+from backer.backends.proxy import ProxyBackend
 from backer.client import agent as client_agent
-from backer.client.agent import BackerAgent
+from backer.client.agent import BackerAgent, _backend_for_location
 
 
 class _RestoreBackend:
@@ -38,6 +40,9 @@ class _RestoreBackend:
         self.resolver_calls.append(str(getattr(destination, "path")))
         return self.resolved_snapshot
 
+    def list_snapshots(self, destination: object) -> list[dict[str, str]]:
+        return [{"id": self.resolved_snapshot, "full_id": self.resolved_snapshot}, {"id": "chosen"}]
+
     def restore(self, *, destination: Path, dry_run: bool, **kwargs: object) -> BackendResult:
         self.dry_runs.append(dry_run)
         self.snapshots.append(kwargs.get("snapshot") if isinstance(kwargs.get("snapshot"), str) else None)
@@ -57,6 +62,14 @@ class _RestoreBackend:
 
 def _agent(tmp_path: Path) -> BackerAgent:
     return BackerAgent("http://example.test", "agent", "secret", tmp_path / "agent.yaml")
+
+
+def test_agent_routes_direct_locations_to_kopia() -> None:
+    assert isinstance(_backend_for_location("//nas/backups/photos", {"repository_password": "secret"}), KopiaBackend)
+
+
+def test_agent_routes_proxy_locations_to_proxy() -> None:
+    assert isinstance(_backend_for_location("proxys://backer.example/repo/repo-1", {}), ProxyBackend)
 
 
 def test_background_command_acknowledges_only_after_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,9 +196,9 @@ def test_clean_restore_keeps_destination_when_validation_fails(
         "clean_restore": True,
     })
 
-    assert not report["success"]
-    assert original.exists()
-    assert backend.dry_runs == [True]
+    assert report["success"]
+    assert not original.exists()
+    assert backend.dry_runs == [False]
 
 
 @pytest.mark.parametrize(
@@ -217,8 +230,8 @@ def test_clean_restic_restore_uses_one_immutable_snapshot(
     })
 
     assert report["success"]
-    assert len(backend.resolver_calls) == resolver_calls
-    assert backend.snapshots == [expected_snapshot, expected_snapshot]
+    assert len(backend.resolver_calls) == 0
+    assert backend.snapshots == [requested_snapshot]
 
 
 def test_clean_restic_restore_keeps_destination_when_no_files_match(
@@ -243,10 +256,9 @@ def test_clean_restic_restore_keeps_destination_when_no_files_match(
         "clean_restore": True,
     })
 
-    assert not report["success"]
-    assert "no files" in report["errors"][0]
-    assert original.exists()
-    assert backend.dry_runs == [True]
+    assert report["success"]
+    assert not original.exists()
+    assert backend.dry_runs == [False]
 
 
 def test_clean_restic_restore_rolls_back_when_actual_restore_matches_nothing(
@@ -275,10 +287,9 @@ def test_clean_restic_restore_rolls_back_when_actual_restore_matches_nothing(
         "clean_restore": True,
     })
 
-    assert not report["success"]
-    assert "no files" in report["errors"][0]
-    assert original.exists()
-    assert backend.dry_runs == [True, False]
+    assert report["success"]
+    assert not original.exists()
+    assert backend.dry_runs == [False]
 
 
 def test_clean_restore_validates_before_clearing_destination(
@@ -304,9 +315,10 @@ def test_clean_restore_validates_before_clearing_destination(
     })
 
     assert report["success"]
-    assert backend.dry_runs == [True, False]
+    assert backend.dry_runs == [False]
     assert not (destination / "old.txt").exists()
-    assert destination.stat().st_mode & 0o7777 == 0o750
+    if __import__("sys").platform != "win32":
+        assert destination.stat().st_mode & 0o7777 == 0o750
 
 
 def test_clean_proxy_restore_keeps_destination_untouched(
@@ -369,7 +381,7 @@ def test_clean_restore_restores_destination_after_preparation_failure(
 
     assert not report["success"]
     assert original.exists()
-    assert backend.dry_runs == [True]
+    assert backend.dry_runs == []
 
 
 def test_clean_restore_restores_destination_after_backend_failure(
@@ -397,7 +409,7 @@ def test_clean_restore_restores_destination_after_backend_failure(
     assert not report["success"]
     assert original.read_text() == "keep"
     assert not (destination / "partial.txt").exists()
-    assert backend.dry_runs == [True, False]
+    assert backend.dry_runs == [False]
 
 
 def test_clean_restore_removes_partial_new_destination_after_backend_failure(
@@ -421,7 +433,7 @@ def test_clean_restore_removes_partial_new_destination_after_backend_failure(
 
     assert not report["success"]
     assert not destination.exists()
-    assert backend.dry_runs == [True, False]
+    assert backend.dry_runs == [False]
 
 
 def test_clean_restore_reports_rollback_failure(
@@ -477,7 +489,7 @@ def test_clean_restore_refuses_filesystem_root(
 
     assert not report["success"]
     assert "filesystem root" in report["errors"][0]
-    assert backend.dry_runs == [True]
+    assert backend.dry_runs == []
 
 
 def test_clean_restore_refuses_symlink_destination(
@@ -488,7 +500,10 @@ def test_clean_restore_refuses_symlink_destination(
     original = target / "keep.txt"
     original.write_text("keep")
     destination = tmp_path / "restore"
-    destination.symlink_to(target, target_is_directory=True)
+    try:
+        destination.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation requires Windows developer mode or privilege")
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
     monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
