@@ -7,9 +7,6 @@ from rich.console import Console
 from rich.table import Table
 
 from backer import __version__
-
-# Import backends to register them
-from backer.backends import BackendRegistry
 from backer.backends.base import BackupDestination, BackupSource
 
 console = Console()
@@ -22,9 +19,9 @@ console = Console()
 def main(ctx: click.Context, config: Path | None) -> None:
     """Backer - Unified backup orchestration.
 
-    Consolidates rsync, rclone, restic, kopia and more into one tool.
+    Back up and restore with Kopia.
 
-    Run 'backer setup' to download and install backup tools.
+    Run 'backer setup' to download and install Kopia.
     """
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
@@ -37,9 +34,9 @@ def main(ctx: click.Context, config: Path | None) -> None:
 @click.option("--force", "-f", is_flag=True, help="Force reinstall even if already installed")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress output (for scripted installs)")
 def setup(force: bool, quiet: bool) -> None:
-    """Download and install backup tools (rclone, restic, kopia).
+    """Download and install Kopia.
 
-    This automatically downloads the required backup tools so you don't
+    This automatically downloads Kopia so you don't
     need to install them manually.
     """
     from backer.tools.manager import get_tool_manager
@@ -50,7 +47,7 @@ def setup(force: bool, quiet: bool) -> None:
         console.print("[bold]Backer Setup[/bold]")
         console.print(f"Tools directory: {manager.tools_dir}\n")
 
-    tools = ["rclone", "restic", "kopia"]
+    tools = ["kopia"]
     failures = []
 
     for tool in tools:
@@ -81,18 +78,18 @@ def setup(force: bool, quiet: bool) -> None:
 
     if not quiet:
         console.print("\n[bold]Setup complete![/bold]")
-        console.print("Run 'backer tools' to see installed tools.")
+        console.print("Run 'backer tools' to see Kopia status.")
 
 
 @main.command()
 def tools() -> None:
-    """Show status of backup tools."""
+    """Show Kopia status."""
     from backer.tools.manager import get_tool_manager
 
     manager = get_tool_manager()
-    tools_info = manager.list_tools()
+    tools_info = {"kopia": manager.list_tools()["kopia"]}
 
-    table = Table(title="Backup Tools")
+    table = Table(title="Kopia")
     table.add_column("Tool", style="cyan")
     table.add_column("Status")
     table.add_column("Version")
@@ -117,22 +114,7 @@ def tools() -> None:
 
     console.print(table)
     console.print(f"\nManaged tools directory: {manager.tools_dir}")
-    console.print("Run 'backer setup' to install missing tools.")
-
-
-@main.command()
-def backends() -> None:
-    """List available backup backends and their status."""
-    table = Table(title="Available Backends")
-    table.add_column("Backend", style="cyan")
-    table.add_column("Status", style="green")
-    table.add_column("Version/Info")
-
-    for backend_type, (available, info) in BackendRegistry.check_all_available().items():
-        status = "[green]✓ Available[/green]" if available else "[red]✗ Not found[/red]"
-        table.add_row(backend_type.value, status, info)
-
-    console.print(table)
+    console.print("Run 'backer setup' to install Kopia.")
 
 
 # ============ Standalone backup commands ============
@@ -1447,10 +1429,6 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
 @click.option("--name", "-n", required=True, help="Job name")
 @click.option("--source", "-s", required=True, help="Source path")
 @click.option("--dest", "-d", required=True, help="Destination path")
-@click.option(
-    "--repository-password", envvar="BACKER_REPOSITORY_PASSWORD", required=True,
-    help="Repository encryption password",
-)
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
@@ -1459,7 +1437,6 @@ def job_create(
     name: str,
     source: str,
     dest: str,
-    repository_password: str,
     schedule: str | None,
     server: str | None,
     username: str | None,
