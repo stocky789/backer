@@ -2,9 +2,7 @@
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ClientStatus(str, Enum):
@@ -33,17 +31,16 @@ class Client(BaseModel):
 class JobCreate(BaseModel):
     """Request to create a new backup job."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
+    client_id: str | None = None
     source_path: str
-    destination_path: str
-    backend: str = "rclone"  # rclone or restic (rsync not supported for agents)
+    destination_path: str = ""
+    repository_id: str | None = None
     excludes: list[str] = Field(default_factory=list)
     schedule_cron: str | None = None
-    client_id: str | None = None
-    repository_id: str | None = None
-    enabled: bool = True
-    tags: list[str] = Field(default_factory=list)
-    backend_options: dict[str, Any] = Field(default_factory=dict)
+    retention: dict[str, int] | None = None
 
 
 class JobResponse(BaseModel):
@@ -52,7 +49,6 @@ class JobResponse(BaseModel):
     name: str
     source_path: str
     destination_path: str
-    backend: str
     client_id: str | None
     enabled: bool
     schedule_cron: str | None

@@ -19,7 +19,6 @@ class DestinationConfig(BaseModel):
     """Configuration for a backup destination."""
 
     path: str
-    backend: str = "rclone"  # rclone, restic (rsync not supported for agents)
 
 
 class RetentionConfig(BaseModel):
@@ -51,7 +50,6 @@ class JobConfig(BaseModel):
     pre_scripts: list[str] = Field(default_factory=list)
     post_scripts: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
-    backend_options: dict[str, Any] = Field(default_factory=dict)
     client_id: str | None = None  # Which client this job runs on
 
 

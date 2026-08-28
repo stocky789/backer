@@ -15,12 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from backer.agent.service import AgentService
 from backer.server.app import _build_backup_command_payload, create_app
 from backer.server.auth import generate_proxy_capability
-from backer.server.capabilities import BACKEND_CAPABILITIES, validate_job_backend
-from backer.server.models import Client, ClientStatus
+from backer.server.models import Client, ClientStatus, JobCreate
 from backer.server.web.auth import get_setup_token
 
 
@@ -52,16 +52,38 @@ def _complete_setup(client: TestClient) -> None:
     assert response.status_code == 303
 
 
-def test_capability_matrix_rejects_unadvertised_backend_repository_pairs() -> None:
-    assert validate_job_backend("restic", "smb") is None
-    assert validate_job_backend("kopia", "nfs") is None
-    assert validate_job_backend("rclone", "local") == "Local repositories use the server proxy/Kopia backend"
-    assert validate_job_backend("rsync", "smb") == "Unsupported backend: rsync"
-    assert validate_job_backend("restic", "s3") is None
-    assert validate_job_backend("rclone", "s3") == "Backend 'rclone' does not support s3 repositories"
-    assert validate_job_backend("kopia", "s3") == "Backend 'kopia' does not support s3 repositories"
-    assert not any((BACKEND_CAPABILITIES["proxy"].init, BACKEND_CAPABILITIES["proxy"].prune,
-                    BACKEND_CAPABILITIES["proxy"].check))
+def test_job_contract_has_no_backend_selector() -> None:
+    job = JobCreate(name="photos", source_path="/photos", repository_id="repo-1")
+
+    assert "backend" not in job.model_dump()
+    assert "backend_options" not in job.model_dump()
+
+
+@pytest.mark.parametrize("field", ["backend", "backend_options"])
+def test_job_contract_rejects_removed_backend_fields(field: str) -> None:
+    with pytest.raises(ValidationError):
+        JobCreate.model_validate({
+            "name": "photos",
+            "source_path": "/photos",
+            "repository_id": "repo-1",
+            field: "restic" if field == "backend" else {},
+        })
+
+
+@pytest.mark.parametrize("field", ["backend", "backend_type", "backend_options"])
+def test_repository_api_rejects_removed_backend_fields(tmp_path: Path, field: str) -> None:
+    app = create_app(tmp_path)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.post("/api/v1/repositories", json={
+            "name": "Backups",
+            "type": "local",
+            "share": str(tmp_path / "backups"),
+            "repository_password": "secret",
+            field: "restic" if field != "backend_options" else {},
+        })
+
+    assert response.status_code == 422
 
 
 def test_backup_payload_keeps_smb_and_repository_passwords_separate() -> None:

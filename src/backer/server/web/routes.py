@@ -19,7 +19,6 @@ from backer.server.auth import (
     generate_enrollment_code,
     hash_enrollment_code,
 )
-from backer.server.capabilities import validate_job_backend
 from backer.server.storage import Storage
 from backer.server.web.auth import (
     clear_session_cookie,
@@ -422,7 +421,7 @@ async def jobs_create(
     repo = storage.get_repository(repository_id)
     if not repo:
         return RedirectResponse("/jobs/new?error=invalid_repo", status_code=303)
-    if validate_job_backend(backend, repo.get("repo_type")):
+    if repo.get("repo_type") not in {"smb", "nfs", "local", "s3"}:
         return RedirectResponse("/jobs/new?error=unsupported_backend", status_code=303)
     client = storage.get_client(client_id)
     if client and (client.os_info or "").lower().startswith("android") and repo.get("repo_type") != "local":

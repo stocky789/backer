@@ -21,6 +21,8 @@ class Storage:
 
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path) if isinstance(db_path, str) else db_path
+        if self.db_path.exists() and self.db_path.is_dir():
+            self.db_path /= "backer.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -92,7 +94,6 @@ class Storage:
                     password_encrypted TEXT,
                     storage_password_encrypted TEXT,
                     repository_password_encrypted TEXT,
-                    backend_type TEXT,
                     domain TEXT,
                     mount_point TEXT,
                     status TEXT DEFAULT 'disconnected',
@@ -271,7 +272,7 @@ class Storage:
             # Repository credentials used to share one ambiguous column. Keep
             # legacy data readable, but split it exactly once by repository role.
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(repositories)")}
-            for column in ("storage_password_encrypted", "repository_password_encrypted", "backend_type"):
+            for column in ("storage_password_encrypted", "repository_password_encrypted"):
                 if column not in columns:
                     conn.execute(f"ALTER TABLE repositories ADD COLUMN {column} TEXT")
             conn.execute("""
@@ -283,11 +284,6 @@ class Storage:
                 WHERE repo_type IN ('local', 'nfs')
                     AND repository_password_encrypted IS NULL AND password_encrypted IS NOT NULL
             """)
-            conn.execute("""
-                UPDATE repositories SET backend_type = CASE WHEN repo_type = 'local' THEN 'kopia' ELSE 'restic' END
-                WHERE backend_type IS NULL
-            """)
-
             # Migration: Convert delete_before_backup to copies_to_keep
             # If delete_before_backup was 1, set copies_to_keep to 1
             try:
@@ -480,7 +476,6 @@ class Storage:
     # Job operations
     def save_job(self, name: str, config: dict[str, Any]) -> None:
         """Save or update a job configuration."""
-        config = self._encrypt_job_repository_password(config)
         now = tz.get_now().isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -498,11 +493,7 @@ class Storage:
             row = conn.execute("SELECT config FROM jobs WHERE name = ?", (name,)).fetchone()
             if not row:
                 return None
-            stored_config = json.loads(row["config"])
-            config = self._encrypt_job_repository_password(stored_config)
-            if config != stored_config:
-                conn.execute("UPDATE jobs SET config = ? WHERE name = ?", (json.dumps(config), name))
-            return self._decrypt_job_repository_password(config)
+            return json.loads(row["config"])
 
     def list_jobs(self) -> list[dict[str, Any]]:
         """List all job configurations."""
@@ -510,36 +501,8 @@ class Storage:
             rows = conn.execute("SELECT name, config FROM jobs ORDER BY name").fetchall()
             result = []
             for row in rows:
-                stored_config = json.loads(row["config"])
-                config = self._encrypt_job_repository_password(stored_config)
-                if config != stored_config:
-                    conn.execute("UPDATE jobs SET config = ? WHERE name = ?", (json.dumps(config), row["name"]))
-                result.append({"name": row["name"], **self._decrypt_job_repository_password(config)})
+                result.append({"name": row["name"], **json.loads(row["config"])})
             return result
-
-    def _encrypt_job_repository_password(self, config: dict[str, Any]) -> dict[str, Any]:
-        """Migrate legacy restic_password values into encrypted job config."""
-        if config.get("backend") not in {"restic", "kopia"}:
-            return config
-        result = {**config, "backend_options": dict(config.get("backend_options") or {})}
-        options = result["backend_options"]
-        password = (
-            options.pop("repository_password", None)
-            or options.pop("restic_password", None)
-            or options.pop("password", None)
-        )
-        if password and not options.get("repository_password_encrypted"):
-            options["repository_password_encrypted"] = get_secrets_manager(self.db_path.parent).encrypt(password)
-        return result
-
-    def _decrypt_job_repository_password(self, config: dict[str, Any]) -> dict[str, Any]:
-        result = {**config, "backend_options": dict(config.get("backend_options") or {})}
-        encrypted = result["backend_options"].pop("repository_password_encrypted", None)
-        if encrypted:
-            password = get_secrets_manager(self.db_path.parent).decrypt(encrypted)
-            if password:
-                result["backend_options"]["repository_password"] = password
-        return result
 
     def delete_job(self, name: str) -> bool:
         """Delete a job and all associated records.
@@ -798,7 +761,6 @@ class Storage:
         password_encrypted: str | None = None,
         storage_password_encrypted: str | None = None,
         repository_password_encrypted: str | None = None,
-        backend_type: str | None = None,
         domain: str | None = None,
         config: dict[str, Any] | None = None,
         provider_credentials_encrypted: str | None = None,
@@ -809,8 +771,8 @@ class Storage:
                 """
                 INSERT INTO repositories (id, name, repo_type, server, share, path,
                     username, password_encrypted, storage_password_encrypted, repository_password_encrypted,
-                    backend_type, domain, created_at, config, provider_credentials_encrypted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    domain, created_at, config, provider_credentials_encrypted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     repo_id,
@@ -823,7 +785,6 @@ class Storage:
                     password_encrypted,
                     storage_password_encrypted,
                     repository_password_encrypted,
-                    backend_type or ("kopia" if repo_type == "local" else "restic"),
                     domain,
                     tz.get_now().isoformat(),
                     json.dumps(config or {}),
@@ -900,7 +861,6 @@ class Storage:
             "share": row["share"],
             "path": row["path"],
             "username": row["username"],
-            "backend_type": row["backend_type"] or ("kopia" if row["repo_type"] == "local" else "restic"),
             "has_storage_password": bool(row["storage_password_encrypted"] or row["password_encrypted"]),
             "has_repository_password": bool(row["repository_password_encrypted"]),
             "has_password": bool(

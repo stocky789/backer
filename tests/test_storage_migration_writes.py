@@ -42,6 +42,16 @@ def test_schema_upgrade_keeps_legacy_nfs_repository_password(tmp_path: Path) -> 
     assert storage.get_repository_password("nfs-repo") == "repository-secret"
 
 
+def test_fresh_repository_schema_has_no_backend_type(tmp_path: Path) -> None:
+    storage = Storage(tmp_path)
+
+    with storage._connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(repositories)")}
+
+    assert "backend_type" not in columns
+    assert "repository_password_encrypted" in columns
+
+
 @pytest.mark.parametrize(
     "read_jobs",
     [
@@ -49,7 +59,7 @@ def test_schema_upgrade_keeps_legacy_nfs_repository_password(tmp_path: Path) -> 
         lambda storage, _name: storage.list_jobs(),
     ],
 )
-def test_job_reads_only_write_migrated_legacy_configs(
+def test_job_reads_do_not_migrate_legacy_configs(
     tmp_path: Path, read_jobs: Callable[[Storage, str], object]
 ) -> None:
     storage = Storage(tmp_path / "backer.db")
@@ -82,7 +92,7 @@ def test_job_reads_only_write_migrated_legacy_configs(
 
     read_jobs(storage, "legacy")
     updates = [statement for statement in statements if statement.startswith("UPDATE jobs")]
-    assert len(updates) == 1
+    assert not updates
     with original_connect() as conn:
         config = conn.execute("SELECT config FROM jobs WHERE name = 'legacy'").fetchone()["config"]
-    assert "restic_password" not in config
+    assert "restic_password" in config

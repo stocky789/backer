@@ -35,7 +35,6 @@ from backer.server.auth import (
     verify_expired_proxy_capability,
     verify_proxy_capability,
 )
-from backer.server.capabilities import validate_job_backend
 from backer.server.models import (
     BackupResult,
     Client,
@@ -673,17 +672,15 @@ def _build_backup_command_payload(
 
 
 def _validate_job_config(config: dict[str, Any], storage: Storage) -> None:
-    """Reject unsupported backend/repository combinations before persistence."""
-    backend = config.get("backend", "rclone")
+    """Reject unsupported repository types before persistence."""
     repo_type = None
     if repo_id := config.get("repository_id"):
         repo = storage.get_repository(repo_id)
         if not repo:
             raise HTTPException(status_code=400, detail="Repository not found")
         repo_type = repo.get("repo_type")
-    error = validate_job_backend(backend, repo_type)
-    if error:
-        raise HTTPException(status_code=400, detail=error)
+    if repo_type and repo_type not in {"smb", "nfs", "local", "s3"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported repository type: {repo_type}")
     if (client_id := config.get("client_id")):
         client = storage.get_client(client_id)
         if client and (client.os_info or "").lower().startswith("android"):
@@ -3586,9 +3583,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             name=job.name,
             source_path=job.source_path,
             destination_path=job.destination_path,
-            backend=job.backend,
             client_id=job.client_id,
-            enabled=job.enabled,
             schedule_cron=job.schedule_cron,
             last_run=None,
             last_status=None,
@@ -3614,7 +3609,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     name=job["name"],
                     source_path=job.get("source_path", ""),
                     destination_path=job.get("destination_path", ""),
-                    backend=job.get("backend", "rclone"),
                     client_id=job.get("client_id"),
                     enabled=job.get("enabled", True),
                     schedule_cron=job.get("schedule_cron"),
@@ -4657,6 +4651,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         from backer.server.secrets import get_secrets_manager
 
         data = await request.json()
+        if {"backend", "backend_type", "backend_options"} & data.keys():
+            raise HTTPException(status_code=422, detail="Backup engine fields are not supported")
 
         name = data.get("name", "").strip()
         if not name:
@@ -4672,8 +4668,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         config: dict[str, Any] | None = None
         provider_credentials_encrypted = None
         if repo_type == "s3":
-            if data.get("backend", "restic") != "restic":
-                raise HTTPException(status_code=400, detail="S3 repositories are supported only with Restic")
             from backer.server.s3 import S3ConfigError, parse_s3_config
 
             try:
@@ -4683,7 +4677,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if not data.get("repository_password"):
                 raise HTTPException(status_code=400, detail="Repository password required for S3")
             data["share"], data["path"] = s3.bucket, s3.prefix
-            config = {"backend_type": "restic", "s3": s3.public_config}
+            config = {"s3": s3.public_config}
             provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(json.dumps({
                 "access_key_id": s3.access_key_id, "secret_access_key": s3.secret_access_key,
             }))
@@ -4773,9 +4767,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             username=data.get("username"),
             storage_password_encrypted=storage_password_encrypted,
             repository_password_encrypted=repository_password_encrypted,
-            backend_type=(config or {}).get(
-                "backend_type", "kopia" if repo_type == "local" else data.get("backend_type", "restic")
-            ),
             domain=data.get("domain"),
             config=config,
             provider_credentials_encrypted=provider_credentials_encrypted,

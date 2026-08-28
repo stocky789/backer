@@ -126,7 +126,6 @@ class TestRepositoryMetadata:
 
         job_config = {
             "source_path": "/home/user/data",
-            "backend": "restic",
             "client_id": "agent-1",
         }
         assert repo_meta.save_job("my-backup", job_config) is True
