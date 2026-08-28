@@ -156,7 +156,13 @@ def test_repository_import_discards_legacy_backend_metadata(tmp_path: Path) -> N
     repository = tmp_path / "repository"
     metadata = RepositoryMetadata(repository)
     metadata.initialize()
-    metadata.save_job("photos", {"source_path": "/photos", "backend": "proxy"})
+    metadata.save_job("photos", {
+        "source_path": "/photos",
+        "backend": "proxy",
+        "backend_type": "kopia",
+        "backend_options": {"legacy": "discard"},
+        "retention": {"keep_last": 7},
+    })
     app.state.storage.add_repository("repo-1", "repo", "local", share=str(repository))
     app.state.storage.set_repository_password("repo-1", "secret")
 
@@ -165,7 +171,9 @@ def test_repository_import_discards_legacy_backend_metadata(tmp_path: Path) -> N
         response = client.post("/api/v1/repositories/repo-1/import")
 
     assert response.status_code == 200
-    assert "backend" not in app.state.storage.get_job("photos")
+    job = app.state.storage.get_job("photos")
+    assert not {"backend", "backend_type", "backend_options"} & job.keys()
+    assert job["retention"] == {"keep_last": 7}
 
 
 def test_backup_payload_keeps_smb_and_repository_passwords_separate() -> None:

@@ -90,6 +90,7 @@ def import_repository_metadata(
             if not existing:
                 config.pop("backend", None)
                 config.pop("backend_type", None)
+                config.pop("backend_options", None)
                 # Update config to reference this repository
                 config["repository_id"] = repo_id
                 config["imported_at"] = tz.get_now().isoformat()

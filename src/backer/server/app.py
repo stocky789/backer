@@ -5790,6 +5790,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         if not existing:
                                             config.pop("backend", None)
                                             config.pop("backend_type", None)
+                                            config.pop("backend_options", None)
                                             config["repository_id"] = repo_id
                                             config["imported_at"] = tz.get_now().isoformat()
                                             config["imported_from_repo"] = True
