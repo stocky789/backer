@@ -5617,86 +5617,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         return {"task_id": task.id, "status": "scanning", "message": "Repository scan started"}
-
-    @app.post("/api/v1/repositories/{repo_id}/scan-restic")
-    async def scan_restic_repository(
-        repo_id: str,
-        request: Request,
-        storage: Storage = Depends(get_storage),
-    ) -> dict[str, Any]:
-        """Scan a restic repository for snapshots and sync metadata.
-
-        This queries restic directly to find snapshots and updates the
-        repository metadata. Requires the restic password.
-        """
-        from backer.server.repo_metadata import (
-            RepositoryMetadata,
-            ResticRepositoryScanner,
-        )
-
-        repo = storage.get_repository(repo_id)
-        if not repo:
-            raise HTTPException(status_code=404, detail="Repository not found")
-
-        data = await request.json()
-        password = data.get("password")
-        if not password:
-            # Try to get password from repository or job configuration
-            password = storage.get_repository_password(repo_id)
-            if not password:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Restic password required (provide in request body or repository config)"
-                )
-
-        # Build repository path
-        repo_type = repo.get("repo_type", "smb")
-        if repo_type == "smb":
-            repo_path = f"//{repo['server']}/{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "nfs":
-            repo_path = f"{repo['server']}:{repo['share']}"
-            if repo.get("path"):
-                repo_path += "/" + repo["path"]
-        elif repo_type == "local":
-            repo_path = repo.get("share", "") or repo.get("path", "")
-        else:
-            repo_path = repo.get("share", "") or repo.get("path", "")
-
-        try:
-            # First, ensure metadata is initialized
-            repo_meta = RepositoryMetadata(repo_path, repo_type)
-            if not repo_meta.is_initialized():
-                repo_meta.initialize()
-
-            # Scan restic repo and sync to metadata
-            scanner = ResticRepositoryScanner(repo_path, password)
-
-            if not scanner.is_restic_repo():
-                return {
-                    "success": False,
-                    "error": "Not a valid restic repository or incorrect password",
-                    "repository_id": repo_id,
-                }
-
-            sync_result = scanner.scan_and_sync(repo_meta)
-
-            return {
-                "success": True,
-                "repository_id": repo_id,
-                "repository_name": repo.get("name"),
-                "path": repo_path,
-                **sync_result,
-            }
-        except Exception as e:
-            logger.error(f"Failed to scan restic repository {repo_id}: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "repository_id": repo_id,
-            }
-
     @app.post("/api/v1/repositories/{repo_id}/import")
     def import_repository_metadata_endpoint(
         repo_id: str,
@@ -12650,10 +12570,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except Exception as e:
             return {"success": False, "error": f"Failed to create/access directory: {e}"}
 
-        # Get the actual backend type to use (stored in config)
-        config = repo.get("config") or {}
-        backend_type = config.get("backend_type", "kopia" if repo.get("repo_type") == "local" else "restic")
-
         try:
             if repo.get("repo_type") == "local":
                 kopia = ServerKopia(str(path), _repository_password_or_error(repo_password))
@@ -12662,11 +12578,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            backend = get_backend(backend_type, {
-                "password": repo_password,
+            backend = get_backend("kopia", {
+                "repository_password": _repository_password_or_error(repo_password),
             })
 
-            dest = BackupDestination(path=str(path), backend_type=backend_type)
+            dest = BackupDestination(path=str(path))
             result = backend.init_repo(dest)
 
             return {
@@ -12720,14 +12636,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            config = repo.get("config") or {}
-            backend_type = config.get("backend_type", "restic")
-
-            backend = get_backend(backend_type, {
-                "password": repo_password,
+            backend = get_backend("kopia", {
+                "repository_password": _repository_password_or_error(repo_password),
             })
 
-            dest = BackupDestination(path=str(local_path), backend_type=backend_type)
+            dest = BackupDestination(path=str(local_path))
             snapshots = backend.list_snapshots(dest)
 
             return {"snapshots": snapshots}
@@ -12765,14 +12678,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            config = repo.get("config") or {}
-            backend_type = config.get("backend_type", "restic")
-
-            backend = get_backend(backend_type, {
-                "password": repo_password,
+            backend = get_backend("kopia", {
+                "repository_password": _repository_password_or_error(repo_password),
             })
 
-            dest = BackupDestination(path=str(local_path), backend_type=backend_type)
+            dest = BackupDestination(path=str(local_path))
             result = backend.prune(dest, dry_run=dry_run)
 
             return {
@@ -12819,21 +12729,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            config = repo.get("config") or {}
-            backend_type = config.get("backend_type", "restic")
-
-            backend = get_backend(backend_type, {
-                "password": repo_password,
+            backend = get_backend("kopia", {
+                "repository_password": _repository_password_or_error(repo_password),
             })
 
-            dest = BackupDestination(path=str(local_path), backend_type=backend_type)
+            dest = BackupDestination(path=str(local_path))
             result = backend.check(dest, dry_run=dry_run)
 
             return {
                 "success": result.success,
                 "output": result.output,
                 "error": result.errors[0] if result.errors else None,
-                "integrity": "accessibility only" if backend_type == "rclone" else "repository validation",
+                "integrity": "repository validation",
             }
         except Exception as e:
             logger.error(f"Failed to check repository {repo_id}: {e}")
