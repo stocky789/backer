@@ -1,4 +1,4 @@
-"""S3 settings for the single supported cloud backend: Restic."""
+"""Validated S3 configuration for Kopia repositories."""
 
 from __future__ import annotations
 
@@ -18,25 +18,6 @@ class S3Config:
     region: str
     access_key_id: str
     secret_access_key: str
-    use_path_style: bool
-
-    @property
-    def restic_repository(self) -> str:
-        path = f"{self.bucket}/{self.prefix}" if self.prefix else self.bucket
-        return f"s3:{self.endpoint}/{path}"
-
-    @property
-    def restic_options(self) -> list[str]:
-        lookup = "path" if self.use_path_style else "dns"
-        return ["-o", f"s3.region={self.region}", "-o", f"s3.bucket-lookup={lookup}"]
-
-    @property
-    def environment(self) -> dict[str, str]:
-        return {
-            "AWS_ACCESS_KEY_ID": self.access_key_id,
-            "AWS_SECRET_ACCESS_KEY": self.secret_access_key,
-            "AWS_DEFAULT_REGION": self.region,
-        }
 
     @property
     def public_config(self) -> dict[str, object]:
@@ -45,16 +26,11 @@ class S3Config:
             "prefix": self.prefix,
             "endpoint": self.endpoint,
             "region": self.region,
-            "use_path_style": self.use_path_style,
         }
 
 
 def parse_s3_config(data: dict[str, object]) -> S3Config:
-    """Validate one Restic S3 repository configuration.
-
-    Secrets are deliberately inputs only; callers persist them separately from
-    ``public_config`` and pass them to an agent only for a repository operation.
-    """
+    """Validate S3 configuration; callers persist credentials separately."""
     def required(name: str) -> str:
         value = str(data.get(name, "")).strip()
         if not value:
@@ -81,16 +57,27 @@ def parse_s3_config(data: dict[str, object]) -> S3Config:
         region=required("region"),
         access_key_id=required("access_key_id"),
         secret_access_key=required("secret_access_key"),
-        use_path_style=bool(data.get("use_path_style", True)),
     )
 
 
-def restic_s3_config(data: dict[str, object]) -> dict[str, object]:
-    """Return the destination, options and environment Restic needs for S3."""
+def kopia_s3_config(data: dict[str, object]) -> dict[str, object]:
+    """Return the Kopia S3 boundary without embedding provider keys in arguments."""
     config = parse_s3_config(data)
+    endpoint = urlparse(config.endpoint)
+    options = [
+        "--bucket", config.bucket,
+        "--prefix", config.prefix,
+        "--endpoint", endpoint.netloc,
+        "--region", config.region,
+    ]
+    if endpoint.scheme == "http":
+        options.append("--disable-tls")
     return {
-        "repository": config.restic_repository,
-        "options": config.restic_options,
-        "environment": config.environment,
+        "repository": f"s3://{config.bucket}/{config.prefix}".rstrip("/"),
+        "options": options,
+        "environment": {
+            "AWS_ACCESS_KEY_ID": config.access_key_id,
+            "AWS_SECRET_ACCESS_KEY": config.secret_access_key,
+        },
         "public_config": config.public_config,
     }

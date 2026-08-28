@@ -438,13 +438,13 @@ async def jobs_create(
         if repo.get("path"):
             destination_path += "/" + repo["path"]
     elif repo_type == "s3":
-        from backer.server.s3 import parse_s3_config
+        from backer.backends.s3 import kopia_s3_config
 
         # The command payload supplies encrypted credentials separately.
-        destination_path = parse_s3_config({
+        destination_path = kopia_s3_config({
             **repo.get("config", {}).get("s3", {}),
             **(storage.get_repository_provider_credentials(repository_id) or {}),
-        }).restic_repository
+        })["repository"]
     elif repo_type == "local":
         destination_path = repo.get("share", "") or repo.get("path", "")
     else:

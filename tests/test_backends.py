@@ -259,15 +259,15 @@ class TestBackupDestination:
 class TestKopiaBackend:
     """Tests for kopia backend."""
 
-    def test_password_from_config(self) -> None:
-        """Test password is set from config."""
-        backend = KopiaBackend(config={"password": "test_password"})
+    def test_repository_password_from_config(self) -> None:
+        """Kopia only accepts the repository password boundary key."""
+        backend = KopiaBackend(config={"repository_password": "test_password"})
         assert backend._env.get("KOPIA_PASSWORD") == "test_password"
 
-    def test_config_file_from_config(self) -> None:
-        """Test config file path is set from config."""
-        backend = KopiaBackend(config={"config_file": "/path/to/config"})
-        assert backend._env.get("KOPIA_CONFIG_PATH") == "/path/to/config"
+    def test_connect_requires_repository_password_before_kopia_runs(self) -> None:
+        success, message = KopiaBackend()._connect_repo("/backup/repo")
+        assert not success
+        assert message == "Repository encryption password is required"
 
     def test_restore_dry_run_is_rejected_without_running_kopia(self) -> None:
         result = KopiaBackend().restore(
@@ -287,7 +287,10 @@ class TestKopiaBackend:
 
     def test_get_repo_type_s3(self) -> None:
         """Test S3 repository type detection."""
-        backend = KopiaBackend()
+        backend = KopiaBackend({"s3": {
+            "bucket": "mybucket", "prefix": "prefix", "endpoint": "https://minio.test",
+            "region": "us-east-1", "access_key_id": "access", "secret_access_key": "secret",
+        }})
         repo_type, args = backend._get_repo_type("s3://mybucket/prefix")
         assert repo_type == "s3"
         assert "--bucket" in args
@@ -315,10 +318,10 @@ class TestKopiaBackend:
         assert "--path" in args
 
     def test_get_repo_type_invalid_s3_path(self) -> None:
-        """Test that invalid S3 path raises ValueError."""
+        """S3 locations require managed S3 configuration."""
         backend = KopiaBackend()
-        with pytest.raises(ValueError, match="bucket name is required"):
-            backend._get_repo_type("s3://")
+        with pytest.raises(ValueError, match="S3 repository configuration is required"):
+            backend._get_repo_type("s3://bucket")
 
     def test_get_repo_type_invalid_azure_path(self) -> None:
         """Test that invalid Azure path raises ValueError."""

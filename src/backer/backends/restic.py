@@ -56,17 +56,7 @@ class ResticBackend(BackendBase):
             self._env["RESTIC_PASSWORD"] = "backer-default-password"
             logger.debug("[RESTIC] Using default repository password")
 
-        # S3 is intentionally the only managed cloud provider. Its credentials
-        # stay in the command environment, never the repository URL.
-        s3 = self.config.get("s3")
-        if isinstance(s3, dict):
-            from backer.server.s3 import parse_s3_config
-
-            s3_config = parse_s3_config(s3)
-            self._env.update(s3_config.environment)
-            self._s3_options = s3_config.restic_options
-        else:
-            self._s3_options: list[str] = []
+        self._s3_options: list[str] = []
 
     def _repo_args(self, repository: str) -> list[str]:
         return ["--repo", repository, *self._s3_options]

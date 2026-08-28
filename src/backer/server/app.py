@@ -636,16 +636,16 @@ def _build_backup_command_payload(
                 logger.debug(f"[BACKUP] Using proxy for local repo: {proxy_uri} (scheme={proxy_scheme})")
 
             elif repo_type == "s3":
-                from backer.server.s3 import parse_s3_config
+                from backer.backends.s3 import kopia_s3_config
 
                 s3 = {
                     **repo.get("config", {}).get("s3", {}),
                     **(storage.get_repository_provider_credentials(repository_id) or {}),
                 }
-                if backend != "restic":
-                    raise ValueError("S3 repositories are supported only with Restic")
-                payload["backend_options"]["s3"] = s3
-                payload["destination_path"] = parse_s3_config(s3).restic_repository
+                s3_config = kopia_s3_config(s3)
+                payload["backend"] = "kopia"
+                payload["destination_path"] = s3_config["repository"]
+                payload["backend_options"] = {"repository_password": repo_password, "s3": s3}
 
             # For restic/kopia backends, include the repository password
             # This is needed for the agent to authenticate with the backup repository
@@ -4397,16 +4397,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
 
                 elif repo_type == "s3":
-                    from backer.server.s3 import parse_s3_config
+                    from backer.backends.s3 import kopia_s3_config
 
                     s3 = {
                         **repo.get("config", {}).get("s3", {}),
                         **(storage.get_repository_provider_credentials(repository_id) or {}),
                     }
-                    if backend != "restic":
-                        raise HTTPException(status_code=400, detail="S3 repositories are supported only with Restic")
-                    command_payload["source_path"] = parse_s3_config(s3).restic_repository
-                    command_payload["backend_options"]["s3"] = s3
+                    s3_config = kopia_s3_config(s3)
+                    command_payload["backend"] = "kopia"
+                    command_payload["source_path"] = s3_config["repository"]
+                    command_payload["backend_options"] = {"repository_password": repo_password, "s3": s3}
 
                 # For restic/kopia backends, include the repository password
                 if backend in ("restic", "kopia") and repo_password:
@@ -4661,18 +4661,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         config: dict[str, Any] | None = None
         provider_credentials_encrypted = None
         if repo_type == "s3":
-            from backer.server.s3 import S3ConfigError, parse_s3_config
+            from backer.backends.s3 import S3ConfigError, kopia_s3_config
 
             try:
-                s3 = parse_s3_config(data.get("s3") or {})
+                s3 = kopia_s3_config(data.get("s3") or {})
             except S3ConfigError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             if not data.get("repository_password"):
                 raise HTTPException(status_code=400, detail="Repository password required for S3")
-            data["share"], data["path"] = s3.bucket, s3.prefix
-            config = {"s3": s3.public_config}
+            data["share"], data["path"] = s3["public_config"]["bucket"], s3["public_config"]["prefix"]
+            config = {"s3": s3["public_config"]}
             provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(json.dumps({
-                "access_key_id": s3.access_key_id, "secret_access_key": s3.secret_access_key,
+                "access_key_id": s3["environment"]["AWS_ACCESS_KEY_ID"], "secret_access_key": s3["environment"]["AWS_SECRET_ACCESS_KEY"],
             }))
 
         # Validate local repository paths
@@ -4897,15 +4897,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     success, message = LocalBrowser.test_connection(local_path)
                 elif repo_type == "s3":
                     from backer.backends.base import BackupDestination
-                    from backer.backends.restic import ResticBackend
-                    from backer.server.s3 import parse_s3_config
+                    from backer.backends.kopia import KopiaBackend
+                    from backer.backends.s3 import kopia_s3_config
 
                     s3 = {
                         **repo.get("config", {}).get("s3", {}),
                         **(storage.get_repository_provider_credentials(repo_id) or {}),
                     }
-                    success, message = ResticBackend({"repository_password": password, "s3": s3}).test_connection(
-                        BackupDestination(path=parse_s3_config(s3).restic_repository)
+                    success, message = KopiaBackend({"repository_password": password, "s3": s3}).test_connection(
+                        BackupDestination(path=kopia_s3_config(s3)["repository"])
                     )
                 else:
                     success, message = False, "Test not supported for this repository type"

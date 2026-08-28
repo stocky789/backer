@@ -16,6 +16,7 @@ from backer.backends.base import (
     BackupSource,
     OperationType,
 )
+from backer.backends.s3 import kopia_s3_config
 from backer.tools.manager import get_tool_manager
 
 logger = logging.getLogger(__name__)
@@ -41,24 +42,10 @@ class KopiaBackend(BackendBase):
         self._binary_path: Path | None = None
         self._env = os.environ.copy()
 
-        # Set repository password from config if provided
-        # Check multiple keys for compatibility (UI uses restic_password for both backends)
-        password = (
-            self.config.get("repository_password")
-            or self.config.get("password")
-            or self.config.get("restic_password")
-            or self.config.get("kopia_password")
-        )
+        password = self.config.get("repository_password")
         if password:
             self._env["KOPIA_PASSWORD"] = password
-        elif "KOPIA_PASSWORD" not in self._env:
-            # Use default password if none provided - allows auto-initialization
-            self._env["KOPIA_PASSWORD"] = "backer-default-password"
-            logger.debug("[KOPIA] Using default repository password")
-
-        # Kopia config directory - use separate config per repo to avoid conflicts
-        if "config_file" in self.config:
-            self._env["KOPIA_CONFIG_PATH"] = self.config["config_file"]
+        self._has_repository_password = bool(password)
 
     def _get_binary(self, auto_install: bool = True) -> Path:
         """Get path to kopia binary, downloading if necessary."""
@@ -109,14 +96,12 @@ class KopiaBackend(BackendBase):
             ValueError: If the path format is invalid (e.g., empty bucket name)
         """
         if path.startswith("s3://"):
-            # S3 bucket: s3://bucket/prefix
-            remainder = path[5:]
-            if not remainder or remainder.startswith("/"):
-                raise ValueError(f"Invalid S3 path '{path}': bucket name is required")
-            parts = remainder.split("/", 1)
-            bucket = parts[0]
-            prefix = parts[1] if len(parts) > 1 else ""
-            return "s3", ["--bucket", bucket, "--prefix", prefix]
+            s3 = self.config.get("s3")
+            if not isinstance(s3, dict):
+                raise ValueError("S3 repository configuration is required")
+            config = kopia_s3_config(s3)
+            self._env.update(config["environment"])
+            return "s3", config["options"]
         elif path.startswith("gs://"):
             # Google Cloud Storage
             remainder = path[5:]
@@ -150,6 +135,12 @@ class KopiaBackend(BackendBase):
     def init_repo(self, destination: BackupDestination) -> BackendResult:
         """Initialize a new kopia repository."""
         started_at = datetime.now()
+
+        if not self._has_repository_password:
+            return BackendResult(
+                success=False, operation=OperationType.BACKUP, started_at=started_at,
+                finished_at=datetime.now(), errors=["Repository encryption password is required"], return_code=-1,
+            )
 
         try:
             binary = self._get_binary()
@@ -187,6 +178,8 @@ class KopiaBackend(BackendBase):
 
     def _connect_repo(self, path: str) -> tuple[bool, str]:
         """Connect to an existing kopia repository."""
+        if not self._has_repository_password:
+            return False, "Repository encryption password is required"
         try:
             binary = self._get_binary()
             repo_type, repo_args = self._get_repo_type(path)
@@ -223,6 +216,16 @@ class KopiaBackend(BackendBase):
         except Exception:
             # Disconnect errors are non-fatal and expected when not connected
             pass
+
+    def test_connection(self, destination: BackupDestination) -> tuple[bool, str]:
+        """Test S3 access without creating a repository."""
+        connected, message = self._connect_repo(destination.path)
+        if connected:
+            self._disconnect_repo()
+            return True, "Repository is accessible"
+        if "repository does not exist" in message.lower() or "not initialized" in message.lower():
+            return True, "S3 is accessible; repository will be initialized on first backup"
+        return False, message
 
     def backup(
         self,
