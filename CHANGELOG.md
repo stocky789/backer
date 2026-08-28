@@ -34,6 +34,7 @@ The release workflow publishes the top section verbatim as the release notes.
 - SMB and NFS repository setup now requests the encryption password before connection testing.
 - Windows agents now recognize S3 repository URLs instead of treating them as NFS paths.
 - Job exclusion patterns now use Kopia source policies compatible with current Kopia releases.
+- Updating or removing a job exclusion now replaces the previous Kopia ignore policy.
 - History live updates no longer request a missing runs endpoint in browsers.
 
 ## 0.7.2

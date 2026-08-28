@@ -283,24 +283,26 @@ class KopiaBackend(BackendBase):
             if dry_run:
                 cmd.append("--dry-run")
 
-            # Persist job excludes in Kopia's source policy before creating the snapshot.
+            # Replace the source policy so changed or removed job excludes cannot leak into later runs.
+            policy_cmd = [str(binary), "policy", "set", str(source.path), "--clear-ignore"]
             for exclude in source.excludes or []:
-                policy = subprocess.run(
-                    [str(binary), "policy", "set", str(source.path), "--add-ignore", exclude],
-                    capture_output=True,
-                    text=True,
-                    env=self._env,
-                    timeout=self.config.get("timeout", 86400),
+                policy_cmd.extend(["--add-ignore", exclude])
+            policy = subprocess.run(
+                policy_cmd,
+                capture_output=True,
+                text=True,
+                env=self._env,
+                timeout=self.config.get("timeout", 86400),
+            )
+            if policy.returncode != 0:
+                return BackendResult(
+                    success=False,
+                    operation=OperationType.BACKUP,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    errors=[line for line in policy.stderr.split("\n") if line.strip()],
+                    return_code=policy.returncode,
                 )
-                if policy.returncode != 0:
-                    return BackendResult(
-                        success=False,
-                        operation=OperationType.BACKUP,
-                        started_at=started_at,
-                        finished_at=datetime.now(),
-                        errors=[line for line in policy.stderr.split("\n") if line.strip()],
-                        return_code=policy.returncode,
-                    )
 
             # Add tags from config
             for tag in self.config.get("tags", []):

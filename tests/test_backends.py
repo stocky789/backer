@@ -151,7 +151,9 @@ class TestKopiaBackend:
         assert not success
         assert message == "Repository encryption password is required"
 
-    def test_backup_sets_kopia_ignore_policy_for_excludes(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_backup_replaces_kopia_ignore_policy_for_changed_or_removed_excludes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         backend = KopiaBackend({"repository_password": "test-password"})
         calls: list[list[str]] = []
         monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
@@ -162,8 +164,15 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-        assert backend.backup(BackupSource(tmp_path, excludes=["*.ignore"]), BackupDestination("repo")).success
-        assert ["kopia", "policy", "set", str(tmp_path), "--add-ignore", "*.ignore"] in calls
+        for excludes in (["*.one"], ["*.two"], []):
+            assert backend.backup(BackupSource(tmp_path, excludes=excludes), BackupDestination("repo")).success
+
+        policies = [call for call in calls if call[1:3] == ["policy", "set"]]
+        assert policies == [
+            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore", "--add-ignore", "*.one"],
+            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore", "--add-ignore", "*.two"],
+            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore"],
+        ]
 
     def test_restore_dry_run_is_rejected_without_running_kopia(self) -> None:
         result = KopiaBackend().restore(
