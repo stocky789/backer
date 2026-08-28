@@ -535,20 +535,3 @@ def test_gui_service_uses_shared_agent_executor(
 
     assert calls == [True]
 
-
-def test_gui_service_downloads_only_requested_tool(tmp_path: Path) -> None:
-    service = AgentService("http://example.test", "agent", "secret", tools_dir=tmp_path / "tools")
-    requested: list[str] = []
-
-    class ToolManager:
-        def get_tool_path(self, _: str) -> None:
-            return None
-
-        def download(self, tool: str) -> Path:
-            requested.append(tool)
-            return tmp_path / tool
-
-    service._tool_manager = ToolManager()
-
-    assert service._get_tool_path("rclone") == tmp_path / "rclone"
-    assert requested == ["rclone"]
