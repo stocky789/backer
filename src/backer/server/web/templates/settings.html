@@ -90,44 +90,29 @@ Server Settings
 
     <div class="card mt-4" style="max-width: 800px;">
         <div class="card-header">
-            <span class="card-title">Supported Backup Backends</span>
+            <span class="card-title">Backup Tool</span>
         </div>
         <div class="card-body">
             <div class="data-grid-container">
                 <table class="data-grid">
                     <thead>
                         <tr>
-                            <th>Backend</th>
+                            <th>Tool</th>
                             <th>Status</th>
                             <th>Description</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td><strong>rclone</strong></td>
-                            <td><span class="status-badge success">Supported</span></td>
-                            <td class="text-muted">Mirror local paths and mounted SMB/NFS only.</td>
-                        </tr>
-                        <tr>
-                            <td><strong>restic</strong></td>
-                            <td><span class="status-badge success">Supported</span></td>
-                            <td class="text-muted">Best for encrypted, deduplicated backups with versioning.</td>
-                        </tr>
-                        <tr>
-                            <td><strong>kopia</strong></td>
+                            <td><strong>Kopia</strong></td>
                             <td><span class="status-badge success">Supported</span></td>
                             <td class="text-muted">Modern backup with encryption, compression, and deduplication.</td>
-                        </tr>
-                        <tr>
-                            <td><strong>rsync</strong></td>
-                            <td><span class="status-badge muted">Not Available</span></td>
-                            <td class="text-muted">Not supported for agent-based backups. Use rclone instead.</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
             <div class="form-hint" style="margin-top: 12px;">
-                Backup tools (rclone, restic, kopia) are automatically downloaded to agents when they first connect.
+                Kopia is automatically downloaded to agents when they first connect.
             </div>
         </div>
     </div>

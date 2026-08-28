@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backer.server.app import create_app
@@ -30,6 +31,37 @@ def complete_setup(client: TestClient, username: str = "owner", password: str = 
         follow_redirects=False,
     )
     assert response.status_code == 303
+
+
+@pytest.fixture
+def authenticated_client(tmp_path: Path):
+    app = create_app(tmp_path)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        complete_setup(client)
+        yield client
+
+
+def test_new_job_page_has_no_backup_engine_choice(authenticated_client) -> None:
+    html = authenticated_client.get("/jobs/new").text
+    assert "Backup Method" not in html
+    assert 'name="backend"' not in html
+    assert "Restic" not in html
+    assert "rclone" not in html
+
+
+def test_jobs_page_has_no_backend_editor(authenticated_client) -> None:
+    html = authenticated_client.get("/jobs").text
+    assert 'id="editBackend"' not in html
+    assert 'id="editResticPassword"' not in html
+
+
+def test_repository_page_uses_product_language(authenticated_client) -> None:
+    html = authenticated_client.get("/storage").text
+    assert "S3-compatible storage" in html
+    assert "Encryption password" in html
+    assert "Restic" not in html
+    assert "Proxy / Kopia" not in html
+    assert "path-style" not in html.lower()
 
 
 def test_new_server_requires_setup_before_login(tmp_path: Path) -> None:

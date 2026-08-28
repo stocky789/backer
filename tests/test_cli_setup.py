@@ -19,3 +19,9 @@ def test_setup_installs_kopia_and_fails_nonzero(monkeypatch) -> None:
     result = CliRunner().invoke(main, ["setup", "--quiet"])
     assert result.exit_code != 0
     assert "kopia" in result.output
+
+
+def test_job_create_has_no_backend_option() -> None:
+    result = CliRunner().invoke(main, ["job", "create", "--help"])
+    assert result.exit_code == 0
+    assert "--backend" not in result.output

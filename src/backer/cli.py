@@ -141,14 +141,17 @@ def backends() -> None:
 @main.command()
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination")
-@click.option("--backend", "-b", default="rclone", help="Backend to use (rclone, restic, rsync)")
+@click.option(
+    "--repository-password", envvar="BACKER_REPOSITORY_PASSWORD", required=True,
+    help="Repository encryption password",
+)
 @click.option("--exclude", "-e", multiple=True, help="Exclude patterns")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def backup(
     source: Path,
     destination: str,
-    backend: str,
+    repository_password: str,
     exclude: tuple[str, ...],
     dry_run: bool,
     verbose: bool,
@@ -162,19 +165,16 @@ def backup(
 
         backer backup /home/user/docs /mnt/backup/docs
 
-        backer backup /data remote:bucket/data -b rclone
-
-        backer backup /home /backup/repo -b restic
     """
-    from backer.backends import get_backend
+    from backer.backends.kopia import KopiaBackend
 
     console.print(f"[bold]Backing up[/bold] {source} → {destination}")
-    console.print(f"Backend: {backend}" + (" (dry run)" if dry_run else ""))
+    console.print("Kopia" + (" (dry run)" if dry_run else ""))
 
     try:
-        be = get_backend(backend)
+        be = KopiaBackend({"repository_password": repository_password})
 
-        with console.status(f"Checking {backend} availability..."):
+        with console.status("Checking Kopia availability..."):
             available, msg = be.check_available()
 
         if not available:
@@ -212,13 +212,16 @@ def backup(
 @main.command()
 @click.argument("source")
 @click.argument("destination", type=click.Path(path_type=Path))
-@click.option("--backend", "-b", default="rclone", help="Backend to use")
-@click.option("--snapshot", "-s", help="Snapshot ID to restore (for restic/borg)")
+@click.option(
+    "--repository-password", envvar="BACKER_REPOSITORY_PASSWORD", required=True,
+    help="Repository encryption password",
+)
+@click.option("--snapshot", "-s", help="Snapshot ID to restore")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 def restore(
     source: str,
     destination: Path,
-    backend: str,
+    repository_password: str,
     snapshot: str | None,
     dry_run: bool,
 ) -> None:
@@ -227,12 +230,12 @@ def restore(
     SOURCE is the backup location.
     DESTINATION is where to restore files.
     """
-    from backer.backends import get_backend
+    from backer.backends.kopia import KopiaBackend
 
     console.print(f"[bold]Restoring[/bold] {source} → {destination}")
 
     try:
-        be = get_backend(backend)
+        be = KopiaBackend({"repository_password": repository_password})
         src = BackupDestination(path=source)
 
         with console.status("Restoring..."):
@@ -1409,7 +1412,6 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
 
         table = Table(title="Backup Jobs")
         table.add_column("Name", style="cyan")
-        table.add_column("Backend")
         table.add_column("Source")
         table.add_column("Destination")
         table.add_column("Last Run")
@@ -1425,7 +1427,6 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
                 status_style = "dim"
             table.add_row(
                 j["name"],
-                j.get("backend", "rclone"),
                 j.get("source_path", "")[:30],
                 j.get("destination_path", "")[:30],
                 j.get("last_run", "-")[:19] if j.get("last_run") else "-",
@@ -1446,7 +1447,10 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
 @click.option("--name", "-n", required=True, help="Job name")
 @click.option("--source", "-s", required=True, help="Source path")
 @click.option("--dest", "-d", required=True, help="Destination path")
-@click.option("--backend", "-b", default="rclone", help="Backend to use")
+@click.option(
+    "--repository-password", envvar="BACKER_REPOSITORY_PASSWORD", required=True,
+    help="Repository encryption password",
+)
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
@@ -1455,7 +1459,7 @@ def job_create(
     name: str,
     source: str,
     dest: str,
-    backend: str,
+    repository_password: str,
     schedule: str | None,
     server: str | None,
     username: str | None,
@@ -1470,7 +1474,6 @@ def job_create(
         "name": name,
         "source_path": source,
         "destination_path": dest,
-        "backend": backend,
         "schedule_cron": schedule,
     }
 

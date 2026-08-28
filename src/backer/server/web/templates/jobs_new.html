@@ -87,7 +87,7 @@ Creating New Backup Job
 
                     <div class="form-group">
                         <label class="form-label">Destination Repository *</label>
-                        <select name="repository_id" class="form-input" required id="repoSelect" onchange="onRepoChange()">
+                        <select name="repository_id" class="form-input" required id="repoSelect" onchange="updateDestPath()">
                             <option value="">Select a storage repository...</option>
                             {% for repo in repositories %}
                             <option value="{{ repo.id }}"
@@ -125,62 +125,7 @@ Creating New Backup Job
                     </div>
                 </div>
 
-                <!-- Backup Method -->
                 <div class="form-section">
-                    <div class="form-section-title">Backup Method</div>
-
-                    <div class="backup-method-cards" id="backendCards">
-                        <label class="backup-method-card selected" data-value="kopia">
-                            <input type="radio" name="backend" value="kopia" checked style="display: none;">
-                            <div class="method-header">
-                                <span class="method-name">Kopia</span>
-                                <span class="method-badge recommended">Recommended</span>
-                            </div>
-                            <div class="method-desc">Modern backup with encryption, compression & deduplication</div>
-                            <ul class="method-features">
-                                <li>Encrypted & secure</li>
-                                <li>Fast incremental backups</li>
-                                <li>Point-in-time recovery</li>
-                            </ul>
-                        </label>
-                        <label class="backup-method-card" data-value="restic">
-                            <input type="radio" name="backend" value="restic" style="display: none;">
-                            <div class="method-header">
-                                <span class="method-name">Restic</span>
-                                <span class="method-badge">Established</span>
-                            </div>
-                            <div class="method-desc">Battle-tested encrypted backup with deduplication</div>
-                            <ul class="method-features">
-                                <li>Encrypted & secure</li>
-                                <li>Snapshot-based versioning</li>
-                                <li>Mature & well-tested</li>
-                            </ul>
-                        </label>
-                        <label class="backup-method-card" data-value="rclone">
-                            <input type="radio" name="backend" value="rclone" style="display: none;">
-                            <div class="method-header">
-                                <span class="method-name">Rclone</span>
-                                <span class="method-badge">Simple Sync</span>
-                            </div>
-                            <div class="method-desc">Fast file sync to network shares (no encryption)</div>
-                            <ul class="method-features">
-                                <li>Very fast transfers</li>
-                                <li>Simple mirror copy</li>
-                                <li>No versioning</li>
-                            </ul>
-                        </label>
-                    </div>
-
-                    <div class="form-group" id="resticPasswordGroup" style="display: none; margin-top: 16px;">
-                        <label class="form-label" id="repoPasswordLabel">Repository Password</label>
-                        <input type="password" name="restic_password" class="form-input" id="resticPassword"
-                               placeholder="Leave empty to use default password">
-                        <div class="form-hint">
-                            Password used to encrypt the repository. If left empty, a default password will be used.
-                            <strong>Remember this password - you'll need it to restore backups!</strong>
-                        </div>
-                    </div>
-
                     <div class="form-group">
                         <label class="form-label">Exclude Patterns</label>
                         <input type="text" name="excludes" class="form-input"
@@ -351,77 +296,6 @@ Creating New Backup Job
     color: var(--text-muted);
     margin-top: 4px;
 }
-.backup-method-cards {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-}
-.backup-method-card {
-    border: 2px solid var(--border);
-    border-radius: 6px;
-    padding: 16px;
-    cursor: pointer;
-    transition: all 0.15s;
-    background: var(--bg-panel);
-}
-.backup-method-card:hover {
-    border-color: var(--accent);
-    background: var(--bg-hover);
-}
-.backup-method-card.selected {
-    border-color: var(--accent);
-    background: var(--accent-light);
-    box-shadow: 0 0 0 1px var(--accent);
-}
-.method-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
-}
-.method-name {
-    font-weight: 700;
-    font-size: 14px;
-    color: var(--text-primary);
-}
-.method-badge {
-    font-size: 9px;
-    padding: 3px 8px;
-    border-radius: 3px;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-}
-.method-badge.recommended {
-    background: var(--status-success);
-    color: white;
-}
-.method-desc {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-bottom: 12px;
-    line-height: 1.4;
-}
-.method-features {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    font-size: 11px;
-}
-.method-features li {
-    padding: 3px 0;
-    color: var(--status-success);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-.method-features li::before {
-    content: "✓";
-    font-weight: bold;
-    font-size: 10px;
-}
 .file-browser-agent-info {
     margin-bottom: 12px;
 }
@@ -576,50 +450,11 @@ Creating New Backup Job
     color: var(--text-muted);
     font-size: 12px;
 }
-@media (max-width: 700px) {
-    .backup-method-cards {
-        grid-template-columns: 1fr;
-    }
-}
 </style>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function onRepoChange() {
-    updateDestPath();
-    updateBackendOptions();
-}
-
-function updateBackendOptions() {
-    const select = document.getElementById('repoSelect');
-    const option = select.options[select.selectedIndex];
-    const repoType = option ? option.dataset.type : '';
-
-    const resticCard = document.querySelector('.backup-method-card[data-value="restic"]');
-    const rcloneCard = document.querySelector('.backup-method-card[data-value="rclone"]');
-    const kopiaCard = document.querySelector('.backup-method-card[data-value="kopia"]');
-
-    if (repoType === 'local') {
-        // For LOCAL repos, only Kopia is supported (uses server-side kopia)
-        if (resticCard) resticCard.style.display = 'none';
-        if (rcloneCard) rcloneCard.style.display = 'none';
-
-        // Auto-select Kopia if another backend was selected
-        const selectedCard = document.querySelector('.backup-method-card.selected');
-        if (selectedCard && selectedCard.dataset.value !== 'kopia') {
-            document.querySelectorAll('.backup-method-card').forEach(c => c.classList.remove('selected'));
-            kopiaCard.classList.add('selected');
-            kopiaCard.querySelector('input[type="radio"]').checked = true;
-            onBackendChange();
-        }
-    } else {
-        // For SMB/NFS repos, show all backend options
-        if (resticCard) resticCard.style.display = '';
-        if (rcloneCard) rcloneCard.style.display = '';
-    }
-}
-
 function updateDestPath() {
     const select = document.getElementById('repoSelect');
     const option = select.options[select.selectedIndex];
@@ -660,29 +495,6 @@ function onRetentionChange() {
 }
 
 document.getElementById('destSubfolder').addEventListener('input', updateDestPath);
-
-function onBackendChange() {
-    const selectedCard = document.querySelector('.backup-method-card.selected');
-    const backend = selectedCard ? selectedCard.dataset.value : 'kopia';
-    const passwordGroup = document.getElementById('resticPasswordGroup');
-    const passwordLabel = document.getElementById('repoPasswordLabel');
-
-    if (backend === 'restic' || backend === 'kopia') {
-        passwordGroup.style.display = 'block';
-        passwordLabel.textContent = backend === 'restic' ? 'Restic Repository Password' : 'Kopia Repository Password';
-    } else {
-        passwordGroup.style.display = 'none';
-    }
-}
-
-document.querySelectorAll('.backup-method-card').forEach(card => {
-    card.addEventListener('click', function() {
-        document.querySelectorAll('.backup-method-card').forEach(c => c.classList.remove('selected'));
-        this.classList.add('selected');
-        this.querySelector('input[type="radio"]').checked = true;
-        onBackendChange();
-    });
-});
 
 // File Browser
 let currentBrowsePath = '';
@@ -918,6 +730,5 @@ function selectPath() {
 onAgentChange();
 onScheduleChange();
 onRetentionChange();
-onBackendChange();
 </script>
 {% endblock %}

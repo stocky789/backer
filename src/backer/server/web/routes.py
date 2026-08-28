@@ -393,7 +393,6 @@ async def jobs_create(
     source_path: str = Form(...),
     repository_id: str = Form(...),
     dest_subfolder: str = Form(""),
-    backend: str = Form("rclone"),
     client_id: str = Form(...),
     excludes: str = Form(""),
     schedule_cron: str = Form(""),
@@ -403,7 +402,6 @@ async def jobs_create(
     retention_keep_daily: int = Form(None),
     retention_keep_weekly: int = Form(None),
     retention_keep_monthly: int = Form(None),
-    restic_password: str = Form(""),
 ):
     """Create a new backup job."""
     storage = get_storage(request)
@@ -476,21 +474,14 @@ async def jobs_create(
         retention = {"keep_last": 14, "keep_daily": 14, "keep_weekly": 8, "keep_monthly": 12}
     # "forever" preset means no retention policy (keep all)
 
-    # Build backend options (for restic/kopia password, etc.)
-    backend_options = {}
-    if backend in ("restic", "kopia") and restic_password:
-        backend_options["repository_password"] = restic_password
-
     job_config = {
         "source_path": source_path,
         "destination_path": destination_path,
         "repository_id": repository_id,
-        "backend": backend,
         "client_id": client_id if client_id else None,
         "excludes": [e.strip() for e in excludes.split(",") if e.strip()],
         "schedule_cron": final_schedule if final_schedule else None,
         "retention": retention,
-        "backend_options": backend_options,
         "enabled": True,
     }
 

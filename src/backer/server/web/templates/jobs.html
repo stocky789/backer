@@ -74,7 +74,6 @@
                         </td>
                         <td>
                             <strong>{{ job.name }}</strong>
-                            <div class="text-muted" style="font-size: 10px;">{{ job.backend or 'imported' }}</div>
                         </td>
                         <td>
                             {% if job.client_id %}
@@ -199,22 +198,6 @@
                         <option value="{{ agent.id }}">{{ agent.name }} ({{ agent.hostname }})</option>
                         {% endfor %}
                     </select>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Backend</label>
-                    <select id="editBackend" class="form-input" onchange="onEditBackendChange()">
-                        <option value="rclone">rclone</option>
-                        <option value="restic">restic</option>
-                        <option value="kopia">kopia</option>
-                    </select>
-                </div>
-
-                <div class="form-group" id="editResticPasswordGroup" style="display: none;">
-                    <label class="form-label" id="editRepoPasswordLabel">Repository Password</label>
-                    <input type="password" id="editResticPassword" class="form-input"
-                           placeholder="Leave empty to keep current password">
-                    <div class="form-hint">Password for the repository. Leave empty to keep current password.</div>
                 </div>
 
                 <div class="form-group">
@@ -706,29 +689,12 @@ async function editJob(jobName) {
         document.getElementById('editJobOriginalName').value = jobName;
         document.getElementById('editSourcePath').value = job.source_path || '';
         document.getElementById('editClientId').value = job.client_id || '';
-        document.getElementById('editBackend').value = job.backend || 'rclone';
         document.getElementById('editSchedule').value = job.schedule_cron || '';
         document.getElementById('editExcludes').value = (job.excludes || []).join(', ');
-        document.getElementById('editResticPassword').value = '';
         document.getElementById('editError').style.display = 'none';
-
-        onEditBackendChange();
         document.getElementById('editModal').showModal();
     } catch (e) {
         Toast.error('Error loading job: ' + e.message);
-    }
-}
-
-function onEditBackendChange() {
-    const backend = document.getElementById('editBackend').value;
-    const passwordGroup = document.getElementById('editResticPasswordGroup');
-    const passwordLabel = document.getElementById('editRepoPasswordLabel');
-
-    if (backend === 'restic' || backend === 'kopia') {
-        passwordGroup.style.display = 'block';
-        passwordLabel.textContent = backend === 'restic' ? 'Restic Repository Password' : 'Kopia Repository Password';
-    } else {
-        passwordGroup.style.display = 'none';
     }
 }
 
@@ -741,24 +707,12 @@ async function saveJob(event) {
 
     const jobName = document.getElementById('editJobOriginalName').value;
     const excludesStr = document.getElementById('editExcludes').value;
-    const backend = document.getElementById('editBackend').value;
-    const resticPassword = document.getElementById('editResticPassword').value;
-
     const data = {
         source_path: document.getElementById('editSourcePath').value,
         client_id: document.getElementById('editClientId').value || null,
-        backend: backend,
         schedule_cron: document.getElementById('editSchedule').value || null,
         excludes: excludesStr ? excludesStr.split(',').map(s => s.trim()).filter(s => s) : []
     };
-
-    if (backend === 'restic' || backend === 'kopia') {
-        if (resticPassword) {
-            data.backend_options = { repository_password: resticPassword };
-        }
-    } else {
-        data.backend_options = {};
-    }
 
     try {
         const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobName)}`, {
