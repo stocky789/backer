@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import tarfile
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -176,6 +177,47 @@ def test_server_kopia_locks_latest_snapshot_once_per_repository(tmp_path: Path, 
 
     assert app_module.ServerKopia(str(tmp_path / "repo"), "password").find_latest_snapshot("photos") == "latest"
     assert locks == [(tmp_path / "repo").resolve() / ".backer-kopia.lock"]
+
+
+def test_local_repository_check_works_without_posix_getuid(tmp_path: Path, monkeypatch) -> None:
+    from backer.server.repositories import LocalBrowser
+
+    monkeypatch.delattr("backer.server.repositories.os.getuid", raising=False)
+
+    assert LocalBrowser.test_connection(str(tmp_path)) == (True, f"Local directory accessible: {tmp_path}")
+
+
+def test_local_repository_scan_uses_its_encryption_password(tmp_path: Path, monkeypatch) -> None:
+    import backer.server.app as app_module
+
+    passwords: list[str] = []
+
+    class FakeKopia:
+        def __init__(self, _path, password):
+            passwords.append(password)
+
+        def snapshot_list(self, job_name=None):
+            return []
+
+    monkeypatch.setattr(app_module, "ServerKopia", FakeKopia)
+    app = create_app(tmp_path / "server")
+    storage = app.state.storage
+    repository = tmp_path / "repository"
+    (repository / ".kopia-repo").mkdir(parents=True)
+    storage.add_repository("repo-1", "local", "local", share=str(repository))
+    storage.set_repository_password("repo-1", "scan-password")
+
+    with TestClient(app) as client:
+        _setup(client)
+        task_id = client.post("/api/v1/repositories/repo-1/scan").json()["task_id"]
+        for _ in range(20):
+            if client.get(f"/api/v1/tasks/{task_id}").json()["status"] == "completed":
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("repository scan did not complete")
+
+    assert passwords == ["scan-password"]
 
 
 def test_proxy_snapshot_failure_restores_previous_contents(tmp_path: Path, monkeypatch):

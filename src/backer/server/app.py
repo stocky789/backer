@@ -5018,7 +5018,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_storage_password(repo_id)
+        password = storage.get_repository_password(repo_id) if repo_type == "local" else storage.get_storage_password(repo_id)
         domain = repo.get("domain")
         mount_point = repo.get("mount_point")
 

@@ -447,7 +447,7 @@ class LocalBrowser:
         try:
             dir_path = Path(path)
             current_user = getpass.getuser()
-            current_uid = os.getuid()
+            current_uid = os.getuid() if hasattr(os, "getuid") else "N/A"
 
             logger.info(f"Testing local path: {path}")
             logger.info(f"Current user: {current_user} (UID: {current_uid})")
