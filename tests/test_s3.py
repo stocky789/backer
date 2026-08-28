@@ -13,10 +13,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backer.agent.service import AgentService
-from backer.client.agent import BackerAgent
 from backer.backends.base import BackupDestination, BackupSource
 from backer.backends.kopia import KopiaBackend
 from backer.backends.s3 import S3ConfigError, kopia_s3_config, parse_s3_config
+from backer.client.agent import BackerAgent
 from backer.server.app import _build_backup_command_payload, create_app
 from backer.server.web.auth import get_setup_token
 
