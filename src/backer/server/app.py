@@ -56,8 +56,14 @@ from backer.server.web.routes import router as web_router
 logger = logging.getLogger(__name__)
 
 _SECRET_KEYS = {
-    "password", "kopia_password", "repository_password", "storage_password", "client_secret",
-    "proxy_capability", "access_key_id", "secret_access_key",
+    "password",
+    "kopia_password",
+    "repository_password",
+    "storage_password",
+    "client_secret",
+    "proxy_capability",
+    "access_key_id",
+    "secret_access_key",
 }
 
 
@@ -71,10 +77,12 @@ def _redact_secrets(value: Any) -> Any:
 
 def _serialized_kopia_operation(method):
     """Serialize each connect/use/disconnect sequence for one repository."""
+
     @wraps(method)
     def locked(self, *args, **kwargs):
         with file_lock(self.repo_path.resolve() / ".backer-kopia.lock"):
             return method(self, *args, **kwargs)
+
     return locked
 
 
@@ -162,10 +170,16 @@ class ServerKopia:
             True if repository is ready
         """
         # Try to connect first
-        rc, stdout, stderr = self._run_cmd([
-            "repository", "connect", "filesystem",
-            "--path", str(self.kopia_repo_path),
-        ], check=False)
+        rc, stdout, stderr = self._run_cmd(
+            [
+                "repository",
+                "connect",
+                "filesystem",
+                "--path",
+                str(self.kopia_repo_path),
+            ],
+            check=False,
+        )
 
         if rc == 0:
             logger.info(f"[SERVER KOPIA] Connected to repository at {self.kopia_repo_path}")
@@ -176,10 +190,16 @@ class ServerKopia:
         logger.info(f"[SERVER KOPIA] Initializing repository at {self.kopia_repo_path}")
         self.kopia_repo_path.mkdir(parents=True, exist_ok=True)
 
-        rc, stdout, stderr = self._run_cmd([
-            "repository", "create", "filesystem",
-            "--path", str(self.kopia_repo_path),
-        ], check=False)
+        rc, stdout, stderr = self._run_cmd(
+            [
+                "repository",
+                "create",
+                "filesystem",
+                "--path",
+                str(self.kopia_repo_path),
+            ],
+            check=False,
+        )
 
         if rc != 0:
             logger.error(f"[SERVER KOPIA] Failed to initialize repository: {stderr}")
@@ -191,10 +211,16 @@ class ServerKopia:
 
     def _connect(self) -> bool:
         """Connect to the repository."""
-        rc, _, stderr = self._run_cmd([
-            "repository", "connect", "filesystem",
-            "--path", str(self.kopia_repo_path),
-        ], check=False)
+        rc, _, stderr = self._run_cmd(
+            [
+                "repository",
+                "connect",
+                "filesystem",
+                "--path",
+                str(self.kopia_repo_path),
+            ],
+            check=False,
+        )
 
         if rc != 0:
             logger.error(f"[SERVER KOPIA] Failed to connect: {stderr}")
@@ -231,9 +257,11 @@ class ServerKopia:
         try:
             # Build snapshot command with tags
             args = [
-                "snapshot", "create",
+                "snapshot",
+                "create",
                 "--json",
-                "--tags", f"job:{job_name}",
+                "--tags",
+                f"job:{job_name}",
             ]
             if source_path:
                 args.extend(["--tags", f"source:{source_path}"])
@@ -317,24 +345,24 @@ class ServerKopia:
                 if job_name and snap_job != job_name:
                     continue
 
-                result.append({
-                    "id": snap.get("id", "")[:12],
-                    "full_id": snap.get("id"),
-                    "timestamp": snap.get("startTime"),
-                    "hostname": snap.get("hostname"),
-                    "source": snap.get("source", {}).get("path", ""),
-                    "job": snap_job,
-                    "size": snap.get("stats", {}).get("totalSize", 0),
-                    "files": snap.get("stats", {}).get("totalFiles", 0),
-                })
+                result.append(
+                    {
+                        "id": snap.get("id", "")[:12],
+                        "full_id": snap.get("id"),
+                        "timestamp": snap.get("startTime"),
+                        "hostname": snap.get("hostname"),
+                        "source": snap.get("source", {}).get("path", ""),
+                        "job": snap_job,
+                        "size": snap.get("stats", {}).get("totalSize", 0),
+                        "files": snap.get("stats", {}).get("totalFiles", 0),
+                    }
+                )
 
             # Sort by timestamp descending (newest first)
             result.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
             if job_name and not result:
-                logger.warning(
-                    f"[SERVER KOPIA] No snapshots for job '{job_name}' (total: {len(snapshots)})"
-                )
+                logger.warning(f"[SERVER KOPIA] No snapshots for job '{job_name}' (total: {len(snapshots)})")
 
             return result
 
@@ -368,7 +396,8 @@ class ServerKopia:
             dest_path.mkdir(parents=True, exist_ok=True)
 
             args = [
-                "snapshot", "restore",
+                "snapshot",
+                "restore",
                 "--overwrite-files",
                 "--overwrite-directories",
                 "--overwrite-symlinks",
@@ -538,8 +567,8 @@ def _build_backup_command_payload(
     if client_id:
         client = storage.get_client(client_id)
         if client:
-            os_info = getattr(client, 'os_info', '') or ''
-            is_android_client = os_info.lower().startswith('android')
+            os_info = getattr(client, "os_info", "") or ""
+            is_android_client = os_info.lower().startswith("android")
             if is_android_client:
                 logger.debug(f"[BACKUP] Detected Android client: {client_id} (os_info={os_info})")
 
@@ -566,30 +595,45 @@ def _build_backup_command_payload(
         "dry_run": dry_run,
     }
     if repo_type == "smb":
-        payload.update({
-            "destination_path": f"//{repo.get('server')}/{repo.get('share')}/Agents/{job_subfolder}",
-            "smb_server": repo.get("server"), "smb_share": repo.get("share"),
-            "smb_username": repo.get("username"), "smb_domain": repo.get("domain"),
-        })
+        payload.update(
+            {
+                "destination_path": f"//{repo.get('server')}/{repo.get('share')}/Agents/{job_subfolder}",
+                "smb_server": repo.get("server"),
+                "smb_share": repo.get("share"),
+                "smb_username": repo.get("username"),
+                "smb_domain": repo.get("domain"),
+            }
+        )
         if storage_password := storage.get_storage_password(repository_id):
             payload["smb_password"] = storage_password
     elif repo_type == "nfs":
-        payload.update({
-            "destination_path": f"{repo.get('server')}:{repo.get('share')}/Agents/{job_subfolder}",
-            "nfs_server": repo.get("server"), "nfs_export": repo.get("share"),
-        })
+        payload.update(
+            {
+                "destination_path": f"{repo.get('server')}:{repo.get('share')}/Agents/{job_subfolder}",
+                "nfs_server": repo.get("server"),
+                "nfs_export": repo.get("share"),
+            }
+        )
     elif repo_type == "local":
         public_url = storage.get_setting("public_url", "http://localhost:8420")
         scheme = "proxys" if public_url.startswith("https://") else "proxy"
         host = public_url.removeprefix("https://").removeprefix("http://")
         payload["destination_path"] = f"{scheme}://{host}/repo/{repository_id}/Agents/{job_subfolder}"
         payload["repository_options"]["proxy_capability"] = generate_proxy_capability(
-            client_id=client_id or "", repo_id=repository_id, job_name=job_name, run_id=run_id,
-            subfolder=f"Agents/{job_subfolder}", operation="backup",
+            client_id=client_id or "",
+            repo_id=repository_id,
+            job_name=job_name,
+            run_id=run_id,
+            subfolder=f"Agents/{job_subfolder}",
+            operation="backup",
         )
     elif repo_type == "s3":
         from backer.backends.s3 import kopia_s3_config
-        s3 = {**repo.get("config", {}).get("s3", {}), **(storage.get_repository_provider_credentials(repository_id) or {})}
+
+        s3 = {
+            **repo.get("config", {}).get("s3", {}),
+            **(storage.get_repository_provider_credentials(repository_id) or {}),
+        }
         payload["destination_path"] = kopia_s3_config(s3)["repository"]
         payload["repository_options"]["s3"] = s3
     else:
@@ -608,7 +652,7 @@ def _validate_job_config(config: dict[str, Any], storage: Storage) -> None:
         repo_type = repo.get("repo_type")
     if repo_type and repo_type not in {"smb", "nfs", "local", "s3"}:
         raise HTTPException(status_code=400, detail=f"Unsupported repository type: {repo_type}")
-    if (client_id := config.get("client_id")):
+    if client_id := config.get("client_id"):
         client = storage.get_client(client_id)
         if client and (client.os_info or "").lower().startswith("android"):
             if repo_type != "local":
@@ -639,7 +683,9 @@ def _refresh_proxy_capabilities(commands: list[dict[str, Any]], client_id: str) 
     for command in commands:
         payload = command.get("payload", {})
         operation = command.get("command_type")
-        if not str(payload.get("destination_path" if operation == "backup" else "source_path", "")).lower().startswith(("proxy://", "proxys://")) or operation not in {"backup", "restore"}:
+        if not str(payload.get("destination_path" if operation == "backup" else "source_path", "")).lower().startswith(
+            ("proxy://", "proxys://")
+        ) or operation not in {"backup", "restore"}:
             continue
         proxy_path = payload.get("destination_path" if operation == "backup" else "source_path", "")
         match = re.search(r"/repo/([^/]+)/(.+)$", proxy_path)
@@ -647,32 +693,48 @@ def _refresh_proxy_capabilities(commands: list[dict[str, Any]], client_id: str) 
             continue
         repo_id, subfolder = match.groups()
         payload.setdefault("repository_options", {})["proxy_capability"] = generate_proxy_capability(
-            client_id=client_id, repo_id=repo_id, job_name=payload.get("job_name", ""),
-            run_id=payload.get("run_id", ""), subfolder=subfolder, operation=operation,
+            client_id=client_id,
+            repo_id=repo_id,
+            job_name=payload.get("job_name", ""),
+            run_id=payload.get("run_id", ""),
+            subfolder=subfolder,
+            operation=operation,
         )
     return commands
 
 
 def _pending_proxy_command_authorizes(
-    storage: Storage, client_id: str, claims: dict[str, Any], operation: str,
+    storage: Storage,
+    client_id: str,
+    claims: dict[str, Any],
+    operation: str,
 ) -> bool:
     """An expired capability is usable only while its exact command is queued."""
     command_operation = claims.get("operation")
     if claims.get("sub") != client_id or (
-        command_operation != operation
-        and not (operation == "check" and command_operation in {"backup", "restore"})
+        command_operation != operation and not (operation == "check" and command_operation in {"backup", "restore"})
     ):
         return False
     for command in storage.get_pending_commands(client_id):
         payload = command["payload"]
-        if command["command_type"] != command_operation or not str(payload.get("destination_path" if command_operation == "backup" else "source_path", "")).lower().startswith(("proxy://", "proxys://")):
+        if command["command_type"] != command_operation or not str(
+            payload.get("destination_path" if command_operation == "backup" else "source_path", "")
+        ).lower().startswith(("proxy://", "proxys://")):
             continue
         path = payload.get("destination_path" if command_operation == "backup" else "source_path", "")
         match = re.search(r"/repo/([^/]+)/(.+)$", path)
         if match and (
-            match.group(1), payload.get("job_name"), payload.get("run_id"), match.group(2), command_operation,
+            match.group(1),
+            payload.get("job_name"),
+            payload.get("run_id"),
+            match.group(2),
+            command_operation,
         ) == (
-            claims.get("repo"), claims.get("job"), claims.get("run"), claims.get("subfolder"), claims.get("operation"),
+            claims.get("repo"),
+            claims.get("job"),
+            claims.get("run"),
+            claims.get("subfolder"),
+            claims.get("operation"),
         ):
             return True
     return False
@@ -801,8 +863,7 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
     repo_type = repository.get("repo_type", "").lower()
     if repo_type not in ("smb", "nfs"):
         logger.error(
-            f"Repository type '{repo_type}' is not supported for Unraid backups. "
-            "Use an SMB or NFS repository."
+            f"Repository type '{repo_type}' is not supported for Unraid backups. Use an SMB or NFS repository."
         )
         return
 
@@ -877,9 +938,11 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 is_local_share = True
             else:
                 normalized = repo_server.strip().lower()
-                is_local_share = (
-                    hosts_match(repo_server, hypervisor["host"]) or
-                    normalized in ("localhost", "127.0.0.1", "tower", "tower.local")
+                is_local_share = hosts_match(repo_server, hypervisor["host"]) or normalized in (
+                    "localhost",
+                    "127.0.0.1",
+                    "tower",
+                    "tower.local",
                 )
 
         mount_point = None
@@ -965,8 +1028,7 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
         guest_map = {g["vmid"]: g for g in all_guests}
 
         logger.info(
-            f"Starting Unraid backup job '{job['name']}' to repository "
-            f"'{repository['name']}' ({len(guest_ids)} items)"
+            f"Starting Unraid backup job '{job['name']}' to repository '{repository['name']}' ({len(guest_ids)} items)"
         )
 
         # Start job progress tracking for activity panel
@@ -1073,23 +1135,24 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 )
 
                 # Collect result for metadata
-                backup_results.append({
-                    "vmid": guest_id,
-                    "guest_name": guest_name,
-                    "guest_type": guest_type,
-                    "success": result.get("success", False),
-                    "backup_filename": backup_filename,
-                    "backup_size": backup_size,
-                    "duration_seconds": result.get("duration_seconds"),
-                    "started_at": tz.get_now().isoformat(),
-                    "finished_at": tz.get_now().isoformat(),
-                    "errors": result.get("errors"),
-                })
+                backup_results.append(
+                    {
+                        "vmid": guest_id,
+                        "guest_name": guest_name,
+                        "guest_type": guest_type,
+                        "success": result.get("success", False),
+                        "backup_filename": backup_filename,
+                        "backup_size": backup_size,
+                        "duration_seconds": result.get("duration_seconds"),
+                        "started_at": tz.get_now().isoformat(),
+                        "finished_at": tz.get_now().isoformat(),
+                        "errors": result.get("errors"),
+                    }
+                )
 
                 if result.get("success"):
                     logger.info(
-                        f"Backup succeeded for {guest_type} '{guest_name}' "
-                        f"({backup_size / 1024 / 1024:.1f} MB)"
+                        f"Backup succeeded for {guest_type} '{guest_name}' ({backup_size / 1024 / 1024:.1f} MB)"
                     )
                 else:
                     logger.warning(f"Backup failed for {guest_type} '{guest_name}': {result.get('errors')}")
@@ -1109,13 +1172,15 @@ def _trigger_unraid_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     errors=[str(e)],
                 )
                 # Collect failed result for metadata
-                backup_results.append({
-                    "vmid": guest_id,
-                    "guest_name": guest_name,
-                    "guest_type": guest_type,
-                    "success": False,
-                    "errors": [str(e)],
-                })
+                backup_results.append(
+                    {
+                        "vmid": guest_id,
+                        "guest_name": guest_name,
+                        "guest_type": guest_type,
+                        "success": False,
+                        "errors": [str(e)],
+                    }
+                )
 
         # Cleanup: unmount external share if we mounted it
         if mount_point:
@@ -1376,8 +1441,7 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
                     status="success" if result.get("success") else "failed",
                     upid=result.get("upid"),
                     finished_at=(
-                        datetime.fromisoformat(result["finished_at"])
-                        if result.get("finished_at") else tz.get_now()
+                        datetime.fromisoformat(result["finished_at"]) if result.get("finished_at") else tz.get_now()
                     ),
                     duration_seconds=result.get("duration_seconds"),
                     backup_size=backup_size,
@@ -1387,25 +1451,24 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
                 )
 
                 # Collect result for metadata
-                backup_results.append({
-                    "vmid": vmid,
-                    "guest_name": guest_name,
-                    "guest_type": guest_type,
-                    "success": result.get("success", False),
-                    "backup_filename": backup_filename,
-                    "backup_size": backup_size,
-                    "duration_seconds": result.get("duration_seconds"),
-                    "started_at": tz.get_now().isoformat(),
-                    "finished_at": (
-                        result.get("finished_at") or tz.get_now().isoformat()
-                    ),
-                    "errors": result.get("errors"),
-                })
+                backup_results.append(
+                    {
+                        "vmid": vmid,
+                        "guest_name": guest_name,
+                        "guest_type": guest_type,
+                        "success": result.get("success", False),
+                        "backup_filename": backup_filename,
+                        "backup_size": backup_size,
+                        "duration_seconds": result.get("duration_seconds"),
+                        "started_at": tz.get_now().isoformat(),
+                        "finished_at": (result.get("finished_at") or tz.get_now().isoformat()),
+                        "errors": result.get("errors"),
+                    }
+                )
 
                 if result.get("success"):
                     logger.info(
-                        f"Backup succeeded for VMID {vmid} -> {proxmox_storage_id} "
-                        f"({backup_size / 1024 / 1024:.1f} MB)"
+                        f"Backup succeeded for VMID {vmid} -> {proxmox_storage_id} ({backup_size / 1024 / 1024:.1f} MB)"
                     )
                 else:
                     logger.warning(f"Backup failed for VMID {vmid}: {result.get('errors')}")
@@ -1425,13 +1488,15 @@ def _trigger_proxmox_backup_job(job_id: str, job: dict, hypervisor: dict) -> Non
                     errors=[str(e)],
                 )
                 # Collect failed result for metadata
-                backup_results.append({
-                    "vmid": vmid,
-                    "guest_name": guest_name,
-                    "guest_type": guest_type,
-                    "success": False,
-                    "errors": [str(e)],
-                })
+                backup_results.append(
+                    {
+                        "vmid": vmid,
+                        "guest_name": guest_name,
+                        "guest_type": guest_type,
+                        "success": False,
+                        "errors": [str(e)],
+                    }
+                )
 
         # Release storage reference (only deletes if no other tasks using it)
         # This unmounts the share when last task completes, keeping Proxmox UI clean
@@ -1709,24 +1774,23 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                 )
 
                 # Collect result for metadata
-                backup_results.append({
-                    "vmid": vmid,
-                    "guest_name": guest_name,
-                    "guest_type": "vm",
-                    "success": result.get("success", False),
-                    "backup_filename": backup_filename,
-                    "backup_size": backup_size,
-                    "duration_seconds": result.get("duration_seconds"),
-                    "started_at": tz.get_now().isoformat(),
-                    "finished_at": tz.get_now().isoformat(),
-                    "errors": result.get("errors"),
-                })
+                backup_results.append(
+                    {
+                        "vmid": vmid,
+                        "guest_name": guest_name,
+                        "guest_type": "vm",
+                        "success": result.get("success", False),
+                        "backup_filename": backup_filename,
+                        "backup_size": backup_size,
+                        "duration_seconds": result.get("duration_seconds"),
+                        "started_at": tz.get_now().isoformat(),
+                        "finished_at": tz.get_now().isoformat(),
+                        "errors": result.get("errors"),
+                    }
+                )
 
                 if result.get("success"):
-                    logger.info(
-                        f"Backup succeeded for VM '{guest_name}' "
-                        f"({backup_size / 1024 / 1024:.1f} MB)"
-                    )
+                    logger.info(f"Backup succeeded for VM '{guest_name}' ({backup_size / 1024 / 1024:.1f} MB)")
 
                     # Enforce copies_to_keep retention after successful backup
                     copies_to_keep = job.get("copies_to_keep", 0)
@@ -1763,13 +1827,15 @@ def _trigger_hyperv_backup_job(job_id: str, job: dict, hypervisor: dict) -> None
                     errors=[str(e)],
                 )
                 # Collect failed result for metadata
-                backup_results.append({
-                    "vmid": vmid,
-                    "guest_name": guest_name,
-                    "guest_type": "vm",
-                    "success": False,
-                    "errors": [str(e)],
-                })
+                backup_results.append(
+                    {
+                        "vmid": vmid,
+                        "guest_name": guest_name,
+                        "guest_type": "vm",
+                        "success": False,
+                        "errors": [str(e)],
+                    }
+                )
 
         # Finish job progress tracking
         success_count = sum(1 for r in backup_results if r.get("success"))
@@ -2032,19 +2098,21 @@ def _trigger_hyperv_cluster_backup_job(job_id: str, job: dict, hypervisor: dict)
                     errors=result.get("errors"),
                 )
 
-                backup_results.append({
-                    "vmid": vmid,
-                    "guest_name": guest_name,
-                    "guest_type": "vm",
-                    "success": result.get("success", False),
-                    "backup_filename": backup_filename,
-                    "backup_size": backup_size,
-                    "duration_seconds": result.get("duration_seconds"),
-                    "started_at": tz.get_now().isoformat(),
-                    "finished_at": tz.get_now().isoformat(),
-                    "errors": result.get("errors"),
-                    "owner_node": result.get("owner_node"),
-                })
+                backup_results.append(
+                    {
+                        "vmid": vmid,
+                        "guest_name": guest_name,
+                        "guest_type": "vm",
+                        "success": result.get("success", False),
+                        "backup_filename": backup_filename,
+                        "backup_size": backup_size,
+                        "duration_seconds": result.get("duration_seconds"),
+                        "started_at": tz.get_now().isoformat(),
+                        "finished_at": tz.get_now().isoformat(),
+                        "errors": result.get("errors"),
+                        "owner_node": result.get("owner_node"),
+                    }
+                )
 
                 if result.get("success"):
                     logger.info(
@@ -2086,13 +2154,15 @@ def _trigger_hyperv_cluster_backup_job(job_id: str, job: dict, hypervisor: dict)
                     finished_at=tz.get_now(),
                     errors=[str(e)],
                 )
-                backup_results.append({
-                    "vmid": vmid,
-                    "guest_name": guest_name,
-                    "guest_type": "vm",
-                    "success": False,
-                    "errors": [str(e)],
-                })
+                backup_results.append(
+                    {
+                        "vmid": vmid,
+                        "guest_name": guest_name,
+                        "guest_type": "vm",
+                        "success": False,
+                        "errors": [str(e)],
+                    }
+                )
 
         # Finish job progress tracking
         success_count = sum(1 for r in backup_results if r.get("success"))
@@ -2160,8 +2230,13 @@ def _write_metadata_nfs_ml(
     try:
         # Mount the NFS export
         mount_cmd = [
-            "sudo", "-n", "mount", "-t", "nfs",
-            "-o", "soft,timeo=50,retrans=2",
+            "sudo",
+            "-n",
+            "mount",
+            "-t",
+            "nfs",
+            "-o",
+            "soft,timeo=50,retrans=2",
             f"{server}:{export}",
             mount_point,
         ]
@@ -2216,6 +2291,7 @@ def _write_metadata_nfs_ml(
         # Remove temp mount point
         try:
             import os
+
             os.rmdir(mount_point)
         except Exception:
             pass
@@ -2281,10 +2357,7 @@ def _write_metadata_smb_ml(
         ensure_remote_dir(remote_dir)
 
         remote_file = f"{remote_base}/.backer/{rel_path_str}"
-        put_cmd = [
-            "smbclient", f"//{server}/{share}", *auth_parts,
-            "-c", f"put {local_file} {remote_file}"
-        ]
+        put_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"put {local_file} {remote_file}"]
         result = subprocess.run(put_cmd, capture_output=True, timeout=30)
         if result.returncode != 0:
             logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
@@ -2584,6 +2657,7 @@ def _enforce_copies_limit(
         elif repo_type == "nfs":
             _enforce_copies_limit_nfs(repository, safe_hv_name, int(vmid), copies_to_keep)
 
+
 def _enforce_copies_limit_smb(
     repository: dict[str, Any],
     hypervisor_name: str,
@@ -2642,8 +2716,7 @@ def _enforce_copies_limit_smb(
             filename = parts[0]
             # Match vzdump-{type}-{vmid}-{timestamp}.vma* (but not .notes or .log)
             if (
-                filename.startswith(f"vzdump-qemu-{vmid}-")
-                or filename.startswith(f"vzdump-lxc-{vmid}-")
+                filename.startswith(f"vzdump-qemu-{vmid}-") or filename.startswith(f"vzdump-lxc-{vmid}-")
             ) and backup_ext_pattern.search(filename):
                 # Extract timestamp for sorting
                 match = timestamp_pattern.search(filename)
@@ -2671,19 +2744,14 @@ def _enforce_copies_limit_smb(
 
             # Also delete associated .log and .notes files
             base_name = (
-                backup_file.replace(".vma.zst", "")
-                .replace(".vma.gz", "")
-                .replace(".vma.lzo", "")
-                .replace(".vma", "")
+                backup_file.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
             )
             files_to_delete.append(f"{base_name}.log")
             files_to_delete.append(f"{backup_file}.notes")
 
             for filename in files_to_delete:
                 smb_del_cmd = f'cd {base_path}; del "{filename}"'
-                del_cmd = [
-                    "smbclient", f"//{server}/{share}", *auth_opts, "-c", smb_del_cmd
-                ]
+                del_cmd = ["smbclient", f"//{server}/{share}", *auth_opts, "-c", smb_del_cmd]
                 del_result = subprocess.run(del_cmd, capture_output=True, timeout=30)
                 if del_result.returncode == 0:
                     logger.info(f"Deleted old backup file: {filename}")
@@ -2697,14 +2765,14 @@ def _enforce_copies_limit_smb(
 
         if deleted_count > 0:
             logger.info(
-                f"Retention enforcement: deleted {deleted_count} old backups "
-                f"for VM {vmid}, keeping {copies_to_keep}"
+                f"Retention enforcement: deleted {deleted_count} old backups for VM {vmid}, keeping {copies_to_keep}"
             )
 
     except subprocess.TimeoutExpired:
         logger.warning(f"Timeout enforcing retention for VM {vmid} from SMB")
     except Exception as e:
         logger.warning(f"Error enforcing retention for VM {vmid} from SMB: {e}")
+
 
 def _enforce_copies_limit_nfs(
     repository: dict[str, Any],
@@ -2757,8 +2825,7 @@ def _enforce_copies_limit_nfs(
             if not entry.is_file():
                 continue
             if (
-                entry.name.startswith(f"vzdump-qemu-{vmid}-")
-                or entry.name.startswith(f"vzdump-lxc-{vmid}-")
+                entry.name.startswith(f"vzdump-qemu-{vmid}-") or entry.name.startswith(f"vzdump-lxc-{vmid}-")
             ) and backup_ext_pattern.search(entry.name):
                 match = timestamp_pattern.search(entry.name)
                 if match:
@@ -2802,10 +2869,7 @@ def _enforce_copies_limit_nfs(
 
             # Delete associated .log file if exists
             base_name = (
-                entry.name.replace(".vma.zst", "")
-                .replace(".vma.gz", "")
-                .replace(".vma.lzo", "")
-                .replace(".vma", "")
+                entry.name.replace(".vma.zst", "").replace(".vma.gz", "").replace(".vma.lzo", "").replace(".vma", "")
             )
             log_file = entry.parent / f"{base_name}.log"
             if log_file.exists():
@@ -2816,10 +2880,7 @@ def _enforce_copies_limit_nfs(
                     pass
 
         if deleted > 0:
-            logger.info(
-                f"Retention enforcement: deleted {deleted} old backups "
-                f"for VM {vmid}, keeping {copies_to_keep}"
-            )
+            logger.info(f"Retention enforcement: deleted {deleted} old backups for VM {vmid}, keeping {copies_to_keep}")
 
     except subprocess.TimeoutExpired:
         logger.warning(f"Timeout enforcing retention for VM {vmid} from NFS")
@@ -2838,9 +2899,11 @@ def _enforce_copies_limit_nfs(
         # Remove temp mount point
         try:
             import os
+
             os.rmdir(mount_point)
         except Exception:
             pass
+
 
 def _enforce_copies_limit_hyperv_smb(
     repository: dict[str, Any],
@@ -2882,9 +2945,7 @@ def _enforce_copies_limit_hyperv_smb(
         logger.info(f"Checking retention for Hyper-V VM {vm_name} at //{server}/{share}/{vm_path}")
 
         # List timestamp folders in the VM directory using SMBBrowser
-        success, entries = SMBBrowser.list_directory(
-            server, share, vm_path, username, password, domain
-        )
+        success, entries = SMBBrowser.list_directory(server, share, vm_path, username, password, domain)
         if not success:
             error_msg = entries if isinstance(entries, str) else "Unknown error"
             logger.warning(f"Could not list Hyper-V backups in {vm_path}: {error_msg}")
@@ -2909,9 +2970,7 @@ def _enforce_copies_limit_hyperv_smb(
         logger.info(f"VM {vm_name}: Found {current_count} Hyper-V backups, limit is {copies_to_keep}")
 
         if current_count <= copies_to_keep:
-            logger.debug(
-                f"VM {vm_name}: {current_count} backups <= {copies_to_keep} limit, nothing to delete"
-            )
+            logger.debug(f"VM {vm_name}: {current_count} backups <= {copies_to_keep} limit, nothing to delete")
             return
 
         # Delete oldest backup folders to stay within limit
@@ -2936,9 +2995,7 @@ def _enforce_copies_limit_hyperv_smb(
             folder_path = f"{vm_path}/{folder_name}"
 
             # Recursively delete the timestamp folder and all contents
-            deleted = _delete_smb_folder_recursive(
-                server, share, folder_path, auth_opts, username, password, domain
-            )
+            deleted = _delete_smb_folder_recursive(server, share, folder_path, auth_opts, username, password, domain)
             if deleted:
                 logger.info(f"Deleted old Hyper-V backup folder: {folder_name}")
                 deleted_count += 1
@@ -2953,6 +3010,7 @@ def _enforce_copies_limit_hyperv_smb(
 
     except Exception as e:
         logger.warning(f"Error enforcing Hyper-V retention for VM {vm_name}: {e}")
+
 
 def _delete_smb_folder_recursive(
     server: str,
@@ -2973,9 +3031,7 @@ def _delete_smb_folder_recursive(
 
     try:
         # List contents of the folder
-        success, entries = SMBBrowser.list_directory(
-            server, share, folder_path, username, password, domain
-        )
+        success, entries = SMBBrowser.list_directory(server, share, folder_path, username, password, domain)
         if not success:
             error_msg = entries if isinstance(entries, str) else "Unknown error"
             logger.warning(f"[RETENTION] Cannot list folder {folder_path}: {error_msg}")
@@ -3042,9 +3098,7 @@ def _delete_smb_folder_recursive(
             if "NT_STATUS_DIRECTORY_NOT_EMPTY" in stderr:
                 logger.warning(f"[RETENTION] Directory not empty after deletion attempt: {folder_path}")
                 # Re-list to see what's left
-                success2, entries2 = SMBBrowser.list_directory(
-                    server, share, folder_path, username, password, domain
-                )
+                success2, entries2 = SMBBrowser.list_directory(server, share, folder_path, username, password, domain)
                 if success2:
                     remaining = [e.name for e in entries2 if e.name not in [".", ".."]]
                     logger.warning(f"[RETENTION] Remaining items: {remaining[:10]}")
@@ -3058,6 +3112,7 @@ def _delete_smb_folder_recursive(
     except Exception as e:
         logger.warning(f"[RETENTION] Error deleting SMB folder {folder_path}: {e}")
         return False
+
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -3114,9 +3169,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     # Global exception handler for malformed JSON requests
     @app.exception_handler(json.JSONDecodeError)
-    async def json_decode_error_handler(
-        request: Request, exc: json.JSONDecodeError
-    ) -> JSONResponse:
+    async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError) -> JSONResponse:
         return JSONResponse(
             status_code=400,
             content={"detail": f"Invalid JSON in request body: {exc.msg}"},
@@ -3170,9 +3223,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # hostname is not a credential and must not permit a takeover.
             secret_hash = storage.get_client_secret_hash(existing_client.id)
             provided_hash = hashlib.sha256((credentials.password if credentials else "").encode()).hexdigest()
-            if credentials.username == existing_client.id and secrets.compare_digest(
-                secret_hash or "", provided_hash
-            ):
+            if credentials.username == existing_client.id and secrets.compare_digest(secret_hash or "", provided_hash):
                 client_secret = secrets.token_urlsafe(32)
                 secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
                 storage.update_client_secret(existing_client.id, secret_hash)
@@ -3199,9 +3250,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # New clients need an admin-issued, single-use enrollment key. Duplicate
         # hostnames are display labels, not identities, so a valid token creates
         # a separate record instead of replacing the existing client.
-        if not storage.consume_setting(
-            "agent_enrollment_token_hash", hash_enrollment_code(request.enrollment_token)
-        ):
+        if not storage.consume_setting("agent_enrollment_token_hash", hash_enrollment_code(request.enrollment_token)):
             raise HTTPException(status_code=403, detail="Valid enrollment key required")
         if enrollment_code_expired(storage.get_setting("agent_enrollment_token_expires")):
             raise HTTPException(status_code=403, detail="Enrollment key expired")
@@ -3333,10 +3382,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 jobs_deleted += 1
                 logger.info(f"[DELETE AGENT] Deleted associated job: {job_name}")
 
-        result: dict[str, Any] = {
-            "status": "deleted",
-            "jobs_deleted": jobs_deleted
-        }
+        result: dict[str, Any] = {"status": "deleted", "jobs_deleted": jobs_deleted}
 
         # Schedule metadata cleanup as a background task
         if delete_metadata:
@@ -3345,16 +3391,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             repo_info = []
             for repo in repos:
                 repo_id = repo.get("id")
-                repo_info.append({
-                    "repo_id": repo_id,
-                    "repo_type": repo.get("repo_type", "smb"),
-                    "server": repo.get("server", ""),
-                    "share": repo.get("share", ""),
-                    "path": repo.get("path", ""),
-                    "username": repo.get("username"),
-                    "password": storage.get_storage_password(repo_id) if repo_id else None,
-                    "domain": repo.get("domain"),
-                })
+                repo_info.append(
+                    {
+                        "repo_id": repo_id,
+                        "repo_type": repo.get("repo_type", "smb"),
+                        "server": repo.get("server", ""),
+                        "share": repo.get("share", ""),
+                        "path": repo.get("path", ""),
+                        "username": repo.get("username"),
+                        "password": storage.get_storage_password(repo_id) if repo_id else None,
+                        "domain": repo.get("domain"),
+                    }
+                )
 
             def cleanup_agent_metadata(task: Task) -> dict[str, Any]:
                 """Background task to clean up agent metadata from repositories."""
@@ -3376,8 +3424,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     try:
                         if repo["repo_type"] == "smb":
                             success, msg = smb_delete_file(
-                                repo["server"], repo["share"], agent_path,
-                                repo["username"], repo["password"], repo["domain"]
+                                repo["server"],
+                                repo["share"],
+                                agent_path,
+                                repo["username"],
+                                repo["password"],
+                                repo["domain"],
                             )
                             if success:
                                 metadata_deleted += 1
@@ -3405,9 +3457,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return result
 
     @app.post("/api/v1/clients/{client_id}/reset-credentials")
-    def reset_client_credentials(
-        client_id: str, storage: Storage = Depends(get_storage)
-    ) -> dict[str, Any]:
+    def reset_client_credentials(client_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
         """Reset credentials for an existing agent.
 
         Generates a new client_secret for the agent. The agent will need to
@@ -3467,9 +3517,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """
         import asyncio
 
-        storage.update_client_status(
-            client.id, ClientStatus.ONLINE, ip_address=req.client.host if req.client else None
-        )
+        storage.update_client_status(client.id, ClientStatus.ONLINE, ip_address=req.client.host if req.client else None)
 
         # Check for pending commands immediately
         commands = storage.get_pending_commands(client.id)
@@ -3689,8 +3737,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             # Delete the entire job subfolder (all backup data + metadata)
                             task.message = f"Deleting job subfolder '{job_subfolder}'..."
                             success, msg = smb_delete_directory(
-                                server, share, job_subfolder_path,
-                                username, password, domain
+                                server, share, job_subfolder_path, username, password, domain
                             )
                             if success:
                                 subfolder_deleted = True
@@ -3701,8 +3748,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         else:
                             # Only delete job metadata, keep backup data
                             success, msg = smb_delete_directory(
-                                server, share, metadata_job_path,
-                                username, password, domain
+                                server, share, metadata_job_path, username, password, domain
                             )
                             if success:
                                 job_deleted = True
@@ -3779,9 +3825,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             # NFS not mounted - use nfs_delete_directory to temp mount
                             if delete_snapshots:
                                 task.message = f"Deleting job subfolder '{job_subfolder}' from NFS..."
-                                success, msg = nfs_delete_directory(
-                                    server, share, job_subfolder_path
-                                )
+                                success, msg = nfs_delete_directory(server, share, job_subfolder_path)
                                 if success:
                                     subfolder_deleted = True
                                     job_deleted = True
@@ -3790,9 +3834,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     errors.append(f"Job subfolder: {msg}")
                             else:
                                 # Only delete job metadata
-                                success, msg = nfs_delete_directory(
-                                    server, share, metadata_job_path
-                                )
+                                success, msg = nfs_delete_directory(server, share, metadata_job_path)
                                 if success:
                                     job_deleted = True
                                     logger.info(f"Deleted job metadata from NFS: {metadata_job_path}")
@@ -3874,8 +3916,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         for run in recent_runs:
             if run.get("status") in ("pending", "running"):
                 raise HTTPException(
-                    status_code=409,
-                    detail=f"Job '{job_name}' is already running (run_id: {run.get('run_id')})"
+                    status_code=409, detail=f"Job '{job_name}' is already running (run_id: {run.get('run_id')})"
                 )
 
         now = tz.get_now()
@@ -3925,18 +3966,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
     @app.get("/api/v1/jobs/{job_name}/runs")
-    def get_job_runs(
-        job_name: str, limit: int = 20, storage: Storage = Depends(get_storage)
-    ) -> list[dict[str, Any]]:
+    def get_job_runs(job_name: str, limit: int = 20, storage: Storage = Depends(get_storage)) -> list[dict[str, Any]]:
         """Get run history for a job."""
         if not storage.get_job(job_name):
             raise HTTPException(status_code=404, detail="Job not found")
         return storage.get_job_runs(job_name, limit)
 
     @app.get("/api/v1/runs/{run_id}")
-    def get_run_details(
-        run_id: str, storage: Storage = Depends(get_storage)
-    ) -> dict[str, Any]:
+    def get_run_details(run_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
         """Get details for a specific job run including logs and output."""
         run = storage.get_job_run(run_id)
         if not run:
@@ -4006,10 +4043,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             snapshot_id=result.snapshot_id,
         )
         # Mark progress as complete
-        storage.finish_job_progress(
-            result.run_id,
-            status="completed" if result.success else "failed"
-        )
+        storage.finish_job_progress(result.run_id, status="completed" if result.success else "failed")
         return {"status": "recorded"}
 
     # ============ Progress Tracking ============
@@ -4200,7 +4234,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=400,
                 detail="Job is missing destination_path and no repository configured. "
-                       "Please re-import or reconfigure the job."
+                "Please re-import or reconfigure the job.",
             )
 
         # Append job-specific subfolder to backup source
@@ -4238,8 +4272,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Check if the target client is an Android device
         # Android agents cannot mount SMB/NFS shares, so they must use proxy backend
         is_android_client = False
-        os_info = getattr(client, 'os_info', '') or ''
-        is_android_client = os_info.lower().startswith('android')
+        os_info = getattr(client, "os_info", "") or ""
+        is_android_client = os_info.lower().startswith("android")
         if is_android_client:
             logger.debug(f"[RESTORE] Detected Android client: {client_id} (os_info={os_info})")
 
@@ -4263,64 +4297,68 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not repo:
             raise HTTPException(status_code=404, detail="Repository not found")
         if repo:
-                repo_type = repo.get("repo_type", "")
-                repo_password = storage.get_repository_password(repository_id)
-                if not repo_password:
-                    raise HTTPException(status_code=400, detail="Repository encryption password is required")
-                command_payload["repository_options"] = {"repository_password": repo_password}
-                storage_password = storage.get_storage_password(repository_id)
+            repo_type = repo.get("repo_type", "")
+            repo_password = storage.get_repository_password(repository_id)
+            if not repo_password:
+                raise HTTPException(status_code=400, detail="Repository encryption password is required")
+            command_payload["repository_options"] = {"repository_password": repo_password}
+            storage_password = storage.get_storage_password(repository_id)
 
-                if repo_type == "smb":
-                    # Include SMB connection info for agents that can mount shares.
-                    command_payload["smb_server"] = repo.get("server")
-                    command_payload["smb_share"] = repo.get("share")
-                    command_payload["smb_username"] = repo.get("username")
-                    command_payload["smb_domain"] = repo.get("domain")
-                    if storage_password:
-                        command_payload["smb_password"] = storage_password
+            if repo_type == "smb":
+                # Include SMB connection info for agents that can mount shares.
+                command_payload["smb_server"] = repo.get("server")
+                command_payload["smb_share"] = repo.get("share")
+                command_payload["smb_username"] = repo.get("username")
+                command_payload["smb_domain"] = repo.get("domain")
+                if storage_password:
+                    command_payload["smb_password"] = storage_password
 
-                elif repo_type == "nfs":
-                    # NFS info (no password needed typically)
-                    command_payload["nfs_server"] = repo.get("server")
-                    command_payload["nfs_export"] = repo.get("share")
+            elif repo_type == "nfs":
+                # NFS info (no password needed typically)
+                command_payload["nfs_server"] = repo.get("server")
+                command_payload["nfs_export"] = repo.get("share")
 
-                elif repo_type == "local":
-                    # For local repositories, use proxy backend for restore
-                    # The agent streams restore data FROM the server via HTTP/HTTPS
-                    public_url = storage.get_setting("public_url", "http://localhost:8420")
+            elif repo_type == "local":
+                # For local repositories, use proxy backend for restore
+                # The agent streams restore data FROM the server via HTTP/HTTPS
+                public_url = storage.get_setting("public_url", "http://localhost:8420")
 
-                    # Determine proxy scheme based on public_url protocol
-                    if public_url.startswith("https://"):
-                        proxy_scheme = "proxys"
-                        host_part = public_url[8:]  # Remove "https://"
-                    else:
-                        proxy_scheme = "proxy"
-                        host_part = public_url[7:]  # Remove "http://"
+                # Determine proxy scheme based on public_url protocol
+                if public_url.startswith("https://"):
+                    proxy_scheme = "proxys"
+                    host_part = public_url[8:]  # Remove "https://"
+                else:
+                    proxy_scheme = "proxy"
+                    host_part = public_url[7:]  # Remove "http://"
 
-                    # Generate proxy URI with job subfolder
-                    # Structure: proxy://host/repo/{id}/Agents/{job}
-                    proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+                # Generate proxy URI with job subfolder
+                # Structure: proxy://host/repo/{id}/Agents/{job}
+                proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
 
-                    # Override source_path with proxy URI
-                    command_payload["source_path"] = proxy_uri
+                # Override source_path with proxy URI
+                command_payload["source_path"] = proxy_uri
 
-                    command_payload["repository_options"]["proxy_capability"] = generate_proxy_capability(
-                        client_id=client_id, repo_id=repository_id, job_name=job_name,
-                        run_id=f"restore_{restore_id}", subfolder=f"Agents/{job_subfolder}", operation="restore",
-                    )
+                command_payload["repository_options"]["proxy_capability"] = generate_proxy_capability(
+                    client_id=client_id,
+                    repo_id=repository_id,
+                    job_name=job_name,
+                    run_id=f"restore_{restore_id}",
+                    subfolder=f"Agents/{job_subfolder}",
+                    operation="restore",
+                )
 
-                    logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
+                logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
 
-                elif repo_type == "s3":
-                    from backer.backends.s3 import kopia_s3_config
+            elif repo_type == "s3":
+                from backer.backends.s3 import kopia_s3_config
 
-                    s3 = {
-                        **repo.get("config", {}).get("s3", {}),
-                        **(storage.get_repository_provider_credentials(repository_id) or {}),
-                    }
-                    s3_config = kopia_s3_config(s3)
-                    command_payload["source_path"] = s3_config["repository"]
-                    command_payload["repository_options"]["s3"] = s3
+                s3 = {
+                    **repo.get("config", {}).get("s3", {}),
+                    **(storage.get_repository_provider_credentials(repository_id) or {}),
+                }
+                s3_config = kopia_s3_config(s3)
+                command_payload["source_path"] = s3_config["repository"]
+                command_payload["repository_options"]["s3"] = s3
 
         storage.queue_command(
             client_id=client_id,
@@ -4381,6 +4419,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def get_retention_presets() -> dict[str, Any]:
         """Get available retention policy presets."""
         from backer.server.retention import RETENTION_PRESETS
+
         return {"presets": RETENTION_PRESETS}
 
     @app.post("/api/v1/jobs/{job_name}/retention")
@@ -4528,10 +4567,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return {
                 "success": True,
                 "path": path,
-                "entries": [
-                    {"name": e.name, "is_dir": e.is_dir, "size": e.size}
-                    for e in result
-                ],
+                "entries": [{"name": e.name, "is_dir": e.is_dir, "size": e.size} for e in result],
             }
         else:
             return {"success": False, "error": result}
@@ -4580,9 +4616,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail="Repository password required for S3")
             data["share"], data["path"] = s3["public_config"]["bucket"], s3["public_config"]["prefix"]
             config = {"s3": s3["public_config"]}
-            provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(json.dumps({
-                "access_key_id": s3["environment"]["AWS_ACCESS_KEY_ID"], "secret_access_key": s3["environment"]["AWS_SECRET_ACCESS_KEY"],
-            }))
+            provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(
+                json.dumps(
+                    {
+                        "access_key_id": s3["environment"]["AWS_ACCESS_KEY_ID"],
+                        "secret_access_key": s3["environment"]["AWS_SECRET_ACCESS_KEY"],
+                    }
+                )
+            )
 
         # Validate local repository paths
         if repo_type == "local":
@@ -4599,7 +4640,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 # Log current process permissions for debugging
                 current_user = getpass.getuser()
-                current_uid = os.getuid() if hasattr(os, 'getuid') else 'N/A'
+                current_uid = os.getuid() if hasattr(os, "getuid") else "N/A"
                 logger.info(f"[CREATE REPO] Running as user: {current_user} (UID: {current_uid})")
                 logger.info(f"[CREATE REPO] Validating local path: {path_obj}")
 
@@ -4631,7 +4672,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     logger.error(f"[CREATE REPO] Insufficient permissions for {path_obj}")
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Path must be readable and writable (readable={readable}, writable={writable})"
+                        detail=f"Path must be readable and writable (readable={readable}, writable={writable})",
                     )
 
                 # Update share with absolute normalized path (cross-platform compatible)
@@ -4643,9 +4684,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 logger.error(f"[CREATE REPO] Failed to validate local path '{local_path}': {e}", exc_info=True)
                 raise HTTPException(status_code=400, detail=f"Invalid local path: {str(e)}")
 
-        storage_password = data.get("storage_password") or (
-            data.get("password") if repo_type == "smb" else None
-        )
+        storage_password = data.get("storage_password") or (data.get("password") if repo_type == "smb" else None)
         repository_password = data.get("repository_password") or (
             data.get("password") if repo_type == "local" else None
         )
@@ -4763,9 +4802,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         share = repo.get("share", "")
         username = repo.get("username")
         password = (
-            storage.get_storage_password(repo_id)
-            if repo_type == "smb"
-            else storage.get_repository_password(repo_id)
+            storage.get_storage_password(repo_id) if repo_type == "smb" else storage.get_repository_password(repo_id)
         )
         domain = repo.get("domain")
 
@@ -4880,10 +4917,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # Format: "        xxxxx blocks of size yyyy. zzzzz blocks available"
                     output = result.stdout + result.stderr
                     import re
-                    match = re.search(
-                        r"(\d+)\s+blocks\s+of\s+size\s+(\d+)\.\s+(\d+)\s+blocks\s+available",
-                        output
-                    )
+
+                    match = re.search(r"(\d+)\s+blocks\s+of\s+size\s+(\d+)\.\s+(\d+)\s+blocks\s+available", output)
                     if match:
                         total_blocks = int(match.group(1))
                         block_size = int(match.group(2))
@@ -4910,8 +4945,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 try:
                     mount_cmd = [
-                        "sudo", "-n", "mount", "-t", "nfs",
-                        "-o", "soft,timeo=30,retrans=2,ro",
+                        "sudo",
+                        "-n",
+                        "mount",
+                        "-t",
+                        "nfs",
+                        "-o",
+                        "soft,timeo=30,retrans=2,ro",
                         f"{server}:{share}",
                         mount_point,
                     ]
@@ -4922,10 +4962,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     mounted = True
 
                     # Use df to get stats
-                    df_result = subprocess.run(
-                        ["df", "-B1", mount_point],
-                        capture_output=True, text=True, timeout=10
-                    )
+                    df_result = subprocess.run(["df", "-B1", mount_point], capture_output=True, text=True, timeout=10)
 
                     if df_result.returncode == 0:
                         lines = df_result.stdout.strip().split("\n")
@@ -4951,10 +4988,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 finally:
                     if mounted:
                         try:
-                            subprocess.run(
-                                ["sudo", "-n", "umount", "-l", mount_point],
-                                capture_output=True, timeout=10
-                            )
+                            subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
                         except Exception:
                             pass
                     try:
@@ -4968,10 +5002,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if not local_path or not Path(local_path).exists():
                     return {"repo_id": repo_id, "error": "Local path not found"}
 
-                df_result = subprocess.run(
-                    ["df", "-B1", local_path],
-                    capture_output=True, text=True, timeout=10
-                )
+                df_result = subprocess.run(["df", "-B1", local_path], capture_output=True, text=True, timeout=10)
 
                 if df_result.returncode == 0:
                     lines = df_result.stdout.strip().split("\n")
@@ -5018,7 +5049,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         server = repo.get("server", "")
         share = repo.get("share", "")
         username = repo.get("username")
-        password = storage.get_repository_password(repo_id) if repo_type == "local" else storage.get_storage_password(repo_id)
+        password = (
+            storage.get_repository_password(repo_id) if repo_type == "local" else storage.get_storage_password(repo_id)
+        )
         domain = repo.get("domain")
         mount_point = repo.get("mount_point")
 
@@ -5109,14 +5142,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             jobs_from_fs = {}
                             try:
                                 for job_dir in agents_dir.iterdir():
-                                    if job_dir.is_dir() and not job_dir.name.startswith('.'):
+                                    if job_dir.is_dir() and not job_dir.name.startswith("."):
                                         job_name = job_dir.name
                                         contents_dir = job_dir / "contents"
 
                                         # Count files if contents folder exists
                                         file_count = 0
                                         if contents_dir.exists():
-                                            file_count = sum(1 for _ in contents_dir.rglob('*') if _.is_file())
+                                            file_count = sum(1 for _ in contents_dir.rglob("*") if _.is_file())
 
                                         if file_count > 0 or contents_dir.exists():
                                             jobs_from_fs[job_name] = {
@@ -5165,14 +5198,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     jobs_from_snapshots = {}
 
                                     for snap in snapshots:
-                                        kopia_snapshots.append({
-                                            "snapshot_id": snap.get("full_id"),
-                                            "short_id": snap.get("id"),
-                                            "hostname": snap.get("hostname"),
-                                            "time": snap.get("timestamp"),
-                                            "paths": [snap.get("source", "")],
-                                            "job": snap.get("job"),
-                                        })
+                                        kopia_snapshots.append(
+                                            {
+                                                "snapshot_id": snap.get("full_id"),
+                                                "short_id": snap.get("id"),
+                                                "hostname": snap.get("hostname"),
+                                                "time": snap.get("timestamp"),
+                                                "paths": [snap.get("source", "")],
+                                                "job": snap.get("job"),
+                                            }
+                                        )
 
                                         # Track jobs found in snapshots
                                         job_name = snap.get("job")
@@ -5197,8 +5232,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         else:
                                             # Update run count
                                             existing_jobs[job_name]["run_count"] = max(
-                                                existing_jobs[job_name].get("run_count", 0),
-                                                job_info["run_count"]
+                                                existing_jobs[job_name].get("run_count", 0), job_info["run_count"]
                                             )
                                     discovery["jobs"] = list(existing_jobs.values())
 
@@ -5231,16 +5265,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     agent_ids_seen = set()
 
                     # List directories at the repo root (legacy: job subfolders at root)
-                    ok, entries = smb_list_files(
-                        server, share, base_path,
-                        username, password, domain
-                    )
+                    ok, entries = smb_list_files(server, share, base_path, username, password, domain)
 
                     # Also scan inside Agents/ folder (new structure)
                     agents_path = f"{base_path}/Agents" if base_path else "Agents"
                     ok_agents_folder, agent_entries = smb_list_files(
-                        server, share, agents_path,
-                        username, password, domain
+                        server, share, agents_path, username, password, domain
                     )
 
                     # Build combined list of folders to scan with their base paths
@@ -5248,9 +5278,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     if ok:
                         # Filter to get just directory names (legacy job subfolders at root)
                         legacy_folders = [
-                            e for e in entries
-                            if not e.startswith('.') and not e.endswith('.json')
-                            and e != 'Agents' and e != 'Hypervisors'
+                            e
+                            for e in entries
+                            if not e.startswith(".")
+                            and not e.endswith(".json")
+                            and e != "Agents"
+                            and e != "Hypervisors"
                         ]
                         for folder in legacy_folders:
                             folder_path = f"{base_path}/{folder}" if base_path else folder
@@ -5259,8 +5292,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     if ok_agents_folder:
                         # Job subfolders under Agents/
                         agent_job_folders = [
-                            e for e in agent_entries
-                            if not e.startswith('.') and not e.endswith('.json')
+                            e for e in agent_entries if not e.startswith(".") and not e.endswith(".json")
                         ]
                         for folder in agent_job_folders:
                             folder_path = f"{agents_path}/{folder}"
@@ -5278,8 +5310,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                             # Check if this folder has .backer metadata
                             ok2, content = smb_read_file(
-                                server, share, f"{metadata_base}/metadata.json",
-                                username, password, domain
+                                server, share, f"{metadata_base}/metadata.json", username, password, domain
                             )
 
                             if not ok2:
@@ -5297,8 +5328,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 for f in agent_files:
                                     if f.endswith(".json"):
                                         ok4, c = smb_read_file(
-                                            server, share, f"{metadata_base}/agents/{f}",
-                                            username, password, domain
+                                            server, share, f"{metadata_base}/agents/{f}", username, password, domain
                                         )
                                         if ok4:
                                             try:
@@ -5317,8 +5347,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             if ok3:
                                 for d in job_dirs:
                                     ok4, c = smb_read_file(
-                                        server, share, f"{metadata_base}/jobs/{d}/config.json",
-                                        username, password, domain
+                                        server,
+                                        share,
+                                        f"{metadata_base}/jobs/{d}/config.json",
+                                        username,
+                                        password,
+                                        domain,
                                     )
                                     if ok4:
                                         try:
@@ -5326,8 +5360,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                             # Add job_folder context
                                             job["job_folder"] = job_folder
                                             ok5, runs = smb_list_files(
-                                                server, share, f"{metadata_base}/jobs/{d}/runs",
-                                                username, password, domain
+                                                server,
+                                                share,
+                                                f"{metadata_base}/jobs/{d}/runs",
+                                                username,
+                                                password,
+                                                domain,
                                             )
                                             run_count = len([r for r in runs if r.endswith(".json")]) if ok5 else 0
                                             job["run_count"] = run_count
@@ -5343,8 +5381,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 for f in snap_files:
                                     if f.endswith(".json"):
                                         ok4, c = smb_read_file(
-                                            server, share, f"{metadata_base}/snapshots/{f}",
-                                            username, password, domain
+                                            server, share, f"{metadata_base}/snapshots/{f}", username, password, domain
                                         )
                                         if ok4:
                                             try:
@@ -5359,21 +5396,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     all_guests = []
                     all_hypervisor_jobs = []
                     hypervisors_path = f"{base_path}/Hypervisors" if base_path else "Hypervisors"
-                    ok_hv, hv_folders = smb_list_files(
-                        server, share, hypervisors_path,
-                        username, password, domain
-                    )
+                    ok_hv, hv_folders = smb_list_files(server, share, hypervisors_path, username, password, domain)
                     if ok_hv:
                         for hv_folder in hv_folders:
-                            if hv_folder.startswith('.'):
+                            if hv_folder.startswith("."):
                                 continue
                             task.message = f"Scanning hypervisor: {hv_folder}..."
                             hv_metadata_base = f"{hypervisors_path}/{hv_folder}/.backer"
 
                             # Read hypervisor metadata
                             ok_meta, meta_content = smb_read_file(
-                                server, share, f"{hv_metadata_base}/metadata.json",
-                                username, password, domain
+                                server, share, f"{hv_metadata_base}/metadata.json", username, password, domain
                             )
                             if ok_meta:
                                 found_any_metadata = True
@@ -5381,15 +5414,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                                 # Read hypervisors
                                 ok_hvs, hv_files = smb_list_files(
-                                    server, share, f"{hv_metadata_base}/hypervisors",
-                                    username, password, domain
+                                    server, share, f"{hv_metadata_base}/hypervisors", username, password, domain
                                 )
                                 if ok_hvs:
                                     for f in hv_files:
                                         if f.endswith(".json"):
                                             ok_h, c = smb_read_file(
-                                                server, share, f"{hv_metadata_base}/hypervisors/{f}",
-                                                username, password, domain
+                                                server,
+                                                share,
+                                                f"{hv_metadata_base}/hypervisors/{f}",
+                                                username,
+                                                password,
+                                                domain,
                                             )
                                             if ok_h:
                                                 try:
@@ -5401,15 +5437,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                                 # Read hypervisor jobs
                                 ok_jobs, job_files = smb_list_files(
-                                    server, share, f"{hv_metadata_base}/hypervisor_jobs",
-                                    username, password, domain
+                                    server, share, f"{hv_metadata_base}/hypervisor_jobs", username, password, domain
                                 )
                                 if ok_jobs:
                                     for f in job_files:
                                         if f.endswith(".json"):
                                             ok_j, c = smb_read_file(
-                                                server, share, f"{hv_metadata_base}/hypervisor_jobs/{f}",
-                                                username, password, domain
+                                                server,
+                                                share,
+                                                f"{hv_metadata_base}/hypervisor_jobs/{f}",
+                                                username,
+                                                password,
+                                                domain,
                                             )
                                             if ok_j:
                                                 try:
@@ -5421,8 +5460,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                                 # Read guests from hypervisor_backups
                                 ok_guests, guest_dirs = smb_list_files(
-                                    server, share, f"{hv_metadata_base}/hypervisor_backups",
-                                    username, password, domain
+                                    server, share, f"{hv_metadata_base}/hypervisor_backups", username, password, domain
                                 )
                                 guest_count = len(guest_dirs) if ok_guests else 0
                                 logger.debug(f"[SCAN] Found {guest_count} guest directories in {hv_folder}")
@@ -5436,8 +5474,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         if ok_g:
                                             try:
                                                 guest_data = json_module.loads(g_content)
-                                                vmid = guest_data.get('vmid')
-                                                name = guest_data.get('name')
+                                                vmid = guest_data.get("vmid")
+                                                name = guest_data.get("name")
                                                 logger.debug(f"[SCAN] Guest data: vmid={vmid}, name={name}")
                                                 guest_data["hypervisor_folder"] = hv_folder
                                                 # Count backup runs
@@ -5448,8 +5486,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                                 run_count = len([r for r in run_files if r.endswith(".json")])
                                                 guest_data["run_count"] = run_count if ok_runs else 0
                                                 all_guests.append(guest_data)
-                                                vmid = guest_data.get('vmid')
-                                                name = guest_data.get('name')
+                                                vmid = guest_data.get("vmid")
+                                                name = guest_data.get("name")
                                                 logger.info(
                                                     f"[SCAN] Added guest {vmid} ({name}) with {run_count} backups"
                                                 )
@@ -5462,41 +5500,44 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         # Also check for legacy metadata at root level (backwards compatibility)
                         metadata_base = f"{base_path}/.backer" if base_path else ".backer"
                         ok, content = smb_read_file(
-                            server, share, f"{metadata_base}/metadata.json",
-                            username, password, domain
+                            server, share, f"{metadata_base}/metadata.json", username, password, domain
                         )
                         if not ok:
                             logger.info(f"[SCAN] No metadata found in //{server}/{share}/{base_path}")
-                            return format_result({
-                                "initialized": False,
-                                "agents": [],
-                                "jobs": [],
-                                "snapshots": [],
-                                "summary": {"agent_count": 0, "job_count": 0, "snapshot_count": 0, "total_runs": 0},
-                                "scan_path": f"//{server}/{share}/{base_path}",
-                                "scan_note": "Scanned job subfolders for .backer/metadata.json - none found",
-                            })
+                            return format_result(
+                                {
+                                    "initialized": False,
+                                    "agents": [],
+                                    "jobs": [],
+                                    "snapshots": [],
+                                    "summary": {"agent_count": 0, "job_count": 0, "snapshot_count": 0, "total_runs": 0},
+                                    "scan_path": f"//{server}/{share}/{base_path}",
+                                    "scan_note": "Scanned job subfolders for .backer/metadata.json - none found",
+                                }
+                            )
 
                     task.progress = 90
-                    return format_result({
-                        "initialized": found_any_metadata,
-                        "agents": all_agents,
-                        "jobs": all_jobs,
-                        "snapshots": all_snapshots,
-                        "hypervisors": all_hypervisors,
-                        "guests": all_guests,
-                        "hypervisor_jobs": all_hypervisor_jobs,
-                        "summary": {
-                            "agent_count": len(all_agents),
-                            "job_count": len(all_jobs),
-                            "snapshot_count": len(all_snapshots),
-                            "hypervisor_count": len(all_hypervisors),
-                            "guest_count": len(all_guests),
-                            "hypervisor_job_count": len(all_hypervisor_jobs),
-                            "total_runs": sum(j.get("run_count", 0) for j in all_jobs),
-                            "total_vm_runs": sum(g.get("run_count", 0) for g in all_guests),
-                        },
-                    })
+                    return format_result(
+                        {
+                            "initialized": found_any_metadata,
+                            "agents": all_agents,
+                            "jobs": all_jobs,
+                            "snapshots": all_snapshots,
+                            "hypervisors": all_hypervisors,
+                            "guests": all_guests,
+                            "hypervisor_jobs": all_hypervisor_jobs,
+                            "summary": {
+                                "agent_count": len(all_agents),
+                                "job_count": len(all_jobs),
+                                "snapshot_count": len(all_snapshots),
+                                "hypervisor_count": len(all_hypervisors),
+                                "guest_count": len(all_guests),
+                                "hypervisor_job_count": len(all_hypervisor_jobs),
+                                "total_runs": sum(j.get("run_count", 0) for j in all_jobs),
+                                "total_vm_runs": sum(g.get("run_count", 0) for g in all_guests),
+                            },
+                        }
+                    )
 
                 elif repo_type == "nfs":
                     # NFS requires temporary mount to scan
@@ -5524,12 +5565,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             if any(err in error_msg for err in ("permission", "setuid", "user", "fstab")):
                                 nfs_target = f"{server}:{share}"
                                 mount_cmd = [
-                                    "sudo", "-n", "mount", "-t", "nfs",
-                                    "-o", nfs_opts, nfs_target, str(temp_mount)
+                                    "sudo",
+                                    "-n",
+                                    "mount",
+                                    "-t",
+                                    "nfs",
+                                    "-o",
+                                    nfs_opts,
+                                    nfs_target,
+                                    str(temp_mount),
                                 ]
-                                result = subprocess.run(
-                                    mount_cmd, capture_output=True, text=True, timeout=30
-                                )
+                                result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=30)
 
                         if result.returncode != 0:
                             return {
@@ -5573,15 +5619,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         # Always cleanup: unmount and remove temp dir
                         if mounted:
                             try:
-                                subprocess.run(
-                                    ["umount", str(temp_mount)],
-                                    capture_output=True, timeout=10
-                                )
+                                subprocess.run(["umount", str(temp_mount)], capture_output=True, timeout=10)
                             except Exception:
                                 try:
                                     subprocess.run(
-                                        ["sudo", "-n", "umount", str(temp_mount)],
-                                        capture_output=True, timeout=10
+                                        ["sudo", "-n", "umount", str(temp_mount)], capture_output=True, timeout=10
                                     )
                                 except Exception:
                                     pass
@@ -5615,6 +5657,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         return {"task_id": task.id, "status": "scanning", "message": "Repository scan started"}
+
     @app.post("/api/v1/repositories/{repo_id}/import")
     def import_repository_metadata_endpoint(
         repo_id: str,
@@ -5732,14 +5775,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Helper function to import from a job folder's .backer directory
                 def import_from_metadata_base(metadata_base: str, job_folder: str) -> None:
                     # Read and import jobs from this metadata location
-                    ok, job_dirs = smb_list_files(
-                        server, share, f"{metadata_base}/jobs", username, password, domain
-                    )
+                    ok, job_dirs = smb_list_files(server, share, f"{metadata_base}/jobs", username, password, domain)
                     if ok:
                         for job_dir in job_dirs:
                             ok2, job_content = smb_read_file(
-                                server, share, f"{metadata_base}/jobs/{job_dir}/config.json",
-                                username, password, domain
+                                server, share, f"{metadata_base}/jobs/{job_dir}/config.json", username, password, domain
                             )
                             if ok2:
                                 try:
@@ -5765,17 +5805,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                                             # Import job runs
                                             ok3, run_files = smb_list_files(
-                                                server, share,
+                                                server,
+                                                share,
                                                 f"{metadata_base}/jobs/{job_dir}/runs",
-                                                username, password, domain
+                                                username,
+                                                password,
+                                                domain,
                                             )
                                             if ok3:
                                                 for run_file in run_files:
                                                     if run_file.endswith(".json"):
                                                         ok4, run_content = smb_read_file(
-                                                            server, share,
+                                                            server,
+                                                            share,
                                                             f"{metadata_base}/jobs/{job_dir}/runs/{run_file}",
-                                                            username, password, domain
+                                                            username,
+                                                            password,
+                                                            domain,
                                                         )
                                                         if ok4:
                                                             try:
@@ -5826,8 +5872,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         for f in agent_files:
                             if f.endswith(".json"):
                                 ok2, c = smb_read_file(
-                                    server, share, f"{metadata_base}/agents/{f}",
-                                    username, password, domain
+                                    server, share, f"{metadata_base}/agents/{f}", username, password, domain
                                 )
                                 if ok2:
                                     try:
@@ -5844,8 +5889,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # First try legacy structure: root/.backer/
                 legacy_metadata_base = f"{base_path}/.backer" if base_path else ".backer"
                 ok, _ = smb_read_file(
-                    server, share, f"{legacy_metadata_base}/metadata.json",
-                    username, password, domain
+                    server, share, f"{legacy_metadata_base}/metadata.json", username, password, domain
                 )
                 if ok:
                     found_any_metadata = True
@@ -5854,20 +5898,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 # Scan Agents/ folder for job-specific metadata (new structure)
                 agents_path = f"{base_path}/Agents" if base_path else "Agents"
-                ok, agent_folders = smb_list_files(
-                    server, share, agents_path, username, password, domain
-                )
+                ok, agent_folders = smb_list_files(server, share, agents_path, username, password, domain)
                 if ok:
                     for job_folder in agent_folders:
-                        if job_folder.startswith('.'):
+                        if job_folder.startswith("."):
                             continue
                         folder_path = f"{agents_path}/{job_folder}"
                         metadata_base = f"{folder_path}/.backer"
 
                         # Check if this folder has metadata
                         ok2, _ = smb_read_file(
-                            server, share, f"{metadata_base}/metadata.json",
-                            username, password, domain
+                            server, share, f"{metadata_base}/metadata.json", username, password, domain
                         )
                         if ok2:
                             found_any_metadata = True
@@ -5951,7 +5992,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Build auth for smbclient
                 auth_parts = []
                 if username:
-                    pw = password or ''
+                    pw = password or ""
                     if domain:
                         auth_parts.extend(["-U", f"{domain}\\{username}%{pw}"])
                     else:
@@ -5986,8 +6027,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             continue
 
                         ok3, job_content = smb_read_file(
-                            server, share, f"{jobs_path}/{job_file}",
-                            username, password, domain
+                            server, share, f"{jobs_path}/{job_file}", username, password, domain
                         )
 
                         if not ok3:
@@ -6077,8 +6117,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 try:
                     nfs_export = share or repo.get("path", "")
                     mount_cmd = [
-                        "sudo", "-n", "mount", "-t", "nfs",
-                        "-o", "soft,timeo=50,retrans=2,ro",
+                        "sudo",
+                        "-n",
+                        "mount",
+                        "-t",
+                        "nfs",
+                        "-o",
+                        "soft,timeo=50,retrans=2,ro",
                         f"{server}:{nfs_export}",
                         mount_point,
                     ]
@@ -6339,8 +6384,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Only SMB/NFS repositories support hypervisor backups
         if repo_type not in ("smb", "nfs", "local"):
             raise HTTPException(
-                status_code=400,
-                detail=f"Repository type '{repo_type}' does not support hypervisor backups"
+                status_code=400, detail=f"Repository type '{repo_type}' does not support hypervisor backups"
             )
 
         try:
@@ -6365,20 +6409,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     raise HTTPException(status_code=400, detail="Local repository path not configured")
             elif repo_type in ("smb", "nfs"):
                 # For SMB/NFS, use subpath only (SMB client will be used on Linux)
-                if sys.platform == 'win32':
+                if sys.platform == "win32":
                     # Windows can use UNC paths
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
-                        subpath_windows = subpath.replace('/', '\\')
+                        subpath_windows = subpath.replace("/", "\\")
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     # Linux will use SMB client - just pass subpath
                     repo_path = subpath or "."
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported repository type: {repo_type}"
-                )
+                raise HTTPException(status_code=400, detail=f"Unsupported repository type: {repo_type}")
 
             # Initialize discovery service with SMB credentials
             discovery = HypervisorDiscoveryService(
@@ -6389,26 +6430,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 share=share,
                 username=username,
                 password=password,
-                domain=domain
+                domain=domain,
             )
 
             # Discover orphaned backups
             result = discovery.discover_orphaned_backups()
 
-            return {
-                "success": True,
-                "repository_id": repo_id,
-                **result
-            }
+            return {"success": True, "repository_id": repo_id, **result}
 
         except HTTPException:
             raise
         except Exception as e:
             logger.exception(f"Failed to discover orphaned backups in repository {repo_id}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Discovery failed: {str(e)}"
-            )
+            raise HTTPException(status_code=500, detail=f"Discovery failed: {str(e)}")
 
     @app.post("/api/v1/hypervisors/{hypervisor_id}/adopt-backups")
     async def adopt_orphaned_backups(
@@ -6461,8 +6495,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Only SMB/NFS/local repositories support hypervisor backups
         if repo_type not in ("smb", "nfs", "local"):
             raise HTTPException(
-                status_code=400,
-                detail=f"Repository type '{repo_type}' does not support hypervisor backups"
+                status_code=400, detail=f"Repository type '{repo_type}' does not support hypervisor backups"
             )
 
         try:
@@ -6487,20 +6520,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     raise HTTPException(status_code=400, detail="Local repository path not configured")
             elif repo_type in ("smb", "nfs"):
                 # For SMB/NFS, use subpath only (SMB client will be used on Linux)
-                if sys.platform == 'win32':
+                if sys.platform == "win32":
                     # Windows can use UNC paths
                     repo_path = f"\\\\{server}\\{share}"
                     if subpath:
-                        subpath_windows = subpath.replace('/', '\\')
+                        subpath_windows = subpath.replace("/", "\\")
                         repo_path = f"{repo_path}\\{subpath_windows}"
                 else:
                     # Linux will use SMB client - just pass subpath
                     repo_path = subpath or "."
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported repository type: {repo_type}"
-                )
+                raise HTTPException(status_code=400, detail=f"Unsupported repository type: {repo_type}")
 
             # Initialize discovery service with SMB credentials
             discovery = HypervisorDiscoveryService(
@@ -6511,7 +6541,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 share=share,
                 username=username,
                 password=password,
-                domain=domain
+                domain=domain,
             )
 
             # Adopt backups
@@ -6520,7 +6550,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 new_hypervisor_name=hypervisor["name"],
                 guest_vmids=guest_vmids,
                 import_jobs=import_jobs,
-                repository_id=repository_id
+                repository_id=repository_id,
             )
 
             logger.info(
@@ -6528,21 +6558,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 f"({hypervisor_id}) from repository {repository_id}"
             )
 
-            return {
-                "success": True,
-                "hypervisor_id": hypervisor_id,
-                "repository_id": repository_id,
-                **result
-            }
+            return {"success": True, "hypervisor_id": hypervisor_id, "repository_id": repository_id, **result}
 
         except HTTPException:
             raise
         except Exception as e:
             logger.exception(f"Failed to adopt backups to hypervisor {hypervisor_id}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Adoption failed: {str(e)}"
-            )
+            raise HTTPException(status_code=500, detail=f"Adoption failed: {str(e)}")
 
     @app.post("/api/v1/repositories/{repo_id}/wipe")
     def wipe_repository(
@@ -6673,8 +6695,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Start from the repository's subpath
                 base_path = subpath.strip("/") if subpath else ""
                 logger.info(
-                    f"Starting SMB wipe for repo {repo_id}: server={server}, "
-                    f"share={share}, base_path='{base_path}'"
+                    f"Starting SMB wipe for repo {repo_id}: server={server}, share={share}, base_path='{base_path}'"
                 )
                 deleted_items = delete_path_recursive(base_path)
 
@@ -6718,9 +6739,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 # Mount the NFS share with read-write access
                 mount_cmd = [
-                    "sudo", "-n", "mount", "-t", "nfs",
-                    "-o", "soft,timeo=50,retrans=2,rw",
-                    nfs_source, mount_point,
+                    "sudo",
+                    "-n",
+                    "mount",
+                    "-t",
+                    "nfs",
+                    "-o",
+                    "soft,timeo=50,retrans=2,rw",
+                    nfs_source,
+                    mount_point,
                 ]
                 result = subprocess.run(mount_cmd, capture_output=True, text=True, timeout=60)
                 if result.returncode != 0:
@@ -6797,13 +6824,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                 try:
                                     if item.is_dir():
                                         subprocess.run(
-                                            ["sudo", "-n", "rm", "-rf", str(item)],
-                                            capture_output=True, timeout=30
+                                            ["sudo", "-n", "rm", "-rf", str(item)], capture_output=True, timeout=30
                                         )
                                     else:
                                         subprocess.run(
-                                            ["sudo", "-n", "rm", "-f", str(item)],
-                                            capture_output=True, timeout=30
+                                            ["sudo", "-n", "rm", "-f", str(item)], capture_output=True, timeout=30
                                         )
                                     count += 1
                                 except Exception:
@@ -6844,16 +6869,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if mounted and mount_point:
                     task.message = "Unmounting NFS share..."
                     try:
-                        subprocess.run(
-                            ["sudo", "-n", "umount", mount_point],
-                            capture_output=True, timeout=30
-                        )
+                        subprocess.run(["sudo", "-n", "umount", mount_point], capture_output=True, timeout=30)
                     except Exception:
                         try:
-                            subprocess.run(
-                                ["sudo", "-n", "umount", "-l", mount_point],
-                                capture_output=True, timeout=10
-                            )
+                            subprocess.run(["sudo", "-n", "umount", "-l", mount_point], capture_output=True, timeout=10)
                         except Exception:
                             pass
 
@@ -7047,6 +7066,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 if hypervisor_type == "hyperv-cluster":
                     from backer.hypervisors.hyperv import HyperVClusterAPI
+
                     cluster_name = body.get("cluster_name")
                     api = HyperVClusterAPI(
                         host=host,
@@ -7192,11 +7212,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 repository = storage.get_repository(repository_id)
                 if repository:
                     # Make copies to avoid threading issues
-                    cleanup_data.append({
-                        "job": dict(job),
-                        "repository": dict(repository),
-                        "repository_id": repository_id,
-                    })
+                    cleanup_data.append(
+                        {
+                            "job": dict(job),
+                            "repository": dict(repository),
+                            "repository_id": repository_id,
+                        }
+                    )
                     # Track unique repositories for folder cleanup
                     if repository_id not in repos_to_cleanup:
                         repos_to_cleanup[repository_id] = dict(repository)
@@ -7350,6 +7372,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             if hypervisor_type == "hyperv-cluster":
                 from backer.hypervisors.hyperv import HyperVClusterAPI
+
                 cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
                 api = HyperVClusterAPI(
                     host=hypervisor["host"],
@@ -7376,9 +7399,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         elif hypervisor_type == "proxmox":
             auth_method = (
-                ProxmoxAuthMethod.TOKEN
-                if hypervisor["auth_method"] == "token"
-                else ProxmoxAuthMethod.PASSWORD
+                ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
             )
 
             api = ProxmoxAPI(
@@ -7475,6 +7496,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 if hypervisor_type == "hyperv-cluster":
                     from backer.hypervisors.hyperv import HyperVClusterAPI, HyperVClusterBackupManager
+
                     cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
                     api = HyperVClusterAPI(
                         host=hypervisor["host"],
@@ -7503,9 +7525,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             elif hypervisor_type == "proxmox":
                 auth_method = (
-                    ProxmoxAuthMethod.TOKEN
-                    if hypervisor["auth_method"] == "token"
-                    else ProxmoxAuthMethod.PASSWORD
+                    ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
                 )
 
                 api = ProxmoxAPI(
@@ -7616,10 +7636,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         hypervisor_type = hypervisor.get("hypervisor_type")
         if hypervisor_type != "hyperv-cluster":
-            raise HTTPException(
-                status_code=400,
-                detail="This endpoint is only for Hyper-V cluster hypervisors"
-            )
+            raise HTTPException(status_code=400, detail="This endpoint is only for Hyper-V cluster hypervisors")
 
         password = storage.get_hypervisor_password(hypervisor_id)
         if not password:
@@ -7678,10 +7695,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         port = request.get("port", 5985)
 
         if not all([host, username, password]):
-            raise HTTPException(
-                status_code=400,
-                detail="Missing required fields: host, username, password"
-            )
+            raise HTTPException(status_code=400, detail="Missing required fields: host, username, password")
 
         # If cluster_name is not provided, it will be auto-detected by HyperVClusterAPI
         try:
@@ -7743,60 +7757,64 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 # Add array as main storage
                 capacity = array_status.get("capacity", {}).get("disks", {})
-                storages.append({
-                    "storage": "array",
-                    "type": "array",
-                    "node": "unraid",
-                    "content": "images,backup",
-                    "path": "/mnt/user",
-                    "active": array_status.get("state") == "STARTED",
-                    "enabled": True,
-                    "shared": True,
-                    "total": capacity.get("total", 0),
-                    "used": capacity.get("used", 0),
-                    "avail": capacity.get("free", 0),
-                })
+                storages.append(
+                    {
+                        "storage": "array",
+                        "type": "array",
+                        "node": "unraid",
+                        "content": "images,backup",
+                        "path": "/mnt/user",
+                        "active": array_status.get("state") == "STARTED",
+                        "enabled": True,
+                        "shared": True,
+                        "total": capacity.get("total", 0),
+                        "used": capacity.get("used", 0),
+                        "avail": capacity.get("free", 0),
+                    }
+                )
 
                 # Add shares as storage locations when supported by the API
                 if api.supports_shares:
                     shares = api.list_shares()
                     if api.supports_shares:
                         for share in shares:
-                            storages.append({
-                                "storage": f"share:{share.name}",
-                                "type": "share",
-                                "node": "unraid",
-                                "content": "backup",
-                                "path": f"/mnt/user/{share.name}",
-                                "active": True,
-                                "enabled": True,
-                                "shared": True,
-                                "total": share.total_bytes,
-                                "used": share.used_bytes,
-                                "avail": share.free_bytes,
-                            })
+                            storages.append(
+                                {
+                                    "storage": f"share:{share.name}",
+                                    "type": "share",
+                                    "node": "unraid",
+                                    "content": "backup",
+                                    "path": f"/mnt/user/{share.name}",
+                                    "active": True,
+                                    "enabled": True,
+                                    "shared": True,
+                                    "total": share.total_bytes,
+                                    "used": share.used_bytes,
+                                    "avail": share.free_bytes,
+                                }
+                            )
                 if not api.supports_shares:
-                    storages.append({
-                        "storage": "shares-unavailable",
-                        "type": "info",
-                        "node": "unraid",
-                        "content": "Shares unavailable",
-                        "path": "",
-                        "active": False,
-                        "enabled": False,
-                        "shared": True,
-                        "total": 0,
-                        "used": 0,
-                        "avail": 0,
-                    })
+                    storages.append(
+                        {
+                            "storage": "shares-unavailable",
+                            "type": "info",
+                            "node": "unraid",
+                            "content": "Shares unavailable",
+                            "path": "",
+                            "active": False,
+                            "enabled": False,
+                            "shared": True,
+                            "total": 0,
+                            "used": 0,
+                            "avail": 0,
+                        }
+                    )
 
                 return storages
 
             elif hypervisor_type == "proxmox":
                 auth_method = (
-                    ProxmoxAuthMethod.TOKEN
-                    if hypervisor["auth_method"] == "token"
-                    else ProxmoxAuthMethod.PASSWORD
+                    ProxmoxAuthMethod.TOKEN if hypervisor["auth_method"] == "token" else ProxmoxAuthMethod.PASSWORD
                 )
 
                 api = ProxmoxAPI(
@@ -7913,7 +7931,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=400,
                 detail=f"Repository type '{repo_type}' is not supported for hypervisor backups. "
-                       "Only SMB or NFS repositories can be used."
+                "Only SMB or NFS repositories can be used.",
             )
 
         # Check for duplicate name
@@ -7984,7 +8002,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Repository type '{repo_type}' is not supported for hypervisor backups. "
-                           "Only SMB or NFS repositories can be used."
+                    "Only SMB or NFS repositories can be used.",
                 )
             update_kwargs["repository_id"] = new_repo_id
         # Accept both mode and backup_mode
@@ -8132,7 +8150,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # No repository data to clean up
         return {"id": job_id, "status": "deleted"}
 
-
     def _auto_import_hypervisor_jobs(
         storage: Storage,
         repository: dict[str, Any],
@@ -8167,8 +8184,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Check if we already have jobs for this hypervisor+repo combination
         existing_jobs = storage.list_hypervisor_jobs()
         has_existing = any(
-            j.get("hypervisor_id") == hypervisor_id and j.get("repository_id") == repository_id
-            for j in existing_jobs
+            j.get("hypervisor_id") == hypervisor_id and j.get("repository_id") == repository_id for j in existing_jobs
         )
         if has_existing:
             # Already have jobs, skip auto-import
@@ -8193,14 +8209,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 domain = repository.get("domain")
 
                 # Path to .backer/ in the hypervisor folder
-                backer_path = f"{subpath}/Hypervisors/{safe_hv_name}/.backer" if subpath else \
-                              f"Hypervisors/{safe_hv_name}/.backer"
+                backer_path = (
+                    f"{subpath}/Hypervisors/{safe_hv_name}/.backer"
+                    if subpath
+                    else f"Hypervisors/{safe_hv_name}/.backer"
+                )
                 jobs_path = f"{backer_path}/hypervisor_jobs"
 
                 # Get list of deleted jobs to skip
-                deleted_job_ids = _get_deleted_job_ids_smb(
-                    server, share, backer_path, username, password, domain
-                )
+                deleted_job_ids = _get_deleted_job_ids_smb(server, share, backer_path, username, password, domain)
                 if deleted_job_ids:
                     logger.debug(f"Found {len(deleted_job_ids)} deleted jobs to skip")
 
@@ -8214,8 +8231,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         continue
 
                     ok2, job_content = smb_read_file(
-                        server, share, f"{jobs_path}/{job_file}",
-                        username, password, domain
+                        server, share, f"{jobs_path}/{job_file}", username, password, domain
                     )
                     if not ok2:
                         continue
@@ -8223,8 +8239,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     try:
                         job_data = json_module.loads(job_content)
                         imported_count += _import_single_job(
-                            storage, job_data, hypervisor_id, repository_id, hv_name, hv_host,
-                            deleted_job_ids
+                            storage, job_data, hypervisor_id, repository_id, hv_name, hv_host, deleted_job_ids
                         )
                     except (json_module.JSONDecodeError, Exception) as e:
                         logger.warning(f"Failed to import job from {job_file}: {e}")
@@ -8236,8 +8251,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                 try:
                     mount_cmd = [
-                        "sudo", "-n", "mount", "-t", "nfs",
-                        "-o", "soft,timeo=50,retrans=2,ro",
+                        "sudo",
+                        "-n",
+                        "mount",
+                        "-t",
+                        "nfs",
+                        "-o",
+                        "soft,timeo=50,retrans=2,ro",
                         f"{server}:{export}",
                         mount_point,
                     ]
@@ -8265,8 +8285,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         try:
                             job_data = json_module.loads(job_file.read_text())
                             imported_count += _import_single_job(
-                                storage, job_data, hypervisor_id, repository_id, hv_name, hv_host,
-                                deleted_job_ids
+                                storage, job_data, hypervisor_id, repository_id, hv_name, hv_host, deleted_job_ids
                             )
                         except (json_module.JSONDecodeError, Exception) as e:
                             logger.warning(f"Failed to import job from {job_file.name}: {e}")
@@ -8432,9 +8451,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     return
 
                 logger.info(f"[HYPERV CLEANUP] Cleaning up Hyper-V backup folders for job {job.get('name')}")
-                _cleanup_hyperv_smb_job_files(
-                    server, share, username, repo_password, domain, filenames_to_delete
-                )
+                _cleanup_hyperv_smb_job_files(server, share, username, repo_password, domain, filenames_to_delete)
             else:
                 logger.warning(f"Hyper-V backup cleanup not supported for repo type: {repo_type}")
             return
@@ -8450,9 +8467,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             dump_path = "dump"  # Proxmox creates dump/ at the NFS export root
             logger.info(f"NFS cleanup: {server}:{export}/{dump_path}")
-            _cleanup_nfs_job_files(
-                server, export, dump_path, filenames_to_delete, timestamp_fallback
-            )
+            _cleanup_nfs_job_files(server, export, dump_path, filenames_to_delete, timestamp_fallback)
 
         elif repo_type == "smb":
             # SMB storage: Proxmox mounts at {share}/{subdir}/Hypervisors/{hv_name}
@@ -8476,8 +8491,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             logger.info(f"SMB cleanup: //{server}/{share}/{full_dump_path}")
             _cleanup_smb_job_files(
-                server, share, username, repo_password, domain, full_dump_path,
-                filenames_to_delete, timestamp_fallback
+                server, share, username, repo_password, domain, full_dump_path, filenames_to_delete, timestamp_fallback
             )
         else:
             logger.warning(f"Repository cleanup not supported for type: {repo_type}")
@@ -8507,8 +8521,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         runs = storage.get_hypervisor_runs(job_id=job_id, limit=10000)
         run_ids = [(r.get("guest_id"), r.get("id")) for r in runs if r.get("id")]
 
-        logger.info(f"[METADATA CLEANUP] Cleaning up metadata for job '{job.get('name')}' "
-                    f"({len(run_ids)} run records)")
+        logger.info(f"[METADATA CLEANUP] Cleaning up metadata for job '{job.get('name')}' ({len(run_ids)} run records)")
 
         if repo_type == "nfs":
             export = repository.get("share", "")
@@ -8528,9 +8541,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 logger.warning("Cannot clean up SMB metadata: missing server or share")
                 return
 
-            _cleanup_smb_job_metadata(
-                server, share, username, repo_password, domain, subdir, hv_name, job_id, run_ids
-            )
+            _cleanup_smb_job_metadata(server, share, username, repo_password, domain, subdir, hv_name, job_id, run_ids)
         else:
             logger.warning(f"Metadata cleanup not supported for type: {repo_type}")
 
@@ -8561,10 +8572,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return
 
             # Add the deletion record
-            deleted_jobs.setdefault("jobs", []).append({
-                "job_id": job_id,
-                "deleted_at": tz.get_now().isoformat(),
-            })
+            deleted_jobs.setdefault("jobs", []).append(
+                {
+                    "job_id": job_id,
+                    "deleted_at": tz.get_now().isoformat(),
+                }
+            )
 
             # Write back
             deleted_file.parent.mkdir(parents=True, exist_ok=True)
@@ -8617,10 +8630,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return
 
             # Add the deletion record
-            deleted_jobs.setdefault("jobs", []).append({
-                "job_id": job_id,
-                "deleted_at": tz.get_now().isoformat(),
-            })
+            deleted_jobs.setdefault("jobs", []).append(
+                {
+                    "job_id": job_id,
+                    "deleted_at": tz.get_now().isoformat(),
+                }
+            )
 
             # Write to temp file and upload
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -8861,8 +8876,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         logger.info(f"[NFS CLEANUP] Starting cleanup for {total_files} backup(s)")
         logger.info(f"[NFS CLEANUP] Target: {server}:{export}/{dump_path}")
         logger.info(
-            f"[NFS CLEANUP] Direct filenames: {len(filenames_to_delete)}, "
-            f"Timestamp fallback: {len(timestamp_fallback)}"
+            f"[NFS CLEANUP] Direct filenames: {len(filenames_to_delete)}, Timestamp fallback: {len(timestamp_fallback)}"
         )
 
         mount_point = None
@@ -8952,7 +8966,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         match = re.match(
                             rf"vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
                             rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?$",
-                            entry.name
+                            entry.name,
                         )
                         if match:
                             file_date = match.group(2)
@@ -9029,9 +9043,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             """Run an smbclient command and return success status and output."""
             full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
             try:
-                result = subprocess.run(
-                    full_cmd, capture_output=True, timeout=timeout, text=True
-                )
+                result = subprocess.run(full_cmd, capture_output=True, timeout=timeout, text=True)
                 return result.returncode == 0, result.stderr or result.stdout
             except subprocess.TimeoutExpired:
                 return False, "Command timed out"
@@ -9051,9 +9063,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return False
 
             # List directory contents using SMBBrowser for proper file type detection
-            success, entries = SMBBrowser.list_directory(
-                server, share, smb_path, username, password, domain
-            )
+            success, entries = SMBBrowser.list_directory(server, share, smb_path, username, password, domain)
             if not success:
                 logger.debug(f"[HYPERV CLEANUP] Could not list {smb_path}: {entries}")
                 return False
@@ -9087,12 +9097,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Try with forward slashes
                 unc_prefix_fwd = f"//{server}/{share}"
                 if backup_path.startswith(unc_prefix_fwd):
-                    smb_path = backup_path[len(unc_prefix_fwd):].lstrip("/\\")
+                    smb_path = backup_path[len(unc_prefix_fwd) :].lstrip("/\\")
                 else:
                     logger.warning(f"[HYPERV CLEANUP] Path doesn't match share: {backup_path}")
                     continue
             else:
-                smb_path = backup_path[len(unc_prefix):].lstrip("/\\")
+                smb_path = backup_path[len(unc_prefix) :].lstrip("/\\")
 
             # Normalize path separators
             smb_path = smb_path.replace("\\", "/")
@@ -9158,9 +9168,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             """Run an smbclient command and return success status and output."""
             full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
             try:
-                result = subprocess.run(
-                    full_cmd, capture_output=True, timeout=60, text=True
-                )
+                result = subprocess.run(full_cmd, capture_output=True, timeout=60, text=True)
                 return result.returncode == 0, result.stderr or result.stdout
             except subprocess.TimeoutExpired:
                 return False, "Command timed out"
@@ -9200,8 +9208,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         total_files = len(filenames_to_delete) + len(timestamp_fallback)
         logger.info(f"[SMB CLEANUP] Starting cleanup for {total_files} backup(s) in {dump_path}")
         logger.info(
-            f"[SMB CLEANUP] Direct filenames: {len(filenames_to_delete)}, "
-            f"Timestamp fallback: {len(timestamp_fallback)}"
+            f"[SMB CLEANUP] Direct filenames: {len(filenames_to_delete)}, Timestamp fallback: {len(timestamp_fallback)}"
         )
 
         deleted_count = 0
@@ -9226,7 +9233,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         match = re.search(
                             rf"(vzdump-(qemu|lxc)-{guest_id}-(\d{{4}}_\d{{2}}_\d{{2}})-"
                             rf"(\d{{2}}_\d{{2}}_\d{{2}})\.(vma|tar)(?:\.(zst|gz|lzo))?)",
-                            line
+                            line,
                         )
                         if match:
                             filename = match.group(1)
@@ -9298,9 +9305,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             else:
                 full_hv_path = hv_folder
 
-            _cleanup_smb_hypervisor_folder(
-                server, share, username, repo_password, domain, full_hv_path
-            )
+            _cleanup_smb_hypervisor_folder(server, share, username, repo_password, domain, full_hv_path)
         else:
             logger.warning(f"Hypervisor folder cleanup not supported for type: {repo_type}")
 
@@ -9345,10 +9350,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 for job_file in jobs_dir.glob("*.json"):
                     try:
                         import json
+
                         data = json.loads(job_file.read_text())
                         # Check if this job belongs to the hypervisor being deleted
-                        if data.get("hypervisor_id") == hypervisor_name or \
-                           data.get("hypervisor_name") == hypervisor_name:
+                        if (
+                            data.get("hypervisor_id") == hypervisor_name
+                            or data.get("hypervisor_name") == hypervisor_name
+                        ):
                             job_file.unlink()
                             logger.info(f"[NFS HV CLEANUP] Deleted job metadata: {job_file.name}")
                     except Exception as e:
@@ -9402,9 +9410,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             """Run an smbclient command and return success status and output."""
             full_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", cmd]
             try:
-                result = subprocess.run(
-                    full_cmd, capture_output=True, timeout=60, text=True
-                )
+                result = subprocess.run(full_cmd, capture_output=True, timeout=60, text=True)
                 return result.returncode == 0, result.stderr or result.stdout
             except subprocess.TimeoutExpired:
                 return False, "Command timed out"
@@ -9484,8 +9490,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         try:
             # Mount the NFS export
             mount_cmd = [
-                "sudo", "-n", "mount", "-t", "nfs",
-                "-o", "soft,timeo=50,retrans=2",
+                "sudo",
+                "-n",
+                "mount",
+                "-t",
+                "nfs",
+                "-o",
+                "soft,timeo=50,retrans=2",
                 f"{server}:{export}",
                 mount_point,
             ]
@@ -9543,6 +9554,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # Remove temp mount point
             try:
                 import os
+
                 os.rmdir(mount_point)
             except Exception:
                 pass
@@ -9614,10 +9626,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             # Upload file
             remote_file = f"{remote_base}/.backer/{rel_path_str}"
-            put_cmd = [
-                "smbclient", f"//{server}/{share}", *auth_parts,
-                "-c", f"put {local_file} {remote_file}"
-            ]
+            put_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"put {local_file} {remote_file}"]
             result = subprocess.run(put_cmd, capture_output=True, timeout=30)
             if result.returncode != 0:
                 logger.debug(f"smbclient put failed for {remote_file}: {result.stderr.decode()}")
@@ -9826,7 +9835,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Repository type '{repo_type}' is not supported for Hyper-V backups. "
-                           "Use an SMB repository so the Hyper-V host can export directly to it."
+                    "Use an SMB repository so the Hyper-V host can export directly to it.",
                 )
 
             # Trigger backup in background via scheduler mechanism
@@ -9854,8 +9863,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if repo_type != "smb":
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Repository type '{repo_type}' is not supported for Unraid backups. "
-                           "Use an SMB repository."
+                    detail=f"Repository type '{repo_type}' is not supported for Unraid backups. Use an SMB repository.",
                 )
 
             # Trigger backup in background via scheduler mechanism
@@ -9882,7 +9890,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=400,
                 detail=f"Repository type '{repo_type}' is not supported for hypervisor backups. "
-                       "Use an SMB or NFS repository so Proxmox can write directly to it."
+                "Use an SMB or NFS repository so Proxmox can write directly to it.",
             )
 
         # Get credentials
@@ -9977,7 +9985,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 return {"run_id": run_id, "total": 0, "success": 0, "failed": 0, "results": []}
 
             for i, vmid in enumerate(guest_ids):
-                logger.info(f"=== Processing guest {i+1}/{total}: VMID {vmid} ===")
+                logger.info(f"=== Processing guest {i + 1}/{total}: VMID {vmid} ===")
                 task.progress = int((i / total) * 100)
                 guest = guest_map.get(vmid)
                 guest_name = guest.name if guest else f"VM {vmid}"
@@ -10020,6 +10028,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # Progress callback to update task with vzdump progress
                     def progress_callback(status: Any, log_lines: list[str]) -> None:
                         import re
+
                         for line in log_lines:
                             # Parse vzdump progress: "INFO: 5% (1.2G of 24G)"
                             match = re.search(r"(\d+)%", line)
@@ -10142,8 +10151,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         task_manager = get_task_manager()
         guest_count = len(job.get("guest_ids") or [])
-        hv_name = hypervisor['name']
-        repo_name = repository['name']
+        hv_name = hypervisor["name"]
+        repo_name = repository["name"]
         if guest_count:
             desc = f"Backing up {guest_count} guests from {hv_name} to {repo_name}"
         else:
@@ -10288,10 +10297,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return result
         except Exception as e:
             logger.error(f"Error setting up incremental tracking for VM {vmid}: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to set up incremental tracking: {e}"
-            )
+            raise HTTPException(status_code=500, detail=f"Failed to set up incremental tracking: {e}")
 
     @app.delete("/api/v1/hypervisors/{hypervisor_id}/incremental-cleanup/{vmid}")
     def cleanup_vm_incremental_tracking(
@@ -10413,9 +10419,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 backup_base_path = f"{backup_base_path}\\{smb_path_win}"
 
             # Add hypervisor subfolder
-            safe_hv_name = "".join(
-                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
-            )
+            safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
             backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
 
             # Get SMB credentials from repository
@@ -10448,20 +10452,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     except ValueError:
                         pass
 
-                result.append({
-                    "filename": f"{vm_name}/{timestamp}",
-                    "volid": backup.get("path", ""),
-                    "vmid": vm_name,  # Hyper-V uses VM name as ID
-                    "vm_name": vm_name,
-                    "guest_type": "vm",
-                    "ctime": ctime,
-                    "size": backup.get("size_bytes", 0),
-                    "format": "vmcx",
-                    "node": hypervisor.get("name", "unknown"),
-                    "path": backup.get("path", ""),
-                    "timestamp": timestamp,
-                    "vmcx_file": backup.get("vmcx_file", ""),
-                })
+                result.append(
+                    {
+                        "filename": f"{vm_name}/{timestamp}",
+                        "volid": backup.get("path", ""),
+                        "vmid": vm_name,  # Hyper-V uses VM name as ID
+                        "vm_name": vm_name,
+                        "guest_type": "vm",
+                        "ctime": ctime,
+                        "size": backup.get("size_bytes", 0),
+                        "format": "vmcx",
+                        "node": hypervisor.get("name", "unknown"),
+                        "path": backup.get("path", ""),
+                        "timestamp": timestamp,
+                        "vmcx_file": backup.get("vmcx_file", ""),
+                    }
+                )
 
             # Filter by job's guest_ids if specified (for Hyper-V, these are VM names or GUIDs)
             logger.info(f"Before filter: {len(result)} backups, job_guest_ids={job_guest_ids}")
@@ -10499,11 +10505,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     vmid = str(b.get("vmid", "")).lower() if b.get("vmid") else ""
                     # Also check vmcx_file which contains the VM GUID
                     vmcx = b.get("vmcx_file", "").lower().replace(".vmcx", "")
-                    return (
-                        vm_name in expanded_ids or
-                        vmid in expanded_ids or
-                        vmcx in expanded_ids
-                    )
+                    return vm_name in expanded_ids or vmid in expanded_ids or vmcx in expanded_ids
 
                 result = [b for b in result if backup_matches(b)]
                 logger.info(f"After filter: {len(result)} backups")
@@ -10745,7 +10747,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Build smbclient auth
         auth_parts = []
         if username:
-            pw = repo_password or ''
+            pw = repo_password or ""
             if domain:
                 auth_parts.extend(["-U", f"{domain}\\{username}%{pw}"])
             else:
@@ -10757,10 +10759,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         dump_path = f"{remote_base}/dump"
         logger.debug(f"Listing backups from //{server}/{share}/{dump_path}")
 
-        list_cmd = [
-            "smbclient", f"//{server}/{share}", *auth_parts,
-            "-c", f"ls {dump_path}/vzdump-*"
-        ]
+        list_cmd = ["smbclient", f"//{server}/{share}", *auth_parts, "-c", f"ls {dump_path}/vzdump-*"]
 
         try:
             result = subprocess.run(list_cmd, capture_output=True, timeout=30, text=True)
@@ -10776,6 +10775,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Format: "  vzdump-qemu-100-2025_12_06-10_30_00.vma.zst      A   123456789  Fri Dec  6 10:35:00 2025"
                 # Or:     "  vzdump-qemu-100-2025_12_06-10_30_00.vma.zst  N  123456789  Fri Dec  6 10:35:00 2025"
                 import re
+
                 for line in result.stdout.split("\n"):
                     # Skip empty lines and summary lines
                     if not line.strip() or "blocks of size" in line or "blocks available" in line:
@@ -10786,7 +10786,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # QEMU VMs use .vma extension, LXC containers use .tar extension
                     vzdump_match = re.search(
                         r"(vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.(vma|tar)(?:\.(zst|gz|lzo))?)",
-                        line
+                        line,
                     )
                     if vzdump_match:
                         filename = vzdump_match.group(1)
@@ -10803,17 +10803,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
                         try:
                             backup_time = datetime.strptime(f"{date_str}_{time_str}", "%Y_%m_%d_%H_%M_%S")
-                            backups.append({
-                                "filename": filename,
-                                "volid": f"backer:{dump_path}/{filename}",
-                                "vmid": int(vmid),
-                                "guest_type": guest_type,
-                                "ctime": backup_time.timestamp(),
-                                "size": size,
-                                "format": "vma",
-                                "node": hypervisor.get("name", "unknown"),
-                                "compression": compression or "none",
-                            })
+                            backups.append(
+                                {
+                                    "filename": filename,
+                                    "volid": f"backer:{dump_path}/{filename}",
+                                    "vmid": int(vmid),
+                                    "guest_type": guest_type,
+                                    "ctime": backup_time.timestamp(),
+                                    "size": size,
+                                    "format": "vma",
+                                    "node": hypervisor.get("name", "unknown"),
+                                    "compression": compression or "none",
+                                }
+                            )
                         except ValueError as e:
                             logger.debug(f"Failed to parse backup date from {filename}: {e}")
 
@@ -10857,8 +10859,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         try:
             # Mount the NFS export
             mount_cmd = [
-                "sudo", "-n", "mount", "-t", "nfs",
-                "-o", "soft,timeo=50,retrans=2,ro",  # read-only, soft mount
+                "sudo",
+                "-n",
+                "mount",
+                "-t",
+                "nfs",
+                "-o",
+                "soft,timeo=50,retrans=2,ro",  # read-only, soft mount
                 f"{server}:{export}",
                 mount_point,
             ]
@@ -10888,7 +10895,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     # QEMU VMs use .vma extension, LXC containers use .tar extension
                     vzdump_match = re.match(
                         r"vzdump-(qemu|lxc)-(\d+)-(\d{4}_\d{2}_\d{2})-(\d{2}_\d{2}_\d{2})\.(vma|tar)(?:\.(zst|gz|lzo))?$",
-                        entry.name
+                        entry.name,
                     )
                     if vzdump_match:
                         guest_type = vzdump_match.group(1)
@@ -10908,17 +10915,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             # Parse backup time from filename
                             backup_time = datetime.strptime(f"{date_str}_{time_str}", "%Y_%m_%d_%H_%M_%S")
 
-                            backups.append({
-                                "filename": entry.name,
-                                "volid": f"backup/{entry.name}",
-                                "vmid": int(vmid),
-                                "guest_type": guest_type,
-                                "ctime": backup_time.timestamp(),
-                                "size": size,
-                                "format": file_format,
-                                "node": hypervisor_name,
-                                "compression": compression or "none",
-                            })
+                            backups.append(
+                                {
+                                    "filename": entry.name,
+                                    "volid": f"backup/{entry.name}",
+                                    "vmid": int(vmid),
+                                    "guest_type": guest_type,
+                                    "ctime": backup_time.timestamp(),
+                                    "size": size,
+                                    "format": file_format,
+                                    "node": hypervisor_name,
+                                    "compression": compression or "none",
+                                }
+                            )
                         except ValueError as e:
                             logger.debug(f"Failed to parse backup {entry.name}: {e}")
 
@@ -10938,7 +10947,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     subprocess.run(
                         ["sudo", "-n", "umount", "-l", mount_point],  # lazy unmount for reliability
                         capture_output=True,
-                        timeout=30
+                        timeout=30,
                     )
                 except Exception:
                     pass
@@ -10967,16 +10976,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 else:
                     started_at = 0
 
-                backups.append({
-                    "filename": f"vzdump-qemu-{run.get('guest_id', 0)}-backup",
-                    "volid": run.get("upid", ""),
-                    "vmid": run.get("guest_id", 0),
-                    "guest_type": "qemu",  # Default
-                    "ctime": started_at,
-                    "size": 0,  # Not tracked in run table
-                    "format": "vma",
-                    "node": run.get("guest_name", "unknown"),
-                })
+                backups.append(
+                    {
+                        "filename": f"vzdump-qemu-{run.get('guest_id', 0)}-backup",
+                        "volid": run.get("upid", ""),
+                        "vmid": run.get("guest_id", 0),
+                        "guest_type": "qemu",  # Default
+                        "ctime": started_at,
+                        "size": 0,  # Not tracked in run table
+                        "format": "vma",
+                        "node": run.get("guest_name", "unknown"),
+                    }
+                )
         return backups
 
     @app.post("/api/v1/hypervisors/{hypervisor_id}/restore")
@@ -11013,6 +11024,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Parse original VMID from backup filename (e.g., vzdump-qemu-100-2024...)
         import re
+
         vmid_match = re.search(r"vzdump-(?:qemu|lxc)-(\d+)-", archive)
         if not vmid_match:
             raise HTTPException(status_code=400, detail="Could not parse VMID from backup filename")
@@ -11117,6 +11129,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Use cluster API for hyperv-cluster type
         if hypervisor_type == "hyperv-cluster":
             from backer.hypervisors.hyperv import HyperVClusterAPI, HyperVClusterBackupManager
+
             cluster_name = hypervisor.get("cluster_name") or hypervisor.get("config", {}).get("cluster_name")
             api = HyperVClusterAPI(
                 host=hypervisor["host"],
@@ -11162,9 +11175,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             backup_base_path = f"{backup_base_path}\\{smb_path_win}"
 
         # Add hypervisor subfolder
-        safe_hv_name = "".join(
-            c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
-        )
+        safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
         backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
 
         # Build full path to the backup
@@ -11204,8 +11215,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         if guest and vm_name_from_path and guest["name"].lower() == vm_name_from_path.lower():
                             old_vm_id = gid.lower()
                             logger.info(
-                                f"Found current VM GUID from job: {old_vm_id} "
-                                f"(matches VM name '{vm_name_from_path}')"
+                                f"Found current VM GUID from job: {old_vm_id} (matches VM name '{vm_name_from_path}')"
                             )
                             break
 
@@ -11279,10 +11289,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                             new_vm_id if str(gid).lower() == old_vm_id.lower() else gid
                                             for gid in guest_ids
                                         ]
-                                        _storage.update_hypervisor_job(
-                                            job["id"],
-                                            guest_ids=updated_guest_ids
-                                        )
+                                        _storage.update_hypervisor_job(job["id"], guest_ids=updated_guest_ids)
                                         logger.info(
                                             f"Updated job '{job['name']}': "
                                             f"guest_ids changed from {guest_ids} to {updated_guest_ids}"
@@ -11392,6 +11399,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Parse original VMID from backup filename
         import re
+
         vmid_match = re.search(r"vzdump-(?:qemu|lxc)-(\d+)-", filename)
         if not vmid_match:
             raise HTTPException(status_code=400, detail="Could not parse VMID from backup filename")
@@ -11887,9 +11895,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 backup_base_path = f"{backup_base_path}\\{smb_path_win}"
 
             # Add hypervisor subfolder
-            safe_hv_name = "".join(
-                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
-            )
+            safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
             backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
 
             # Build full path to the backup
@@ -12003,9 +12009,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 backup_base_path = f"{backup_base_path}\\{smb_path_win}"
 
             # Add hypervisor subfolder
-            safe_hv_name = "".join(
-                c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"]
-            )
+            safe_hv_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in hypervisor["name"])
             backup_base_path = f"{backup_base_path}\\Hypervisors\\{safe_hv_name}"
 
             # Build full path to the backup
@@ -12275,11 +12279,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         log_files = []
         for log_file in sorted(log_dir.glob("*.log"), reverse=True):
             stat = log_file.stat()
-            log_files.append({
-                "name": log_file.name,
-                "size": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            })
+            log_files.append(
+                {
+                    "name": log_file.name,
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                }
+            )
 
         return log_files
 
@@ -12348,30 +12354,32 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         # Parse log lines for structured output
         log_entries = []
-        log_pattern = re.compile(
-            r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+) - (\w+) - (.*)$'
-        )
+        log_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+) - (\w+) - (.*)$")
 
         for line in selected_lines:
-            line = line.rstrip('\n\r')
+            line = line.rstrip("\n\r")
             match = log_pattern.match(line)
             if match:
-                log_entries.append({
-                    "timestamp": match.group(1),
-                    "logger": match.group(2).strip(),
-                    "level": match.group(3),
-                    "message": match.group(4),
-                    "raw": line,
-                })
+                log_entries.append(
+                    {
+                        "timestamp": match.group(1),
+                        "logger": match.group(2).strip(),
+                        "level": match.group(3),
+                        "message": match.group(4),
+                        "raw": line,
+                    }
+                )
             else:
                 # Non-matching line (continuation or different format)
-                log_entries.append({
-                    "timestamp": "",
-                    "logger": "",
-                    "level": "",
-                    "message": line,
-                    "raw": line,
-                })
+                log_entries.append(
+                    {
+                        "timestamp": "",
+                        "logger": "",
+                        "level": "",
+                        "message": line,
+                        "raw": line,
+                    }
+                )
 
         return {
             "filename": filename,
@@ -12426,7 +12434,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-            }
+            },
         )
 
     # ============ Proxy Repository Operations ============
@@ -12488,13 +12496,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             expired_claims = verify_expired_proxy_capability(capability or "")
             if expired_claims and _pending_proxy_command_authorizes(storage, client_id, expired_claims, operation):
                 claims = expired_claims
-        if not claims or any((
-            claims.get("repo") != repo_id,
-            claims.get("sub") != client_id,
-            claims.get("operation") != operation
-            and not (operation == "check" and claims.get("operation") in {"backup", "restore"}),
-            bool(subfolder) and claims.get("subfolder") != subfolder,
-        )):
+        if not claims or any(
+            (
+                claims.get("repo") != repo_id,
+                claims.get("sub") != client_id,
+                claims.get("operation") != operation
+                and not (operation == "check" and claims.get("operation") in {"backup", "restore"}),
+                bool(subfolder) and claims.get("subfolder") != subfolder,
+            )
+        ):
             raise HTTPException(status_code=403, detail="Missing, expired, or invalid proxy capability")
 
         # Get repository password (secure)
@@ -12512,8 +12522,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Check if a repository is available (health check for proxy backend)."""
         auth_header = request.headers.get("authorization")
         repo, _ = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="check", capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="check",
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         # Check if local path exists and is readable
@@ -12544,8 +12558,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Initialize a backup repository on the server."""
         auth_header = request.headers.get("authorization")
         repo, repo_password = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="init", capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="init",
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         # Parse request body (password may be sent for verification)
@@ -12576,9 +12594,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            backend = get_backend("kopia", {
-                "repository_password": _repository_password_or_error(repo_password),
-            })
+            backend = get_backend(
+                "kopia",
+                {
+                    "repository_password": _repository_password_or_error(repo_password),
+                },
+            )
 
             dest = BackupDestination(path=str(path))
             result = backend.init_repo(dest)
@@ -12607,8 +12628,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """
         auth_header = request.headers.get("authorization")
         repo, repo_password = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="list", capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="list",
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         try:
@@ -12634,9 +12659,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            backend = get_backend("kopia", {
-                "repository_password": _repository_password_or_error(repo_password),
-            })
+            backend = get_backend(
+                "kopia",
+                {
+                    "repository_password": _repository_password_or_error(repo_password),
+                },
+            )
 
             dest = BackupDestination(path=str(local_path))
             snapshots = backend.list_snapshots(dest)
@@ -12656,8 +12684,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Prune the repository to remove unused data."""
         auth_header = request.headers.get("authorization")
         repo, repo_password = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="prune", capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="prune",
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         try:
@@ -12676,9 +12708,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            backend = get_backend("kopia", {
-                "repository_password": _repository_password_or_error(repo_password),
-            })
+            backend = get_backend(
+                "kopia",
+                {
+                    "repository_password": _repository_password_or_error(repo_password),
+                },
+            )
 
             dest = BackupDestination(path=str(local_path))
             result = backend.prune(dest, dry_run=dry_run)
@@ -12702,8 +12737,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """Check repository integrity."""
         auth_header = request.headers.get("authorization")
         repo, repo_password = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="check", capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="check",
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         try:
@@ -12727,9 +12766,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
-            backend = get_backend("kopia", {
-                "repository_password": _repository_password_or_error(repo_password),
-            })
+            backend = get_backend(
+                "kopia",
+                {
+                    "repository_password": _repository_password_or_error(repo_password),
+                },
+            )
 
             dest = BackupDestination(path=str(local_path))
             result = backend.check(dest, dry_run=dry_run)
@@ -12765,8 +12807,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         auth_header = request.headers.get("authorization")
         subfolder = request.headers.get("X-Backup-Subfolder", "").strip("/\\").replace("\\", "/")
         repo, repo_password = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="backup", subfolder=subfolder, capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="backup",
+            subfolder=subfolder,
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         local_path = repo.get("share")
@@ -12818,8 +12865,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             # The lock survives workers and process restarts, unlike an asyncio
             # lock. It lives outside contents and rollback-directory globs.
-            transaction_lock = local_base / ".backer-locks" / (
-                f"proxy-{hashlib.sha256(job_name.encode()).hexdigest()}.lock"
+            transaction_lock = (
+                local_base / ".backer-locks" / (f"proxy-{hashlib.sha256(job_name.encode()).hexdigest()}.lock")
             )
             # One repository/job has one live contents directory. Keep the old
             # tree until Kopia accepts the replacement, then discard it.
@@ -12842,7 +12889,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     if not kopia.ensure_repo():
                         raise RuntimeError("Failed to initialize kopia repository")
                     result = kopia.snapshot_create(
-                        source_dir=backup_dir, job_name=job_name, source_path=source_path,
+                        source_dir=backup_dir,
+                        job_name=job_name,
+                        source_path=source_path,
                     )
                     if not result.get("success"):
                         raise RuntimeError(result.get("error", "Snapshot creation failed"))
@@ -12870,7 +12919,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             except Exception as cleanup_error:
                                 logger.warning(
                                     "[PROXY BACKUP] Failed to clean rejected contents %s: %s",
-                                    failed_dir, cleanup_error,
+                                    failed_dir,
+                                    cleanup_error,
                                 )
                     elif previous_moved:
                         try:
@@ -12891,7 +12941,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         except Exception as cleanup_error:
                             logger.warning(
                                 "[PROXY BACKUP] Snapshot committed but failed to clean previous contents %s: %s",
-                                previous_dir, cleanup_error,
+                                previous_dir,
+                                cleanup_error,
                             )
 
             # Clean up tar file
@@ -12899,7 +12950,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 Path(tmp_path).unlink()
             except Exception as cleanup_error:
                 logger.warning(
-                    "[PROXY BACKUP] Snapshot committed but failed to clean upload archive: %s", cleanup_error,
+                    "[PROXY BACKUP] Snapshot committed but failed to clean upload archive: %s",
+                    cleanup_error,
                 )
             tmp_path = None
 
@@ -12991,7 +13043,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     shutil.rmtree(staging_dir)
                 except Exception as cleanup_error:
                     logger.warning(
-                        "[PROXY BACKUP] Failed to clean staging directory %s: %s", staging_dir, cleanup_error,
+                        "[PROXY BACKUP] Failed to clean staging directory %s: %s",
+                        staging_dir,
+                        cleanup_error,
                     )
             # Clean up temp tar file if it still exists
             if tmp_path:
@@ -13024,8 +13078,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         auth_header = request.headers.get("authorization")
         subfolder = request.headers.get("X-Restore-Subfolder", "").strip("/\\").replace("\\", "/")
         repo, repo_password = _verify_repo_access(
-            repo_id, credentials, storage, auth_header,
-            operation="restore", subfolder=subfolder, capability=request.headers.get("X-Backer-Capability"),
+            repo_id,
+            credentials,
+            storage,
+            auth_header,
+            operation="restore",
+            subfolder=subfolder,
+            capability=request.headers.get("X-Backer-Capability"),
         )
 
         local_path = repo.get("share")
@@ -13213,6 +13272,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     # Add web authentication middleware
     from backer.server.web.auth import AuthMiddleware
+
     app.add_middleware(AuthMiddleware)
 
     # Include web UI routes

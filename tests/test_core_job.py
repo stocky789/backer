@@ -1,10 +1,10 @@
 from datetime import datetime
 from pathlib import Path
 
+import backer.core.job as job_module
 from backer.backends.base import BackendResult, OperationType
 from backer.core.config import DestinationConfig, JobConfig, SourceConfig
 from backer.core.job import BackupJob
-import backer.core.job as job_module
 
 
 def test_backup_job_uses_kopia_without_removed_backend_options(monkeypatch) -> None:
@@ -24,7 +24,9 @@ def test_backup_job_uses_kopia_without_removed_backend_options(monkeypatch) -> N
     backend = Backend()
     monkeypatch.setattr(job_module, "get_backend", lambda name, options: backend)
     monkeypatch.setattr(BackupJob, "_save_run_history", lambda *_: None)
-    job = BackupJob(JobConfig(name="photos", source=SourceConfig(path="/photos"), destination=DestinationConfig(path="/repo")))
+    job = BackupJob(
+        JobConfig(name="photos", source=SourceConfig(path="/photos"), destination=DestinationConfig(path="/repo"))
+    )
 
     assert job.run().status.value == "success"
     assert job.restore(Path("/restore")).success

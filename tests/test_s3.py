@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 from backer.agent.service import AgentService
 from backer.backends.base import BackupDestination, BackupSource
 from backer.backends.kopia import KopiaBackend
-from backer.server.app import _build_backup_command_payload, create_app
 from backer.backends.s3 import S3ConfigError, kopia_s3_config, parse_s3_config
+from backer.server.app import _build_backup_command_payload, create_app
 from backer.server.web.auth import get_setup_token
 
 
@@ -37,8 +37,14 @@ def test_s3_config_builds_kopia_boundary() -> None:
 
     assert result["repository"] == "s3://backer-test/agents/host-one"
     assert result["options"] == [
-        "--bucket", "backer-test", "--prefix", "agents/host-one",
-        "--endpoint", "minio.example.test:9000", "--region", "us-east-1",
+        "--bucket",
+        "backer-test",
+        "--prefix",
+        "agents/host-one",
+        "--endpoint",
+        "minio.example.test:9000",
+        "--region",
+        "us-east-1",
     ]
     assert result["environment"] == {
         "AWS_ACCESS_KEY_ID": "test-access-key",
@@ -75,39 +81,66 @@ def test_s3_api_encrypts_credentials_and_builds_kopia_agent_payload(tmp_path, mo
     app = create_app(tmp_path)
     monkeypatch.setattr(KopiaBackend, "test_connection", lambda *_: (True, "mocked S3 connection"))
     with TestClient(app, raise_server_exceptions=False) as client:
-        client.post("/setup", data={
-            "username": "owner", "display_name": "Owner", "password": "test-admin-password",
-            "confirm_password": "test-admin-password", "setup_token": get_setup_token(),
-            "timezone": "Australia/Sydney", "public_url": "https://backer.example.test",
-        })
-        response = client.post("/api/v1/repositories", json={
-            "name": "Offsite", "type": "s3",
-            "repository_password": "repo-password", "s3": config(),
-        })
+        client.post(
+            "/setup",
+            data={
+                "username": "owner",
+                "display_name": "Owner",
+                "password": "test-admin-password",
+                "confirm_password": "test-admin-password",
+                "setup_token": get_setup_token(),
+                "timezone": "Australia/Sydney",
+                "public_url": "https://backer.example.test",
+            },
+        )
+        response = client.post(
+            "/api/v1/repositories",
+            json={
+                "name": "Offsite",
+                "type": "s3",
+                "repository_password": "repo-password",
+                "s3": config(),
+            },
+        )
     assert response.status_code == 200
     repo_id = response.json()["id"]
     storage = app.state.storage
     repo = storage.get_repository(repo_id)
     assert repo is not None
-    assert repo["config"] == {"s3": {
-        "bucket": "backer-test", "prefix": "agents/host-one",
-        "endpoint": "https://minio.example.test:9000", "region": "us-east-1",
-    }}
+    assert repo["config"] == {
+        "s3": {
+            "bucket": "backer-test",
+            "prefix": "agents/host-one",
+            "endpoint": "https://minio.example.test:9000",
+            "region": "us-east-1",
+        }
+    }
     assert "test-secret-key" not in str(storage.list_repositories())
     assert storage.get_repository_provider_credentials(repo_id) == {
-        "access_key_id": "test-access-key", "secret_access_key": "test-secret-key",
+        "access_key_id": "test-access-key",
+        "secret_access_key": "test-secret-key",
     }
 
-    payload = _build_backup_command_payload({
-        "repository_id": repo_id, "source_path": "/source", "destination_path": "ignored",
-    }, "daily", "run-1", storage=storage)
+    payload = _build_backup_command_payload(
+        {
+            "repository_id": repo_id,
+            "source_path": "/source",
+            "destination_path": "ignored",
+        },
+        "daily",
+        "run-1",
+        storage=storage,
+    )
     assert payload["destination_path"] == "s3://backer-test/agents/host-one"
     assert payload["repository_options"] == {
         "repository_password": "repo-password",
         "s3": {
-            "bucket": "backer-test", "prefix": "agents/host-one",
-            "endpoint": "https://minio.example.test:9000", "region": "us-east-1",
-            "access_key_id": "test-access-key", "secret_access_key": "test-secret-key",
+            "bucket": "backer-test",
+            "prefix": "agents/host-one",
+            "endpoint": "https://minio.example.test:9000",
+            "region": "us-east-1",
+            "access_key_id": "test-access-key",
+            "secret_access_key": "test-secret-key",
         },
     }
 
@@ -131,7 +164,9 @@ def test_s3_bucket_create_request_signs_without_exposing_secret() -> None:
     assert request.full_url == "http://minio.example.test:9000/backer-test"
     assert request.get_method() == "PUT"
     assert request.get_header("X-amz-content-sha256") == hashlib.sha256(b"").hexdigest()
-    assert request.get_header("Authorization").startswith("AWS4-HMAC-SHA256 Credential=test-access-key/20260828/us-east-1/s3/aws4_request")
+    assert request.get_header("Authorization").startswith(
+        "AWS4-HMAC-SHA256 Credential=test-access-key/20260828/us-east-1/s3/aws4_request"
+    )
     assert "test-secret-key" not in str(request.header_items())
 
 
@@ -141,15 +176,13 @@ def _s3_bucket_create_request(
     payload_hash = hashlib.sha256(b"").hexdigest()
     parsed = urlparse(endpoint)
     path = f"/{quote(bucket, safe='-_.~')}"
-    headers = (
-        f"host:{parsed.netloc}\n"
-        f"x-amz-content-sha256:{payload_hash}\n"
-        f"x-amz-date:{now}\n"
-    )
+    headers = f"host:{parsed.netloc}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{now}\n"
     signed_headers = "host;x-amz-content-sha256;x-amz-date"
     scope = f"{now[:8]}/{region}/s3/aws4_request"
     canonical_request = f"PUT\n{path}\n\n{headers}\n{signed_headers}\n{payload_hash}"
-    string_to_sign = "AWS4-HMAC-SHA256\n" + now + "\n" + scope + "\n" + hashlib.sha256(canonical_request.encode()).hexdigest()
+    string_to_sign = (
+        "AWS4-HMAC-SHA256\n" + now + "\n" + scope + "\n" + hashlib.sha256(canonical_request.encode()).hexdigest()
+    )
 
     def sign(key: bytes, value: str) -> bytes:
         return hmac.new(key, value.encode(), hashlib.sha256).digest()
@@ -164,7 +197,10 @@ def _s3_bucket_create_request(
             "Host": parsed.netloc,
             "X-Amz-Content-Sha256": payload_hash,
             "X-Amz-Date": now,
-            "Authorization": f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
+            "Authorization": (
+                f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, "
+                f"SignedHeaders={signed_headers}, Signature={signature}"
+            ),
         },
     )
 
@@ -183,22 +219,29 @@ def _create_s3_bucket(endpoint: str, bucket: str, region: str, access_key: str, 
 
 
 def test_s3_minio_end_to_end(tmp_path: Path) -> None:
-    names = ("BACKER_TEST_S3_ENDPOINT", "BACKER_TEST_S3_BUCKET", "BACKER_TEST_S3_ACCESS_KEY", "BACKER_TEST_S3_SECRET_KEY")
+    names = (
+        "BACKER_TEST_S3_ENDPOINT",
+        "BACKER_TEST_S3_BUCKET",
+        "BACKER_TEST_S3_ACCESS_KEY",
+        "BACKER_TEST_S3_SECRET_KEY",
+    )
     if not all(os.getenv(name) for name in names):
         pytest.skip("all BACKER_TEST_S3_* variables are required")
     endpoint, bucket, access_key, secret_key = (os.environ[name] for name in names)
     _create_s3_bucket(endpoint, bucket, "us-east-1", access_key, secret_key)
 
-    backend = KopiaBackend({
-        "repository_password": "repository-password",
-        "s3": config(
-            bucket=bucket,
-            prefix="agent/job",
-            endpoint=endpoint,
-            access_key_id=access_key,
-            secret_access_key=secret_key,
-        ),
-    })
+    backend = KopiaBackend(
+        {
+            "repository_password": "repository-password",
+            "s3": config(
+                bucket=bucket,
+                prefix="agent/job",
+                endpoint=endpoint,
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+            ),
+        }
+    )
     repository = BackupDestination(f"s3://{bucket}/agent/job")
     source, restored = tmp_path / "source", tmp_path / "restored"
     source.mkdir()
