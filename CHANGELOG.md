@@ -18,6 +18,17 @@ Minor Features are additions and adjustments that fit into the existing workflow
 Bug Fixes are corrections to behaviour that was already meant to work.
 The release workflow publishes the top section verbatim as the release notes.
 
+## 0.8.0
+
+### Major Features
+
+- **Directory backups now use Kopia snapshots exclusively.** Repository and job setup no longer offers an engine choice.
+
+### Minor Features
+
+- S3-compatible repositories are supported with native Kopia configuration.
+- Each repository has its own encryption password.
+
 ## 0.7.2
 
 ### Major Features

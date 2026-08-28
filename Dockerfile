@@ -7,7 +7,7 @@ ARG VERSION=latest
 FROM python:3.12-slim
 
 LABEL maintainer="Backer Contributors"
-LABEL description="Unified backup orchestration - consolidating rsync, rclone, restic and more"
+LABEL description="Self-hosted directory backup and restore management powered by Kopia"
 LABEL version="${VERSION}"
 
 # Install system dependencies
@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     smbclient \
     nfs-common \
     sshpass \
-    rsync \
     sudo \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*

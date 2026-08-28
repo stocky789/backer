@@ -70,20 +70,20 @@ Access the web UI at `http://your-server:8420`
 
 ### Docker
 
-Docker downloads rclone, Restic, and Kopia on first use into its persistent data volume, verifying each release checksum. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
+Docker downloads Kopia on first use into its persistent data volume, verifying its release checksum. SMB/NFS repositories are mounted inside the container, so the compose/run config must include `SYS_ADMIN` and `apparmor:unconfined`.
 
 **Docker Compose** is the recommended way to run Backer server. See Quick Start above.
 
 #### Docker Run (Alternative)
 
 ```bash
-docker build -t backer:0.7.2 .
+docker build -t backer:0.8.0 .
 docker run -d --name backer \
   -p 8420:8420 \
   -v backer-data:/data \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
-  backer:0.7.2
+  backer:0.8.0
 ```
 
 #### Docker Security Notes
@@ -129,16 +129,15 @@ backer restore /backup /destination
 
 - Agent-based backups for Windows and Linux
 - Proxmox VE hypervisor backup (VMs and LXC containers)
-- Multiple backends: rclone, restic, kopia
-- Storage: SMB, NFS, local, and S3-compatible storage through Restic only
-
-S3 support is a managed Restic configuration (endpoint, region, path style, and encrypted provider credentials). rclone and Kopia cloud remotes are not configured by Backer.
+- Encrypted, compressed, deduplicated Kopia snapshots
+- Storage repositories on SMB, NFS, local, and S3-compatible storage
+- Repository-level encryption passwords and S3-compatible provider credentials
 - Cron scheduling with retention policies
 - Web dashboard with backup history
 
 ## Storage Repositories
 
-Backer supports multiple storage backend types for backup destinations:
+Backer creates Kopia snapshots in SMB, NFS, local, and S3-compatible repositories.
 
 ### SMB/CIFS (Windows Shares)
 - Network shares accessible via SMB protocol
@@ -161,7 +160,7 @@ Store backups directly on the Backer server filesystem using local paths.
 - **Reverse proxy compatible**: Works with Cloudflare, nginx, Traefik, and similar proxies
 
 #### How It Works
-Agents stream backup data to the server via HTTP using the "proxy backend". The server executes the actual backup tool (restic/kopia/rclone) locally on the configured path.
+Agents stream backup data to the server via its authenticated local-repository transport. The server creates Kopia snapshots on the configured path.
 
 #### Docker Setup
 ```yaml

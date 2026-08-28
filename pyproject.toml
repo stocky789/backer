@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backer"
-version = "0.7.2"
-description = "Unified backup orchestration - consolidating rsync, rclone, restic and more"
+version = "0.8.0"
+description = "Self-hosted directory backup and restore management powered by Kopia"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Backer Contributors" }
 ]
-keywords = ["backup", "rsync", "rclone", "restic", "orchestration"]
+keywords = ["backup", "kopia", "snapshots", "restore"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
