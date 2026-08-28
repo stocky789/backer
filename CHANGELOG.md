@@ -31,6 +31,8 @@ The release workflow publishes the top section verbatim as the release notes.
 
 ### Bug Fixes
 
+- Repository creation now rejects unsupported repository types and requires an explicit encryption password before any repository is created.
+- Imported and newly written repository metadata no longer carries obsolete backup-engine fields.
 - SMB and NFS repository setup now requests the encryption password before connection testing.
 - Windows agents now recognize S3 repository URLs instead of treating them as NFS paths.
 - Job exclusion patterns now use Kopia source policies compatible with current Kopia releases.

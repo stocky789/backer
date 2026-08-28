@@ -1585,7 +1585,6 @@ class BackerAgent:
             job_name=job_name,
             job_config={
                 "source_path": source_path,
-                "backend": backend_name,
                 "client_id": self.client_id,
             },
         )
@@ -1613,7 +1612,6 @@ class BackerAgent:
                     "hostname": socket.gethostname(),
                     "paths": [source_path],
                     "time": finished_at.isoformat(),
-                    "backend": backend_name,
                 },
             )
 

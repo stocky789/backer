@@ -7,7 +7,6 @@ Background service that polls the server for commands and executes backups.
 import base64
 import json
 import logging
-import ntpath
 import os
 import subprocess
 import sys
@@ -998,7 +997,3 @@ class AgentService:
             )
         except Exception as e:
             logger.error(f"Failed to report result: {e}")
-    def _ensure_repository_parent_directory(self, repository_path: str) -> None:
-        """Create a Windows UNC repository parent before initializing Kopia."""
-        if sys.platform == "win32":
-            Path(ntpath.dirname(repository_path)).mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 import threading
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +12,7 @@ from backer.backends.kopia import KopiaBackend
 from backer.backends.proxy import ProxyBackend
 from backer.client import agent as client_agent
 from backer.client.agent import BackerAgent, _backend_for_location
+from backer.core.repo_metadata import RepositoryMetadata
 
 
 class _RestoreBackend:
@@ -70,6 +72,25 @@ def test_agent_routes_direct_locations_to_kopia() -> None:
 
 def test_agent_routes_proxy_locations_to_proxy() -> None:
     assert isinstance(_backend_for_location("proxys://backer.example/repo/repo-1", {}), ProxyBackend)
+
+
+def test_agent_metadata_does_not_write_backend(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    agent._write_metadata_to_path(
+        tmp_path / "repository",
+        "photos",
+        "run-1",
+        "/photos",
+        "kopia",
+        SimpleNamespace(success=True, bytes_transferred=1, files_transferred=1),
+        datetime.now(),
+        datetime.now(),
+        "snapshot-1",
+    )
+
+    metadata = RepositoryMetadata(tmp_path / "repository")
+    assert "backend" not in metadata.get_job("photos")["config"]
+    assert "backend" not in metadata.get_snapshot("snapshot-1")
 
 
 def test_background_command_acknowledges_only_after_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,4 +555,3 @@ def test_gui_service_uses_shared_agent_executor(
     service._execute_restore({"dry_run": False})
 
     assert calls == [True]
-

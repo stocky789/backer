@@ -45,20 +45,3 @@ def test_backup_retry_treats_false_backup_result_as_failure(tmp_path: Path, monk
 
     with pytest.raises(RuntimeError, match="Backup failed: gitprojects"):
         agent._execute_backup_with_retry({"job_name": "gitprojects"}, max_retries=1)
-
-
-def test_windows_unc_repository_parent_is_created_before_repo_init(tmp_path: Path, monkeypatch) -> None:
-    agent = make_agent(tmp_path)
-    created_paths: list[str] = []
-
-    def fake_mkdir(self: Path, parents: bool = False, exist_ok: bool = False) -> None:
-        created_paths.append(str(self))
-        assert parents is True
-        assert exist_ok is True
-
-    monkeypatch.setattr(agent_service.sys, "platform", "win32")
-    monkeypatch.setattr(agent_service.Path, "mkdir", fake_mkdir)
-
-    agent._ensure_repository_parent_directory("\\\\192.168.0.254\\backer\\Agents\\gitprojects")
-
-    assert created_paths == ["\\\\192.168.0.254\\backer\\Agents"]

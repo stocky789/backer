@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from backer.agent.service import AgentService
+from backer.core.repo_metadata import RepositoryMetadata
 from backer.server.app import _build_backup_command_payload, create_app
 from backer.server.auth import generate_proxy_capability
 from backer.server.models import Client, ClientStatus, JobCreate
@@ -110,6 +111,61 @@ def test_repository_api_rejects_removed_backend_fields(tmp_path: Path, field: st
         })
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("repo_type", ["smb", "nfs", "local", "s3"])
+def test_repository_api_requires_an_explicit_encryption_password_before_persisting(
+    tmp_path: Path, repo_type: str
+) -> None:
+    app = create_app(tmp_path)
+    local_path = tmp_path / "must-not-be-created"
+    payload = {
+        "name": f"{repo_type}-repository",
+        "type": repo_type,
+        "share": str(local_path) if repo_type == "local" else "backups",
+    }
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.post("/api/v1/repositories", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Repository encryption password is required"
+    assert app.state.storage.list_repositories() == []
+    assert not local_path.exists()
+
+
+def test_repository_api_rejects_unsupported_type_before_persisting(tmp_path: Path) -> None:
+    app = create_app(tmp_path)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.post("/api/v1/repositories", json={
+            "name": "Unsupported",
+            "type": "ftp",
+            "repository_password": "secret",
+        })
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported repository type"
+    assert app.state.storage.list_repositories() == []
+
+
+def test_repository_import_discards_legacy_backend_metadata(tmp_path: Path) -> None:
+    app = create_app(tmp_path)
+    repository = tmp_path / "repository"
+    metadata = RepositoryMetadata(repository)
+    metadata.initialize()
+    metadata.save_job("photos", {"source_path": "/photos", "backend": "proxy"})
+    app.state.storage.add_repository("repo-1", "repo", "local", share=str(repository))
+    app.state.storage.set_repository_password("repo-1", "secret")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.post("/api/v1/repositories/repo-1/import")
+
+    assert response.status_code == 200
+    assert "backend" not in app.state.storage.get_job("photos")
 
 
 def test_backup_payload_keeps_smb_and_repository_passwords_separate() -> None:
@@ -286,6 +342,8 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
     assert (contents / "keep.txt").read_text() == "new"
     assert not (contents / "deleted.txt").exists()
     assert snapshots == [contents, contents]
+    metadata = RepositoryMetadata(storage_path / "Agents" / "photos")
+    assert "backend_type" not in metadata.get_job("photos")["config"]
 
 
 def test_windows_startup_task_uses_the_dedicated_service_binary(monkeypatch, tmp_path: Path) -> None:

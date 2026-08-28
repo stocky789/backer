@@ -4606,8 +4606,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if storage.get_repository_by_name(name):
             raise HTTPException(status_code=409, detail="Repository name already exists")
 
-        repo_id = str(uuid4())[:8]
         repo_type = data.get("type", "smb")
+        if repo_type not in {"smb", "nfs", "local", "s3"}:
+            raise HTTPException(status_code=400, detail="Unsupported repository type")
+        repository_password = _repository_password_or_error(data.get("repository_password"))
+
+        repo_id = str(uuid4())[:8]
         config: dict[str, Any] | None = None
         provider_credentials_encrypted = None
         if repo_type == "s3":
@@ -4617,8 +4621,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 s3 = kopia_s3_config(data.get("s3") or {})
             except S3ConfigError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
-            if not data.get("repository_password"):
-                raise HTTPException(status_code=400, detail="Repository password required for S3")
             data["share"], data["path"] = s3["public_config"]["bucket"], s3["public_config"]["prefix"]
             config = {"s3": s3["public_config"]}
             provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(
@@ -4690,18 +4692,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Invalid local path: {str(e)}")
 
         storage_password = data.get("storage_password") or (data.get("password") if repo_type == "smb" else None)
-        repository_password = data.get("repository_password") or (
-            data.get("password") if repo_type == "local" else None
-        )
-        if repo_type == "local" and not repository_password:
-            repository_password = secrets.token_urlsafe(32)
         storage_password_encrypted = repository_password_encrypted = None
-        if storage_password or repository_password:
-            secrets_manager = get_secrets_manager(storage.db_path.parent)
-            storage_password_encrypted = secrets_manager.encrypt(storage_password) if storage_password else None
-            repository_password_encrypted = (
-                secrets_manager.encrypt(repository_password) if repository_password else None
-            )
+        secrets_manager = get_secrets_manager(storage.db_path.parent)
+        storage_password_encrypted = secrets_manager.encrypt(storage_password) if storage_password else None
+        repository_password_encrypted = secrets_manager.encrypt(repository_password)
 
         storage.add_repository(
             repo_id=repo_id,
@@ -5741,7 +5735,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                         "repository_id": repo_id,
                                         "source_path": job_info["source"],
                                         "destination_path": repo_path,
-                                        "backend": "proxy",  # Use proxy for LOCAL repos
                                         "imported_at": tz.get_now().isoformat(),
                                         "imported_from_kopia": True,
                                         "snapshot_count": job_info["snapshot_count"],
@@ -5795,6 +5788,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                     if job_name:
                                         existing = storage.get_job(job_name)
                                         if not existing:
+                                            config.pop("backend", None)
+                                            config.pop("backend_type", None)
                                             config["repository_id"] = repo_id
                                             config["imported_at"] = tz.get_now().isoformat()
                                             config["imported_from_repo"] = True
@@ -5802,9 +5797,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                                             # Set destination_path to repo path for restores
                                             if not config.get("destination_path"):
                                                 config["destination_path"] = repo_path
-                                            # Set backend if not present
-                                            if not config.get("backend"):
-                                                config["backend"] = "kopia"
                                             storage.save_job(job_name, config)
                                             imported["jobs"] += 1
 
@@ -13004,7 +12996,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 # Save job configuration
                 job_config = {
                     "source_path": source_path,
-                    "backend_type": "kopia",
                     "repo_id": repo_id,
                     "client_id": client_id,
                 }
