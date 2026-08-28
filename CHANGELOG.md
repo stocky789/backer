@@ -32,6 +32,7 @@ The release workflow publishes the top section verbatim as the release notes.
 ### Bug Fixes
 
 - SMB and NFS repository setup now requests the encryption password before connection testing.
+- Windows agents now recognize S3 repository URLs instead of treating them as NFS paths.
 
 ## 0.7.2
 

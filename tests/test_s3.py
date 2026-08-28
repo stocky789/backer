@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backer.agent.service import AgentService
+from backer.client.agent import BackerAgent
 from backer.backends.base import BackupDestination, BackupSource
 from backer.backends.kopia import KopiaBackend
 from backer.backends.s3 import S3ConfigError, kopia_s3_config, parse_s3_config
@@ -52,6 +53,10 @@ def test_s3_config_builds_kopia_boundary() -> None:
     }
     assert "secret_access_key" not in result["public_config"]
     assert "access_key_id" not in result["public_config"]
+
+
+def test_agent_does_not_treat_s3_repository_as_nfs() -> None:
+    assert not BackerAgent("http://server.example.test")._is_nfs_path("s3://bucket/prefix")
 
 
 def test_http_s3_endpoint_disables_tls() -> None:

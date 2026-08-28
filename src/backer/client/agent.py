@@ -502,7 +502,7 @@ class BackerAgent:
         """Check if a path is an NFS path (server:/export format)."""
         # NFS paths look like: server:/export/path or 192.168.1.1:/share/path
         # But NOT like /local/path or C:\path
-        if path.startswith("/") or path.startswith("\\"):
+        if path.startswith(("/", "\\")) or "://" in path:
             return False
         if ":" in path:
             # Check it's not a Windows drive letter (C:)
