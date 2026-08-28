@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
 
 import pytest
 from fastapi.testclient import TestClient
@@ -113,11 +119,76 @@ def test_s3_config_rejects_incomplete_or_unsafe_values(field: str, value: object
         parse_s3_config(config(**{field: value}))
 
 
+def test_s3_bucket_create_request_signs_without_exposing_secret() -> None:
+    request = _s3_bucket_create_request(
+        endpoint="http://minio.example.test:9000",
+        bucket="backer-test",
+        region="us-east-1",
+        access_key="test-access-key",
+        secret_key="test-secret-key",
+        now="20260828T120000Z",
+    )
+
+    assert request.full_url == "http://minio.example.test:9000/backer-test"
+    assert request.get_method() == "PUT"
+    assert request.get_header("X-amz-content-sha256") == hashlib.sha256(b"").hexdigest()
+    assert request.get_header("Authorization").startswith("AWS4-HMAC-SHA256 Credential=test-access-key/20260828/us-east-1/s3/aws4_request")
+    assert "test-secret-key" not in str(request.header_items())
+
+
+def _s3_bucket_create_request(
+    endpoint: str, bucket: str, region: str, access_key: str, secret_key: str, now: str
+) -> Request:
+    payload_hash = hashlib.sha256(b"").hexdigest()
+    parsed = urlparse(endpoint)
+    path = f"/{quote(bucket, safe='-_.~')}"
+    headers = (
+        f"host:{parsed.netloc}\n"
+        f"x-amz-content-sha256:{payload_hash}\n"
+        f"x-amz-date:{now}\n"
+    )
+    signed_headers = "host;x-amz-content-sha256;x-amz-date"
+    scope = f"{now[:8]}/{region}/s3/aws4_request"
+    canonical_request = f"PUT\n{path}\n\n{headers}\n{signed_headers}\n{payload_hash}"
+    string_to_sign = "AWS4-HMAC-SHA256\n" + now + "\n" + scope + "\n" + hashlib.sha256(canonical_request.encode()).hexdigest()
+
+    def sign(key: bytes, value: str) -> bytes:
+        return hmac.new(key, value.encode(), hashlib.sha256).digest()
+
+    signing_key = sign(sign(sign(sign(f"AWS4{secret_key}".encode(), now[:8]), region), "s3"), "aws4_request")
+    signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    return Request(
+        f"{endpoint.rstrip('/')}{path}",
+        data=b"",
+        method="PUT",
+        headers={
+            "Host": parsed.netloc,
+            "X-Amz-Content-Sha256": payload_hash,
+            "X-Amz-Date": now,
+            "Authorization": f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        },
+    )
+
+
+def _create_s3_bucket(endpoint: str, bucket: str, region: str, access_key: str, secret_key: str) -> None:
+    request = _s3_bucket_create_request(
+        endpoint, bucket, region, access_key, secret_key, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+    try:
+        with urlopen(request, timeout=30):
+            pass
+    except HTTPError as exc:
+        if exc.code == 409 and b"BucketAlreadyOwnedByYou" in exc.read():
+            return
+        raise RuntimeError("S3 test bucket could not be created") from exc
+
+
 def test_s3_minio_end_to_end(tmp_path: Path) -> None:
     names = ("BACKER_TEST_S3_ENDPOINT", "BACKER_TEST_S3_BUCKET", "BACKER_TEST_S3_ACCESS_KEY", "BACKER_TEST_S3_SECRET_KEY")
     if not all(os.getenv(name) for name in names):
         pytest.skip("all BACKER_TEST_S3_* variables are required")
     endpoint, bucket, access_key, secret_key = (os.environ[name] for name in names)
+    _create_s3_bucket(endpoint, bucket, "us-east-1", access_key, secret_key)
 
     backend = KopiaBackend({
         "repository_password": "repository-password",
