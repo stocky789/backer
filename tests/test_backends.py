@@ -64,7 +64,7 @@ class TestProxyBackend:
         assert [result.success for result in results] == [False, False, False]
         assert [result.errors for result in results] == [
             ["Proxy backend initialization is server-managed"],
-            ["Proxy backend pruning is not supported by agent proxy capabilities"],
+            ["No retention policy configured - refusing to prune. Nothing was deleted."],
             ["Proxy backend integrity checks are not supported by agent proxy capabilities"],
         ]
 
@@ -239,3 +239,179 @@ class TestKopiaBackend:
         backend = KopiaBackend()
         with pytest.raises(ValueError, match="cannot be empty"):
             backend._get_repo_type("")
+
+    def test_prune_real_run_passes_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """dry_run=False must actually delete snapshots, not just report them."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=False)
+
+        assert result.success
+        expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
+        assert "--delete" in expire_call
+        assert "--dry-run" not in expire_call
+
+    def test_prune_dry_run_omits_delete_and_unsupported_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """dry_run=True must not pass --dry-run (kopia has no such flag) or --delete."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
+
+        assert result.success
+        expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
+        assert "--delete" not in expire_call
+        assert "--dry-run" not in expire_call
+
+    def test_prune_refuses_with_no_retention_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No keep_* at all must refuse and spawn no kopia process that could delete."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"))
+
+        assert not result.success
+        assert "no retention policy" in result.errors[0].lower()
+        assert calls == []
+
+    def test_prune_without_source_path_targets_global_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No source_path -> repository-wide prune, as before."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
+
+        assert result.success
+        policy_call = next(c for c in calls if c[1:3] == ["policy", "set"])
+        assert "--global" in policy_call
+        expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
+        assert "--all" in expire_call
+
+    def test_prune_with_source_path_scopes_to_source_and_skips_global(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """source_path -> target that one source, never --global."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+        snapshot_json = (
+            '[{"source": {"host": "myhost", "userName": "myuser", "path": "/data/app"}}]'
+        )
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["snapshot", "list"]:
+                return CompletedProcess(command, 0, snapshot_json, "")
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True, source_path="/data/app")
+
+        assert result.success
+        policy_call = next(c for c in calls if c[1:3] == ["policy", "set"])
+        assert "--global" not in policy_call
+        assert "myuser@myhost:/data/app" in policy_call
+        expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
+        assert "myuser@myhost:/data/app" in expire_call
+        assert "--all" not in expire_call
+
+    def test_prune_with_unresolvable_source_path_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cannot build a source target -> refuse, never fall back to --global."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["snapshot", "list"]:
+                return CompletedProcess(command, 0, "[]", "")
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, source_path="/no/such/source")
+
+        assert not result.success
+        assert not any(c[1:3] == ["policy", "set"] for c in calls)
+        assert not any(c[1:3] == ["snapshot", "expire"] for c in calls)
+
+    def test_prune_keep_yearly_emits_keep_annual_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """keep_yearly maps to kopia's --keep-annual, not --keep-yearly."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_yearly=3, dry_run=True)
+
+        assert result.success
+        policy_call = next(c for c in calls if c[1:3] == ["policy", "set"])
+        assert "--keep-annual" in policy_call
+        assert "3" in policy_call
+        assert "--keep-yearly" not in policy_call
+
+    def test_check_runs_snapshot_verify(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """check() must run a real kopia subcommand, not 'repository validate-client'."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.check(BackupDestination("repo"))
+
+        assert result.success
+        assert calls[0] == ["kopia", "snapshot", "verify", "--verify-files-percent=0"]
+
+    def test_check_verify_files_percent_is_configurable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Full content verification is opt-in via config, since it is much slower."""
+        backend = KopiaBackend({"repository_password": "test-password", "verify_files_percent": 100})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        backend.check(BackupDestination("repo"))
+
+        assert calls[0] == ["kopia", "snapshot", "verify", "--verify-files-percent=100"]

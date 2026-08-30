@@ -663,21 +663,67 @@ class ProxyBackend(BackendBase):
     def prune(
         self,
         destination: BackupDestination,
+        keep_last: int | None = None,
+        keep_daily: int | None = None,
+        keep_weekly: int | None = None,
+        keep_monthly: int | None = None,
+        keep_yearly: int | None = None,
         dry_run: bool = False,
-        progress_callback: Any | None = None,
+        source_path: str | None = None,
     ) -> BackendResult:
-        """Proxy capabilities do not authorize repository-wide pruning."""
+        """Send the retention policy to the server and request a prune.
+
+        The server applies exactly the policy sent in this request body -
+        it never invents one, so a caller that wants pruning must supply
+        keep_* values here.
+        """
         started_at = datetime.now()
-        error = "Proxy backend pruning is not supported by agent proxy capabilities"
-        logger.warning(f"[PROXY] {error}")
-        return BackendResult(
-            success=False,
-            operation=OperationType.PRUNE,
-            started_at=started_at,
-            finished_at=datetime.now(),
-            errors=[error],
-            return_code=1,
-        )
+        if not any((keep_last, keep_daily, keep_weekly, keep_monthly, keep_yearly)):
+            # Refuse here as well as server-side: without a policy the server
+            # would reject the request anyway, and pruning under a policy
+            # nobody configured is how snapshots get deleted by surprise.
+            return BackendResult(
+                success=False,
+                operation=OperationType.PRUNE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=["No retention policy configured - refusing to prune. Nothing was deleted."],
+                return_code=-1,
+            )
+        try:
+            response = self._request(
+                "POST",
+                "/prune",
+                json_data={
+                    "keep_last": keep_last,
+                    "keep_daily": keep_daily,
+                    "keep_weekly": keep_weekly,
+                    "keep_monthly": keep_monthly,
+                    "keep_yearly": keep_yearly,
+                    "dry_run": dry_run,
+                    "source_path": source_path,
+                },
+            )
+            data = response.json()
+            return BackendResult(
+                success=bool(data.get("success", False)),
+                operation=OperationType.PRUNE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                output=data.get("output", "") or "",
+                errors=[data["error"]] if data.get("error") else [],
+                return_code=0 if data.get("success") else 1,
+            )
+        except Exception as e:
+            logger.error(f"[PROXY] Prune failed: {e}")
+            return BackendResult(
+                success=False,
+                operation=OperationType.PRUNE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(e)],
+                return_code=1,
+            )
 
     def check(
         self,

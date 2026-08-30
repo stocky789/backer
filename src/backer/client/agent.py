@@ -1379,6 +1379,18 @@ class BackerAgent:
                         ) from rollback_err
                 raise
 
+            # A clean restore that reports success but left the destination empty is
+            # more dangerous than an outright failure: the staged original would be
+            # discarded below and the run reported green while the user's data is
+            # simply gone. Treat "restored nothing" as a failure so the existing
+            # rollback path below restores the staged original instead.
+            if clean_restore and not dry_run and staged_destination and result.success:
+                if not destination.exists() or not any(destination.iterdir()):
+                    result.success = False
+                    result.errors.append(
+                        "Clean restore produced no files; keeping original destination"
+                    )
+
             if clean_restore and not dry_run and not result.success:
                 try:
                     if destination.exists():

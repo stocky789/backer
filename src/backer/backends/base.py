@@ -222,7 +222,9 @@ class BackendBase(ABC):
         keep_daily: int | None = None,
         keep_weekly: int | None = None,
         keep_monthly: int | None = None,
+        keep_yearly: int | None = None,
         dry_run: bool = False,
+        source_path: str | None = None,
     ) -> BackendResult:
         """Prune old snapshots according to retention policy.
 

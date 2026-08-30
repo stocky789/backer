@@ -20,16 +20,15 @@ class _RestoreBackend:
         self,
         validation_success: bool,
         restore_success: bool = True,
-        validation_files: int = 1,
-        validation_matched_items: int | None = None,
-        restore_matched_items: int | None = None,
+        restore_files: int | None = None,
         resolved_snapshot: str = "a" * 64,
     ):
         self.validation_success = validation_success
         self.restore_success = restore_success
-        self.validation_files = validation_files
-        self.validation_matched_items = validation_matched_items
-        self.restore_matched_items = restore_matched_items
+        # Number of files the (non-dry-run) restore actually writes to the
+        # destination. None means "write one", 0 simulates a restore that
+        # reports success but matches/restores nothing.
+        self.restore_files = restore_files
         self.resolved_snapshot = resolved_snapshot
         self.dry_runs: list[bool] = []
         self.snapshots: list[str | None] = []
@@ -43,22 +42,32 @@ class _RestoreBackend:
         return self.resolved_snapshot
 
     def list_snapshots(self, destination: object) -> list[dict[str, str]]:
+        # Kopia validates a clean restore by confirming the repository opens
+        # and the selected snapshot exists (it refuses dry-run restores), so
+        # an unavailable/unvalidatable repository is modeled as an empty list.
+        if not self.validation_success:
+            return []
         return [{"id": self.resolved_snapshot, "full_id": self.resolved_snapshot}, {"id": "chosen"}]
 
     def restore(self, *, destination: Path, dry_run: bool, **kwargs: object) -> BackendResult:
         self.dry_runs.append(dry_run)
         self.snapshots.append(kwargs.get("snapshot") if isinstance(kwargs.get("snapshot"), str) else None)
-        matched_items = self.validation_matched_items if dry_run else self.restore_matched_items
-        if not dry_run and not self.restore_success:
+        if not self.restore_success:
             (destination / "partial.txt").write_text("partial")
+            files_written = 0
+        elif not dry_run:
+            files_written = self.restore_files if self.restore_files is not None else 1
+            for i in range(files_written):
+                (destination / f"restored{i}.txt").write_text("restored")
+        else:
+            files_written = 0
         return BackendResult(
-            success=self.validation_success if dry_run else self.restore_success,
+            success=self.restore_success,
             operation=OperationType.RESTORE,
             started_at=datetime.now(),
             finished_at=datetime.now(),
-            errors=[] if (self.validation_success if dry_run else self.restore_success) else ["repository unavailable"],
-            files_transferred=self.validation_files if dry_run else 1,
-            metadata={"matched_items": matched_items} if matched_items is not None else {},
+            errors=[] if self.restore_success else ["repository unavailable"],
+            files_transferred=files_written,
         )
 
 
@@ -217,9 +226,10 @@ def test_clean_restore_keeps_destination_when_validation_fails(
         "clean_restore": True,
     })
 
-    assert report["success"]
-    assert not original.exists()
-    assert backend.dry_runs == [False]
+    assert not report["success"]
+    assert original.exists()
+    assert original.read_text() == "keep"
+    assert backend.dry_runs == []
 
 
 @pytest.mark.parametrize(
@@ -262,7 +272,7 @@ def test_clean_kopia_restore_keeps_destination_when_no_files_match(
     destination.mkdir()
     original = destination / "keep.txt"
     original.write_text("keep")
-    backend = _RestoreBackend(validation_success=True, validation_matched_items=0)
+    backend = _RestoreBackend(validation_success=True, restore_files=0)
     agent = _agent(tmp_path)
     monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
@@ -277,23 +287,24 @@ def test_clean_kopia_restore_keeps_destination_when_no_files_match(
         "clean_restore": True,
     })
 
-    assert report["success"]
-    assert not original.exists()
+    assert not report["success"]
+    assert original.exists()
+    assert original.read_text() == "keep"
     assert backend.dry_runs == [False]
 
 
 def test_clean_kopia_restore_rolls_back_when_actual_restore_matches_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Validation (repository opens, snapshot exists) passes, but the real,
+    # non-dry-run restore call itself writes nothing to the destination -
+    # this is the case validation alone cannot catch, since Kopia refuses
+    # dry-run restores.
     destination = tmp_path / "restore"
     destination.mkdir()
     original = destination / "keep.txt"
     original.write_text("keep")
-    backend = _RestoreBackend(
-        validation_success=True,
-        validation_matched_items=1,
-        restore_matched_items=0,
-    )
+    backend = _RestoreBackend(validation_success=True, restore_files=0)
     agent = _agent(tmp_path)
     monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
@@ -305,11 +316,13 @@ def test_clean_kopia_restore_rolls_back_when_actual_restore_matches_nothing(
         "backend": "kopia",
         "source_path": str(tmp_path / "repo"),
         "destination_path": str(destination),
+        "snapshot": "chosen",
         "clean_restore": True,
     })
 
-    assert report["success"]
-    assert not original.exists()
+    assert not report["success"]
+    assert original.exists()
+    assert original.read_text() == "keep"
     assert backend.dry_runs == [False]
 
 
@@ -542,7 +555,9 @@ def test_clean_restore_refuses_symlink_destination(
 
     assert not report["success"]
     assert original.read_text() == "keep"
-    assert backend.dry_runs == [True]
+    # Kopia validates via list_snapshots (it refuses dry-run restores), and the
+    # symlink refusal happens before that real restore is ever invoked.
+    assert backend.dry_runs == []
 
 
 def test_gui_service_uses_shared_agent_executor(

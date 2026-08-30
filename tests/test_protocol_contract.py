@@ -354,6 +354,144 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
     assert "backend_type" not in metadata.get_job("photos")["config"]
 
 
+class _FakeMaintenanceKopia:
+    """Records every maintenance() call instead of touching a real repo."""
+
+    def __init__(self, repo_path: str, password: str):
+        self.repo_path = Path(repo_path)
+        self.calls: list[list[str]] = []
+
+    def ensure_repo(self) -> bool:
+        return True
+
+    def maintenance(self, args: list[str]) -> dict[str, object]:
+        self.calls.append(args)
+        return {"success": True, "output": "ok", "error": None}
+
+
+def _prune_setup(tmp_path: Path, monkeypatch) -> tuple[TestClient, str]:
+    import backer.server.app as server_app
+
+    fake = _FakeMaintenanceKopia("", "")
+    monkeypatch.setattr(server_app, "ServerKopia", lambda *a, **k: fake)
+    app = create_app(tmp_path / "server")
+    storage_path = tmp_path / "repository"
+    storage_path.mkdir()
+    storage = app.state.storage
+    storage.add_repository("repo-1", "local", "local", share=str(storage_path))
+    storage.set_repository_password("repo-1", "test-password")
+    storage.add_client(
+        Client(
+            id="agent-1", name="agent-1", hostname="agent-1", ip_address="127.0.0.1",
+            status=ClientStatus.ONLINE, registered_at=datetime.now(), version="test",
+        ),
+        hashlib.sha256(b"agent-secret").hexdigest(),
+    )
+    token = generate_proxy_capability(
+        client_id="agent-1", repo_id="repo-1", job_name="photos", run_id="run-1",
+        subfolder="Agents/photos", operation="prune",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    _complete_setup(client)
+    client.state_fake = fake  # type: ignore[attr-defined]
+    return client, token
+
+
+def test_prune_refuses_without_a_retention_policy(tmp_path: Path, monkeypatch) -> None:
+    client, token = _prune_setup(tmp_path, monkeypatch)
+    fake = client.state_fake  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/api/repo/repo-1/prune",
+        json={},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert "no retention policy" in body["error"].lower()
+    assert fake.calls == []
+
+
+def test_prune_rejects_invalid_retention_value(tmp_path: Path, monkeypatch) -> None:
+    client, token = _prune_setup(tmp_path, monkeypatch)
+    fake = client.state_fake  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/api/repo/repo-1/prune",
+        json={"keep_last": -1},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert "positive integer" in body["error"].lower()
+    assert fake.calls == []
+
+
+def test_prune_applies_the_supplied_policy_and_nothing_else(tmp_path: Path, monkeypatch) -> None:
+    client, token = _prune_setup(tmp_path, monkeypatch)
+    fake = client.state_fake  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/api/repo/repo-1/prune",
+        json={"keep_daily": 7, "keep_yearly": 2, "source_path": "/data/photos"},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["success"] is True
+    policy_call, expire_call = fake.calls
+    assert policy_call == ["policy", "set", "/data/photos", "--keep-daily", "7", "--keep-annual", "2"]
+    assert expire_call == ["snapshot", "expire", "/data/photos", "--delete"]
+
+
+def test_proxy_backend_prune_sends_policy_in_request_body(monkeypatch) -> None:
+    from backer.backends.base import BackupDestination
+    from backer.backends.proxy import ProxyBackend
+
+    backend = ProxyBackend(config={
+        "location": "proxy://localhost:8420/repo/repo-1",
+        "client_id": "agent-1",
+        "client_secret": "agent-secret",
+    })
+
+    captured: dict[str, object] = {}
+
+    def fake_request(method: str, path: str, json_data=None, **_: object) -> SimpleNamespace:
+        captured["method"] = method
+        captured["path"] = path
+        captured["json_data"] = json_data
+        return SimpleNamespace(json=lambda: {"success": True, "output": "pruned"})
+
+    monkeypatch.setattr(backend, "_request", fake_request)
+
+    result = backend.prune(
+        BackupDestination(path="repo-1"),
+        keep_daily=7,
+        keep_yearly=2,
+        dry_run=False,
+        source_path="/data/photos",
+    )
+
+    assert result.success is True
+    assert captured["path"] == "/prune"
+    assert captured["json_data"] == {
+        "keep_last": None,
+        "keep_daily": 7,
+        "keep_weekly": None,
+        "keep_monthly": None,
+        "keep_yearly": 2,
+        "dry_run": False,
+        "source_path": "/data/photos",
+    }
+
+
 def test_windows_startup_task_uses_the_dedicated_service_binary(monkeypatch, tmp_path: Path) -> None:
     from backer.client import windows_service
 

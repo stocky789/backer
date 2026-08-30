@@ -548,6 +548,35 @@ def _repository_password_or_error(password: str | None) -> str:
     return password
 
 
+# kopia policy flag for each retention key, keyed to match RetentionConfig
+_RETENTION_KOPIA_FLAGS = {
+    "keep_last": "--keep-latest",
+    "keep_daily": "--keep-daily",
+    "keep_weekly": "--keep-weekly",
+    "keep_monthly": "--keep-monthly",
+    "keep_yearly": "--keep-annual",
+}
+
+
+def _validate_retention_policy(body: dict[str, Any]) -> dict[str, int]:
+    """Extract and validate keep_* retention values from a request body.
+
+    Raises ValueError if a supplied value is present but not a positive int.
+    Returns only the keys that were actually supplied - never fills in a
+    default for a missing or invalid one, since that would silently apply
+    a policy nobody configured.
+    """
+    policy: dict[str, int] = {}
+    for key in _RETENTION_KOPIA_FLAGS:
+        if key not in body or body[key] is None:
+            continue
+        value = body[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+        policy[key] = value
+    return policy
+
+
 def _build_backup_command_payload(
     job: dict[str, Any],
     job_name: str,
@@ -4875,6 +4904,36 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         return {"task_id": task.id, "status": "testing", "message": "Connection test started"}
+
+    @app.post("/api/v1/repositories/{repo_id}/password")
+    async def set_repository_password(
+        repo_id: str, request: Request, storage: Storage = Depends(get_storage)
+    ) -> dict[str, Any]:
+        """Set the encryption password on a repository.
+
+        Lets an existing repository that predates mandatory encryption
+        passwords (or otherwise lost its password) be given one so it can be
+        opened again. If a password is already set, the caller must pass
+        `force: true` - changing it does not re-encrypt anything, so a wrong
+        value simply makes a working repository unopenable.
+        """
+        repo = storage.get_repository(repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+
+        data = await request.json()
+        password = _repository_password_or_error(data.get("repository_password"))
+
+        if storage.get_repository_password(repo_id) and not data.get("force"):
+            raise HTTPException(
+                status_code=409,
+                detail="Repository already has a password; pass force=true to replace it",
+            )
+
+        storage.set_repository_password(repo_id, password)
+        logger.info(f"[SET REPO PASSWORD] Password set for repository {repo_id}")
+
+        return {"status": "updated", "repo_id": repo_id}
 
     @app.get("/api/v1/repositories/{repo_id}/stats")
     def get_repository_stats(repo_id: str, storage: Storage = Depends(get_storage)) -> dict[str, Any]:
@@ -12692,9 +12751,25 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         try:
             body = await request.json()
-            dry_run = body.get("dry_run", False)
         except Exception:
-            dry_run = False
+            body = {}
+
+        dry_run = bool(body.get("dry_run", False))
+        source_path = body.get("source_path")
+        if source_path is not None and not isinstance(source_path, str):
+            return {"success": False, "error": "source_path must be a string"}
+
+        try:
+            policy = _validate_retention_policy(body)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        # Fail closed: never delete under a policy nobody explicitly configured.
+        if not policy:
+            return {
+                "success": False,
+                "error": "Refusing to prune: no retention policy was supplied",
+            }
 
         try:
             local_path = repo.get("share")
@@ -12702,7 +12777,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
                 if not kopia.ensure_repo():
                     return {"success": False, "error": "Kopia repository not initialized"}
-                return kopia.maintenance(["snapshot", "expire", "--delete"])
+
+                policy_args = ["policy", "set", source_path if source_path else "--global"]
+                for key, flag in _RETENTION_KOPIA_FLAGS.items():
+                    if key in policy:
+                        policy_args.extend([flag, str(policy[key])])
+                policy_result = kopia.maintenance(policy_args)
+                if not policy_result.get("success"):
+                    return policy_result
+
+                expire_args = ["snapshot", "expire", source_path if source_path else "--all"]
+                if not dry_run:
+                    expire_args.append("--delete")
+                return kopia.maintenance(expire_args)
+
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
 
@@ -12714,7 +12802,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
 
             dest = BackupDestination(path=str(local_path))
-            result = backend.prune(dest, dry_run=dry_run)
+            result = backend.prune(
+                dest,
+                keep_last=policy.get("keep_last"),
+                keep_daily=policy.get("keep_daily"),
+                keep_weekly=policy.get("keep_weekly"),
+                keep_monthly=policy.get("keep_monthly"),
+                keep_yearly=policy.get("keep_yearly"),
+                dry_run=dry_run,
+                source_path=source_path,
+            )
 
             return {
                 "success": result.success,
@@ -12744,12 +12841,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
         try:
-            body = await request.json()
-            dry_run = body.get("dry_run", False)
-        except Exception:
-            dry_run = False
-
-        try:
             local_path = repo.get("share")
             if repo.get("repo_type") == "local":
                 kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
@@ -12772,7 +12863,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
 
             dest = BackupDestination(path=str(local_path))
-            result = backend.check(dest, dry_run=dry_run)
+            result = backend.check(dest)
 
             return {
                 "success": result.success,

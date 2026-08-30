@@ -623,6 +623,44 @@ class KopiaBackend(BackendBase):
 
         return []
 
+    def _resolve_source_target(self, source_path: str) -> str | None:
+        """Build the kopia 'user@host:path' target for a given source path.
+
+        Looks up the actual snapshot source recorded by kopia (via `snapshot
+        list --json`) rather than guessing the local username/hostname, so
+        the target we hand to `policy set` / `snapshot expire` is exactly
+        what kopia already recorded. Returns None if no matching source is
+        found - callers must refuse rather than fall back to a repo-wide
+        target.
+        """
+        try:
+            binary = self._get_binary()
+            result = subprocess.run(
+                [str(binary), "snapshot", "list", "--json", "--all"],
+                capture_output=True,
+                text=True,
+                env=self._env,
+                timeout=60,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+
+            snapshots = json.loads(result.stdout)
+            normalized = source_path.rstrip("/")
+            for snap in snapshots:
+                source = snap.get("source", {})
+                snap_path = source.get("path", "")
+                if snap_path.rstrip("/") == normalized:
+                    host = source.get("host")
+                    user = source.get("userName")
+                    if not host or not user:
+                        return None
+                    return f"{user}@{host}:{snap_path}"
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            return None
+
+        return None
+
     def prune(
         self,
         destination: BackupDestination,
@@ -630,10 +668,31 @@ class KopiaBackend(BackendBase):
         keep_daily: int | None = None,
         keep_weekly: int | None = None,
         keep_monthly: int | None = None,
+        keep_yearly: int | None = None,
         dry_run: bool = False,
+        source_path: str | None = None,
     ) -> BackendResult:
         """Prune old snapshots using kopia policy and maintenance."""
         started_at = datetime.now()
+
+        # FAIL CLOSED: never expire snapshots under a retention policy nobody
+        # configured. Without this, "policy set --global" with no keep flags
+        # is a no-op and "snapshot expire --delete" deletes under whatever
+        # policy happens to already be in effect (kopia defaults, or a policy
+        # left behind by another job sharing this repository).
+        if not any((keep_last, keep_daily, keep_weekly, keep_monthly, keep_yearly)):
+            return BackendResult(
+                success=False,
+                operation=OperationType.PRUNE,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[
+                    "No retention policy configured (keep_last/keep_daily/keep_weekly/"
+                    "keep_monthly/keep_yearly all unset) - refusing to prune. Nothing "
+                    "was deleted."
+                ],
+                return_code=-1,
+            )
 
         try:
             binary = self._get_binary()
@@ -660,8 +719,28 @@ class KopiaBackend(BackendBase):
             )
 
         try:
-            # Set retention policy
-            policy_cmd = [str(binary), "policy", "set", "--global"]
+            target: str | None = None
+            if source_path is not None:
+                target = self._resolve_source_target(source_path)
+                if target is None:
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.PRUNE,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=[
+                            f"Could not resolve a kopia snapshot source matching "
+                            f"'{source_path}' - refusing to prune rather than risk "
+                            f"applying the policy repository-wide."
+                        ],
+                        return_code=-1,
+                    )
+
+            # Set retention policy - scoped to the resolved source when given,
+            # otherwise the repository-wide global policy (a caller that
+            # deliberately prunes the whole repository is legitimate).
+            policy_cmd = [str(binary), "policy", "set"]
+            policy_cmd.append(target if target is not None else "--global")
 
             if keep_last:
                 policy_cmd.extend(["--keep-latest", str(keep_last)])
@@ -671,6 +750,8 @@ class KopiaBackend(BackendBase):
                 policy_cmd.extend(["--keep-weekly", str(keep_weekly)])
             if keep_monthly:
                 policy_cmd.extend(["--keep-monthly", str(keep_monthly)])
+            if keep_yearly:
+                policy_cmd.extend(["--keep-annual", str(keep_yearly)])
 
             # Apply policy
             policy_result = subprocess.run(
@@ -692,10 +773,16 @@ class KopiaBackend(BackendBase):
                     return_code=policy_result.returncode,
                 )
 
-            # Run snapshot expire to apply retention
-            expire_cmd = [str(binary), "snapshot", "expire", "--all"]
-            if dry_run:
-                expire_cmd.append("--dry-run")
+            # Run snapshot expire to apply retention. "snapshot expire" without
+            # --delete only reports what would be removed, so that IS the dry
+            # run; there is no --dry-run flag (kopia rejects it as unknown).
+            expire_cmd = [str(binary), "snapshot", "expire"]
+            if target is not None:
+                expire_cmd.append(target)
+            else:
+                expire_cmd.append("--all")
+            if not dry_run:
+                expire_cmd.append("--delete")
 
             expire_result = subprocess.run(
                 expire_cmd,
@@ -766,9 +853,19 @@ class KopiaBackend(BackendBase):
                 )
 
             try:
-                # Kopia uses 'repository validate-client' for integrity checks
+                # "repository validate-client" is not a real kopia subcommand.
+                # "snapshot verify" is the actual integrity check; by default it
+                # only verifies metadata (--verify-files-percent=0), reading no
+                # file content, which is fast. Reading actual content is much
+                # slower, so it stays opt-in via config.
+                verify_percent = self.config.get("verify_files_percent", 0)
                 result = subprocess.run(
-                    [str(binary), "repository", "validate-client"],
+                    [
+                        str(binary),
+                        "snapshot",
+                        "verify",
+                        f"--verify-files-percent={verify_percent}",
+                    ],
                     capture_output=True,
                     text=True,
                     env=self._env,
