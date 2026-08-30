@@ -12758,6 +12758,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         source_path = body.get("source_path")
         if source_path is not None and not isinstance(source_path, str):
             return {"success": False, "error": "source_path must be a string"}
+        if isinstance(source_path, str) and source_path.startswith("-"):
+            # source_path is passed to kopia as a positional argument. A value
+            # like "--all" would turn a source-scoped expiry into a
+            # repository-wide one and delete every job's snapshots.
+            return {"success": False, "error": "source_path must not start with '-'"}
 
         try:
             policy = _validate_retention_policy(body)

@@ -433,6 +433,26 @@ def test_prune_rejects_invalid_retention_value(tmp_path: Path, monkeypatch) -> N
     assert fake.calls == []
 
 
+def test_prune_rejects_a_source_path_that_smuggles_a_flag(tmp_path: Path, monkeypatch) -> None:
+    """source_path is a positional kopia argument, so "--all" would widen the
+    expiry to the whole repository and delete every job's snapshots."""
+    client, token = _prune_setup(tmp_path, monkeypatch)
+    fake = client.state_fake  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/api/repo/repo-1/prune",
+        json={"keep_last": 3, "source_path": "--all"},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert "must not start with" in body["error"]
+    assert fake.calls == []
+
+
 def test_prune_applies_the_supplied_policy_and_nothing_else(tmp_path: Path, monkeypatch) -> None:
     client, token = _prune_setup(tmp_path, monkeypatch)
     fake = client.state_fake  # type: ignore[attr-defined]
