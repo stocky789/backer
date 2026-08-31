@@ -186,6 +186,32 @@ def test_windows_smb_is_prepared_for_backup_and_restore(tmp_path: Path, monkeypa
     assert connections == [("nas", "backups"), ("nas", "backups")]
 
 
+def test_windows_smb_preparation_reuses_process_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creating a manager per command reintroduces Windows error 1219 conflicts."""
+    from backer.core import destination
+
+    managers: list[object] = []
+
+    class SMBConnectionManager:
+        def __init__(self) -> None:
+            managers.append(self)
+
+        def connect(self, *_: object) -> bool:
+            return True
+
+    monkeypatch.setattr(destination.sys, "platform", "win32")
+    monkeypatch.setattr(destination, "_smb_manager", None)
+    from backer.agent import service as gui_service
+
+    monkeypatch.setattr(gui_service, "SMBConnectionManager", SMBConnectionManager)
+    job = {"smb_username": "user", "smb_password": "secret"}
+
+    destination.prepare_destination({**job, "destination_path": "//nas/backups/repo"}, "kopia")
+    destination.prepare_source({**job, "source_path": "//nas/backups/repo"}, "kopia")
+
+    assert len(managers) == 1
+
+
 def test_linux_smb_password_uses_private_credentials_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

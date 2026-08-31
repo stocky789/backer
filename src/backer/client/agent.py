@@ -21,6 +21,7 @@ from backer import __version__
 from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
 from backer.core.config import ClientConfig, load_config
+from backer.core.destination import prepare_destination, prepare_source
 from backer.core.mounts import (
     check_cifs_available,
     check_nfs_available,
@@ -109,7 +110,6 @@ class BackerAgent:
 
         self._heartbeat_thread: threading.Thread | None = None
         self._http_client: httpx.Client | None = None
-        self._smb_manager: Any | None = None
 
     def _get_client(self) -> httpx.Client:
         """Get or create HTTP client (thread-safe)."""
@@ -512,131 +512,7 @@ class BackerAgent:
         job: dict[str, Any],
         backend_name: str,
     ) -> tuple[str, Any]:
-        """Prepare the destination path for the backend.
-
-        On Linux, SMB and NFS paths need special handling:
-        - For Kopia: Mount the share/export first
-        - For proxy backend: Use destination_path as-is (it's a proxy:// URI)
-
-        Returns:
-            Tuple of (destination_path, cleanup_context_or_none)
-        """
-        dest_path = job.get("destination_path", "")
-
-        # Proxy backend uses destination_path as a proxy:// URI directly
-        # Don't try to mount it as a filesystem path
-        if backend_name == "proxy" or dest_path.startswith(("proxy://", "proxys://")):
-            return dest_path, None
-
-        # Windows can use UNC paths directly, but does not support the NFS
-        # destination format used by the agent protocol.
-        if sys.platform == "win32":
-            if self._is_nfs_path(dest_path) or (job.get("nfs_server") and job.get("nfs_export")):
-                raise RuntimeError("NFS destinations are not supported on Windows")
-            self._prepare_windows_smb(dest_path, job)
-            return dest_path, None
-
-        # Handle SMB paths
-        if self._is_smb_path(dest_path):
-            return self._prepare_smb_destination(job, backend_name, dest_path)
-
-        # Check if NFS credentials were passed (job linked to NFS repository)
-        # This takes priority over parsing dest_path as NFS, because the server
-        # provides the actual NFS export separately from the subpath
-        nfs_server = job.get("nfs_server")
-        nfs_export = job.get("nfs_export")
-        if nfs_server and nfs_export:
-            # Server provided NFS export - mount the export and calculate subpath
-            # dest_path will be like: server:/export/path/Agents/jobname
-            # nfs_export is the actual mountable export: /export/path
-            # We need to extract the subpath after the export
-            print(f"[NFS] Using NFS repository: {nfs_server}:{nfs_export}")
-
-            # Calculate subpath: everything in dest_path after the export
-            # dest_path format: "server:/export/subpath" or just "/local/path"
-            subpath = ""
-            if self._is_nfs_path(dest_path):
-                # Parse the full destination to get the path portion
-                _, full_path, _ = self._parse_nfs_path(dest_path)
-                # Remove the export prefix to get subpath
-                if full_path.startswith(nfs_export):
-                    subpath = full_path[len(nfs_export) :].lstrip("/")
-                else:
-                    # Export doesn't match - maybe path format differs, use full path as subpath
-                    subpath = full_path.lstrip("/")
-
-            ctx = self._nfs_mount_context(server=nfs_server, export_path=nfs_export)
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            print(f"[NFS] Using mounted path: {full_path}")
-            return full_path, ctx
-
-        # Handle NFS paths (without server-provided credentials)
-        if self._is_nfs_path(dest_path):
-            return self._prepare_nfs_destination(job, backend_name, dest_path)
-
-        # Local path, use as-is
-        return dest_path, None
-
-    def _prepare_smb_destination(
-        self,
-        job: dict[str, Any],
-        backend_name: str,
-        dest_path: str,
-    ) -> tuple[str, Any]:
-        """Prepare SMB destination path for the backend."""
-        server, share, subpath = self._parse_smb_path(dest_path)
-
-        # Get credentials from job (passed by server)
-        smb_username = job.get("smb_username")
-        smb_password = job.get("smb_password")
-        smb_domain = job.get("smb_domain")
-
-        if backend_name == "kopia":
-            # Kopia uses a mounted filesystem path for SMB on Linux.
-            print(f"[SMB] Mounting share for {backend_name} backend")
-            ctx = self._smb_mount_context(
-                server=server,
-                share=share,
-                username=smb_username,
-                password=smb_password,
-                domain=smb_domain,
-            )
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            print(f"[SMB] Using mounted path: {full_path}")
-            return full_path, ctx
-
-        else:
-            # Unknown backend, try using path as-is
-            print(f"[SMB] Warning: Unknown backend '{backend_name}', using path as-is")
-            return dest_path, None
-
-    def _prepare_nfs_destination(
-        self,
-        job: dict[str, Any],
-        backend_name: str,
-        dest_path: str,
-    ) -> tuple[str, Any]:
-        """Prepare NFS destination path for the backend."""
-        server, export_path, subpath = self._parse_nfs_path(dest_path)
-
-        if backend_name == "kopia":
-            # Kopia needs a mounted filesystem path.
-            print(f"[NFS] Mounting NFS export for {backend_name} backend")
-            ctx = self._nfs_mount_context(server=server, export_path=export_path)
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            print(f"[NFS] Using mounted path: {full_path}")
-            return full_path, ctx
-
-        else:
-            # Unknown backend, try mounting anyway
-            print(f"[NFS] Warning: Unknown backend '{backend_name}', mounting NFS export")
-            ctx = self._nfs_mount_context(server=server, export_path=export_path)
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            return full_path, ctx
+        return prepare_destination(job, backend_name)
 
     def execute_backup(
         self,
@@ -862,132 +738,7 @@ class BackerAgent:
             Tuple of (prepared_path, cleanup_context).
             cleanup_context should be used to unmount if not None.
         """
-        source_path = job.get("source_path", "")
-
-        # Proxy backend uses source_path as a proxy:// URI directly
-        # Don't try to mount it as a filesystem path
-        if backend_name == "proxy" or source_path.startswith(("proxy://", "proxys://")):
-            print(f"[RESTORE] Using proxy URI directly: {source_path}")
-            return source_path, None
-
-        # Windows can use UNC paths directly, but does not support the NFS
-        # source format used by the agent protocol.
-        if sys.platform == "win32":
-            if self._is_nfs_path(source_path) or (job.get("nfs_server") and job.get("nfs_export")):
-                raise RuntimeError("NFS restores are not supported on Windows")
-            self._prepare_windows_smb(source_path, job)
-            return source_path, None
-
-        # Check if NFS credentials were passed (job linked to NFS repository)
-        # This takes priority over parsing source_path as NFS, because the server
-        # provides the actual NFS export separately from the subpath
-        nfs_server = job.get("nfs_server")
-        nfs_export = job.get("nfs_export")
-        if nfs_server and nfs_export:
-            # Server provided NFS export - mount the export and calculate subpath
-            # source_path will be like: server:/export/path/Agents/jobname
-            # nfs_export is the actual mountable export: /export/path
-            # We need to extract the subpath after the export
-            print(f"[RESTORE] Using NFS repository: {nfs_server}:{nfs_export}")
-
-            # Calculate subpath: everything in source_path after the export
-            subpath = ""
-            if self._is_nfs_path(source_path):
-                # Parse the full source to get the path portion
-                _, full_path, _ = self._parse_nfs_path(source_path)
-                # Remove the export prefix to get subpath
-                if full_path.startswith(nfs_export):
-                    subpath = full_path[len(nfs_export) :].lstrip("/")
-                else:
-                    # Export doesn't match - maybe path format differs, use full path as subpath
-                    subpath = full_path.lstrip("/")
-
-            ctx = self._nfs_mount_context(server=nfs_server, export_path=nfs_export)
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            print(f"[RESTORE] Using mounted path: {full_path}")
-            return full_path, ctx
-
-        # Check for NFS path (server:/export format) without explicit credentials
-        if self._is_nfs_path(source_path):
-            print(f"[RESTORE] Detected NFS source path: {source_path}")
-            return self._prepare_nfs_source(job, backend_name, source_path)
-
-        # Check for SMB path (//server/share or \\server\share format)
-        if self._is_smb_path(source_path):
-            print(f"[RESTORE] Detected SMB source path: {source_path}")
-            return self._prepare_smb_source(job, backend_name, source_path)
-
-        # Local path, use as-is
-        return source_path, None
-
-    def _prepare_windows_smb(self, path: str, job: dict[str, Any]) -> None:
-        """Open the SMB session once before either backup or restore uses a UNC path."""
-        if not self._is_smb_path(path):
-            return
-        server, share, _ = self._parse_smb_path(path)
-        if self._smb_manager is None:
-            from backer.agent.service import SMBConnectionManager
-
-            self._smb_manager = SMBConnectionManager()
-        if not self._smb_manager.connect(
-            server, share, job.get("smb_username"), job.get("smb_password"), job.get("smb_domain")
-        ):
-            raise RuntimeError(f"Failed to connect to SMB share: \\\\{server}\\{share}")
-
-    def _prepare_smb_source(
-        self,
-        job: dict[str, Any],
-        backend_name: str,
-        source_path: str,
-    ) -> tuple[str, Any]:
-        """Prepare SMB source path for restore."""
-        server, share, subpath = self._parse_smb_path(source_path)
-
-        # Get credentials from job (passed by server)
-        smb_username = job.get("smb_username")
-        smb_password = job.get("smb_password")
-        smb_domain = job.get("smb_domain")
-
-        if backend_name == "kopia":
-            # Kopia needs a mounted filesystem path.
-            print(f"[RESTORE] Mounting SMB share for {backend_name} backend")
-            ctx = self._smb_mount_context(
-                server=server,
-                share=share,
-                username=smb_username,
-                password=smb_password,
-                domain=smb_domain,
-            )
-            mount_path = ctx.__enter__()
-            full_path = str(mount_path / subpath) if subpath else str(mount_path)
-            print(f"[RESTORE] Using mounted path: {full_path}")
-            return full_path, ctx
-
-        else:
-            print(f"[RESTORE] Warning: Unknown backend '{backend_name}', using path as-is")
-            return source_path, None
-
-    def _prepare_nfs_source(
-        self,
-        job: dict[str, Any],
-        backend_name: str,
-        source_path: str,
-    ) -> tuple[str, Any]:
-        """Prepare NFS source path for restore.
-
-        Note: This is called when nfs_server/nfs_export were NOT provided explicitly.
-        It parses the full NFS path and extracts server, export, and subpath.
-        """
-        server, export_path, subpath = self._parse_nfs_path(source_path)
-
-        # All backends need mounted path for NFS
-        print(f"[RESTORE] Mounting NFS export {server}:{export_path} for {backend_name} backend")
-        ctx = self._nfs_mount_context(server=server, export_path=export_path)
-        mount_path = ctx.__enter__()
-        full_path = str(mount_path / subpath) if subpath else str(mount_path)
-        print(f"[RESTORE] Using mounted path: {full_path}")
-        return full_path, ctx
+        return prepare_source(job, backend_name)
 
     def execute_restore(
         self,
