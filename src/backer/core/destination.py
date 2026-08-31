@@ -4,6 +4,7 @@ Tests that need a clean Windows SMB manager reset ``_smb_manager``.
 """
 
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from backer.core.mounts import (
@@ -18,7 +19,13 @@ from backer.core.mounts import (
 _smb_manager: Any | None = None
 
 
-def prepare_destination(job: dict[str, Any], backend_name: str) -> tuple[str, Any]:
+def prepare_destination(
+    job: dict[str, Any],
+    backend_name: str,
+    *,
+    smb_mount: Callable[..., Any] = smb_mount_context,
+    nfs_mount: Callable[..., Any] = nfs_mount_context,
+) -> tuple[str, Any]:
     """Prepare the destination path for the backend."""
     dest_path = job.get("destination_path", "")
 
@@ -37,7 +44,7 @@ def prepare_destination(job: dict[str, Any], backend_name: str) -> tuple[str, An
 
     # Handle SMB paths
     if is_smb_path(dest_path):
-        return _prepare_smb_destination(job, backend_name, dest_path)
+        return _prepare_smb_destination(job, backend_name, dest_path, smb_mount)
 
     # Check if NFS credentials were passed (job linked to NFS repository)
     # This takes priority over parsing dest_path as NFS, because the server
@@ -64,7 +71,7 @@ def prepare_destination(job: dict[str, Any], backend_name: str) -> tuple[str, An
                 # Export doesn't match - maybe path format differs, use full path as subpath
                 subpath = full_path.lstrip("/")
 
-        ctx = nfs_mount_context(server=nfs_server, export_path=nfs_export)
+        ctx = nfs_mount(server=nfs_server, export_path=nfs_export)
         mount_path = ctx.__enter__()
         full_path = str(mount_path / subpath) if subpath else str(mount_path)
         print(f"[NFS] Using mounted path: {full_path}")
@@ -72,13 +79,15 @@ def prepare_destination(job: dict[str, Any], backend_name: str) -> tuple[str, An
 
     # Handle NFS paths (without server-provided credentials)
     if is_nfs_path(dest_path):
-        return _prepare_nfs_destination(job, backend_name, dest_path)
+        return _prepare_nfs_destination(job, backend_name, dest_path, nfs_mount)
 
     # Local path, use as-is
     return dest_path, None
 
 
-def _prepare_smb_destination(job: dict[str, Any], backend_name: str, dest_path: str) -> tuple[str, Any]:
+def _prepare_smb_destination(
+    job: dict[str, Any], backend_name: str, dest_path: str, smb_mount: Callable[..., Any]
+) -> tuple[str, Any]:
     """Prepare SMB destination path for the backend."""
     server, share, subpath = parse_smb_path(dest_path)
 
@@ -90,7 +99,7 @@ def _prepare_smb_destination(job: dict[str, Any], backend_name: str, dest_path: 
     if backend_name == "kopia":
         # Kopia uses a mounted filesystem path for SMB on Linux.
         print(f"[SMB] Mounting share for {backend_name} backend")
-        ctx = smb_mount_context(
+        ctx = smb_mount(
             server=server,
             share=share,
             username=smb_username,
@@ -107,14 +116,16 @@ def _prepare_smb_destination(job: dict[str, Any], backend_name: str, dest_path: 
     return dest_path, None
 
 
-def _prepare_nfs_destination(job: dict[str, Any], backend_name: str, dest_path: str) -> tuple[str, Any]:
+def _prepare_nfs_destination(
+    job: dict[str, Any], backend_name: str, dest_path: str, nfs_mount: Callable[..., Any]
+) -> tuple[str, Any]:
     """Prepare NFS destination path for the backend."""
     server, export_path, subpath = parse_nfs_path(dest_path)
 
     if backend_name == "kopia":
         # Kopia needs a mounted filesystem path.
         print(f"[NFS] Mounting NFS export for {backend_name} backend")
-        ctx = nfs_mount_context(server=server, export_path=export_path)
+        ctx = nfs_mount(server=server, export_path=export_path)
         mount_path = ctx.__enter__()
         full_path = str(mount_path / subpath) if subpath else str(mount_path)
         print(f"[NFS] Using mounted path: {full_path}")
@@ -122,13 +133,19 @@ def _prepare_nfs_destination(job: dict[str, Any], backend_name: str, dest_path: 
 
     # Unknown backend, try mounting anyway
     print(f"[NFS] Warning: Unknown backend '{backend_name}', mounting NFS export")
-    ctx = nfs_mount_context(server=server, export_path=export_path)
+    ctx = nfs_mount(server=server, export_path=export_path)
     mount_path = ctx.__enter__()
     full_path = str(mount_path / subpath) if subpath else str(mount_path)
     return full_path, ctx
 
 
-def prepare_source(job: dict[str, Any], backend_name: str) -> tuple[str, Any]:
+def prepare_source(
+    job: dict[str, Any],
+    backend_name: str,
+    *,
+    smb_mount: Callable[..., Any] = smb_mount_context,
+    nfs_mount: Callable[..., Any] = nfs_mount_context,
+) -> tuple[str, Any]:
     """Prepare source path for the backend, mounting SMB/NFS if needed."""
     source_path = job.get("source_path", "")
 
@@ -170,7 +187,7 @@ def prepare_source(job: dict[str, Any], backend_name: str) -> tuple[str, Any]:
                 # Export doesn't match - maybe path format differs, use full path as subpath
                 subpath = full_path.lstrip("/")
 
-        ctx = nfs_mount_context(server=nfs_server, export_path=nfs_export)
+        ctx = nfs_mount(server=nfs_server, export_path=nfs_export)
         mount_path = ctx.__enter__()
         full_path = str(mount_path / subpath) if subpath else str(mount_path)
         print(f"[RESTORE] Using mounted path: {full_path}")
@@ -179,12 +196,12 @@ def prepare_source(job: dict[str, Any], backend_name: str) -> tuple[str, Any]:
     # Check for NFS path (server:/export format) without explicit credentials
     if is_nfs_path(source_path):
         print(f"[RESTORE] Detected NFS source path: {source_path}")
-        return _prepare_nfs_source(job, backend_name, source_path)
+        return _prepare_nfs_source(job, backend_name, source_path, nfs_mount)
 
     # Check for SMB path (//server/share or \\server\share format)
     if is_smb_path(source_path):
         print(f"[RESTORE] Detected SMB source path: {source_path}")
-        return _prepare_smb_source(job, backend_name, source_path)
+        return _prepare_smb_source(job, backend_name, source_path, smb_mount)
 
     # Local path, use as-is
     return source_path, None
@@ -204,10 +221,12 @@ def _prepare_windows_smb(path: str, job: dict[str, Any]) -> None:
     if not _smb_manager.connect(
         server, share, job.get("smb_username"), job.get("smb_password"), job.get("smb_domain")
     ):
-        raise RuntimeError(f"Failed to connect to SMB share: \\{server}\\{share}")
+        raise RuntimeError(f"Failed to connect to SMB share: \\\\{server}\\{share}")
 
 
-def _prepare_smb_source(job: dict[str, Any], backend_name: str, source_path: str) -> tuple[str, Any]:
+def _prepare_smb_source(
+    job: dict[str, Any], backend_name: str, source_path: str, smb_mount: Callable[..., Any]
+) -> tuple[str, Any]:
     """Prepare SMB source path for restore."""
     server, share, subpath = parse_smb_path(source_path)
 
@@ -219,7 +238,7 @@ def _prepare_smb_source(job: dict[str, Any], backend_name: str, source_path: str
     if backend_name == "kopia":
         # Kopia needs a mounted filesystem path.
         print(f"[RESTORE] Mounting SMB share for {backend_name} backend")
-        ctx = smb_mount_context(
+        ctx = smb_mount(
             server=server,
             share=share,
             username=smb_username,
@@ -235,13 +254,15 @@ def _prepare_smb_source(job: dict[str, Any], backend_name: str, source_path: str
     return source_path, None
 
 
-def _prepare_nfs_source(job: dict[str, Any], backend_name: str, source_path: str) -> tuple[str, Any]:
+def _prepare_nfs_source(
+    job: dict[str, Any], backend_name: str, source_path: str, nfs_mount: Callable[..., Any]
+) -> tuple[str, Any]:
     """Prepare NFS source path for restore."""
     server, export_path, subpath = parse_nfs_path(source_path)
 
     # All backends need mounted path for NFS
     print(f"[RESTORE] Mounting NFS export {server}:{export_path} for {backend_name} backend")
-    ctx = nfs_mount_context(server=server, export_path=export_path)
+    ctx = nfs_mount(server=server, export_path=export_path)
     mount_path = ctx.__enter__()
     full_path = str(mount_path / subpath) if subpath else str(mount_path)
     print(f"[RESTORE] Using mounted path: {full_path}")

@@ -512,7 +512,12 @@ class BackerAgent:
         job: dict[str, Any],
         backend_name: str,
     ) -> tuple[str, Any]:
-        return prepare_destination(job, backend_name)
+        return prepare_destination(
+            job,
+            backend_name,
+            smb_mount=self._smb_mount_context,
+            nfs_mount=self._nfs_mount_context,
+        )
 
     def execute_backup(
         self,
@@ -738,7 +743,12 @@ class BackerAgent:
             Tuple of (prepared_path, cleanup_context).
             cleanup_context should be used to unmount if not None.
         """
-        return prepare_source(job, backend_name)
+        return prepare_source(
+            job,
+            backend_name,
+            smb_mount=self._smb_mount_context,
+            nfs_mount=self._nfs_mount_context,
+        )
 
     def execute_restore(
         self,

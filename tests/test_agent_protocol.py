@@ -212,6 +212,38 @@ def test_windows_smb_preparation_reuses_process_manager(monkeypatch: pytest.Monk
     assert len(managers) == 1
 
 
+def test_windows_smb_connection_failure_keeps_unc_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed UNC connection must identify the share with its full UNC path."""
+    from backer.core import destination
+
+    class SMBConnectionManager:
+        def connect(self, *_: object) -> bool:
+            return False
+
+    monkeypatch.setattr(destination, "_smb_manager", SMBConnectionManager())
+
+    with pytest.raises(RuntimeError, match=r"^Failed to connect to SMB share: \\\\nas\\backups$"):
+        destination._prepare_windows_smb("//nas/backups/repo", {})
+
+
+def test_agent_preparation_uses_mount_check_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent mount availability hooks remain effective after core extraction."""
+    from backer.core import destination
+
+    agent = _agent(tmp_path)
+    checks: list[str] = []
+    monkeypatch.setattr(destination.sys, "platform", "linux")
+    monkeypatch.setattr(agent, "_check_cifs_available", lambda: checks.append("cifs") or False)
+    monkeypatch.setattr(agent, "_check_nfs_available", lambda: checks.append("nfs") or False)
+
+    with pytest.raises(RuntimeError, match="cifs-utils not installed"):
+        agent._prepare_destination_for_backend({"destination_path": "//nas/backups"}, "kopia")
+    with pytest.raises(RuntimeError, match="NFS mount tools not installed"):
+        agent._prepare_source_for_backend({"source_path": "nas:/backups"}, "kopia")
+
+    assert checks == ["cifs", "nfs"]
+
+
 def test_linux_smb_password_uses_private_credentials_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
