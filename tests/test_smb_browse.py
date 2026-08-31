@@ -127,13 +127,23 @@ def test_sanitize_removes_colon_and_slash_inline_suffix() -> None:
     assert "def/ghi" not in module.sanitize(":smb,pass=abc:def/ghi")
 
 
-def test_comparison_path_requires_unc_or_actual_mount() -> None:
+def test_comparison_path_requires_unc_or_cifs_mount() -> None:
     module = _spike_module()
 
     assert module is not None
-    assert module.comparison_path(r"\\nas\share", is_dir=lambda: True, is_mount=lambda _path: False)
-    assert module.comparison_path("/tmp/not-a-mount", is_dir=lambda: True, is_mount=lambda _path: False) is None
-    assert module.comparison_path("/mnt/smb", is_dir=lambda: True, is_mount=lambda _path: True)
+    assert module.comparison_path(r"\\nas\share", is_dir=lambda: True, mount_source=lambda _path: None)
+    assert module.comparison_path("/tmp/not-a-mount", is_dir=lambda: True, mount_source=lambda _path: None) is None
+    assert module.comparison_path("/mnt/smb", is_dir=lambda: True, mount_source=lambda _path: "//nas/share")
+
+
+def test_mount_source_requires_matching_cifs_share() -> None:
+    module = _spike_module()
+
+    assert module is not None
+    mounts = ["/dev/sda1 / ext4 rw 0 0", "//nas/share /mnt/smb cifs rw 0 0"]
+    assert module._mount_source(Path("/mnt/smb/backup"), mounts) == "//nas/share"
+    assert module._matches_share("//nas/share", "nas", "share")
+    assert not module._matches_share("//nas/other", "nas", "share")
 
 
 def test_failure_observations_record_actual_controls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,13 +156,17 @@ def test_failure_observations_record_actual_controls(monkeypatch: pytest.MonkeyP
     def runner(argv, *_args, **_kwargs):
         calls.append(argv)
         failed = "--rclone-startup-timeout=1ms" in argv or argv[0] == "kopia"
-        return subprocess.CompletedProcess(argv, int(failed), "", "dropped")
+        return subprocess.CompletedProcess(argv, int(failed), "secret obscured", "dropped secret")
 
     record: dict[str, object] = {}
     module.record_failure_observations(record, ":smb:share", "secret", "obscured", runner, {})
 
     assert record["failure_observations"]["rclone_startup_timeout"]["observed"] is True
     assert record["failure_observations"]["connection_drop"]["observed"] is True
+    evidence = record["failure_observations"]["connection_drop"]["evidence"]
+    assert evidence["returncode"] == 1
+    assert evidence["stderr"] == "dropped [redacted]"
+    assert "secret" not in str(record["failure_observations"])
     assert ["drop-smb"] in calls
 
 
@@ -163,9 +177,7 @@ def test_arm_d_runs_controlled_unc_baseline_and_records_ratio(tmp_path: Path, mo
     record: dict[str, object] = {"elapsed_ms": {}, "repository_size": None}
     assert hasattr(module, "record_unc_baseline")
     monkeypatch.setenv("SPIKE_SMB_COMPARISON_PATH", str(tmp_path))
-    monkeypatch.setenv("SPIKE_SMB_COMPARISON_SERVER", "nas")
-    monkeypatch.setenv("SPIKE_SMB_COMPARISON_SHARE", "share")
-    monkeypatch.setattr(module.os.path, "ismount", lambda _path: True)
+    monkeypatch.setattr(module, "_mount_source", lambda _path: "//nas/share")
 
     def runner(argv, *_args, **_kwargs):
         return subprocess.CompletedProcess(argv, 0, '[{"id":"snap"}]' if "list" in argv else "", "")

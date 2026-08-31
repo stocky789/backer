@@ -172,19 +172,44 @@ def _is_unc_path(value: str) -> bool:
     return value.startswith("\\\\") and path.drive.startswith("\\\\") and "\\" in path.drive.lstrip("\\")
 
 
+def _mount_source(path: Path, mount_lines: list[str] | None = None) -> str | None:
+    """Return the CIFS/SMB source for the mount containing path."""
+    if mount_lines is None:
+        try:
+            mount_lines = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+    candidate = str(path).replace("\\", "/").rstrip("/")
+    matches: list[tuple[int, str]] = []
+    for line in mount_lines:
+        fields = line.split()
+        if len(fields) < 3 or fields[2].casefold() not in {"cifs", "smb3"}:
+            continue
+        source, target = fields[0].replace("\\040", " "), fields[1].replace("\\040", " ")
+        target = target.rstrip("/")
+        if candidate == target or candidate.startswith(f"{target}/"):
+            matches.append((len(target), source))
+    return max(matches, default=(0, None))[1]
+
+
+def _matches_share(source: str, server: str, share: str) -> bool:
+    parts = source.replace("\\", "/").lstrip("/").split("/")
+    return len(parts) >= 2 and parts[0].casefold() == server.casefold() and parts[1].casefold() == share.casefold()
+
+
 def comparison_path(
     value: str,
     *,
     is_dir: Any = None,
-    is_mount: Any = None,
+    mount_source: Any = None,
 ) -> Path | None:
-    """Accept only a reachable UNC path or a real filesystem mount."""
+    """Accept only a reachable UNC path or CIFS/SMB mount."""
     path = Path(value)
     is_dir = is_dir or path.is_dir
-    is_mount = is_mount or os.path.ismount
+    mount_source = mount_source or _mount_source
     if not is_dir():
         return None
-    if _is_unc_path(value) or is_mount(path):
+    if _is_unc_path(value) or mount_source(path):
         return path
     return None
 
@@ -203,11 +228,8 @@ def _controlled_comparison(record: dict[str, Any], server: str, share: str) -> P
         if unc_server.casefold() != server.casefold() or unc_share.casefold() != share.casefold():
             record["unc_baseline"] = "unreachable: comparison UNC is not the selected SMB device"
             return None
-    elif (
-        os.environ.get("SPIKE_SMB_COMPARISON_SERVER", "").casefold() != server.casefold()
-        or os.environ.get("SPIKE_SMB_COMPARISON_SHARE", "").casefold() != share.casefold()
-    ):
-        record["unc_baseline"] = "unreachable: mounted comparison device is not declared as selected SMB device"
+    elif not _matches_share(_mount_source(comparison) or "", server, share):
+        record["unc_baseline"] = "unreachable: mounted comparison source is not the selected SMB device"
         return None
     return comparison
 
@@ -274,6 +296,14 @@ def _drop_command() -> list[str] | None:
     return command
 
 
+def _failure_evidence(result: subprocess.CompletedProcess[str], *secrets: str) -> dict[str, Any]:
+    return {
+        "returncode": result.returncode,
+        "stdout": sanitize(result.stdout, *secrets),
+        "stderr": sanitize(result.stderr, *secrets),
+    }
+
+
 def record_failure_observations(
     record: dict[str, Any], remote: str, password: str, obscured_password: str, runner: Any, environment: dict[str, str]
 ) -> None:
@@ -295,7 +325,9 @@ def record_failure_observations(
         env=environment,
     )
     observations["rclone_startup_timeout"].update(
-        elapsed_ms=round((time.perf_counter() - started) * 1000), observed=timeout_result.returncode != 0
+        elapsed_ms=round((time.perf_counter() - started) * 1000),
+        observed=timeout_result.returncode != 0,
+        evidence=_failure_evidence(timeout_result, password, obscured_password),
     )
     if timeout_result.returncode == 0:
         observations["rclone_startup_timeout"]["error"] = "controlled timeout was not observed"
@@ -311,6 +343,7 @@ def record_failure_observations(
         "control": "completed",
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
         "observed": drop_result.returncode != 0,
+        "evidence": _failure_evidence(drop_result, password, obscured_password),
     }
     record["failure_observations"] = observations
     if not all(observation["observed"] for observation in observations.values()):
