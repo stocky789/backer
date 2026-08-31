@@ -971,7 +971,9 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
         console.print(f"[green]✓ Removed {data_dir}[/green]")
 
     # Always remove config on uninstall (no prompting - causes issues with curl|bash)
-    if has_config:
+    if has_config and _is_server_data_dir(config_dir):
+        console.print(f"[yellow]Keeping {config_dir}: it contains a Backer server database[/yellow]")
+    elif has_config:
         try:
             shutil.rmtree(config_dir, ignore_errors=True)
         except PermissionError:

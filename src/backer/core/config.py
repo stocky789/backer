@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from backer.core.paths import get_config_dir
 
@@ -63,6 +63,26 @@ class RepositoryConfig(ConfigModel):
     passphrase_ref: str | None = None
     repository_options: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("repository_options")
+    @classmethod
+    def reject_inline_secrets(cls, options: dict[str, Any]) -> dict[str, Any]:
+        def check(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    check(item)
+                return
+            if not isinstance(value, dict):
+                return
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if any(part in lowered for part in ("password", "passphrase", "secret", "token", "access_key")):
+                    if not lowered.endswith("_ref"):
+                        raise ValueError(f"Repository secret {key!r} must use a *_ref key")
+                check(item)
+
+        check(options)
+        return options
+
 
 class JobConfig(ConfigModel):
     repository: str
@@ -88,7 +108,10 @@ class BackerConfig(ConfigModel):
                 data = yaml.safe_load(file)
         except yaml.YAMLError as error:
             raise ValueError(f"Invalid configuration at {path}: {error}") from error
-        return cls.model_validate(data or {})
+        try:
+            return cls.model_validate(data or {})
+        except ValidationError as error:
+            raise ValidationError.from_exception_data(f"Invalid configuration at {path}", error.errors()) from error
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

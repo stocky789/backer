@@ -83,6 +83,52 @@ def test_agent_uninstall_preserves_a_server_data_directory(tmp_path: Path) -> No
     assert cli._is_server_data_dir(tmp_path)
 
 
+def test_repository_options_reject_inline_secrets() -> None:
+    with pytest.raises(ValidationError):
+        RepositoryConfig.model_validate({
+            "name": "repo",
+            "type": "s3",
+            "repository_options": {"secret_access_key": "plaintext"},
+        })
+
+
+def test_repository_options_reject_nested_inline_secrets() -> None:
+    with pytest.raises(ValidationError):
+        RepositoryConfig.model_validate({
+            "name": "repo",
+            "type": "s3",
+            "repository_options": {"nested": [{"password": "plaintext"}]},
+        })
+
+
+def test_invalid_model_config_names_the_resolved_path(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent_id: agent\nrepositories: {}\njobs: {}\nfuture: true\n")
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+
+    with pytest.raises(ValidationError, match=re.escape(str(path))):
+        load_config()
+
+
+def test_uninstall_preserves_colocated_server_config_and_data(monkeypatch, tmp_path: Path) -> None:
+    import shutil
+
+    from backer import cli
+
+    (tmp_path / "backer.db").write_text("server")
+    removals: list[Path] = []
+    monkeypatch.setattr("backer.client.agent.get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr("backer.client.agent.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("backer.client.windows_service.is_windows", lambda: False)
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(shutil, "rmtree", lambda path, **_kwargs: removals.append(path))
+
+    cli.agent_uninstall.callback(keep_config=False, yes=True)
+
+    assert removals == []
+    assert (tmp_path / "backer.db").exists()
+
+
 def test_save_is_atomic_and_private(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
 
