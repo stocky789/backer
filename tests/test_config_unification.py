@@ -264,6 +264,20 @@ def test_from_config_preserves_inline_secret_when_keystore_raises_runtime_error(
     assert saved.server.client_secret_ref is None
 
 
+def test_from_config_propagates_unexpected_keystore_programming_error(monkeypatch, tmp_path: Path) -> None:
+    """Catching coding errors here would silently keep a broken migration path alive."""
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    BackerConfig(agent_id="agent-1", server=_server()).save(tmp_path / "config.yaml")
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("bad serializer")
+
+    monkeypatch.setattr("backer.core.keystore.put", fail)
+
+    with pytest.raises(ValueError, match="bad serializer"):
+        BackerAgent.from_config()
+
+
 def test_from_config_falls_back_to_agent_yaml(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     (tmp_path / "agent.yaml").write_text("server_url: https://agent\nclient_id: agent-1\nclient_secret: secret\n")
