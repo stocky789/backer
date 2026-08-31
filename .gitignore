@@ -58,8 +58,20 @@ htmlcov/
 backer-agent-*.log
 
 # ----- Documentation & notes -----
-# Personal notes (not project docs)
-claude.md
+# NOTE: do not ignore "claude.md" here. Git matches it case-insensitively on
+# Windows and macOS, so it also swallows CLAUDE.md - the agent instruction
+# file, which is project config and belongs in the repo alongside AGENTS.md,
+# GEMINI.md and .cursor/rules/. Name personal scratch files something that
+# cannot collide, e.g. notes-local.md, and ignore that instead.
+notes-local.md
+
+# ----- Agent & editor tooling -----
+# Local code-index caches and per-machine assistant state. The shared rule
+# files (CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules/) are tracked.
+.chunkhound/
+.claude/settings.local.json
+.aider*
+.serena/
 
 # ===========================================
 # IMPORTANT: Do NOT add patterns that could
