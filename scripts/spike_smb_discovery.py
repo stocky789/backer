@@ -9,12 +9,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import click
 
+from backer.core.mounts import SMBConnectionManager
 from backer.core.smb_browse import SMBBrowser
 
 
@@ -22,12 +24,29 @@ class ArgvLeakError(RuntimeError):
     """A recoverable storage secret was placed on a command line."""
 
 
+_INLINE_CREDENTIAL = re.compile(r"(?i)(?:^|[,;])(?:user(?:name)?|pass(?:word)?|domain)=[^,\s]*")
+_INLINE_PASS = re.compile(r"(?i)(pass(?:word)?=)[^,:\s]*")
+
+
+def sanitize(value: str | None, *secrets: str | None) -> str | None:
+    """Make records safe even when a child process echoes a secret."""
+    if value is None:
+        return None
+    clean = _INLINE_PASS.sub(r"\1[redacted]", value)
+    for secret in secrets:
+        if secret:
+            clean = clean.replace(secret, "[redacted]")
+    return clean
+
+
 def assert_argv_safe(argv: list[str], password: str | None, obscured_password: str | None = None) -> None:
     """Reject plaintext or rclone-obscured passwords before spawning a child."""
-    if not password:
-        return
     joined = " ".join(argv)
-    if password in joined or (obscured_password and obscured_password in joined):
+    if (
+        _INLINE_CREDENTIAL.search(joined)
+        or (password and password in joined)
+        or (obscured_password and obscured_password in joined)
+    ):
         raise ArgvLeakError("argv_leak")
 
 
@@ -51,11 +70,11 @@ def _record_path(arm: str, device_label: str, dialect: str) -> Path:
     return Path("spike-results") / f"{arm}-{safe_label}-{safe_dialect}.jsonl"
 
 
-def _write_record(arm: str, device_label: str, dialect: str, record: dict[str, Any]) -> None:
+def _write_record(arm: str, device_label: str, dialect: str, record: dict[str, Any], *secrets: str | None) -> None:
     path = _record_path(arm, device_label, dialect)
     path.parent.mkdir(exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.write(sanitize(json.dumps(record, sort_keys=True), *secrets) + "\n")
 
 
 def _base_record(arm: str, server: str, share: str | None, device_label: str, dialect: str) -> dict[str, Any]:
@@ -65,7 +84,7 @@ def _base_record(arm: str, server: str, share: str | None, device_label: str, di
         "dialect": dialect,
         "device_label": device_label,
         "server": server,
-        "share": re.sub(r"(pass=)[^,:/]+", r"\1[redacted]", share) if share else None,
+        "share": sanitize(share),
         "share_count": None,
         "directory_count": None,
         "repository_size": None,
@@ -75,7 +94,9 @@ def _base_record(arm: str, server: str, share: str | None, device_label: str, di
     }
 
 
-def _arm_a(record: dict[str, Any], server: str, share: str | None, password: str | None, depth: int) -> None:
+def _arm_a(
+    record: dict[str, Any], server: str, share: str | None, username: str | None, password: str | None, depth: int
+) -> None:
     if sys.platform != "win32":
         record["error"] = "unreachable: arm A requires Windows"
         return
@@ -88,12 +109,29 @@ def _arm_a(record: dict[str, Any], server: str, share: str | None, password: str
     shares = [line.split()[0] for line in result.stdout.splitlines() if line and not line.startswith(("Share", "-"))]
     record["share_count"] = len(shares)
     if share and depth:
+        manager = SMBConnectionManager()
+        unc = f"\\\\{server}\\{share}"
+        preexisting = _run(["net", "use", unc], password).returncode == 0
+        started = time.perf_counter()
+        record["native_session"] = manager.connect(server, share, username, password)
+        record["elapsed_ms"]["native_session"] = round((time.perf_counter() - started) * 1000)
+        if username and password:
+            started = time.perf_counter()
+            stdin_auth = _run(
+                ["net", "use", unc, f"/user:{username}", "*", "/persistent:no"], password, input=f"{password}\n"
+            )
+            record["elapsed_ms"]["stdin_auth"] = round((time.perf_counter() - started) * 1000)
+            record["stdin_auth"] = stdin_auth.returncode == 0
+            if stdin_auth.returncode == 0:
+                _run(["net", "use", unc, "/delete", "/y"], password)
         started = time.perf_counter()
         try:
             record["directory_count"] = len(list(Path(f"//{server}/{share}").iterdir()))
         except OSError as error:
             record["error"] = str(error)
         record["elapsed_ms"]["list_directories"] = round((time.perf_counter() - started) * 1000)
+        if record["native_session"] and not preexisting:
+            manager.disconnect(server, share)
 
 
 def _arm_b(
@@ -121,9 +159,112 @@ def _arm_b(
             record["error"] = f"unreachable: {result}"
 
 
-def _arm_d(
-    record: dict[str, Any], server: str, share: str | None, username: str | None, password: str | None
+def _create_workload(root: Path, workload_bytes: int, file_count: int) -> Path:
+    source = root / "source with spaces" / "non-ascii-ä"
+    source.mkdir(parents=True)
+    each_file, remainder = divmod(workload_bytes, file_count)
+    for index in range(file_count):
+        size = each_file + (1 if index < remainder else 0)
+        with (source / f"file-{index:05d}").open("wb") as handle:
+            handle.write(b"x" * size)
+    return source
+
+
+def _timed(record: dict[str, Any], operation: str, runner: Any, argv: list[str], *args: Any, **kwargs: Any) -> Any:
+    started = time.perf_counter()
+    result = runner(argv, *args, **kwargs)
+    record["elapsed_ms"][operation] = round((time.perf_counter() - started) * 1000)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"{operation} failed")
+    return result
+
+
+def run_arm_d_workload(
+    record: dict[str, Any],
+    server: str,
+    share: str,
+    username: str | None,
+    password: str,
+    obscured_password: str,
+    runner: Any,
+    workspace: Path,
+    config_path: Path,
+    *,
+    workload_bytes: int = 5 * 1024 * 1024 * 1024,
+    file_count: int = 50_000,
 ) -> None:
+    """Exercise the real rclone provider lifecycle; callers own temporary cleanup."""
+    remote = f":smb:{share}"
+    environment = {
+        **os.environ,
+        "KOPIA_CONFIG_PATH": str(config_path),
+        "KOPIA_PERSIST_CREDENTIALS_ON_CONNECT": "false",
+        "RCLONE_SMB_HOST": server,
+        "RCLONE_SMB_USER": username or "",
+        "RCLONE_SMB_PASS": password,
+    }
+    create = ["kopia", "repository", "create", "rclone", f"--remote-path={remote}"]
+    connect = ["kopia", "repository", "connect", "rclone", f"--remote-path={remote}"]
+    _timed(record, "repository_create", runner, create, password, obscured_password, env=environment)
+    _timed(record, "repository_connect", runner, connect, password, obscured_password, env=environment)
+    config = config_path.read_text(encoding="utf-8", errors="replace") if config_path.exists() else ""
+    if sanitize(config, password, obscured_password) != config:
+        raise RuntimeError("credential persisted in repository config")
+    source = _create_workload(workspace, workload_bytes, file_count)
+    _timed(
+        record,
+        "snapshot_create",
+        runner,
+        ["kopia", "snapshot", "create", str(source)],
+        password,
+        obscured_password,
+        env=environment,
+    )
+    listing = _timed(
+        record,
+        "snapshot_list",
+        runner,
+        ["kopia", "snapshot", "list", "--json", "--all"],
+        password,
+        obscured_password,
+        env=environment,
+    )
+    snapshots = json.loads(listing.stdout or "[]")
+    snapshot_id = snapshots[0].get("id") if snapshots else None
+    if not snapshot_id:
+        raise RuntimeError("snapshot list returned no snapshot id")
+    restore = workspace / "restore"
+    _timed(
+        record,
+        "snapshot_restore",
+        runner,
+        ["kopia", "snapshot", "restore", snapshot_id, str(restore)],
+        password,
+        obscured_password,
+        env=environment,
+    )
+    _timed(
+        record,
+        "snapshot_verify",
+        runner,
+        ["kopia", "snapshot", "verify", "--verify-files-percent=5", snapshot_id],
+        password,
+        obscured_password,
+        env=environment,
+    )
+    _timed(
+        record,
+        "snapshot_prune",
+        runner,
+        ["kopia", "snapshot", "expire", "--delete", str(source)],
+        password,
+        obscured_password,
+        env=environment,
+    )
+    record["repository_size"] = config_path.stat().st_size if config_path.exists() else None
+
+
+def _arm_d(record: dict[str, Any], server: str, share: str | None, username: str | None, password: str | None) -> None:
     if not share:
         record["error"] = "unreachable: --share is required for arm D"
         return
@@ -139,23 +280,19 @@ def _arm_d(
         record["error"] = "unreachable: SPIKE_SMB_PASS is not set"
         return
     obscured_password = _obscure_password(password)
-    remote = f":smb:{share}"
-    argv = ["kopia", "repository", "create", "rclone", f"--remote-path={remote}"]
-    started = time.perf_counter()
-    result = _run(
-        argv,
-        password,
-        obscured_password,
-        env={
-            **os.environ,
-            "RCLONE_SMB_HOST": server,
-            "RCLONE_SMB_USER": username or "",
-            "RCLONE_SMB_PASS": password,
-        },
-    )
-    record["elapsed_ms"]["repository_create"] = round((time.perf_counter() - started) * 1000)
-    if result.returncode:
-        record["error"] = result.stderr.strip() or result.stdout.strip() or "kopia repository create failed"
+    with tempfile.TemporaryDirectory(prefix="backer_smb_spike_") as temporary:
+        temporary_path = Path(temporary)
+        run_arm_d_workload(
+            record,
+            server,
+            share,
+            username,
+            password,
+            obscured_password,
+            _run,
+            temporary_path,
+            temporary_path / "repository.config",
+        )
 
 
 @click.command()
@@ -172,19 +309,19 @@ def main(arm: str, server: str, share: str | None, device_label: str, dialect: s
     record = _base_record(arm, server, share, device_label, dialect)
     try:
         if arm == "a":
-            _arm_a(record, server, share, password, depth)
+            _arm_a(record, server, share, username, password, depth)
         elif arm == "b":
             _arm_b(record, server, share, username, password, depth)
         else:
             _arm_d(record, server, share, username, password)
     except ArgvLeakError as error:
         record["argv_leak"] = True
-        record["error"] = str(error)
-        _write_record(arm, device_label, dialect, record)
+        record["error"] = sanitize(str(error), password)
+        _write_record(arm, device_label, dialect, record, password)
         raise click.ClickException("argv_leak") from error
     except Exception as error:
-        record["error"] = f"unreachable: {error}"
-    _write_record(arm, device_label, dialect, record)
+        record["error"] = sanitize(f"unreachable: {error}", password)
+    _write_record(arm, device_label, dialect, record, password)
 
 
 if __name__ == "__main__":

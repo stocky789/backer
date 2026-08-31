@@ -56,3 +56,51 @@ def test_spike_record_redacts_inline_password() -> None:
     assert module is not None
     record = module._base_record("d", "nas", ":smb,host=nas,pass=sentinel-password:/share", "nas", "3.1.1")
     assert "sentinel-password" not in record["share"]
+
+
+def test_spike_argv_guard_rejects_inline_secret_without_matching_environment() -> None:
+    module = _spike_module()
+
+    assert module is not None
+    with pytest.raises(module.ArgvLeakError):
+        module.assert_argv_safe(["kopia", "--remote-path=:smb,pass=other-secret:/share"], None)
+
+
+def test_spike_sanitizes_slash_secret_and_error_text() -> None:
+    module = _spike_module()
+
+    assert module is not None
+    assert hasattr(module, "sanitize")
+    secret = "secret/with/slash"
+    value = module.sanitize(f":smb,pass={secret}: and {secret}", secret, "encoded-secret")
+    assert secret not in value
+    assert "encoded-secret" not in module.sanitize("encoded-secret", secret, "encoded-secret")
+
+
+def test_arm_d_runs_full_lifecycle_and_inspects_config(tmp_path: Path) -> None:
+    module = _spike_module()
+
+    assert module is not None
+    assert hasattr(module, "run_arm_d_workload")
+    calls: list[list[str]] = []
+
+    def runner(argv, *_args, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, '[{"id":"snap"}]' if "list" in argv else "", "")
+
+    config = tmp_path / "repository.config"
+    config.write_text("safe config", encoding="utf-8")
+    record: dict[str, object] = {"elapsed_ms": {}, "repository_size": None}
+    module.run_arm_d_workload(
+        record, "nas", "share", "user", "secret", "obscured", runner, tmp_path, config, workload_bytes=1, file_count=1
+    )
+
+    assert [command[1:3] for command in calls] == [
+        ["repository", "create"],
+        ["repository", "connect"],
+        ["snapshot", "create"],
+        ["snapshot", "list"],
+        ["snapshot", "restore"],
+        ["snapshot", "verify"],
+        ["snapshot", "expire"],
+    ]
