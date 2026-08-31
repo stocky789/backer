@@ -1,5 +1,6 @@
 """Backer CLI - unified backup management."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -659,9 +660,13 @@ def repo_add(
 @click.pass_context
 def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: bool, sources: tuple[str, ...]) -> None:
     """Copy existing repository sidecar jobs into this machine's config."""
+    import json
+
+    from backer.core import keystore
     from backer.core.config import load_config
     from backer.core.paths import get_config_dir
     from backer.core.repo_metadata import RepositoryMetadata
+    from backer.serverless.repositories import _destination, probe
     from backer.serverless.sidecar import adopt_jobs
 
     config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
@@ -670,16 +675,24 @@ def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: b
     if not repository_id:
         raise click.ClickException(f"Repository '{name}' is not configured")
     record = config.repositories[repository_id]
-    if record.type != "local" or not record.path:
-        raise click.ClickException("Adoption currently requires the repository root to be locally reachable")
-    discovery = RepositoryMetadata(record.path, record.type).discover_all()
+    machine_scope = record.scope == "machine"
+    passphrase = keystore.get(record.passphrase_ref or "", machine_scope=machine_scope)
+    if not passphrase:
+        raise click.ClickException(f"Repository '{record.name}' passphrase is unavailable")
+    raw_storage = keystore.get(record.storage_password_ref or "", machine_scope=machine_scope)
+    storage = json.loads(raw_storage) if record.type == "s3" and raw_storage else None
+    status, _, message = probe(record, passphrase, storage)
+    if status != "present":
+        raise click.ClickException(message or f"Repository is {status}; adoption did not change local config")
+    root = Path(_destination(record))
+    discovery = RepositoryMetadata(root, record.type).discover_all()
     available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
     selected = available if all_jobs else list(jobs)
     if not selected:
         raise click.ClickException("Choose --job NAME or --all")
     mapping = dict(item.split("=", 1) for item in sources if "=" in item)
     try:
-        adopted = adopt_jobs(config, repository_id, Path(record.path), selected, source_paths=mapping)
+        adopted = adopt_jobs(config, repository_id, root, selected, source_paths=mapping)
         config.save(config_path)
     except ValueError as error:
         raise click.ClickException(str(error)) from error
@@ -856,6 +869,7 @@ def agent_status() -> None:
 
 @agent.command("install")
 @click.option("--mode", type=click.Choice(["server", "local"]), default="server", show_default=True)
+@click.option("--headless", is_flag=True, help="Install the machine local scheduler")
 @click.option(
     "--method",
     "-m",
@@ -863,7 +877,7 @@ def agent_status() -> None:
     type=click.Choice(["service", "task", "startup", "systemd"]),
     help="Installation method (Windows: service/task/startup, Linux: systemd)",
 )
-def agent_install(mode: str, method: str) -> None:
+def agent_install(mode: str, headless: bool, method: str) -> None:
     """Install agent to run at system startup.
 
     On Windows, the default method is 'service' which creates a background task
@@ -886,6 +900,7 @@ def agent_install(mode: str, method: str) -> None:
     """
     from backer.client.windows_service import (
         create_local_scheduled_task,
+        create_local_systemd_timer,
         create_systemd_service,
         install_service,
         is_admin,
@@ -894,7 +909,7 @@ def agent_install(mode: str, method: str) -> None:
 
     if mode == "local":
         from backer.core.config import load_config
-        from backer.core.paths import get_config_dir
+        from backer.core.paths import get_config_dir, get_machine_config_dir
         from backer.serverless.repositories import rescope_secrets_for_system
 
         config = load_config(get_config_dir() / "config.yaml")
@@ -902,8 +917,13 @@ def agent_install(mode: str, method: str) -> None:
             rescope_secrets_for_system(config)
         except ValueError as error:
             raise click.ClickException(str(error)) from error
+        config.save(get_machine_config_dir() / "config.yaml")
         if not is_windows():
-            raise click.ClickException("Local scheduling on Linux is installed by the systemd local mode")
+            success, message = create_local_systemd_timer(headless=headless)
+            if not success:
+                raise click.ClickException(message)
+            console.print(f"[green]✓[/green] {message}")
+            return
         success, message = create_local_scheduled_task()
         if not success:
             raise click.ClickException(message)
@@ -1601,7 +1621,10 @@ def job_run(
         from backer.serverless.runs import run_due_jobs, run_local_job
 
         try:
-            reports = run_due_jobs(local_config) if due else [run_local_job(local_config, name)]
+            system_run = os.environ.get("BACKER_RUN_AS_SYSTEM") == "1"
+            reports = (
+                run_due_jobs(local_config, run_as_system=system_run) if due else [run_local_job(local_config, name)]
+            )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
         if due and not reports:

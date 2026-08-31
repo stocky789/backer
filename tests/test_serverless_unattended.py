@@ -67,6 +67,8 @@ def test_serverless_smb_system_reclaims_1219_without_cmdkey(monkeypatch) -> None
         calls.append(command)
         if command == ["net", "use"]:
             return type("Result", (), {"returncode": 0, "stdout": "OK \\\\nas\\share", "stderr": ""})()
+        if command == ["net", "use", "\\\\nas\\share"]:
+            return type("Result", (), {"returncode": 0, "stdout": "User name: other-user", "stderr": ""})()
         if command[0:3] == ["net", "use", "\\\\nas\\share"] and "*" in command:
             attempts += 1
             return type(
@@ -109,3 +111,27 @@ def test_rescope_repository_secrets_to_machine(monkeypatch) -> None:
     rescope_secrets_for_system(config)
 
     assert writes == [("pass", "passphrase", True), ("store", '{"key":"value"}', True)]
+    assert config.repositories["repo"].scope == "machine"
+
+
+def test_due_lock_is_nonblocking(tmp_path: Path) -> None:
+    from backer.serverless.schedule import run_lock
+
+    with run_lock(tmp_path) as first:
+        assert first
+        with run_lock(tmp_path) as second:
+            assert not second
+
+
+def test_sidecar_hint_drops_absolute_destination_path(tmp_path: Path) -> None:
+    from backer.serverless.sidecar import save_job_config
+
+    path = save_job_config(
+        tmp_path,
+        "Nightly",
+        "agent",
+        {"source_path": "C:/data", "repository_hint": {"type": "local", "path": "C:/repo"}},
+        [],
+    )
+
+    assert "path" not in json.loads(path.read_text())["config"]["repository_hint"]

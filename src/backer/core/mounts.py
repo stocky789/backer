@@ -106,7 +106,7 @@ class SMBConnectionManager:
                 if existing_conn:
                     logger.error(
                         f"[SMB-POOL] Error 1219: Cannot connect to {unc_path}.\n"
-                        f"Existing connection: {existing_conn}\n"
+                        f"Existing connection: {existing_conn[0]}\n"
                         f"Please disconnect the existing connection or use the same credentials."
                     )
                 else:
@@ -180,11 +180,18 @@ class SMBConnectionManager:
             return True
         if "1219" not in result.stderr:
             return False
-        existing = self._find_existing_connection(server) or unc_path
+        existing = self._find_existing_connection(server)
+        if not existing:
+            return False
+        existing_path, existing_user = existing
+        if existing_user and existing_user.casefold() == full_user.casefold():
+            return True
         if not is_system:
-            raise RuntimeError(f"SMB connection conflict: {existing}. Disconnect it or use the same credentials.")
+            raise RuntimeError(f"SMB connection conflict: {existing_path}. Disconnect it or use the same credentials.")
+        if not existing_user:
+            return False
         subprocess.run(
-            ["net", "use", existing.split()[-1], "/delete", "/y"],
+            ["net", "use", existing_path, "/delete", "/y"],
             capture_output=True,
             text=True,
             creationflags=get_subprocess_flags(),
@@ -201,7 +208,7 @@ class SMBConnectionManager:
                 return f"\\\\{conn_server}\\{conn_share} (user: {info['username']})"
         return None
 
-    def _find_existing_connection(self, server: str) -> str | None:
+    def _find_existing_connection(self, server: str) -> tuple[str, str | None] | None:
         """Find existing net use connection to server.
 
         Returns the connection string if found, None otherwise.
@@ -213,7 +220,16 @@ class SMBConnectionManager:
 
             for line in result.stdout.split("\n"):
                 if server.lower() in line.lower() and "\\\\" in line:
-                    return line.strip()
+                    connection = line.strip().split()[-1]
+                    details = subprocess.run(
+                        ["net", "use", connection], capture_output=True, text=True, creationflags=get_subprocess_flags()
+                    )
+                    username = None
+                    for detail in details.stdout.splitlines():
+                        if "user name" in detail.lower() and ":" in detail:
+                            username = detail.split(":", 1)[1].strip() or None
+                            break
+                    return connection, username
         except Exception as e:
             logger.debug(f"[SMB-POOL] Error checking existing connections: {e}")
 

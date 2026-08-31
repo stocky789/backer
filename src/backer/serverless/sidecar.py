@@ -48,10 +48,16 @@ def save_job_config(
     root: Path, job_name: str, owner_agent_id: str, config: dict[str, Any], secret_values: list[str]
 ) -> Path:
     """Write an owner-only, secret-free job definition at the stable sidecar path."""
+    config = json.loads(json.dumps(config))
     _reject_secrets(config, allowed_hint=True)
     hint = config.get("repository_password_hint")
     if hint and hint in secret_values:
         raise ValueError("repository password hint must not be a secret")
+    repository_hint = config.get("repository_hint")
+    if isinstance(repository_hint, dict):
+        path_hint = repository_hint.get("path")
+        if isinstance(path_hint, str) and (Path(path_hint).is_absolute() or path_hint.startswith("\\\\")):
+            repository_hint.pop("path")
     path = root / ".backer" / "jobs" / get_job_subfolder(job_name) / "config.json"
     current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     if current and current.get("owner_agent_id") != owner_agent_id:

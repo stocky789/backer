@@ -10,7 +10,7 @@ from backer.core import keystore
 from backer.core.config import BackerConfig
 from backer.core.paths import get_data_dir
 from backer.core.runner import run_backup
-from backer.serverless.schedule import due_jobs
+from backer.serverless.schedule import due_jobs, run_lock
 
 
 def _destination(repository: Any) -> str:
@@ -88,4 +88,9 @@ def run_due_jobs(
     config: BackerConfig, now: datetime | None = None, *, run_as_system: bool = False
 ) -> list[dict[str, Any]]:
     now = now or datetime.now(UTC)
-    return [run_local_job(config, name, run_as_system=run_as_system) for name in due_jobs(config, now, get_data_dir())]
+    with run_lock(get_data_dir()) as acquired:
+        if not acquired:
+            return []
+        return [
+            run_local_job(config, name, run_as_system=run_as_system) for name in due_jobs(config, now, get_data_dir())
+        ]

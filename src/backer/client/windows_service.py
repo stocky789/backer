@@ -94,6 +94,7 @@ def is_admin() -> bool:
 
     try:
         import ctypes
+
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except Exception:
         return False
@@ -102,7 +103,7 @@ def is_admin() -> bool:
 def get_subprocess_flags() -> int:
     """Get subprocess creation flags to hide console window on Windows."""
     if is_windows():
-        return subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0x08000000
+        return subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
     return 0
 
 
@@ -144,7 +145,7 @@ def create_background_scheduled_task(server_url: str | None = None) -> tuple[boo
     task_name = "BackerAgentService"
 
     # Determine the command to run
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         # Running as PyInstaller exe
         command = get_service_executable_path()
         arguments = ""
@@ -165,7 +166,7 @@ def create_background_scheduled_task(server_url: str | None = None) -> tuple[boo
 
     # Create XML task definition for more control
     # This allows us to set "Run whether user is logged on or not"
-    task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+    task_xml = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Backer Backup Agent - Background service for automated backups</Description>
@@ -215,10 +216,10 @@ def create_background_scheduled_task(server_url: str | None = None) -> tuple[boo
     </Exec>
   </Actions>
 </Task>
-'''
+"""
 
     # Write XML to temp file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, encoding='utf-16') as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False, encoding="utf-16") as f:
         f.write(task_xml)
         xml_path = f.name
 
@@ -269,12 +270,33 @@ def create_local_scheduled_task() -> tuple[bool, str]:
     command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
     arguments = "job run --due" if getattr(sys, "frozen", False) else "-m backer job run --due"
     task_name = "BackerLocalBackup"
-    action = f'cmd.exe /d /c "set BACKER_DATA_DIR={data_dir}&& \"{command}\" {arguments}"'
-    subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True,
-                   creationflags=get_subprocess_flags())
+    action = (
+        f'cmd.exe /d /c "set BACKER_DATA_DIR={data_dir}&& set BACKER_CONFIG_DIR={data_dir}'
+        f'&& set BACKER_RUN_AS_SYSTEM=1&& "{command}" {arguments}"'
+    )
+    subprocess.run(
+        ["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True, creationflags=get_subprocess_flags()
+    )
     result = subprocess.run(
-        ["schtasks", "/create", "/tn", task_name, "/tr", action, "/sc", "minute", "/mo", "1",
-         "/ru", "SYSTEM", "/rl", "highest", "/f"], capture_output=True, text=True,
+        [
+            "schtasks",
+            "/create",
+            "/tn",
+            task_name,
+            "/tr",
+            action,
+            "/sc",
+            "minute",
+            "/mo",
+            "1",
+            "/ru",
+            "SYSTEM",
+            "/rl",
+            "highest",
+            "/f",
+        ],
+        capture_output=True,
+        text=True,
         creationflags=get_subprocess_flags(),
     )
     if result.returncode:
@@ -287,7 +309,7 @@ def _create_background_task_simple(server_url: str | None = None) -> tuple[bool,
     task_name = "BackerAgentService"
 
     # Determine the command to run
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         cmd = [get_service_executable_path()]
     else:
         python_exe = get_python_path()
@@ -305,12 +327,18 @@ def _create_background_task_simple(server_url: str | None = None) -> tuple[bool,
     # Create task that runs at startup under SYSTEM account
     result = subprocess.run(
         [
-            "schtasks", "/create",
-            "/tn", task_name,
-            "/tr", subprocess.list2cmdline(cmd),
-            "/sc", "onstart",
-            "/ru", "SYSTEM",
-            "/rl", "highest",
+            "schtasks",
+            "/create",
+            "/tn",
+            task_name,
+            "/tr",
+            subprocess.list2cmdline(cmd),
+            "/sc",
+            "onstart",
+            "/ru",
+            "SYSTEM",
+            "/rl",
+            "highest",
             "/f",
         ],
         capture_output=True,
@@ -329,10 +357,7 @@ def _create_background_task_simple(server_url: str | None = None) -> tuple[bool,
         creationflags=get_subprocess_flags(),
     )
 
-    return True, (
-        f"Background task '{task_name}' created.\n"
-        "Agent will start at system boot and run in background."
-    )
+    return True, (f"Background task '{task_name}' created.\nAgent will start at system boot and run in background.")
 
 
 def remove_background_scheduled_task() -> bool:
@@ -464,11 +489,16 @@ def create_scheduled_task(server_url: str | None = None) -> bool:
     # Create new task
     result = subprocess.run(
         [
-            "schtasks", "/create",
-            "/tn", task_name,
-            "/tr", subprocess.list2cmdline(cmd),
-            "/sc", "onlogon",
-            "/rl", "highest",
+            "schtasks",
+            "/create",
+            "/tn",
+            task_name,
+            "/tr",
+            subprocess.list2cmdline(cmd),
+            "/sc",
+            "onlogon",
+            "/rl",
+            "highest",
             "/f",
         ],
         capture_output=True,
@@ -673,3 +703,47 @@ WantedBy=default.target
     subprocess.run(["systemctl", "--user", "enable", "backer-agent"], capture_output=True)
 
     return True, f"Systemd service created at: {service_path}\nEnable with: systemctl --user enable --now backer-agent"
+
+
+def create_local_systemd_timer(*, headless: bool = False) -> tuple[bool, str]:
+    """Install only Backer's local scheduler units, never the server-agent unit."""
+    if is_windows():
+        return False, "Systemd services only available on Linux"
+    user = os.environ.get("USER", "")
+    if not headless:
+        linger = subprocess.run(
+            ["loginctl", "show-user", user, "-p", "Linger", "--value"], capture_output=True, text=True
+        )
+        if linger.returncode or linger.stdout.strip().lower() != "yes":
+            return False, f"Enable lingering first: loginctl enable-linger {user}"
+        directory = Path.home() / ".config" / "systemd" / "user"
+        systemctl = ["systemctl", "--user"]
+    else:
+        directory = Path("/etc/systemd/system")
+        systemctl = ["systemctl"]
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix = "backer-local"
+    service = directory / f"{prefix}.service"
+    timer = directory / f"{prefix}.timer"
+    command = f"{get_python_path()} -m backer job run --due"
+    service.write_text(f"[Service]\nType=oneshot\nExecStart={command}\n", encoding="utf-8")
+    timer.write_text(
+        "[Unit]\nDescription=Backer local backup scheduler\n\n[Timer]\n"
+        "OnCalendar=*-*-* *:*:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
+        encoding="utf-8",
+    )
+    subprocess.run([*systemctl, "daemon-reload"], capture_output=True)
+    result = subprocess.run([*systemctl, "enable", "--now", f"{prefix}.timer"], capture_output=True, text=True)
+    if result.returncode:
+        return False, result.stderr.strip() or "Failed to enable local backup timer"
+    return True, f"Local backup timer created at: {timer}"
+
+
+def remove_local_systemd_timer(*, headless: bool = False) -> None:
+    """Remove only units created by :func:`create_local_systemd_timer`."""
+    directory = Path("/etc/systemd/system") if headless else Path.home() / ".config" / "systemd" / "user"
+    systemctl = ["systemctl"] if headless else ["systemctl", "--user"]
+    subprocess.run([*systemctl, "disable", "--now", "backer-local.timer"], capture_output=True)
+    for suffix in ("service", "timer"):
+        (directory / f"backer-local.{suffix}").unlink(missing_ok=True)
+    subprocess.run([*systemctl, "daemon-reload"], capture_output=True)

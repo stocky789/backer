@@ -18,6 +18,11 @@ def _machine_config_dir() -> Path:
     return Path("/etc/backer")
 
 
+def get_machine_config_dir() -> Path:
+    """Return the machine-scoped configuration directory for unattended runs."""
+    return _machine_config_dir()
+
+
 def get_config_dir() -> Path:
     """Return the directory containing the active client configuration."""
     if configured := os.environ.get("BACKER_CONFIG_DIR"):

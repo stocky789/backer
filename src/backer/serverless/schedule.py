@@ -4,13 +4,48 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from croniter import croniter
 
 from backer.core.config import BackerConfig
+
+
+@contextmanager
+def run_lock(data_dir: Path):
+    """Yield whether this process owns the one local serverless-run lock."""
+    path = data_dir / "run.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file = path.open("a+b")
+    try:
+        file.write(b"\0")
+        file.flush()
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                file.seek(0)
+                msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            if sys.platform == "win32":
+                msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+    finally:
+        file.close()
 
 
 def _iso(value: datetime) -> str:

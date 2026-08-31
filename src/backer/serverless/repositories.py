@@ -17,6 +17,8 @@ from backer.core.keystore import file_fallback_required
 def _destination(record: RepositoryConfig) -> str:
     if record.type == "s3":
         return f"s3://{record.bucket}/{record.prefix or ''}".rstrip("/")
+    if record.type == "smb":
+        return "\\\\" + "\\".join(part for part in (record.server, record.share, record.path) if part)
     if not record.path:
         raise ValueError("Repository path is required")
     return record.path
@@ -28,8 +30,11 @@ def _backend(record: RepositoryConfig, passphrase: str, storage: dict[str, str] 
         if not storage:
             raise ValueError("S3 storage credentials are required")
         config["s3"] = {
-            "bucket": record.bucket, "prefix": record.prefix or "", "endpoint": record.endpoint,
-            "region": record.region, "access_key_id": storage["access_key_id"],
+            "bucket": record.bucket,
+            "prefix": record.prefix or "",
+            "endpoint": record.endpoint,
+            "region": record.region,
+            "access_key_id": storage["access_key_id"],
             "secret_access_key": storage["secret_access_key"],
         }
     return KopiaBackend(config)
@@ -49,8 +54,16 @@ def create(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | 
 
 
 def add_repository(
-    config: BackerConfig, config_path: Path, name: str, record: RepositoryConfig, passphrase: str,
-    *, attach: bool, init: bool, storage: dict[str, str] | None = None, headless: bool = False,
+    config: BackerConfig,
+    config_path: Path,
+    name: str,
+    record: RepositoryConfig,
+    passphrase: str,
+    *,
+    attach: bool,
+    init: bool,
+    storage: dict[str, str] | None = None,
+    headless: bool = False,
 ) -> tuple[str, str]:
     if attach == init:
         raise ValueError("Choose exactly one of --attach or --init")
@@ -79,12 +92,20 @@ def add_repository(
     backend = keystore.put(passphrase_ref, passphrase)
     if storage_ref:
         import json
+
         keystore.put(storage_ref, json.dumps(storage), machine_scope=False)
-    saved = record.model_copy(update={
-        "id": repo_id, "name": name, "unique_id": unique_id, "added_at": datetime.now(UTC).isoformat(),
-        "last_check_status": "present", "last_check_at": datetime.now(UTC).isoformat(),
-        "passphrase_ref": passphrase_ref, "storage_password_ref": storage_ref,
-    })
+    saved = record.model_copy(
+        update={
+            "id": repo_id,
+            "name": name,
+            "unique_id": unique_id,
+            "added_at": datetime.now(UTC).isoformat(),
+            "last_check_status": "present",
+            "last_check_at": datetime.now(UTC).isoformat(),
+            "passphrase_ref": passphrase_ref,
+            "storage_password_ref": storage_ref,
+        }
+    )
     config.repositories[repo_id] = saved
     config.save(config_path)
     return repo_id, backend
@@ -102,3 +123,4 @@ def rescope_secrets_for_system(config: BackerConfig) -> None:
             keystore.put(reference, value, machine_scope=True)
             if keystore.get(reference, machine_scope=True) != value:
                 raise ValueError(f"Repository '{record.name or repository_id}' secret cannot be read at machine scope")
+        config.repositories[repository_id] = record.model_copy(update={"scope": "machine"})
