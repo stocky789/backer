@@ -304,6 +304,18 @@ def create_local_scheduled_task() -> tuple[bool, str]:
     return True, f"Local backup task '{task_name}' created."
 
 
+def remove_local_scheduled_task() -> bool:
+    """Remove only the SYSTEM task created for local serverless scheduling."""
+    if not is_windows():
+        return False
+    result = subprocess.run(
+        ["schtasks", "/delete", "/tn", "BackerLocalBackup", "/f"],
+        capture_output=True,
+        creationflags=get_subprocess_flags(),
+    )
+    return result.returncode == 0
+
+
 def _create_background_task_simple(server_url: str | None = None) -> tuple[bool, str]:
     """Fallback method using simpler schtasks command."""
     task_name = "BackerAgentService"
@@ -715,7 +727,12 @@ def create_local_systemd_timer(*, headless: bool = False) -> tuple[bool, str]:
             ["loginctl", "show-user", user, "-p", "Linger", "--value"], capture_output=True, text=True
         )
         if linger.returncode or linger.stdout.strip().lower() != "yes":
-            return False, f"Enable lingering first: loginctl enable-linger {user}"
+            enabled = subprocess.run(["loginctl", "enable-linger", user], capture_output=True, text=True)
+            verify = subprocess.run(
+                ["loginctl", "show-user", user, "-p", "Linger", "--value"], capture_output=True, text=True
+            )
+            if enabled.returncode or verify.returncode or verify.stdout.strip().lower() != "yes":
+                return False, f"loginctl enable-linger {user}"
         directory = Path.home() / ".config" / "systemd" / "user"
         systemctl = ["systemctl", "--user"]
     else:

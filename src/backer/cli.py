@@ -969,15 +969,31 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
 
 
 @agent.command("uninstall")
+@click.option("--mode", type=click.Choice(["server", "local"]), default="server", show_default=True)
+@click.option("--headless", is_flag=True, help="Remove the machine local scheduler")
 @click.option("--keep-config", is_flag=True, help="Keep configuration files")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
-def agent_uninstall(keep_config: bool, yes: bool) -> None:
+def agent_uninstall(mode: str, headless: bool, keep_config: bool, yes: bool) -> None:
     """Remove agent from system startup and optionally uninstall."""
     import shutil
     import subprocess
 
-    from backer.client.windows_service import is_windows, uninstall_service
+    from backer.client.windows_service import (
+        is_windows,
+        remove_local_scheduled_task,
+        remove_local_systemd_timer,
+        uninstall_service,
+    )
     from backer.core.paths import get_config_dir, get_data_dir
+
+    if mode == "local":
+        if is_windows():
+            if not remove_local_scheduled_task():
+                raise click.ClickException("BackerLocalBackup was not removed")
+        else:
+            remove_local_systemd_timer(headless=headless)
+        console.print("[green]✓ Local scheduler removed[/green]")
+        return
 
     if is_windows():
         success, message = uninstall_service()

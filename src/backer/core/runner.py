@@ -1,5 +1,6 @@
 """Server-independent backup and restore runner."""
 
+import getpass
 import logging
 import platform
 import shutil
@@ -16,6 +17,7 @@ from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
 from backer.core import mounts
 from backer.core.destination import prepare_destination, prepare_source
+from backer.core.paths import get_job_subfolder
 from backer.core.repo_metadata import RepositoryMetadata
 
 logger = logging.getLogger(__name__)
@@ -543,6 +545,10 @@ def _write_metadata_to_path(
             agent_id or "unknown",
             {
                 "source_path": source_path,
+                "source_hostname": socket.gethostname(),
+                "source_platform": sys.platform,
+                "kopia_source": f"{getpass.getuser()}@{socket.gethostname()}:{source_path}",
+                "subfolder": get_job_subfolder(job_name),
                 "excludes": serverless_job.get("excludes", []),
                 "schedule": serverless_job.get("schedule"),
                 "retention": serverless_job.get("retention"),
