@@ -41,6 +41,7 @@ class ClientConfig(ConfigModel):
     server_url: str = "http://localhost:8420"
     client_id: str = ""
     client_secret: str = ""
+    client_secret_ref: str | None = None
     heartbeat_interval: int = 60
 
 
@@ -49,6 +50,7 @@ class RepositoryOptions(ConfigModel):
 
 
 class RepositoryConfig(ConfigModel):
+    id: str | None = None
     name: str
     type: str
     path: str | None = None
@@ -60,8 +62,13 @@ class RepositoryConfig(ConfigModel):
     prefix: str | None = None
     endpoint: str | None = None
     region: str | None = None
-    access_key_id: str | None = None
     scope: str | None = None
+    unique_id: str | None = None
+    added_at: str | None = None
+    last_check_status: str | None = None
+    last_check_at: str | None = None
+    use_existing_session: bool = False
+    path_style: bool | None = None
     storage_password_ref: str | None = None
     passphrase_ref: str | None = None
     repository_options: RepositoryOptions | None = None

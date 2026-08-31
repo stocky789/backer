@@ -1,5 +1,6 @@
 """Backer CLI - unified backup management."""
 
+import sys
 from pathlib import Path
 
 import click
@@ -591,6 +592,49 @@ def server_uninstall(keep_data: bool, yes: bool) -> None:
 def agent() -> None:
     """Agent management commands."""
     pass
+
+
+@main.group()
+def repo() -> None:
+    """Manage local serverless repositories."""
+    pass
+
+
+def _read_passphrase(stream: bool, file: Path | None) -> str:
+    if stream == (file is not None):
+        raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
+    value = sys.stdin.read() if stream else file.read_text(encoding="utf-8")
+    value = value.rstrip("\r\n")
+    if not value:
+        raise click.UsageError("Repository passphrase is required")
+    return value
+
+
+@repo.command("add")
+@click.argument("name")
+@click.option("--attach", is_flag=True, help="Attach an existing repository")
+@click.option("--init", "initialize", is_flag=True, help="Create a new repository")
+@click.option("--type", "repository_type", type=click.Choice(["local", "smb", "s3"]), default="local")
+@click.option("--path")
+@click.option("--passphrase-stdin", is_flag=True)
+@click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
+@click.pass_context
+def repo_add(ctx: click.Context, name: str, attach: bool, initialize: bool, repository_type: str, path: str | None,
+             passphrase_stdin: bool, passphrase_file: Path | None) -> None:
+    """Attach or explicitly create one repository."""
+    from backer.core.config import BackerConfig, RepositoryConfig, load_config
+    from backer.core.paths import get_config_dir
+    from backer.serverless.repositories import add_repository
+
+    try:
+        passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
+        config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
+        config = load_config(config_path) if config_path.exists() else BackerConfig()
+        record = RepositoryConfig(name=name, type=repository_type, path=path)
+        repo_id, backend = add_repository(config, config_path, name, record, passphrase, attach=attach, init=initialize)
+        console.print(f"Repository '{name}' saved ({backend}, id {repo_id})")
+    except (OSError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
 
 
 @agent.command("setup")

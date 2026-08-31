@@ -273,6 +273,7 @@ class KopiaBackend(BackendBase):
 
             cmd = [str(binary), "repository", "create", repo_type]
             cmd.extend(repo_args)
+            cmd.append("--no-persist-credentials")
 
             result = subprocess.run(
                 cmd,
@@ -309,8 +310,10 @@ class KopiaBackend(BackendBase):
             binary = self._get_binary()
             repo_type, repo_args = self._get_repo_type(path)
 
+            self._disconnect_repo(path)
             cmd = [str(binary), "repository", "connect", repo_type]
             cmd.extend(repo_args)
+            cmd.append("--no-persist-credentials")
 
             result = subprocess.run(
                 cmd,
@@ -341,6 +344,32 @@ class KopiaBackend(BackendBase):
         except Exception:
             # Disconnect errors are non-fatal and expected when not connected
             pass
+
+    @_serialize_by_repo("path")
+    def repository_probe(self, path: str) -> tuple[str, str | None]:
+        """Safely distinguish a repository that is absent from one that cannot be opened."""
+        connected, message = self._connect_repo(path)
+        if not connected:
+            lowered = message.lower()
+            if "invalid repository password" in lowered:
+                return "wrong_passphrase", None
+            if "repository not initialized in the provided storage" in lowered:
+                return "absent", None
+            return "unreachable", None
+        try:
+            result = subprocess.run(
+                [str(self._get_binary()), "repository", "status", "--json"],
+                capture_output=True, text=True, env=self._repo_env(path), timeout=30,
+            )
+            if result.returncode:
+                return "unreachable", None
+            payload = json.loads(result.stdout)
+            unique_id = payload.get("uniqueIDHex")
+            return ("present", str(unique_id)) if unique_id else ("unreachable", None)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+            return "unreachable", None
+        finally:
+            self._disconnect_repo(path)
 
     def _auto_init_repo(self, path: str) -> tuple[bool, str]:
         """Create a repository for a backup that found none connected there.

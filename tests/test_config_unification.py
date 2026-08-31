@@ -205,6 +205,20 @@ def test_from_config_reads_unified_file(monkeypatch, tmp_path: Path) -> None:
     assert agent.config_path == tmp_path / "config.yaml"
 
 
+def test_saved_agent_secret_moves_to_keystore(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("backer.core.keystore.put", lambda *_args, **_kwargs: "file")
+    monkeypatch.setattr("backer.core.keystore.get", lambda *_args, **_kwargs: "secret")
+    agent = BackerAgent("https://backer.example", "agent-1", "secret", tmp_path / "config.yaml")
+
+    agent._save_credentials()
+
+    saved = BackerConfig.load(tmp_path / "config.yaml")
+    assert saved.server.client_secret == ""
+    assert saved.server.client_secret_ref == "backer/server/agent-1/secret"
+
+
 def test_from_config_falls_back_to_agent_yaml(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     (tmp_path / "agent.yaml").write_text("server_url: https://agent\nclient_id: agent-1\nclient_secret: secret\n")

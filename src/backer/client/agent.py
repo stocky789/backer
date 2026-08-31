@@ -126,10 +126,15 @@ class BackerAgent:
 
     def _save_credentials(self) -> None:
         """Save client credentials to config file."""
+        from backer.core import keystore
+
         config = load_config(self.config_path)
         config.agent_id = self.client_id or config.agent_id
+        secret_ref = f"backer/server/{config.agent_id}/secret"
+        if self.client_secret:
+            keystore.put(secret_ref, self.client_secret)
         config.server = ClientConfig(
-            server_url=self.server_url, client_id=self.client_id or "", client_secret=self.client_secret or ""
+            server_url=self.server_url, client_id=self.client_id or "", client_secret_ref=secret_ref
         )
         config.save(self.config_path)
 
@@ -141,7 +146,12 @@ class BackerAgent:
             config = load_config(config_path)
             if config.server is None:
                 raise FileNotFoundError(f"Agent config not found: {config_path}")
-            return cls(config.server.server_url, config.server.client_id, config.server.client_secret, config_path)
+            secret = config.server.client_secret
+            if config.server.client_secret_ref:
+                from backer.core import keystore
+
+                secret = keystore.get(config.server.client_secret_ref) or secret
+            return cls(config.server.server_url, config.server.client_id, secret, config_path)
         legacy_path = get_config_dir() / "agent.yaml"
         if not legacy_path.exists():
             raise FileNotFoundError(f"Agent config not found: {config_path}")
