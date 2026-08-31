@@ -322,3 +322,60 @@ def test_runner_s3_sidecar_uses_full_document_and_owner_cannot_be_replaced(monke
     Sidecar.existing = json.dumps({**document, "owner_agent_id": "other"}).encode()
     _write_repo_metadata(job, "s3://bucket", "kopia", result, now, now, None, "owner")
     assert len(stored) == 1
+
+
+def test_repo_adopt_s3_reads_prefixed_sidecars_and_saves_only_local_config(monkeypatch, tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    from backer.cli import main
+
+    config = BackerConfig(
+        agent_id="new-agent",
+        repositories={
+            "repo": RepositoryConfig(
+                id="repo",
+                name="Repo",
+                type="s3",
+                bucket="bucket",
+                prefix="backer-data",
+                endpoint="https://s3.example",
+                passphrase_ref="passphrase",
+                storage_password_ref="storage",
+            )
+        },
+    )
+    config.save(tmp_path / "config.yaml")
+    monkeypatch.setattr("backer.core.paths.get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "backer.core.keystore.get",
+        lambda key, **_: {
+            "passphrase": "repo-pass",
+            "storage": '{"access_key_id":"access","secret_access_key":"secret"}',
+        }[key],
+    )
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: ("present", "unique", ""))
+    operations: list[tuple[str, str]] = []
+
+    class Sidecar:
+        def __init__(self, *_: object) -> None:
+            pass
+
+        def list(self, prefix: str) -> list[str]:
+            operations.append(("list", prefix))
+            return ["backer-data/.backer/jobs/nightly/config.json"]
+
+        def get(self, key: str) -> bytes:
+            operations.append(("get", key))
+            return b'{"job_name":"nightly","owner_agent_id":"old","config":{"source_path":"/old","excludes":["*.tmp"]}}'
+
+        def put_atomic(self, key: str, _: bytes) -> None:
+            operations.append(("put", key))
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.S3Sidecar", Sidecar)
+
+    result = CliRunner().invoke(main, ["repo", "adopt", "Repo", "--all", "--source", "nightly=/new"])
+
+    assert result.exit_code == 0, result.output
+    assert operations == [("list", ".backer/jobs/"), ("get", ".backer/jobs/nightly/config.json")]
+    saved = BackerConfig.load(tmp_path / "config.yaml")
+    assert saved.jobs["nightly"].source.path == "/new"
