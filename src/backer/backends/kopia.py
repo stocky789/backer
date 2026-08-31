@@ -308,6 +308,7 @@ class KopiaBackend(BackendBase):
 
     def _connect_repo(self, path: str) -> tuple[bool, str]:
         """Connect to an existing kopia repository."""
+        self._last_connect_stderr = ""
         if not self._has_repository_password:
             return False, "Repository encryption password is required"
         try:
@@ -330,6 +331,7 @@ class KopiaBackend(BackendBase):
             if result.returncode == 0:
                 return True, "Connected to repository"
             else:
+                self._last_connect_stderr = result.stderr
                 return False, result.stderr.strip()
         except Exception as e:
             return False, str(e)
@@ -354,7 +356,7 @@ class KopiaBackend(BackendBase):
         """Safely distinguish a repository that is absent from one that cannot be opened."""
         connected, message = self._connect_repo(path)
         if not connected:
-            self.last_repository_error = message
+            self.last_repository_error = getattr(self, "_last_connect_stderr", message)
             lowered = message.lower()
             if "invalid repository password" in lowered:
                 return "wrong_passphrase", None

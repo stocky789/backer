@@ -71,11 +71,11 @@ def test_probe_preserves_kopia_error_text(monkeypatch) -> None:
     monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
     monkeypatch.setattr(
         "backer.backends.kopia.subprocess.run",
-        lambda command, **_: CompletedProcess(command, 1, "", "cannot access storage path: offline"),
+        lambda command, **_: CompletedProcess(command, 1, "", "cannot access storage path: offline\n"),
     )
 
     assert backend.repository_probe("offline")[0] == "unreachable"
-    assert backend.last_repository_error == "cannot access storage path: offline"
+    assert backend.last_repository_error == "cannot access storage path: offline\n"
 
 
 def test_repo_attach_refuses_absent_without_create(monkeypatch, tmp_path: Path) -> None:
