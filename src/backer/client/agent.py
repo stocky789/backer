@@ -1,5 +1,6 @@
 """Backer agent - runs on client machines and executes backups."""
 
+import logging
 import os
 import platform
 import shutil
@@ -21,6 +22,8 @@ from backer import __version__
 from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
 from backer.core.repo_metadata import RepositoryMetadata
+
+logger = logging.getLogger(__name__)
 
 _SENSITIVE_OPTION_PARTS = (
     "password", "token", "secret", "access_key", "api_key", "private_key", "authorization",
@@ -61,6 +64,12 @@ def get_config_dir() -> Path:
 
     Linux: /etc/backer (system-wide)
     Windows: %APPDATA%/Backer
+
+    An XDG branch for unprivileged desktop users belongs here, but resolving
+    it on whether /etc/backer exists makes the answer change mid-process:
+    `backer agent setup` rmtree()s that directory and then calls this again,
+    so the wizard would save to ~/.config/backer while the systemd unit still
+    looks in /etc/backer. It needs the unified config work to be done safely.
     """
     # Check environment variable first (for custom locations)
     env_config = os.environ.get("BACKER_CONFIG_DIR")
@@ -78,7 +87,15 @@ def get_config_dir() -> Path:
 
 
 def get_data_dir() -> Path:
-    """Get platform-appropriate data directory."""
+    """Get platform-appropriate data directory.
+
+    Deliberately does NOT honour BACKER_DATA_DIR, unlike tools/manager.py.
+    install.sh sets BACKER_DATA_DIR=/var/lib/backer in the systemd unit and
+    the /usr/local/bin/backer wrapper, and the sole caller of this function
+    is `backer agent uninstall` (cli.py), which shutil.rmtree()s the result -
+    so honouring it here deletes the SERVER's database when an admin
+    uninstalls the agent on a host running both.
+    """
     if sys.platform == "win32":
         localappdata = os.environ.get("LOCALAPPDATA")
         if localappdata:
@@ -1013,18 +1030,19 @@ class BackerAgent:
             except Exception as e:
                 print(f"Failed to report result: {e}")
 
-            # Write metadata to repository for discovery (only on success)
-            if result.success:
-                original_dest = job.get("destination_path", "")
-                self._write_repo_metadata(
-                    job=job,
-                    dest_path=original_dest,
-                    backend_name=backend_name,
-                    result=result,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    snapshot_id=snapshot_id,
-                )
+            # Write metadata to repository for discovery. Written for failed
+            # runs too, so a repository doesn't read as an unbroken run of
+            # green when a job has actually been failing.
+            original_dest = job.get("destination_path", "")
+            self._write_repo_metadata(
+                job=job,
+                dest_path=original_dest,
+                backend_name=backend_name,
+                result=result,
+                started_at=started_at,
+                finished_at=finished_at,
+                snapshot_id=snapshot_id,
+            )
 
             return report
 
@@ -1565,8 +1583,11 @@ class BackerAgent:
             print(f"[METADATA] Successfully wrote metadata to: {dest_path}")
 
         except Exception as e:
-            # Don't fail the backup just because metadata writing failed
-            print(f"[METADATA] Warning - failed to write metadata: {e}")
+            # Don't fail the backup just because metadata writing failed, but
+            # don't let the failure vanish into stdout either - a failed
+            # metadata write can itself hide a failed run from a second
+            # machine reading this repository.
+            logger.error("[METADATA] Failed to write metadata to %s: %s", dest_path, e)
 
     def _write_metadata_to_path(
         self,
@@ -1614,6 +1635,7 @@ class BackerAgent:
             "finished_at": finished_at.isoformat(),
             "bytes_transferred": result.bytes_transferred,
             "files_transferred": result.files_transferred,
+            "errors": result.errors,
             "snapshot_id": snapshot_id,
             "agent_id": self.client_id,
             "hostname": socket.gethostname(),

@@ -1,7 +1,9 @@
 """Tests for repository metadata functionality."""
 
+import json
 import sys
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -258,3 +260,85 @@ class TestRepositoryMetadata:
         assert discovery["agents"] == []
         assert discovery["jobs"] == []
         assert discovery["snapshots"] == []
+
+    def test_discover_all_merges_root_and_job_subfolders(self, temp_repo):
+        """A root sidecar must not hide per-job sidecars under Agents/*/.backer/.
+
+        This is the server-managed layout: a root .backer/ (e.g. from a
+        legacy init) coexists with per-job .backer/ trees under Agents/.
+        discover_all() must union both, not return early on the root one.
+        """
+        # Root-level sidecar with its own job.
+        root_meta = RepositoryMetadata(temp_repo)
+        root_meta.initialize()
+        root_meta.save_agent("agent-root", {"hostname": "root-host"})
+        root_meta.save_job("root-job", {"source_path": "/root-data"})
+
+        # Per-job sidecar under Agents/<job>/.backer/
+        job_dir = temp_repo / "Agents" / "job-a"
+        job_dir.mkdir(parents=True)
+        job_meta = RepositoryMetadata(job_dir)
+        job_meta.initialize()
+        job_meta.save_agent("agent-a", {"hostname": "host-a"})
+        job_meta.save_job("job-a", {"source_path": "/data-a"})
+
+        discovery = root_meta.discover_all()
+
+        assert discovery["initialized"] is True
+        job_names = {job["job_name"] for job in discovery["jobs"]}
+        agent_ids = {agent["agent_id"] for agent in discovery["agents"]}
+        assert job_names == {"root-job", "job-a"}
+        assert agent_ids == {"agent-root", "agent-a"}
+
+    def test_write_json_never_leaves_truncated_file(self, temp_repo):
+        """_write_json must not destroy the existing file if the write fails partway.
+
+        Old behavior opened the target with mode="w" (truncating immediately)
+        before ever writing new content, so a failure mid-write left a
+        zero-byte / invalid JSON file behind. The atomic temp-file + replace
+        implementation must leave the original content intact instead.
+        """
+        repo_meta = RepositoryMetadata(temp_repo)
+        target = temp_repo / BACKER_METADATA_DIR / "metadata.json"
+        target.parent.mkdir(parents=True)
+        target.write_text('{"version": "1.0", "ok": true}', encoding="utf-8")
+
+        with patch("json.dump", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                repo_meta._write_json(target, {"version": "1.0", "ok": False})
+
+        # Original content survives untouched, and no leftover temp file.
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "version": "1.0",
+            "ok": True,
+        }
+        leftovers = list(target.parent.glob("*.tmp"))
+        assert leftovers == []
+
+    def test_write_json_concurrent_writers_produce_valid_json(self, temp_repo):
+        """Concurrent _write_json calls to the same path must never leave
+        invalid or empty JSON on disk - each write is atomic (temp file +
+        os.replace), so a reader always sees either the old or new content."""
+        repo_meta = RepositoryMetadata(temp_repo)
+        target = temp_repo / BACKER_METADATA_DIR / "metadata.json"
+        target.parent.mkdir(parents=True)
+
+        errors = []
+
+        def writer(n):
+            try:
+                ok = repo_meta._write_json(target, {"writer": n})
+                assert ok is True
+            except Exception as e:  # pragma: no cover - surfaced via errors list
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        # Whatever ended up on disk must be complete, parseable JSON.
+        data = json.loads(target.read_text(encoding="utf-8"))
+        assert "writer" in data

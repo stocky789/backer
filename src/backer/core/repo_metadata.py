@@ -22,7 +22,10 @@ Metadata Structure in Repository:
 
 import json
 import logging
+import os
 import sys
+import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -247,12 +250,44 @@ class RepositoryMetadata:
         return results
 
     def _write_json(self, path: Path, data: dict[str, Any]) -> bool:
-        """Write a JSON file to the repository (thread-safe with file locking)."""
+        """Write a JSON file to the repository atomically.
+
+        Writes to a uniquely-named temp file in the same directory and
+        atomically renames it onto the target with os.replace(). This is
+        atomic on both POSIX and Windows, and (unlike advisory file locks,
+        which are unreliable over CIFS/NFS) the rename is evaluated by the
+        server rather than the client. A reader can never observe a
+        truncated/partial file, and an interrupted write leaves the target
+        untouched.
+        """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            # Use file locking to prevent concurrent writes
-            with file_lock(path, mode="w") as f:
-                json.dump(data, f, indent=2, default=str)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, default=str)
+                # On Windows, concurrent os.replace() calls onto the same
+                # destination can transiently race with WinError 5 (Access
+                # Denied) even though the operation is atomic - retry a
+                # few times before giving up.
+                # ponytail: fixed retry count, revisit with backoff/jitter
+                # if this shows up under heavier contention than tests do.
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp_path, path)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.05)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             return True
         except OSError as e:
             logger.error(f"Failed to write {path}: {e}")
@@ -581,37 +616,43 @@ class RepositoryMetadata:
         Returns:
             Dict with agents, jobs, runs, snapshots
         """
-        # First check if we have metadata at the root level (legacy)
-        if self.is_initialized():
-            metadata = self.get_metadata() or {}
-            agents = self.list_agents()
-            jobs = self.list_jobs()
-            snapshots = self.list_snapshots()
-
-            total_runs = sum(job.get("run_count", 0) for job in jobs)
-
-            return {
-                "initialized": True,
-                "metadata": metadata,
-                "agents": agents,
-                "jobs": jobs,
-                "snapshots": snapshots,
-                "summary": {
-                    "agent_count": len(agents),
-                    "job_count": len(jobs),
-                    "snapshot_count": len(snapshots),
-                    "total_runs": total_runs,
-                },
-            }
-
         # Scan job subfolders for metadata
         # New structure: repo_root/Agents/{job_name}/.backer/
         # Legacy structure: repo_root/{job_name}/.backer/
-        all_agents = []
-        all_jobs = []
-        all_snapshots = []
-        agent_ids_seen = set()
+        all_agents: list[dict[str, Any]] = []
+        all_jobs: list[dict[str, Any]] = []
+        all_snapshots: list[dict[str, Any]] = []
+        agent_ids_seen: set[str] = set()
+        job_names_seen: set[str] = set()
         found_any = False
+        root_metadata: dict[str, Any] | None = None
+
+        def add_agent(agent: dict[str, Any]) -> None:
+            agent_id = agent.get("agent_id")
+            if agent_id and agent_id not in agent_ids_seen:
+                agent_ids_seen.add(agent_id)
+                all_agents.append(agent)
+
+        def add_job(job: dict[str, Any]) -> None:
+            job_name = job.get("job_name")
+            if job_name:
+                if job_name in job_names_seen:
+                    return
+                job_names_seen.add(job_name)
+            all_jobs.append(job)
+
+        # Root-level metadata (legacy layout, and/or the repo-level sidecar
+        # that coexists with per-job sidecars under Agents/*/.backer/).
+        # This used to be an early return, which hid every per-job sidecar
+        # whenever a root sidecar also existed - merge instead.
+        if self.is_initialized():
+            found_any = True
+            root_metadata = self.get_metadata() or {}
+            for agent in self.list_agents():
+                add_agent(agent)
+            for job in self.list_jobs():
+                add_job(job)
+            all_snapshots.extend(self.list_snapshots())
 
         def scan_folder(folder: Path, prefix: str = "") -> None:
             """Scan a folder for job metadata."""
@@ -642,15 +683,12 @@ class RepositoryMetadata:
 
                         # Aggregate agents (dedup by agent_id)
                         for agent in subfolder_meta.list_agents():
-                            agent_id = agent.get("agent_id")
-                            if agent_id and agent_id not in agent_ids_seen:
-                                agent_ids_seen.add(agent_id)
-                                all_agents.append(agent)
+                            add_agent(agent)
 
-                        # Aggregate jobs
+                        # Aggregate jobs (dedup by job_name)
                         for job in subfolder_meta.list_jobs():
                             job["job_folder"] = folder_path
-                            all_jobs.append(job)
+                            add_job(job)
 
                         # Aggregate snapshots
                         for snap in subfolder_meta.list_snapshots():
@@ -685,14 +723,11 @@ class RepositoryMetadata:
                         logger.debug(f"Found metadata in legacy job folder: {item.name}")
 
                         for agent in subfolder_meta.list_agents():
-                            agent_id = agent.get("agent_id")
-                            if agent_id and agent_id not in agent_ids_seen:
-                                agent_ids_seen.add(agent_id)
-                                all_agents.append(agent)
+                            add_agent(agent)
 
                         for job in subfolder_meta.list_jobs():
                             job["job_folder"] = item.name
-                            all_jobs.append(job)
+                            add_job(job)
 
                         for snap in subfolder_meta.list_snapshots():
                             snap["job_folder"] = item.name
@@ -708,7 +743,7 @@ class RepositoryMetadata:
 
         total_runs = sum(job.get("run_count", 0) for job in all_jobs)
 
-        return {
+        result: dict[str, Any] = {
             "initialized": True,
             "agents": all_agents,
             "jobs": all_jobs,
@@ -720,6 +755,9 @@ class RepositoryMetadata:
                 "total_runs": total_runs,
             },
         }
+        if root_metadata is not None:
+            result["metadata"] = root_metadata
+        return result
 
     def _safe_filename(self, name: str) -> str:
         """Convert a name to a safe filename."""

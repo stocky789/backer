@@ -1,3 +1,4 @@
+import pathlib
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -100,7 +101,7 @@ def test_agent_metadata_does_not_write_backend(tmp_path: Path) -> None:
         "run-1",
         "/photos",
         "kopia",
-        SimpleNamespace(success=True, bytes_transferred=1, files_transferred=1),
+        SimpleNamespace(success=True, bytes_transferred=1, files_transferred=1, errors=[]),
         datetime.now(),
         datetime.now(),
         "snapshot-1",
@@ -638,3 +639,108 @@ def test_gui_service_uses_shared_agent_executor(
     service._execute_restore({"dry_run": False})
 
     assert calls == [True]
+
+
+def test_failed_backup_run_is_recorded_with_its_error(tmp_path: Path) -> None:
+    """A failing job must not be invisible to a second machine reading the repo."""
+    agent = _agent(tmp_path)
+    agent._write_metadata_to_path(
+        tmp_path / "repository",
+        "photos",
+        "run-1",
+        "/photos",
+        "kopia",
+        SimpleNamespace(
+            success=False, bytes_transferred=0, files_transferred=0,
+            errors=["repository unavailable"],
+        ),
+        datetime.now(),
+        datetime.now(),
+        None,
+    )
+
+    metadata = RepositoryMetadata(tmp_path / "repository")
+    runs = metadata.get_job_runs("photos")
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["errors"] == ["repository unavailable"]
+
+
+def test_execute_backup_writes_repo_metadata_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The end-of-execute_backup metadata write must not be gated on success."""
+    agent = _agent(tmp_path)
+    dest = tmp_path / "repository"
+
+    failing_backend = SimpleNamespace(
+        check_available=lambda: (True, "ready"),
+        backup=lambda **_: SimpleNamespace(
+            success=False, bytes_transferred=0, files_transferred=0,
+            errors=["kopia snapshot create failed"], output="boom", metadata={},
+            return_code=1,
+        ),
+    )
+    monkeypatch.setattr(client_agent, "get_backend", lambda *_a, **_k: failing_backend)
+    monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
+    monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
+
+    report = agent.execute_backup({
+        "run_id": "run-1",
+        "job_name": "photos",
+        "source_path": str(tmp_path / "source"),
+        "destination_path": str(dest),
+    })
+
+    assert not report["success"]
+    metadata = RepositoryMetadata(dest)
+    runs = metadata.get_job_runs("photos")
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["errors"] == ["kopia snapshot create failed"]
+
+
+def test_repo_metadata_write_failure_is_logged_not_swallowed_silently(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = _agent(tmp_path)
+
+    # Force the failure deterministically: point dest_path at a file so
+    # RepositoryMetadata can't create its metadata directory under it.
+    blocked = tmp_path / "blocked_repo"
+    blocked.write_text("not a directory")
+
+    with caplog.at_level("ERROR", logger="backer.client.agent"):
+        agent._write_repo_metadata(
+            job={"job_name": "photos", "run_id": "run-1", "source_path": "/photos"},
+            dest_path=str(blocked),
+            backend_name="kopia",
+            result=SimpleNamespace(success=True, bytes_transferred=0, files_transferred=0, errors=[]),
+            started_at=datetime.now(),
+            finished_at=datetime.now(),
+            snapshot_id=None,
+        )
+
+    assert any("Failed to write metadata" in record.message for record in caplog.records)
+
+
+def _patch_etc_backer_exists(monkeypatch: pytest.MonkeyPatch, exists: bool) -> None:
+    real_exists = pathlib.Path.exists
+
+    def fake_exists(self: pathlib.Path) -> bool:
+        if self == pathlib.Path("/etc/backer"):
+            return exists
+        return real_exists(self)
+
+    monkeypatch.setattr(pathlib.Path, "exists", fake_exists)
+
+
+def test_linux_config_dir_prefers_etc_backer_when_it_already_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing root install (scripts/install-agent.sh) must keep working after upgrade."""
+    monkeypatch.delenv("BACKER_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(client_agent.sys, "platform", "linux")
+    _patch_etc_backer_exists(monkeypatch, exists=True)
+
+    assert client_agent.get_config_dir() == Path("/etc/backer")
+

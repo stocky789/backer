@@ -630,3 +630,89 @@ class TestKopiaBackend:
         result = backend._find_latest_snapshot_for_source("repo", "C:/Users/alice/Documents")
 
         assert result is None
+
+    def test_get_snapshot_files_passes_a_source_where_a_source_is_expected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """'snapshot list' takes a source path, not a snapshot id, and has no --path flag.
+
+        Browsing a snapshot's contents is 'kopia ls <snapshot-id>', since a
+        snapshot id is itself a valid object path at the snapshot root.
+        """
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        ls_output = (
+            "drwxrwxrwx            6 2026-08-31 23:48:18 AEST k090c70a25a6eac07a41461bbfe109552  sub/\n"
+            "-rw-rw-rw-            6 2026-08-31 23:48:18 AEST f218bb89b4c096463f45e07b2ef3a5ef   a.txt\n"
+        )
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, ls_output, "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        entries = backend.get_snapshot_files(BackupDestination("repo"), "f0a62d5b3dc5a02eb2674791653ebb78")
+
+        assert calls[0] == ["kopia", "ls", "--long", "--show-object-id", "f0a62d5b3dc5a02eb2674791653ebb78"]
+        assert not any("--path" in c for c in calls)
+        assert not any(c[1:3] == ["snapshot", "list"] for c in calls)
+        assert {
+            "name": "sub",
+            "type": "dir",
+            "size": 6,
+            "mtime": "2026-08-31 23:48:18 AEST",
+            "object_id": "k090c70a25a6eac07a41461bbfe109552",
+        } in entries
+        assert {
+            "name": "a.txt",
+            "type": "file",
+            "size": 6,
+            "mtime": "2026-08-31 23:48:18 AEST",
+            "object_id": "f218bb89b4c096463f45e07b2ef3a5ef",
+        } in entries
+
+    def test_get_snapshot_files_lists_a_subdirectory(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A path argument addresses '<snapshot-id>/<path>', a subdirectory within the snapshot."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        ls_output = "-rw-rw-rw-            2 2026-08-31 23:48:59 AEST 0a710ee49acdd7a9478fca18433356a9   c file.txt\n"
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, ls_output, "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        entries = backend.get_snapshot_files(
+            BackupDestination("repo"), "af85cb18d4d83b05392e2ffe18472b74", path="sub with space"
+        )
+
+        assert calls[0][-1] == "af85cb18d4d83b05392e2ffe18472b74/sub with space"
+        assert entries == [
+            {
+                "name": "c file.txt",
+                "type": "file",
+                "size": 2,
+                "mtime": "2026-08-31 23:48:59 AEST",
+                "object_id": "0a710ee49acdd7a9478fca18433356a9",
+            }
+        ]
+
+    def test_get_snapshot_files_fails_closed_on_bad_snapshot_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A kopia error (nonexistent snapshot/path) must return no files, not raise or fabricate a listing."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            return CompletedProcess(command, 1, "", "unable to get filesystem directory entry: not a directory object")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        entries = backend.get_snapshot_files(BackupDestination("repo"), "deadbeef")
+
+        assert entries == []

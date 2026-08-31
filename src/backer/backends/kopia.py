@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime
 from functools import wraps
@@ -1122,6 +1123,15 @@ class KopiaBackend(BackendBase):
                 return_code=-1,
             )
 
+    # kopia's `ls` output has no --json mode; one line per entry, e.g.:
+    #   drwxrwxrwx            6 2026-08-31 23:48:18 AEST k090c70a25a6eac07a41461bbfe109552  sub/
+    #   -rw-rw-rw-            6 2026-08-31 23:48:18 AEST f218bb89b4c096463f45e07b2ef3a5ef   a.txt
+    # mode, size, date, time, timezone, object id, name (dirs keep a trailing "/").
+    _LS_LINE_RE = re.compile(
+        r"^(?P<mode>\S+)\s+(?P<size>\d+)\s+(?P<date>\d{4}-\d{2}-\d{2})\s+"
+        r"(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<tz>\S+)\s+(?P<oid>\S+)\s+(?P<name>.+)$"
+    )
+
     @_serialize_by_repo("destination")
     def get_snapshot_files(
         self,
@@ -1129,7 +1139,19 @@ class KopiaBackend(BackendBase):
         snapshot_id: str,
         path: str = "",
     ) -> list[dict[str, Any]]:
-        """List files in a snapshot (for browsing before restore)."""
+        """List files in a snapshot (for browsing before restore).
+
+        `snapshot list` takes a source path and lists snapshot history, not
+        a snapshot's contents, and it has no --path flag. Listing what's
+        inside a snapshot is `kopia ls <object-path>`, where a full snapshot
+        id is itself a valid directory object at the snapshot root, so
+        `<snapshot_id>/<path>` addresses a subdirectory within it directly.
+
+        Takes the FULL snapshot id. `list_snapshots` truncates its "id" to 12
+        characters and keeps the full value in "full_id", so a short id is
+        resolved back through it rather than handed to kopia, which rejects
+        it with "is not a directory object".
+        """
         try:
             binary = self._get_binary()
 
@@ -1138,25 +1160,55 @@ class KopiaBackend(BackendBase):
                 return []
 
             try:
-                cmd = [str(binary), "snapshot", "list", "--json"]
-                if path:
-                    cmd.extend(["--path", path])
-                cmd.append(snapshot_id)
+                full_id = snapshot_id
+                if len(snapshot_id) < 32:
+                    match = next(
+                        (
+                            snap.get("full_id")
+                            for snap in self.list_snapshots(destination)
+                            if snapshot_id in (snap.get("id"), snap.get("full_id"))
+                        ),
+                        None,
+                    )
+                    if not match:
+                        logger.warning(f"[KOPIA] Unknown snapshot id: {snapshot_id}")
+                        return []
+                    full_id = match
 
+                object_path = f"{full_id}/{path}" if path else full_id
                 result = subprocess.run(
-                    cmd,
+                    [str(binary), "ls", "--long", "--show-object-id", object_path],
                     capture_output=True,
                     text=True,
                     env=self._repo_env(destination.path),
                     timeout=60,
                 )
 
-                if result.returncode == 0 and result.stdout.strip():
-                    return json.loads(result.stdout)
+                if result.returncode != 0:
+                    logger.warning(f"[KOPIA] Failed to get snapshot files: {result.stderr.strip()}")
+                    return []
+
+                entries = []
+                for line in result.stdout.splitlines():
+                    m = self._LS_LINE_RE.match(line)
+                    if not m:
+                        continue
+                    name = m.group("name")
+                    is_dir = m.group("mode").startswith("d") or name.endswith("/")
+                    entries.append(
+                        {
+                            "name": name[:-1] if is_dir else name,
+                            "type": "dir" if is_dir else "file",
+                            "size": int(m.group("size")),
+                            "mtime": f"{m.group('date')} {m.group('time')} {m.group('tz')}",
+                            "object_id": m.group("oid"),
+                        }
+                    )
+                return entries
             finally:
                 self._disconnect_repo(destination.path)
 
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as e:
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
             logger.warning(f"[KOPIA] Failed to get snapshot files: {e}")
 
         return []
