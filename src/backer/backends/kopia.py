@@ -354,6 +354,7 @@ class KopiaBackend(BackendBase):
     @_serialize_by_repo("path")
     def repository_probe(self, path: str) -> tuple[str, str | None]:
         """Safely distinguish a repository that is absent from one that cannot be opened."""
+        self.last_repository_error = ""
         connected, message = self._connect_repo(path)
         if not connected:
             self.last_repository_error = getattr(self, "_last_connect_stderr", message)
@@ -369,7 +370,7 @@ class KopiaBackend(BackendBase):
                 capture_output=True, text=True, env=self._repo_env(path), timeout=30,
             )
             if result.returncode:
-                self.last_repository_error = result.stderr.strip()
+                self.last_repository_error = result.stderr
                 return "unreachable", None
             payload = json.loads(result.stdout)
             unique_id = payload.get("uniqueIDHex")

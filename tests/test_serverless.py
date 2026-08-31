@@ -1,6 +1,7 @@
 from pathlib import Path
 from subprocess import CompletedProcess
 
+import pytest
 from click.testing import CliRunner
 
 from backer.backends.base import BackupDestination
@@ -66,13 +67,19 @@ def test_init_resets_and_disconnects_even_after_create_failure(monkeypatch, tmp_
     assert calls[-1][1:3] == ["repository", "disconnect"]
 
 
-def test_probe_preserves_kopia_error_text(monkeypatch) -> None:
+@pytest.mark.parametrize("failure_at", ["connect", "status"])
+def test_probe_preserves_kopia_error_text(monkeypatch, failure_at: str) -> None:
     backend = KopiaBackend({"repository_password": "secret"})
     monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
-    monkeypatch.setattr(
-        "backer.backends.kopia.subprocess.run",
-        lambda command, **_: CompletedProcess(command, 1, "", "cannot access storage path: offline\n"),
-    )
+
+    def run(command, **_):
+        if command[1:3] == ["repository", "disconnect"]:
+            return CompletedProcess(command, 0, "", "")
+        if failure_at == "connect" or command[1:3] == ["repository", "status"]:
+            return CompletedProcess(command, 1, "", "cannot access storage path: offline\n")
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
 
     assert backend.repository_probe("offline")[0] == "unreachable"
     assert backend.last_repository_error == "cannot access storage path: offline\n"
