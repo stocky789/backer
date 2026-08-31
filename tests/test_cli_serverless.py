@@ -59,7 +59,7 @@ def test_init_no_tty_names_all_missing_flags():
         ),
         (
             ["--type", "s3", "--bucket", "b"],
-            ["--prefix", "--endpoint", "--region", "--access-key-id", "--secret-key-stdin"],
+            ["--endpoint", "--region", "--access-key-id", "--secret-key-stdin"],
         ),
     ],
 )
@@ -253,6 +253,39 @@ def test_init_prints_a_reparseable_safe_command(monkeypatch, tmp_path):
     assert calls[1][1] == calls[3][1]
 
 
+def test_init_s3_accepts_an_empty_prefix(monkeypatch, tmp_path):
+    passphrase = tmp_path / "passphrase"
+    secret_key = tmp_path / "secret-key"
+    passphrase.write_text("passphrase\n", encoding="utf-8")
+    secret_key.write_text("secret\n", encoding="utf-8")
+    monkeypatch.setattr("backer.cli.repo_add", lambda **_kwargs: None)
+    monkeypatch.setattr("backer.cli.job_create", lambda **_kwargs: None)
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--type",
+            "s3",
+            "--bucket",
+            "bucket",
+            "--endpoint",
+            "https://s3.example",
+            "--region",
+            "au",
+            "--access-key-id",
+            "key",
+            "--secret-key-file",
+            str(secret_key),
+            "--source",
+            str(tmp_path),
+            "--no-schedule",
+            "--passphrase-file",
+            str(passphrase),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 @pytest.mark.parametrize(
     ("arguments", "repository_expectation"),
     [
@@ -295,9 +328,9 @@ def test_init_forwards_each_repository_type_to_shared_commands(
 ):
     calls = []
     passphrase = tmp_path / "passphrase"
-    storage = tmp_path / "storage"
+    storage = tmp_path / "credential"
     passphrase.write_text("passphrase\n", encoding="utf-8")
-    storage.write_text("storage\n", encoding="utf-8")
+    storage.write_text("do-not-render\n", encoding="utf-8")
     monkeypatch.setattr("backer.cli.repo_add", lambda **kwargs: calls.append(("repo", kwargs)))
     monkeypatch.setattr("backer.cli.job_create", lambda **kwargs: calls.append(("job", kwargs)))
     credential = (
@@ -324,3 +357,12 @@ def test_init_forwards_each_repository_type_to_shared_commands(
     for key, value in repository_expectation.items():
         assert calls[0][1][key] == value
     assert calls[1][1]["source"] == (str(tmp_path),)
+    if repository_expectation["repository_type"] != "local":
+        command = next(
+            line.removeprefix("Run again: ") for line in result.output.splitlines() if line.startswith("Run again: ")
+        )
+        assert "do-not-render" not in command
+        parsed = CliRunner().invoke(main, shlex.split(command.removeprefix("backer ")), input="")
+        assert parsed.exit_code == 0, parsed.output
+        assert calls[0][1] == calls[2][1]
+        assert calls[1][1] == calls[3][1]

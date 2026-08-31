@@ -194,10 +194,11 @@ def test_local_job_create_refuses_duplicate_source(monkeypatch, tmp_path: Path) 
     config.save(tmp_path / "config.yaml")
 
     result = CliRunner().invoke(
-        main, ["job", "create", "--name", "second", "--source", "/data", "--repository", "repo"]
+        main, ["job", "create", "--name", "second", "--source", "/data", "--repository", "repo", "--no-schedule"]
     )
 
     assert result.exit_code != 0
+    assert "already owned" in result.output
     assert "first" in result.output
 
 

@@ -208,7 +208,9 @@ INIT_STEPS = (
         "password_env", "$BACKER_SMB_PASSWORD", "File-server sign-in", bool, _is_type("smb"), "smb-password", _never
     ),
     InitStep("bucket", "--bucket", "S3 bucket", bool, _is_type("s3"), True, _value("--bucket")),
-    InitStep("prefix", "--prefix", "S3 prefix", bool, _is_type("s3"), True, _value("--prefix")),
+    InitStep(
+        "prefix", "--prefix", "S3 prefix", lambda value: value is not None, _is_type("s3"), False, _value("--prefix")
+    ),
     InitStep("endpoint", "--endpoint", "S3 endpoint", bool, _is_type("s3"), True, _value("--endpoint")),
     InitStep("region", "--region", "S3 region", bool, _is_type("s3"), True, _value("--region")),
     InitStep(
@@ -1246,7 +1248,6 @@ def repo_add(
                     flag
                     for flag, value in (
                         ("--bucket", bucket),
-                        ("--prefix", prefix),
                         ("--endpoint", endpoint),
                         ("--region", region),
                         (
