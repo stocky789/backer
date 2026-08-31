@@ -29,6 +29,11 @@ def _secret_tool_available() -> bool:
     return bool(shutil.which("secret-tool") and os.environ.get("DBUS_SESSION_BUS_ADDRESS"))
 
 
+def file_fallback_required() -> bool:
+    """Whether this host has no OS keyring and would use the plaintext file fallback."""
+    return os.name != "nt" and not _secret_tool_available()
+
+
 def _secret_tool(args: list[str], value: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["secret-tool", *args], input=value, capture_output=True, text=True, timeout=15, check=False
@@ -102,7 +107,13 @@ def _dpapi_put(key: str, value: str, machine_scope: bool) -> None:
     grants = ["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"]
     if user:
         grants.extend(["/grant:r", f"{domain}\\{user}:(OI)(CI)F" if domain else f"{user}:(OI)(CI)F"])
-    subprocess.run(["icacls", str(path.parent), *grants], capture_output=True, check=False)
+    result = subprocess.run(
+        ["icacls", str(path.parent), *grants, "/remove:g", "*S-1-5-32-545", "/t", "/c"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Could not apply secret-directory ACL: {result.stderr.strip()}")
     path.write_bytes(_dpapi_protect(value, machine_scope))
 
 

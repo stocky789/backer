@@ -11,6 +11,7 @@ from backer.backends.kopia import KopiaBackend
 from backer.backends.s3 import parse_s3_config
 from backer.core import keystore
 from backer.core.config import BackerConfig, RepositoryConfig
+from backer.core.keystore import file_fallback_required
 
 
 def _destination(record: RepositoryConfig) -> str:
@@ -39,7 +40,7 @@ def probe(
 ) -> tuple[str, str | None, str]:
     backend = _backend(record, passphrase, storage)
     status, unique_id = backend.repository_probe(_destination(record))
-    return status, unique_id, ""
+    return status, unique_id, backend.last_repository_error
 
 
 def create(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | None = None) -> tuple[bool, str]:
@@ -49,10 +50,12 @@ def create(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | 
 
 def add_repository(
     config: BackerConfig, config_path: Path, name: str, record: RepositoryConfig, passphrase: str,
-    *, attach: bool, init: bool, storage: dict[str, str] | None = None,
+    *, attach: bool, init: bool, storage: dict[str, str] | None = None, headless: bool = False,
 ) -> tuple[str, str]:
     if attach == init:
         raise ValueError("Choose exactly one of --attach or --init")
+    if file_fallback_required() and not headless:
+        raise ValueError("No OS keystore is available; re-run with --headless to use protected local files")
     if record.type == "s3":
         parsed = parse_s3_config({**record.model_dump(exclude_none=True), **(storage or {})})
         record = record.model_copy(update={**parsed.public_config, "path": None})

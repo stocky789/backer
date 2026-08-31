@@ -116,6 +116,7 @@ class KopiaBackend(BackendBase):
         if password:
             self._env["KOPIA_PASSWORD"] = password
         self._has_repository_password = bool(password)
+        self.last_repository_error = ""
 
     def _get_binary(self, auto_install: bool = True) -> Path:
         """Get path to kopia binary, downloading if necessary."""
@@ -268,6 +269,7 @@ class KopiaBackend(BackendBase):
             )
 
         try:
+            self._disconnect_repo(destination.path)
             binary = self._get_binary()
             repo_type, repo_args = self._get_repo_type(destination.path)
 
@@ -301,6 +303,8 @@ class KopiaBackend(BackendBase):
                 errors=[str(e)],
                 return_code=-1,
             )
+        finally:
+            self._disconnect_repo(destination.path)
 
     def _connect_repo(self, path: str) -> tuple[bool, str]:
         """Connect to an existing kopia repository."""
@@ -350,6 +354,7 @@ class KopiaBackend(BackendBase):
         """Safely distinguish a repository that is absent from one that cannot be opened."""
         connected, message = self._connect_repo(path)
         if not connected:
+            self.last_repository_error = message
             lowered = message.lower()
             if "invalid repository password" in lowered:
                 return "wrong_passphrase", None
@@ -362,11 +367,13 @@ class KopiaBackend(BackendBase):
                 capture_output=True, text=True, env=self._repo_env(path), timeout=30,
             )
             if result.returncode:
+                self.last_repository_error = result.stderr.strip()
                 return "unreachable", None
             payload = json.loads(result.stdout)
             unique_id = payload.get("uniqueIDHex")
             return ("present", str(unique_id)) if unique_id else ("unreachable", None)
-        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            self.last_repository_error = str(error)
             return "unreachable", None
         finally:
             self._disconnect_repo(path)

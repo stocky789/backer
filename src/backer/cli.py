@@ -618,9 +618,10 @@ def _read_passphrase(stream: bool, file: Path | None) -> str:
 @click.option("--path")
 @click.option("--passphrase-stdin", is_flag=True)
 @click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--headless", is_flag=True, help="Allow the protected local-file secret fallback")
 @click.pass_context
 def repo_add(ctx: click.Context, name: str, attach: bool, initialize: bool, repository_type: str, path: str | None,
-             passphrase_stdin: bool, passphrase_file: Path | None) -> None:
+             passphrase_stdin: bool, passphrase_file: Path | None, headless: bool) -> None:
     """Attach or explicitly create one repository."""
     from backer.core.config import BackerConfig, RepositoryConfig, load_config
     from backer.core.paths import get_config_dir
@@ -631,8 +632,12 @@ def repo_add(ctx: click.Context, name: str, attach: bool, initialize: bool, repo
         config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
         config = load_config(config_path) if config_path.exists() else BackerConfig()
         record = RepositoryConfig(name=name, type=repository_type, path=path)
-        repo_id, backend = add_repository(config, config_path, name, record, passphrase, attach=attach, init=initialize)
+        repo_id, backend = add_repository(
+            config, config_path, name, record, passphrase, attach=attach, init=initialize, headless=headless
+        )
         console.print(f"Repository '{name}' saved ({backend}, id {repo_id})")
+        if backend == "file":
+            console.print("Warning: secrets are stored in protected local files")
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error
 
