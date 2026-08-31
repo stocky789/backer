@@ -129,6 +129,29 @@ class SMBConnectionManager:
             logger.error(f"[SMB-POOL] Connection failed: {result.stderr}")
             return False
 
+    def connect_with_stdin(
+        self,
+        server: str,
+        share: str,
+        username: str,
+        password: str,
+        runner: Callable[..., subprocess.CompletedProcess[str]],
+    ) -> bool:
+        """Create a non-persistent connection without placing the password on argv.
+
+        ``runner`` is deliberately injected so callers can enforce their own
+        argv policy before the process starts.
+        """
+        unc_path = f"\\\\{server}\\{share}"
+        result = runner(
+            ["net", "use", unc_path, f"/user:{username}", "*", "/persistent:no"],
+            input=f"{password}\n",
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+        return result.returncode == 0
+
     def _find_server_conflict(self, server: str, username: str | None) -> str | None:
         """Check if there's a conflicting connection to this server.
 

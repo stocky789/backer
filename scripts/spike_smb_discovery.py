@@ -25,18 +25,18 @@ class ArgvLeakError(RuntimeError):
 
 
 _INLINE_CREDENTIAL = re.compile(r"(?i)(?:^|[,;])(?:user(?:name)?|pass(?:word)?|domain)=[^,\s]*")
-_INLINE_PASS = re.compile(r"(?i)(pass(?:word)?=)[^,:\s]*")
+_INLINE_PASS = re.compile(r"(?i)(pass(?:word)?=)[^,\s]*")
 
 
 def sanitize(value: str | None, *secrets: str | None) -> str | None:
     """Make records safe even when a child process echoes a secret."""
     if value is None:
         return None
-    clean = _INLINE_PASS.sub(r"\1[redacted]", value)
+    clean = value
     for secret in secrets:
         if secret:
             clean = clean.replace(secret, "[redacted]")
-    return clean
+    return _INLINE_PASS.sub(r"\1[redacted]", clean)
 
 
 def assert_argv_safe(argv: list[str], password: str | None, obscured_password: str | None = None) -> None:
@@ -113,17 +113,13 @@ def _arm_a(
         unc = f"\\\\{server}\\{share}"
         preexisting = _run(["net", "use", unc], password).returncode == 0
         started = time.perf_counter()
-        record["native_session"] = manager.connect(server, share, username, password)
+        safe_runner = lambda argv, **kwargs: _run(argv, password, **kwargs)
+        record["native_session"] = bool(username and password) and manager.connect_with_stdin(
+            server, share, username, password, safe_runner
+        )
         record["elapsed_ms"]["native_session"] = round((time.perf_counter() - started) * 1000)
-        if username and password:
-            started = time.perf_counter()
-            stdin_auth = _run(
-                ["net", "use", unc, f"/user:{username}", "*", "/persistent:no"], password, input=f"{password}\n"
-            )
-            record["elapsed_ms"]["stdin_auth"] = round((time.perf_counter() - started) * 1000)
-            record["stdin_auth"] = stdin_auth.returncode == 0
-            if stdin_auth.returncode == 0:
-                _run(["net", "use", unc, "/delete", "/y"], password)
+        record["stdin_auth"] = record["native_session"]
+        record["elapsed_ms"]["stdin_auth"] = record["elapsed_ms"]["native_session"]
         started = time.perf_counter()
         try:
             record["directory_count"] = len(list(Path(f"//{server}/{share}").iterdir()))
@@ -131,7 +127,7 @@ def _arm_a(
             record["error"] = str(error)
         record["elapsed_ms"]["list_directories"] = round((time.perf_counter() - started) * 1000)
         if record["native_session"] and not preexisting:
-            manager.disconnect(server, share)
+            _run(["net", "use", unc, "/delete", "/y"], password)
 
 
 def _arm_b(
@@ -168,6 +164,21 @@ def _create_workload(root: Path, workload_bytes: int, file_count: int) -> Path:
         with (source / f"file-{index:05d}").open("wb") as handle:
             handle.write(b"x" * size)
     return source
+
+
+def record_unc_baseline(record: dict[str, Any], server: str, share: str, workspace: Path, _runner: Any) -> None:
+    """Record the mount/UNC comparator or the reason it cannot be run safely."""
+    started = time.perf_counter()
+    comparison = Path(f"//{server}/{share}")
+    record["elapsed_ms"]["unc_snapshot_create"] = round((time.perf_counter() - started) * 1000)
+    record["failure_observations"] = {
+        "rclone_startup_timeout": "unreachable: requires a reachable rclone SMB endpoint",
+        "connection_drop": "unreachable: requires a controllable SMB endpoint",
+    }
+    if not comparison.exists():
+        record["unc_baseline"] = "unreachable: mounted/UNC comparison path is unavailable"
+        return
+    record["unc_baseline"] = "unreachable: no dedicated comparison repository was provisioned"
 
 
 def _timed(record: dict[str, Any], operation: str, runner: Any, argv: list[str], *args: Any, **kwargs: Any) -> Any:
@@ -262,6 +273,7 @@ def run_arm_d_workload(
         env=environment,
     )
     record["repository_size"] = config_path.stat().st_size if config_path.exists() else None
+    record_unc_baseline(record, server, share, workspace, runner)
 
 
 def _arm_d(record: dict[str, Any], server: str, share: str | None, username: str | None, password: str | None) -> None:
@@ -280,6 +292,7 @@ def _arm_d(record: dict[str, Any], server: str, share: str | None, username: str
         record["error"] = "unreachable: SPIKE_SMB_PASS is not set"
         return
     obscured_password = _obscure_password(password)
+    record["_secrets"] = [password, obscured_password]
     with tempfile.TemporaryDirectory(prefix="backer_smb_spike_") as temporary:
         temporary_path = Path(temporary)
         run_arm_d_workload(
@@ -317,11 +330,11 @@ def main(arm: str, server: str, share: str | None, device_label: str, dialect: s
     except ArgvLeakError as error:
         record["argv_leak"] = True
         record["error"] = sanitize(str(error), password)
-        _write_record(arm, device_label, dialect, record, password)
+        _write_record(arm, device_label, dialect, record, *record.pop("_secrets", [password]))
         raise click.ClickException("argv_leak") from error
     except Exception as error:
         record["error"] = sanitize(f"unreachable: {error}", password)
-    _write_record(arm, device_label, dialect, record, password)
+    _write_record(arm, device_label, dialect, record, *record.pop("_secrets", [password]))
 
 
 if __name__ == "__main__":

@@ -104,3 +104,35 @@ def test_arm_d_runs_full_lifecycle_and_inspects_config(tmp_path: Path) -> None:
         ["snapshot", "verify"],
         ["snapshot", "expire"],
     ]
+
+
+def test_safe_manager_path_keeps_password_off_nested_argv() -> None:
+    from backer.core.mounts import SMBConnectionManager
+
+    assert hasattr(SMBConnectionManager, "connect_with_stdin")
+    commands: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    assert SMBConnectionManager().connect_with_stdin("nas", "share", "user", "sentinel-password", runner)
+    assert all("sentinel-password" not in value for command in commands for value in command)
+
+
+def test_sanitize_removes_colon_and_slash_inline_suffix() -> None:
+    module = _spike_module()
+
+    assert module is not None
+    assert "def/ghi" not in module.sanitize(":smb,pass=abc:def/ghi")
+
+
+def test_arm_d_records_unc_baseline_and_failure_observations(tmp_path: Path) -> None:
+    module = _spike_module()
+
+    assert module is not None
+    record: dict[str, object] = {"elapsed_ms": {}, "repository_size": None}
+    assert hasattr(module, "record_unc_baseline")
+    module.record_unc_baseline(record, "nas", "share", tmp_path, lambda *_args, **_kwargs: None)
+    assert "unc_snapshot_create" in record["elapsed_ms"]
+    assert "failure_observations" in record
