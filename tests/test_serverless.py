@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -8,6 +9,7 @@ from backer.backends.base import BackupDestination
 from backer.backends.kopia import KopiaBackend
 from backer.cli import main
 from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, RetentionConfig, SourceConfig
+from backer.core.job import JobRun, JobStatus
 
 
 def test_probe_distinguishes_absent_unreachable_and_wrong_passphrase(monkeypatch) -> None:
@@ -197,3 +199,36 @@ def test_local_job_create_refuses_duplicate_source(monkeypatch, tmp_path: Path) 
 
     assert result.exit_code != 0
     assert "first" in result.output
+
+
+def test_local_attempt_is_atomic_and_utc(tmp_path: Path, monkeypatch) -> None:
+    from backer.serverless.store import append_run, read_runs
+
+    replaces: list[tuple[Path, Path]] = []
+    original = __import__("os").replace
+    def replace(source: str, target: str) -> None:
+        replaces.append((Path(source), Path(target)))
+        original(source, target)
+
+    monkeypatch.setattr("backer.serverless.store.os.replace", replace)
+    append_run(tmp_path, JobRun("nightly", "20260901T020000Z-agent", JobStatus.FAILED,
+                               datetime(2026, 9, 1, 2, tzinfo=UTC), datetime(2026, 9, 1, 2, 1, tzinfo=UTC)))
+
+    attempt = read_runs(tmp_path, "nightly", 1)[0]
+    assert attempt.to_dict()["started_at"].endswith("Z")
+    assert len(replaces) == 2
+    assert all(source.parent == target.parent and source.suffix == ".tmp" for source, target in replaces)
+
+
+def test_progress_is_local_and_removed_after_preflight_failure(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless.runs import run_local_job
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="repo")},
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))},
+    )
+
+    assert not run_local_job(config, "nightly")["success"]
+    assert not list((tmp_path / "progress").glob("*.json"))
+    assert list((tmp_path / "logs").glob("*.log"))

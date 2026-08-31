@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from backer.core import keystore
@@ -13,7 +14,7 @@ from backer.core.paths import get_data_dir
 from backer.core.runner import run_backup
 from backer.serverless.repositories import probe
 from backer.serverless.schedule import due_jobs, run_lock
-from backer.serverless.store import append_run
+from backer.serverless.store import _write_json, append_run
 
 
 def _destination(repository: Any) -> str:
@@ -26,6 +27,20 @@ def _destination(repository: Any) -> str:
     return repository.path
 
 
+def _write_progress(data_dir: Path, run_id: str, **event: Any) -> None:
+    _write_json(data_dir / "progress" / f"{run_id}.json", {"run_id": run_id, **event})
+
+
+def _write_log(data_dir: Path, run_id: str, text: str, secrets: list[str]) -> None:
+    for secret in secrets:
+        text = text.replace(secret, "***")
+    path = data_dir / "logs" / f"{run_id}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text[:5000], encoding="utf-8")
+    for old in sorted(path.parent.glob("*.log"), key=lambda item: item.stat().st_mtime, reverse=True)[20:]:
+        old.unlink(missing_ok=True)
+
+
 def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any]:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}"
     started = datetime.now(UTC)
@@ -35,6 +50,7 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
     repository_id = None
     secrets: list[str] = []
     try:
+        _write_progress(data_dir, run_id, status="started", started_at=started.isoformat().replace("+00:00", "Z"))
         job = config.jobs.get(name)
         if not job:
             raise ValueError(f"Job '{name}' is not configured")
@@ -106,7 +122,9 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
                     "passphrase_ref",
                 }
             },
-        }, agent_credentials=(config.agent_id, ""))
+        }, agent_credentials=(config.agent_id, ""), on_progress=lambda **event: _write_progress(
+            data_dir, run_id, **{key: value for key, value in event.items() if key != "run_id"}
+        ))
         if not report["success"]:
             raise RuntimeError("; ".join(report.get("errors") or ["Backup failed"]))
         return report
@@ -122,6 +140,8 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
         append_run(data_dir, JobRun(name, run_id, JobStatus.SUCCESS if report.get("success") else JobStatus.FAILED,
                                    started, finished, error_message=error_message, client_id=config.agent_id,
                                    repository_id=repository_id, error_stage=None if report.get("success") else stage))
+        _write_log(data_dir, run_id, report.get("output") or error_message or "", secrets)
+        (data_dir / "progress" / f"{run_id}.json").unlink(missing_ok=True)
 
 
 def run_due_jobs(

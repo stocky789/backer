@@ -1013,20 +1013,8 @@ class KopiaBackend(BackendBase):
                 timeout=self.config.get("timeout", 3600),
             )
 
-            # Also run maintenance to clean up deleted data
-            if not dry_run and expire_result.returncode == 0:
-                maint_result = subprocess.run(
-                    [str(binary), "maintenance", "run", "--full"],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=self.config.get("timeout", 3600),
-                )
-                output = expire_result.stdout + expire_result.stderr + maint_result.stdout + maint_result.stderr
-                return_code = maint_result.returncode
-            else:
-                output = expire_result.stdout + expire_result.stderr
-                return_code = expire_result.returncode
+            output = expire_result.stdout + expire_result.stderr
+            return_code = expire_result.returncode
 
             errors = []
             if return_code != 0:

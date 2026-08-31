@@ -1,7 +1,7 @@
 """Job run record types."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -30,12 +30,15 @@ class JobRun:
     error_stage: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        def utc(value: datetime | None) -> str | None:
+            return value.astimezone(UTC).isoformat().replace("+00:00", "Z") if value else None
+
         return {
             "job_name": self.job_name,
             "run_id": self.run_id,
             "status": self.status.value,
-            "started_at": self.started_at.isoformat(),
-            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "started_at": utc(self.started_at),
+            "finished_at": utc(self.finished_at),
             "error_message": self.error_message,
             "client_id": self.client_id,
             "repository_id": self.repository_id,
