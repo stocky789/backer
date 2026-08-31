@@ -89,3 +89,21 @@ def test_repo_rm_refuses_before_mutating_without_typed_name(tmp_path, monkeypatc
     assert result.exit_code == 2
     assert deleted == []
     assert "r1" in BackerConfig.load(config_path).repositories
+
+
+def test_repository_name_resolves_to_its_canonical_config_key():
+    from backer.cli import _resolve_job_repository
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config = BackerConfig(repositories={"canonical-id": RepositoryConfig(name="display-name", type="local", path="x")})
+    assert _resolve_job_repository(config, "canonical-id") == "canonical-id"
+    assert _resolve_job_repository(config, "display-name") == "canonical-id"
+
+
+def test_repo_discover_reads_password_only_from_stdin_or_environment():
+    result = CliRunner().invoke(
+        main, ["repo", "discover", "--host", "nas", "--username", "svc", "--json"],
+        env={"BACKER_SMB_PASSWORD": "not-in-output"},
+    )
+    assert result.exit_code == 0
+    assert "not-in-output" not in result.output

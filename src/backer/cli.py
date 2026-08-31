@@ -132,8 +132,29 @@ def setup(force: bool, quiet: bool) -> None:
 INIT_STEPS = (
     ("repository_type", "--type", "Where backups are stored", lambda value: value in {"local", "smb", "s3"}),
     ("path", "--path", "Repository path", lambda value: bool(value)),
+    ("host", "--host", "SMB host", lambda value: bool(value)),
+    ("share", "--share", "SMB share", lambda value: bool(value)),
+    ("username", "--username", "File-server user", lambda value: bool(value)),
+    ("password_stdin", "--password-stdin", "File-server sign-in", lambda value: bool(value)),
+    ("bucket", "--bucket", "S3 bucket", lambda value: bool(value)),
+    ("prefix", "--prefix", "S3 prefix", lambda value: value is not None),
+    ("endpoint", "--endpoint", "S3 endpoint", lambda value: bool(value)),
+    ("region", "--region", "S3 region", lambda value: bool(value)),
+    ("access_key_id", "--access-key-id", "S3 access key", lambda value: bool(value)),
+    ("secret_key_stdin", "--secret-key-stdin", "S3 secret key", lambda value: bool(value)),
+    ("passphrase_stdin", "--passphrase-stdin", "Repository passphrase", lambda value: bool(value)),
+    ("generate_passphrase", "--generate-passphrase", "Generate passphrase", lambda value: bool(value)),
+    ("passphrase_out", "--passphrase-out", "Passphrase export", lambda value: bool(value)),
     ("source", "--source", "Folder to back up", lambda value: bool(value)),
+    ("exclude", "--exclude", "Exclude pattern", lambda value: value is not None),
     ("schedule", "--schedule", "Schedule", lambda value: bool(value)),
+    ("keep_last", "--keep-last", "Keep latest", lambda value: value is not None),
+    ("keep_daily", "--keep-daily", "Keep daily", lambda value: value is not None),
+    ("keep_weekly", "--keep-weekly", "Keep weekly", lambda value: value is not None),
+    ("keep_monthly", "--keep-monthly", "Keep monthly", lambda value: value is not None),
+    ("keep_yearly", "--keep-yearly", "Keep yearly", lambda value: value is not None),
+    ("job_name", "--job-name", "Job name", lambda value: bool(value)),
+    ("install", "--install", "Install schedule", lambda value: bool(value)),
 )
 
 
@@ -143,9 +164,22 @@ INIT_STEPS = (
 @click.option("--host")
 @click.option("--share")
 @click.option("--username")
+@click.option("--password-stdin", is_flag=True)
+@click.option("--bucket")
+@click.option("--prefix")
+@click.option("--endpoint")
+@click.option("--region")
+@click.option("--access-key-id")
+@click.option("--secret-key-stdin", is_flag=True)
 @click.option("--source", multiple=True)
+@click.option("--exclude", multiple=True)
 @click.option("--schedule")
 @click.option("--no-schedule", is_flag=True)
+@click.option("--keep-last", type=int)
+@click.option("--keep-daily", type=int)
+@click.option("--keep-weekly", type=int)
+@click.option("--keep-monthly", type=int)
+@click.option("--keep-yearly", type=int)
 @click.option("--repo-name", default="repository")
 @click.option("--job-name", default="backup")
 @click.option("--passphrase-stdin", is_flag=True)
@@ -153,6 +187,7 @@ INIT_STEPS = (
 @click.option("--generate-passphrase", is_flag=True)
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.option("--print-passphrase", is_flag=True)
+@click.option("--install", is_flag=True)
 @click.pass_context
 def init(
     ctx: click.Context,
@@ -161,9 +196,22 @@ def init(
     host: str | None,
     share: str | None,
     username: str | None,
+    password_stdin: bool,
+    bucket: str | None,
+    prefix: str | None,
+    endpoint: str | None,
+    region: str | None,
+    access_key_id: str | None,
+    secret_key_stdin: bool,
     source: tuple[str, ...],
+    exclude: tuple[str, ...],
     schedule: str | None,
     no_schedule: bool,
+    keep_last: int | None,
+    keep_daily: int | None,
+    keep_weekly: int | None,
+    keep_monthly: int | None,
+    keep_yearly: int | None,
     repo_name: str,
     job_name: str,
     passphrase_stdin: bool,
@@ -171,6 +219,7 @@ def init(
     generate_passphrase: bool,
     passphrase_out: Path | None,
     print_passphrase: bool,
+    install: bool,
 ) -> None:
     """Start serverless setup; `setup` downloads Kopia and `agent setup` enrolls a server agent."""
     missing: list[str] = []
@@ -1089,11 +1138,10 @@ def _repository(config, name: str):
 
 def _resolve_job_repository(config, requested: str | None, name: str | None = None) -> str:
     if requested:
-        if requested not in config.repositories:
-            raise click.ClickException(f"Repository '{requested}' is not configured")
-        if name and name in config.jobs and config.jobs[name].repository != requested:
+        repository_id, _ = _repository(config, requested)
+        if name and name in config.jobs and config.jobs[name].repository != repository_id:
             raise click.UsageError(f"Job '{name}' does not belong to repository '{requested}'")
-        return requested
+        return repository_id
     if name and name in config.jobs:
         return config.jobs[name].repository
     if len(config.repositories) == 1:
@@ -1209,9 +1257,9 @@ def repo_rm(ctx: click.Context, name: str, yes: bool, confirm: str | None, passp
 @click.option("--json", "as_json", is_flag=True)
 def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool) -> None:
     """Discover shares on one named SMB host; never scan a network."""
-    if not password_stdin:
+    password = sys.stdin.read().rstrip("\r\n") if password_stdin else os.environ.get("BACKER_SMB_PASSWORD", "")
+    if not password:
         _missing_flags("repo discover", ["--password-stdin"])
-    _ = sys.stdin.read().rstrip("\r\n")
     # Discovery transport is supplied by the Phase 3 SMB browser; defer its rendering to 5b.
     click.echo("[]" if as_json else f"Share discovery for {host} is not available in this build")
 
