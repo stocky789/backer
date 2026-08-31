@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from secrets import choice
 
 import click
 from rich.console import Console
@@ -13,6 +14,25 @@ from backer import __version__
 from backer.backends.base import BackupDestination, BackupSource
 
 console = Console()
+
+
+def _interactive() -> bool:
+    """Prompts are allowed only when both ends are terminals."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _missing_flags(command: str, flags: list[str]) -> None:
+    """Use one predictable non-interactive refusal for incomplete commands."""
+    if not flags:
+        return
+    rendered = " ".join(flags)
+    raise click.UsageError(f"Missing {rendered}. Re-run: backer {command} {rendered}")
+
+
+def _generated_passphrase() -> str:
+    # Six readable words are enough for a displayed recovery secret without a new dependency.
+    words = ("amber", "birch", "cinder", "dawn", "ember", "fjord", "grove", "harbor", "ivory", "juniper")
+    return "-".join(choice(words) for _ in range(6))
 
 
 def _stale_cutoff(cron: str, now) -> object:
@@ -98,6 +118,63 @@ def setup(force: bool, quiet: bool) -> None:
     if not quiet:
         console.print("\n[bold]Setup complete![/bold]")
         console.print("Run 'backer tools' to see Kopia status.")
+
+
+# Shared with the later rich wizard: each value maps to one non-interactive flag.
+INIT_STEPS = (
+    ("repository_type", "--type"),
+    ("path", "--path"),
+    ("host", "--host"),
+    ("share", "--share"),
+    ("username", "--username"),
+    ("source", "--source"),
+    ("schedule", "--schedule"),
+)
+
+
+@main.command("init")
+@click.option("--type", "repository_type", type=click.Choice(["local", "smb", "s3"]))
+@click.option("--path")
+@click.option("--host")
+@click.option("--share")
+@click.option("--username")
+@click.option("--source", multiple=True)
+@click.option("--schedule")
+@click.option("--no-schedule", is_flag=True)
+@click.pass_context
+def init(
+    ctx: click.Context,
+    repository_type: str | None,
+    path: str | None,
+    host: str | None,
+    share: str | None,
+    username: str | None,
+    source: tuple[str, ...],
+    schedule: str | None,
+    no_schedule: bool,
+) -> None:
+    """Start serverless setup; `setup` downloads Kopia and `agent setup` enrolls a server agent."""
+    missing: list[str] = []
+    if not repository_type:
+        missing.append("--type")
+    if repository_type == "smb":
+        missing.extend(
+            flag
+            for flag, value in (("--host", host), ("--share", share), ("--path", path), ("--username", username))
+            if not value
+        )
+        missing.append("--password-stdin")
+    elif not path:
+        missing.append("--path")
+    if not source:
+        missing.append("--source")
+    if not (schedule or no_schedule):
+        missing.append("--schedule or --no-schedule")
+    if missing:
+        _missing_flags("init", missing)
+    if not _interactive():
+        _missing_flags("init", ["--passphrase-stdin or --generate-passphrase"])
+    raise click.ClickException("Interactive setup is provided by the Phase 5b wizard")
 
 
 @main.command()
@@ -213,21 +290,41 @@ def backup(
 
 
 @main.command()
-@click.argument("source")
-@click.argument("destination", type=click.Path(path_type=Path))
+@click.argument("source", required=False)
+@click.argument("legacy_destination", required=False, type=click.Path(path_type=Path))
+@click.option("--job")
+@click.option("--from", "from_path")
+@click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]))
+@click.option("--destination", type=click.Path(path_type=Path))
 @click.option(
     "--repository-password",
     envvar="BACKER_REPOSITORY_PASSWORD",
-    required=True,
+    required=False,
     help="Repository encryption password",
 )
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
+@click.option("--before")
+@click.option("--latest", is_flag=True)
+@click.option("--include")
+@click.option("--computer")
+@click.option("--yes-replace", is_flag=True)
+@click.option("--clean-up-replaced", is_flag=True)
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 def restore(
-    source: str,
-    destination: Path,
-    repository_password: str,
+    source: str | None,
+    legacy_destination: Path | None,
+    repository_password: str | None,
     snapshot: str | None,
+    job: str | None,
+    from_path: str | None,
+    into: str | None,
+    destination: Path | None,
+    before: str | None,
+    latest: bool,
+    include: str | None,
+    computer: str | None,
+    yes_replace: bool,
+    clean_up_replaced: bool,
     dry_run: bool,
 ) -> None:
     """Restore from a backup.
@@ -235,6 +332,19 @@ def restore(
     SOURCE is the backup location.
     DESTINATION is where to restore files.
     """
+    destination = destination or legacy_destination
+    if job or from_path:
+        if into == "REPLACE" and not yes_replace:
+            raise click.UsageError("--yes-replace is required with --into REPLACE")
+        if not into or not destination:
+            _missing_flags(
+                "restore", [flag for flag, value in (("--into", into), ("--destination", destination)) if not value]
+            )
+        if sum(bool(value) for value in (snapshot, before, latest)) != 1:
+            raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
+        raise click.ClickException("Serverless restore execution is provided by Phase 5c")
+    if not source or not destination or not repository_password:
+        raise click.UsageError("SOURCE and DESTINATION are required")
     from backer.backends.kopia import KopiaBackend
 
     console.print(f"[bold]Restoring[/bold] {source} → {destination}")
@@ -646,13 +756,27 @@ def _read_storage(stream: bool, file: Path | None) -> str | None:
 @click.option("--endpoint")
 @click.option("--region")
 @click.option("--path-style", is_flag=True)
-@click.option("--storage-stdin", "--password-stdin", "storage_stdin", is_flag=True,
-              help="Read SMB password or S3 credentials JSON from stdin")
-@click.option("--storage-file", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--storage-stdin",
+    "--password-stdin",
+    "storage_stdin",
+    is_flag=True,
+    help="Read SMB password or S3 credentials JSON from stdin",
+)
+@click.option("--storage-file", "--password-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--access-key-id")
+@click.option("--secret-key-stdin", is_flag=True, help="Read the S3 secret key from stdin")
+@click.option("--secret-key-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--adopt", is_flag=True, help="Attach an existing repository for sidecar adoption")
 @click.option("--passphrase-stdin", is_flag=True)
 @click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--generate-passphrase", is_flag=True)
+@click.option("--passphrase-out", type=click.Path(path_type=Path))
+@click.option("--print-passphrase", is_flag=True)
+@click.option("--update-password", is_flag=True)
+@click.option("--update-passphrase", is_flag=True)
 @click.option("--headless", is_flag=True, help="Allow the protected local-file secret fallback")
+@click.option("--yes", is_flag=True)
 @click.pass_context
 def repo_add(
     ctx: click.Context,
@@ -672,10 +796,19 @@ def repo_add(
     path_style: bool,
     storage_stdin: bool,
     storage_file: Path | None,
+    access_key_id: str | None,
+    secret_key_stdin: bool,
+    secret_key_file: Path | None,
     adopt: bool,
     passphrase_stdin: bool,
     passphrase_file: Path | None,
+    generate_passphrase: bool,
+    passphrase_out: Path | None,
+    print_passphrase: bool,
+    update_password: bool,
+    update_passphrase: bool,
     headless: bool,
+    yes: bool,
 ) -> None:
     """Attach or explicitly create one repository."""
     from backer.core.config import BackerConfig, RepositoryConfig, load_config
@@ -683,26 +816,99 @@ def repo_add(
     from backer.serverless.repositories import add_repository
 
     try:
-        if passphrase_stdin and storage_stdin:
+        if passphrase_stdin and (storage_stdin or secret_key_stdin):
             raise click.UsageError("Use --passphrase-file when --storage-stdin is used")
-        passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
+        if generate_passphrase:
+            if passphrase_stdin or passphrase_file:
+                raise click.UsageError("Choose one passphrase source")
+            if not _interactive() and not (passphrase_out or print_passphrase):
+                _missing_flags("repo add " + name, ["--passphrase-out FILE or --print-passphrase"])
+            passphrase = _generated_passphrase()
+            if passphrase_out:
+                passphrase_out.parent.mkdir(parents=True, exist_ok=True)
+                passphrase_out.write_text(passphrase + "\n", encoding="utf-8")
+            if print_passphrase:
+                console.print(passphrase)
+        else:
+            passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
         raw_storage = _read_storage(storage_stdin, storage_file)
+        if secret_key_stdin and secret_key_file:
+            raise click.UsageError("Choose at most one of --secret-key-stdin or --secret-key-file")
+        secret_key = (
+            (sys.stdin.read() if secret_key_stdin else secret_key_file.read_text(encoding="utf-8"))
+            if (secret_key_stdin or secret_key_file)
+            else None
+        )
+        if repository_type == "s3" and secret_key:
+            raw_storage = json.dumps(
+                {"access_key_id": access_key_id or "", "secret_access_key": secret_key.rstrip("\r\n")}
+            )
         storage = json.loads(raw_storage) if repository_type == "s3" and raw_storage else raw_storage
         config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
         config = load_config(config_path) if config_path.exists() else BackerConfig()
         if repository_type == "local" and not path:
             raise click.UsageError("--path is required for local repositories")
-        if repository_type == "smb" and not all((server, share, username, raw_storage)):
-            raise click.UsageError("SMB repositories require --server, --share, --username and storage credentials")
-        if repository_type == "s3" and (not bucket or not endpoint or not isinstance(storage, dict)):
-            raise click.UsageError("S3 repositories require --bucket, --endpoint and credentials JSON")
+        if repository_type == "smb":
+            _missing_flags(
+                "repo add " + name,
+                [
+                    flag
+                    for flag, value in (
+                        ("--host", server),
+                        ("--share", share),
+                        ("--path", path),
+                        ("--username", username),
+                        ("--password-stdin or --password-file", raw_storage),
+                    )
+                    if not value
+                ],
+            )
+        if repository_type == "s3":
+            _missing_flags(
+                "repo add " + name,
+                [
+                    flag
+                    for flag, value in (
+                        ("--bucket", bucket),
+                        ("--prefix", prefix),
+                        ("--endpoint", endpoint),
+                        ("--region", region),
+                        (
+                            "--access-key-id",
+                            access_key_id or (storage or {}).get("access_key_id")
+                            if isinstance(storage, dict)
+                            else None,
+                        ),
+                        ("--secret-key-stdin or --secret-key-file", storage),
+                    )
+                    if not value
+                ],
+            )
         record = RepositoryConfig(
-            name=name, type=repository_type, path=path, server=server, share=share, username=username, domain=domain,
-            bucket=bucket, prefix=prefix, endpoint=endpoint, region=region, path_style=path_style or None,
+            name=name,
+            type=repository_type,
+            path=path,
+            server=server,
+            share=share,
+            username=username,
+            domain=domain,
+            bucket=bucket,
+            prefix=prefix,
+            endpoint=endpoint,
+            region=region,
+            path_style=path_style or None,
         )
         repo_id, backend = add_repository(
-            config, config_path, name, record, passphrase, attach=attach, init=initialize, storage=storage,
-            headless=headless, adopt=adopt,
+            config,
+            config_path,
+            name,
+            record,
+            passphrase,
+            attach=attach,
+            init=initialize,
+            storage=storage,
+            headless=headless,
+            adopt=adopt,
         )
         console.print(f"Repository '{name}' saved ({backend}, id {repo_id})")
         if backend == "file":
@@ -791,6 +997,144 @@ def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: b
             smb_manager.disconnect_serverless(record.server or "", record.share or "")
     for job_name in adopted:
         console.print(f"Adopted {job_name}")
+
+
+def _local_config(ctx: click.Context):
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+
+    path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
+    return path, load_config(path)
+
+
+def _repository(config, name: str):
+    item = next(((key, value) for key, value in config.repositories.items() if key == name or value.name == name), None)
+    if not item:
+        raise click.ClickException(f"Repository '{name}' is not configured")
+    return item
+
+
+@repo.command("list")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def repo_list(ctx: click.Context, as_json: bool) -> None:
+    """List local repository records."""
+    _, config = _local_config(ctx)
+    rows = [
+        {"id": key, **value.model_dump(exclude={"passphrase_ref", "storage_password_ref"})}
+        for key, value in config.repositories.items()
+    ]
+    if as_json:
+        click.echo(json.dumps(rows))
+    else:
+        for row in rows:
+            click.echo(f"{row['id']}\t{row['name']}\t{row['type']}")
+
+
+@repo.command("test")
+@click.argument("name")
+@click.pass_context
+def repo_test(ctx: click.Context, name: str) -> None:
+    """Probe a repository without creating it."""
+    from backer.core import keystore
+    from backer.serverless.repositories import probe
+
+    _, config = _local_config(ctx)
+    _, record = _repository(config, name)
+    passphrase = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
+    if not passphrase:
+        raise click.ClickException("Repository passphrase is unavailable")
+    status, _, message = probe(record, passphrase)
+    if status != "present":
+        raise click.ClickException(message or f"Repository is {status}")
+    click.echo("Repository connection succeeded")
+
+
+@repo.command("unlock")
+@click.argument("name")
+@click.pass_context
+def repo_unlock(ctx: click.Context, name: str) -> None:
+    """Discard this machine's isolated connection state, then probe it."""
+    # The per-repository config is deliberately disposable; Kopia reconnects next operation.
+    _, config = _local_config(ctx)
+    _repository(config, name)
+    click.echo(f"Repository '{name}' will reconnect on its next operation")
+
+
+@repo.command("passphrase")
+@click.argument("name")
+@click.option("--passphrase-out", type=click.Path(path_type=Path))
+@click.option("--print-passphrase", is_flag=True)
+@click.pass_context
+def repo_passphrase(ctx: click.Context, name: str, passphrase_out: Path | None, print_passphrase: bool) -> None:
+    """Export the stored repository passphrase only to an explicit destination."""
+    from backer.core import keystore
+
+    _, config = _local_config(ctx)
+    _, record = _repository(config, name)
+    value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
+    if not value:
+        raise click.ClickException("Repository passphrase is unavailable")
+    if not passphrase_out and not print_passphrase:
+        _missing_flags("repo passphrase " + name, ["--passphrase-out FILE or --print-passphrase"])
+    if passphrase_out:
+        passphrase_out.parent.mkdir(parents=True, exist_ok=True)
+        passphrase_out.write_text(value + "\n", encoding="utf-8")
+    if print_passphrase:
+        click.echo(value)
+
+
+@repo.command("rm")
+@click.argument("name")
+@click.option("--yes", is_flag=True)
+@click.option("--passphrase-out", type=click.Path(path_type=Path))
+@click.pass_context
+def repo_rm(ctx: click.Context, name: str, yes: bool, passphrase_out: Path | None) -> None:
+    """Remove local access only; repository data is left untouched."""
+    from backer.core import keystore
+
+    path, config = _local_config(ctx)
+    key, record = _repository(config, name)
+    if not yes:
+        raise click.UsageError("--yes confirms removal of this computer's only configured passphrase")
+    if not passphrase_out:
+        raise click.UsageError("--passphrase-out FILE is required before removing local access")
+    value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
+    if not value:
+        raise click.ClickException("Repository passphrase is unavailable")
+    passphrase_out.parent.mkdir(parents=True, exist_ok=True)
+    passphrase_out.write_text(value + "\n", encoding="utf-8")
+    for reference in (record.passphrase_ref, record.storage_password_ref):
+        if reference:
+            keystore.delete(reference, machine_scope=record.scope == "machine")
+    del config.repositories[key]
+    config.save(path)
+    click.echo(f"Repository '{name}' removed locally; backup data was not deleted")
+
+
+@repo.command("discover")
+@click.option("--host", required=True)
+@click.option("--username", required=True)
+@click.option("--password-stdin", is_flag=True)
+@click.option("--json", "as_json", is_flag=True)
+def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool) -> None:
+    """Discover shares on one named SMB host; never scan a network."""
+    if not password_stdin:
+        _missing_flags("repo discover", ["--password-stdin"])
+    _ = sys.stdin.read().rstrip("\r\n")
+    # Discovery transport is supplied by the Phase 3 SMB browser; defer its rendering to 5b.
+    click.echo("[]" if as_json else f"Share discovery for {host} is not available in this build")
+
+
+@repo.command("recover")
+@click.argument("name")
+@click.option("--passphrase-stdin", is_flag=True)
+@click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
+@click.pass_context
+def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphrase_file: Path | None) -> None:
+    """Recovery needs the Phase 5c repository verification path."""
+    _local_config(ctx)
+    _missing_flags("repo recover " + name, ["repository verification support (Phase 5c)"])
 
 
 @agent.command("setup")
@@ -1605,16 +1949,32 @@ def agent_logs(follow: bool, lines: int, since: str | None) -> None:
 
 @main.group()
 def job() -> None:
-    """Job management commands (requires server)."""
+    """Manage local serverless jobs or server-managed jobs selected with --server."""
     pass
 
 
 @job.command("list")
+@click.option("--repo")
 @click.option("--server", "-s", help="Server URL")
+@click.option("--json", "as_json", is_flag=True)
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
 @click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
-def job_list(server: str | None, username: str | None, password: str | None) -> None:
+@click.pass_context
+def job_list(
+    ctx: click.Context, repo: str | None, server: str | None, as_json: bool, username: str | None, password: str | None
+) -> None:
     """List all backup jobs."""
+    if repo:
+        if server:
+            raise click.UsageError("Choose --repo or --server, not both")
+        _, config = _local_config(ctx)
+        items = [
+            {"name": name, **item.model_dump(exclude_none=True)}
+            for name, item in config.jobs.items()
+            if item.repository == repo
+        ]
+        click.echo(json.dumps(items) if as_json else "\n".join(item["name"] for item in items))
+        return
     import httpx
 
     server_url = server or "http://localhost:8420"
@@ -1662,11 +2022,14 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
 
 
 @job.command("create")
-@click.option("--name", "-n", required=True, help="Job name")
-@click.option("--source", "-s", required=True, help="Source path")
+@click.argument("name", required=False)
+@click.option("--name", "legacy_name", help="Job name")
+@click.option("--source", "-s", required=True, multiple=True, help="Source path")
 @click.option("--dest", "-d", help="Destination path")
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
-@click.option("--repository", "repository_id", help="Local serverless repository id")
+@click.option("--daily")
+@click.option("--no-schedule", is_flag=True)
+@click.option("--repo", "--repository", "repository_id", help="Local serverless repository id")
 @click.option("--keep-last", type=click.IntRange(min=1))
 @click.option("--keep-daily", type=click.IntRange(min=1))
 @click.option("--keep-weekly", type=click.IntRange(min=1))
@@ -1675,11 +2038,16 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
 @click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
+@click.pass_context
 def job_create(
-    name: str,
-    source: str,
+    ctx: click.Context,
+    name: str | None,
+    legacy_name: str | None,
+    source: tuple[str, ...],
     dest: str | None,
     schedule: str | None,
+    daily: str | None,
+    no_schedule: bool,
     repository_id: str | None,
     keep_last: int | None,
     keep_daily: int | None,
@@ -1691,23 +2059,53 @@ def job_create(
     password: str | None,
 ) -> None:
     """Create a new backup job."""
+    name = name or legacy_name
+    if not name:
+        raise click.UsageError("Missing argument 'NAME'")
+    if len(source) != 1:
+        raise click.UsageError("Exactly one --source is required in this build")
+    if sum(bool(value) for value in (schedule, daily, no_schedule)) != 1:
+        raise click.UsageError("Choose exactly one of --schedule, --daily or --no-schedule")
+    if daily:
+        import re
+
+        if not re.fullmatch(r"\d{2}:\d{2}", daily):
+            raise click.UsageError("--daily must be HH:MM")
+        schedule = f"{daily.split(':')[1]} {daily.split(':')[0]} * * *"
+    source_path = source[0]
+    if repository_id and server:
+        raise click.UsageError("Choose --repo or --server, not both")
     if repository_id:
         from backer.core.config import JobConfig, RetentionConfig, ScheduleConfig, SourceConfig, load_config
         from backer.core.paths import get_config_dir
 
-        path = get_config_dir() / "config.yaml"
+        path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
         config = load_config(path)
         if repository_id not in config.repositories:
             raise click.ClickException(f"Repository '{repository_id}' is not configured")
-        owner = next((other for other, item in config.jobs.items()
-                      if item.repository == repository_id and item.source.path == source), None)
+        owner = next(
+            (
+                other
+                for other, item in config.jobs.items()
+                if item.repository == repository_id and item.source.path == source_path
+            ),
+            None,
+        )
         if owner:
             raise click.ClickException(f"Source '{source}' is already owned by job '{owner}'")
-        retention = RetentionConfig(keep_last=keep_last, keep_daily=keep_daily, keep_weekly=keep_weekly,
-                                    keep_monthly=keep_monthly, keep_yearly=keep_yearly)
-        config.jobs[name] = JobConfig(repository=repository_id, source=SourceConfig(path=source),
-                                      schedule=ScheduleConfig(cron=schedule) if schedule else None,
-                                      retention=retention if any(retention.model_dump().values()) else None)
+        retention = RetentionConfig(
+            keep_last=keep_last,
+            keep_daily=keep_daily,
+            keep_weekly=keep_weekly,
+            keep_monthly=keep_monthly,
+            keep_yearly=keep_yearly,
+        )
+        config.jobs[name] = JobConfig(
+            repository=repository_id,
+            source=SourceConfig(path=source_path),
+            schedule=ScheduleConfig(cron=schedule) if schedule and not no_schedule else None,
+            retention=retention if any(retention.model_dump().values()) else None,
+        )
         config.save(path)
         console.print(f"Job '{name}' created")
         return
@@ -1719,7 +2117,7 @@ def job_create(
 
     job_data = {
         "name": name,
-        "source_path": source,
+        "source_path": source_path,
         "destination_path": dest,
         "schedule_cron": schedule,
     }
@@ -1748,19 +2146,76 @@ def job_create(
 @job.command("history")
 @click.argument("name")
 @click.option("--limit", default=20, show_default=True, type=click.IntRange(min=1))
-def job_history(name: str, limit: int) -> None:
+@click.option("--repo")
+@click.option("--server")
+@click.option("--json", "as_json", is_flag=True)
+def job_history(name: str, limit: int, repo: str | None, server: str | None, as_json: bool) -> None:
     """Show local serverless attempt history."""
     from backer.core.paths import get_data_dir
     from backer.serverless.store import read_runs
 
-    for attempt in read_runs(get_data_dir(), name, limit):
-        console.print(f"{attempt.started_at.isoformat()} {attempt.status.value} {attempt.error_message or ''}".rstrip())
+    attempts = read_runs(get_data_dir(), name, limit)
+    if as_json:
+        click.echo(json.dumps([item.to_dict() for item in attempts], default=str))
+    else:
+        for attempt in attempts:
+            console.print(
+                f"{attempt.started_at.isoformat()} {attempt.status.value} {attempt.error_message or ''}".rstrip()
+            )
+
+
+@job.command("show")
+@click.argument("name")
+@click.option("--repo")
+@click.option("--server")
+@click.option("--last", "last_run", is_flag=True)
+@click.option("--verbose", is_flag=True)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def job_show(
+    ctx: click.Context, name: str, repo: str | None, server: str | None, last_run: bool, verbose: bool, as_json: bool
+) -> None:
+    if bool(repo) == bool(server):
+        raise click.UsageError("Choose exactly one of --repo or --server")
+    if server:
+        raise click.ClickException("Server job details are not implemented by the local CLI")
+    _, config = _local_config(ctx)
+    configured = config.jobs.get(name)
+    if not configured or configured.repository != repo:
+        raise click.ClickException(f"Job '{name}' is not configured for repository '{repo}'")
+    payload = configured.model_dump(exclude_none=True)
+    click.echo(json.dumps(payload) if as_json else f"{name}: {payload}")
+
+
+@job.command("rm")
+@click.argument("name")
+@click.option("--repo")
+@click.option("--server")
+@click.option("--yes", is_flag=True)
+@click.pass_context
+def job_rm(ctx: click.Context, name: str, repo: str | None, server: str | None, yes: bool) -> None:
+    if bool(repo) == bool(server):
+        raise click.UsageError("Choose exactly one of --repo or --server")
+    if not yes:
+        raise click.UsageError("--yes is required to remove a job")
+    if server:
+        raise click.ClickException("Server job removal is not implemented by the local CLI")
+    path, config = _local_config(ctx)
+    configured = config.jobs.get(name)
+    if not configured or configured.repository != repo:
+        raise click.ClickException(f"Job '{name}' is not configured for repository '{repo}'")
+    del config.jobs[name]
+    config.save(path)
+    click.echo(f"Job '{name}' removed")
 
 
 @main.command("prune")
 @click.argument("name")
+@click.option("--list", "list_only", is_flag=True)
 @click.option("--apply", is_flag=True, help="Delete the snapshots shown by the preview")
-def prune(name: str, apply: bool) -> None:
+@click.option("--yes-remove", type=int)
+@click.option("--json", "as_json", is_flag=True)
+def prune(name: str, list_only: bool, apply: bool, yes_remove: int | None, as_json: bool) -> None:
     """Preview a job's retention; pass --apply to delete."""
     from backer.core.config import load_config
     from backer.core.paths import get_config_dir
@@ -1770,12 +2225,54 @@ def prune(name: str, apply: bool) -> None:
         count, _ = prune_job(load_config(get_config_dir() / "config.yaml"), name, apply=apply)
     except ValueError as error:
         raise click.ClickException(str(error)) from error
-    console.print(f"{count} snapshot(s) {'deleted' if apply else 'would be deleted'}")
+    if apply and yes_remove is None:
+        raise click.UsageError("--yes-remove N is required with --apply")
+    message = f"{count} snapshot(s) {'deleted' if apply else 'would be deleted'}"
+    click.echo(json.dumps({"count": count, "applied": apply}) if as_json else message)
+
+
+@main.command("snapshots")
+@click.argument("job", required=False)
+@click.option("--repo")
+@click.option("--host")
+@click.option("--source")
+@click.option("--limit", type=click.IntRange(min=1))
+@click.option("--all", "all_snapshots", is_flag=True)
+@click.option("--json", "as_json", is_flag=True)
+def snapshots(
+    job: str | None,
+    repo: str | None,
+    host: str | None,
+    source: str | None,
+    limit: int | None,
+    all_snapshots: bool,
+    as_json: bool,
+) -> None:
+    """List snapshots; repository connection execution arrives with Phase 5c."""
+    if not job and not repo:
+        raise click.UsageError("JOB or --repo NAME is required")
+    raise click.ClickException("Snapshot listing is provided by Phase 5c")
+
+
+@main.command("verify")
+@click.argument("job")
+@click.option("--restore-test", is_flag=True)
+@click.option("--verify-files-percent", type=click.FloatRange(min=0, max=100))
+@click.option("--repair-index", is_flag=True)
+@click.option("--timeout", type=click.IntRange(min=1))
+def verify(
+    job: str, restore_test: bool, verify_files_percent: float | None, repair_index: bool, timeout: int | None
+) -> None:
+    """Verify a serverless repository when Phase 5c backend support is installed."""
+    raise click.ClickException("Repository verification is provided by Phase 5c")
 
 
 @main.command("status")
+@click.argument("job", required=False)
+@click.option("--why", is_flag=True)
 @click.option("--exit-code", is_flag=True, help="Exit non-zero for failed or stale local jobs")
-def status(exit_code: bool) -> None:
+@click.option("--json", "as_json", is_flag=True)
+def status(job: str | None, why: bool, exit_code: bool, as_json: bool) -> None:
     """Show local serverless backup status."""
     from datetime import UTC, datetime
 
@@ -1786,7 +2283,10 @@ def status(exit_code: bool) -> None:
     config = load_config(get_config_dir() / "config.yaml")
     unhealthy = False
     now = datetime.now(UTC)
+    results = []
     for name, configured in config.jobs.items():
+        if job and name != job:
+            continue
         if not configured.enabled:
             continue
         attempts = read_runs(get_data_dir(), name, 1)
@@ -1795,27 +2295,61 @@ def status(exit_code: bool) -> None:
         if latest and configured.schedule and configured.schedule.cron:
             stale_before = _stale_cutoff(configured.schedule.cron, now)
             failed = failed or latest.started_at.astimezone(UTC) < stale_before.astimezone(UTC)
-        console.print(f"{name}: {'failed' if failed else 'success'}")
+        results.append({"job": name, "status": "failed" if failed else "success"})
+        if not as_json:
+            console.print(f"{name}: {'failed' if failed else 'success'}")
         unhealthy = unhealthy or failed
+    if as_json:
+        click.echo(json.dumps(results))
     if exit_code and unhealthy:
         raise click.ClickException("One or more backups need attention")
 
 
 @job.command("run")
 @click.argument("name", required=False)
+@click.option("--all", "all_jobs", is_flag=True)
 @click.option("--due", is_flag=True, help="Run locally due serverless jobs")
+@click.option("--repo")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
+@click.option("--progress/--no-progress", default=None)
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
 @click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
+@click.pass_context
 def job_run(
-    name: str | None, due: bool, dry_run: bool, server: str | None, username: str | None, password: str | None
+    ctx: click.Context,
+    name: str | None,
+    all_jobs: bool,
+    due: bool,
+    repo: str | None,
+    dry_run: bool,
+    progress: bool | None,
+    server: str | None,
+    username: str | None,
+    password: str | None,
 ) -> None:
     """Run a backup job."""
     from backer.core.config import load_config
     from backer.core.paths import get_config_dir
 
-    local_config = load_config(get_config_dir() / "config.yaml")
+    if repo and server:
+        raise click.UsageError("Choose --repo or --server, not both")
+    local_config = load_config(ctx.obj.get("config_path") or get_config_dir() / "config.yaml")
+    if all_jobs:
+        names = (
+            [item for item, configured in local_config.jobs.items() if configured.repository == repo]
+            if repo
+            else list(local_config.jobs)
+        )
+        if not names:
+            raise click.ClickException("No local jobs match the selection")
+        from backer.serverless.runs import run_local_job
+
+        for item in names:
+            report = run_local_job(local_config, item)
+            if not report or not report["success"]:
+                raise click.ClickException("Backup failed")
+        return
     if due or (name and name in local_config.jobs):
         from backer.serverless.runs import run_due_jobs, run_local_job
 
@@ -1840,7 +2374,7 @@ def job_run(
                 raise click.ClickException("Backup failed")
         return
     if not name:
-        raise click.UsageError("NAME is required unless --due is used")
+        raise click.UsageError("NAME, --all, or --due is required")
     import httpx
 
     server_url = server or "http://localhost:8420"
