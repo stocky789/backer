@@ -151,6 +151,19 @@ class BackerAgent:
                 from backer.core import keystore
 
                 secret = keystore.get(config.server.client_secret_ref) or secret
+            elif secret:
+                from backer.core import keystore
+
+                secret_ref = f"backer/server/{config.server.client_id}/secret"
+                try:
+                    keystore.put(secret_ref, secret)
+                    if keystore.get(secret_ref) == secret:
+                        config.server = config.server.model_copy(
+                            update={"client_secret": "", "client_secret_ref": secret_ref}
+                        )
+                        config.save(config_path)
+                except OSError:
+                    pass
             return cls(config.server.server_url, config.server.client_id, secret, config_path)
         legacy_path = get_config_dir() / "agent.yaml"
         if not legacy_path.exists():

@@ -24,10 +24,10 @@ def _destination(record: RepositoryConfig) -> str:
     return record.path
 
 
-def _backend(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | None = None) -> KopiaBackend:
+def _backend(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | str | None = None) -> KopiaBackend:
     config: dict[str, object] = {"repository_password": passphrase}
     if record.type == "s3":
-        if not storage:
+        if not isinstance(storage, dict):
             raise ValueError("S3 storage credentials are required")
         config["s3"] = {
             "bucket": record.bucket,
@@ -41,14 +41,14 @@ def _backend(record: RepositoryConfig, passphrase: str, storage: dict[str, str] 
 
 
 def probe(
-    record: RepositoryConfig, passphrase: str, storage: dict[str, str] | None = None
+    record: RepositoryConfig, passphrase: str, storage: dict[str, str] | str | None = None
 ) -> tuple[str, str | None, str]:
     backend = _backend(record, passphrase, storage)
     status, unique_id = backend.repository_probe(_destination(record))
     return status, unique_id, backend.last_repository_error
 
 
-def create(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | None = None) -> tuple[bool, str]:
+def create(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | str | None = None) -> tuple[bool, str]:
     result = _backend(record, passphrase, storage).init_repo(BackupDestination(_destination(record)))
     return result.success, "\n".join(result.errors or [])
 
@@ -62,11 +62,16 @@ def add_repository(
     *,
     attach: bool,
     init: bool,
-    storage: dict[str, str] | None = None,
+    storage: dict[str, str] | str | None = None,
     headless: bool = False,
+    adopt: bool = False,
 ) -> tuple[str, str]:
-    if attach == init:
+    if attach and init:
         raise ValueError("Choose exactly one of --attach or --init")
+    if not attach and not init:
+        raise ValueError("Choose exactly one of --attach or --init")
+    if adopt and not init:
+        raise ValueError("--adopt requires --init")
     if file_fallback_required() and not headless:
         raise ValueError("No OS keystore is available; re-run with --headless to use protected local files")
     if record.type == "s3":
@@ -77,15 +82,19 @@ def add_repository(
         raise ValueError(message or f"Repository is {status}; nothing was created")
     if init:
         if status == "present":
-            raise ValueError("Repository already exists; use --attach")
-        if status != "absent":
+            if not adopt:
+                raise ValueError("Repository already exists; use --attach or --adopt")
+        elif adopt:
+            raise ValueError(message or "Repository is absent; adoption requires an existing repository")
+        elif status != "absent":
             raise ValueError(message or f"Repository is {status}; refusing to create")
-        created, error = create(record, passphrase, storage)
-        if not created:
-            raise ValueError(error or "Repository creation failed")
-        status, unique_id, message = probe(record, passphrase, storage)
-        if status != "present":
-            raise ValueError(message or "Created repository could not be verified")
+        elif status == "absent":
+            created, error = create(record, passphrase, storage)
+            if not created:
+                raise ValueError(error or "Repository creation failed")
+            status, unique_id, message = probe(record, passphrase, storage)
+            if status != "present":
+                raise ValueError(message or "Created repository could not be verified")
     repo_id = record.id or uuid4().hex[:12]
     passphrase_ref = f"backer/repo/{repo_id}/passphrase"
     storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
@@ -93,7 +102,7 @@ def add_repository(
     if storage_ref:
         import json
 
-        keystore.put(storage_ref, json.dumps(storage), machine_scope=False)
+        keystore.put(storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False)
     saved = record.model_copy(
         update={
             "id": repo_id,

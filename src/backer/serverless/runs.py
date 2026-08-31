@@ -41,7 +41,7 @@ def _write_log(data_dir: Path, run_id: str, text: str, secrets: list[str]) -> No
         old.unlink(missing_ok=True)
 
 
-def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any]:
+def _run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any]:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}"
     started = datetime.now(UTC)
     data_dir = get_data_dir()
@@ -49,6 +49,8 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
     stage = "prepare_destination"
     repository_id = None
     secrets: list[str] = []
+    smb_manager = None
+    smb_session_created = False
     try:
         _write_progress(data_dir, run_id, status="started", started_at=started.isoformat().replace("+00:00", "Z"))
         job = config.jobs.get(name)
@@ -86,6 +88,18 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
         )
         if smb_password:
             secrets.append(smb_password)
+        if repository.type == "smb":
+            if not smb_password or not repository.server or not repository.share or not repository.username:
+                raise ValueError(f"Repository '{repository.name}' SMB credentials are incomplete")
+            from backer.core.mounts import SMBConnectionManager
+
+            smb_manager = SMBConnectionManager()
+            if not smb_manager.connect_serverless(
+                repository.server, repository.share, repository.username, smb_password,
+                domain=repository.domain, is_system=run_as_system,
+            ):
+                raise ValueError(f"Could not connect to SMB repository '{repository.name}'")
+            smb_session_created = getattr(smb_manager, "serverless_session_created", True)
         stage = "connect"
         status, unique_id, message = probe(repository, passphrase, storage)
         if status != "present" or (repository.unique_id and unique_id != repository.unique_id):
@@ -142,15 +156,23 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
                                    repository_id=repository_id, error_stage=None if report.get("success") else stage))
         _write_log(data_dir, run_id, report.get("output") or error_message or "", secrets)
         (data_dir / "progress" / f"{run_id}.json").unlink(missing_ok=True)
+        if smb_manager and smb_session_created:
+            smb_manager.disconnect_serverless(repository.server or "", repository.share or "")
+
+
+def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any] | None:
+    """Run one local job only when the shared serverless lock is available."""
+    with run_lock(get_data_dir()) as acquired:
+        return _run_local_job(config, name, run_as_system=run_as_system) if acquired else None
 
 
 def run_due_jobs(
     config: BackerConfig, now: datetime | None = None, *, run_as_system: bool = False
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     now = now or datetime.now(UTC)
     with run_lock(get_data_dir()) as acquired:
         if not acquired:
-            return []
+            return None
         return [
-            run_local_job(config, name, run_as_system=run_as_system) for name in due_jobs(config, now, get_data_dir())
+            _run_local_job(config, name, run_as_system=run_as_system) for name in due_jobs(config, now, get_data_dir())
         ]

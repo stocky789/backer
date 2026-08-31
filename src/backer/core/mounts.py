@@ -32,6 +32,7 @@ class SMBConnectionManager:
     def __init__(self):
         self._connections: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self.serverless_session_created = False
 
     def connect(
         self,
@@ -163,6 +164,7 @@ class SMBConnectionManager:
         is_system: bool = False,
     ) -> bool:
         """Connect without Credential Manager; SYSTEM may reclaim its own 1219 connection."""
+        self.serverless_session_created = False
         full_user = f"{domain}\\{username}" if domain else username
         unc_path = f"\\\\{server}\\{share}"
 
@@ -177,6 +179,7 @@ class SMBConnectionManager:
 
         result = connect()
         if result.returncode == 0:
+            self.serverless_session_created = True
             return True
         if "1219" not in result.stderr:
             return False
@@ -190,13 +193,17 @@ class SMBConnectionManager:
             raise RuntimeError(f"SMB connection conflict: {existing_path}. Disconnect it or use the same credentials.")
         if not existing_user:
             return False
-        subprocess.run(
+        removed = subprocess.run(
             ["net", "use", existing_path, "/delete", "/y"],
             capture_output=True,
             text=True,
             creationflags=get_subprocess_flags(),
         )
-        return connect().returncode == 0
+        if removed.returncode:
+            return False
+        result = connect()
+        self.serverless_session_created = result.returncode == 0
+        return self.serverless_session_created
 
     def disconnect_serverless(self, server: str, share: str) -> None:
         """Remove only the non-persistent session this serverless invocation created."""

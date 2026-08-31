@@ -1,5 +1,6 @@
 """Backer CLI - unified backup management."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -622,12 +623,33 @@ def _read_passphrase(stream: bool, file: Path | None) -> str:
     return value
 
 
+def _read_storage(stream: bool, file: Path | None) -> str | None:
+    if not stream and file is None:
+        return None
+    if stream and file is not None:
+        raise click.UsageError("Choose at most one of --storage-stdin or --storage-file")
+    return (sys.stdin.read() if stream else file.read_text(encoding="utf-8")).rstrip("\r\n")
+
+
 @repo.command("add")
 @click.argument("name")
 @click.option("--attach", is_flag=True, help="Attach an existing repository")
 @click.option("--init", "initialize", is_flag=True, help="Create a new repository")
 @click.option("--type", "repository_type", type=click.Choice(["local", "smb", "s3"]), default="local")
 @click.option("--path")
+@click.option("--server", "--host", "server")
+@click.option("--share")
+@click.option("--username")
+@click.option("--domain")
+@click.option("--bucket")
+@click.option("--prefix")
+@click.option("--endpoint")
+@click.option("--region")
+@click.option("--path-style", is_flag=True)
+@click.option("--storage-stdin", "--password-stdin", "storage_stdin", is_flag=True,
+              help="Read SMB password or S3 credentials JSON from stdin")
+@click.option("--storage-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--adopt", is_flag=True, help="Attach an existing repository for sidecar adoption")
 @click.option("--passphrase-stdin", is_flag=True)
 @click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--headless", is_flag=True, help="Allow the protected local-file secret fallback")
@@ -639,6 +661,18 @@ def repo_add(
     initialize: bool,
     repository_type: str,
     path: str | None,
+    server: str | None,
+    share: str | None,
+    username: str | None,
+    domain: str | None,
+    bucket: str | None,
+    prefix: str | None,
+    endpoint: str | None,
+    region: str | None,
+    path_style: bool,
+    storage_stdin: bool,
+    storage_file: Path | None,
+    adopt: bool,
     passphrase_stdin: bool,
     passphrase_file: Path | None,
     headless: bool,
@@ -649,17 +683,31 @@ def repo_add(
     from backer.serverless.repositories import add_repository
 
     try:
+        if passphrase_stdin and storage_stdin:
+            raise click.UsageError("Use --passphrase-file when --storage-stdin is used")
         passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
+        raw_storage = _read_storage(storage_stdin, storage_file)
+        storage = json.loads(raw_storage) if repository_type == "s3" and raw_storage else raw_storage
         config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
         config = load_config(config_path) if config_path.exists() else BackerConfig()
-        record = RepositoryConfig(name=name, type=repository_type, path=path)
+        if repository_type == "local" and not path:
+            raise click.UsageError("--path is required for local repositories")
+        if repository_type == "smb" and not all((server, share, username, raw_storage)):
+            raise click.UsageError("SMB repositories require --server, --share, --username and storage credentials")
+        if repository_type == "s3" and (not bucket or not endpoint or not isinstance(storage, dict)):
+            raise click.UsageError("S3 repositories require --bucket, --endpoint and credentials JSON")
+        record = RepositoryConfig(
+            name=name, type=repository_type, path=path, server=server, share=share, username=username, domain=domain,
+            bucket=bucket, prefix=prefix, endpoint=endpoint, region=region, path_style=path_style or None,
+        )
         repo_id, backend = add_repository(
-            config, config_path, name, record, passphrase, attach=attach, init=initialize, headless=headless
+            config, config_path, name, record, passphrase, attach=attach, init=initialize, storage=storage,
+            headless=headless, adopt=adopt,
         )
         console.print(f"Repository '{name}' saved ({backend}, id {repo_id})")
         if backend == "file":
             console.print("Warning: secrets are stored in protected local files")
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, json.JSONDecodeError) as error:
         raise click.ClickException(str(error)) from error
 
 
@@ -1776,13 +1824,18 @@ def job_run(
             reports = (
                 run_due_jobs(local_config, run_as_system=system_run)
                 if due
-                else [run_local_job(local_config, name, run_as_system=system_run)]
+                else run_local_job(local_config, name, run_as_system=system_run)
             )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
+        if reports is None:
+            if due:
+                console.print("Another local backup is running")
+                return
+            raise click.ClickException("Another local backup is running")
         if due and not reports:
             console.print("No jobs due")
-        for report in reports:
+        for report in reports if due else [reports]:
             if not report["success"]:
                 raise click.ClickException("Backup failed")
         return

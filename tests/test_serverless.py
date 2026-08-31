@@ -248,3 +248,101 @@ def test_stale_cutoff_uses_uneven_cron_intervals() -> None:
     now = datetime(2026, 3, 20, tzinfo=UTC)
 
     assert _stale_cutoff("0 0 1,15 * *", now) == datetime(2026, 2, 17, tzinfo=UTC)
+
+
+def test_smb_preflight_authenticates_before_probe_and_records_failure(monkeypatch, tmp_path: Path) -> None:
+    """Removing the serverless SMB session must make the UNC probe fail safely."""
+    from backer.serverless.runs import run_local_job
+    from backer.serverless.store import read_runs
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    order: list[str] = []
+
+    class Manager:
+        def connect_serverless(self, *_args, **_kwargs) -> bool:
+            order.append("connect")
+            return True
+
+        def disconnect_serverless(self, *_args) -> None:
+            order.append("disconnect")
+
+    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    monkeypatch.setattr("backer.serverless.runs.keystore.get", lambda key, **_: "pass" if key == "pass" else "smb")
+
+    def offline(*_args):
+        assert order == ["connect"]
+        return "unreachable", None, "share unavailable"
+
+    monkeypatch.setattr("backer.serverless.runs.probe", offline)
+    config = BackerConfig(
+        repositories={
+            "repo": RepositoryConfig(
+                name="Repo", type="smb", server="nas", share="backups", username="backup",
+                passphrase_ref="pass", storage_password_ref="storage",
+            )
+        },
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))},
+    )
+
+    assert not run_local_job(config, "nightly")["success"]
+    assert order == ["connect", "disconnect"]
+    assert read_runs(tmp_path, "nightly", 1)[0].error_stage == "prepare_destination"
+
+
+def test_explicit_and_due_runs_share_one_nonblocking_lock(monkeypatch, tmp_path: Path) -> None:
+    """Removing the explicit lock boundary would allow overlapping local backups."""
+    from backer.serverless.runs import run_local_job
+    from backer.serverless.schedule import run_lock
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    config = BackerConfig(jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))})
+
+    with run_lock(tmp_path):
+        assert run_local_job(config, "nightly") is None
+
+
+def test_job_run_lock_holder_fails_explicitly_but_skips_due(monkeypatch, tmp_path: Path) -> None:
+    """Returning a lock-holder result as a failed attempt would violate scheduler safety."""
+    config = BackerConfig(jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))})
+    config.save(tmp_path / "config.yaml")
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("backer.serverless.runs.run_local_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("backer.serverless.runs.run_due_jobs", lambda *_args, **_kwargs: None)
+
+    explicit = CliRunner().invoke(main, ["job", "run", "nightly"])
+    due = CliRunner().invoke(main, ["job", "run", "--due"])
+
+    assert explicit.exit_code != 0
+    assert "another local backup" in explicit.output.lower()
+    assert due.exit_code == 0
+    assert due.output.strip() == "Another local backup is running"
+
+
+def test_repo_add_s3_stores_credentials_outside_config_and_adopt_never_creates(monkeypatch, tmp_path: Path) -> None:
+    """Dropping typed S3 input or treating adopt as init would leak or create data."""
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: ("present", "id", ""))
+    puts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "backer.serverless.repositories.keystore.put", lambda key, value, **_: puts.append((key, value)) or "file"
+    )
+    created: list[bool] = []
+    monkeypatch.setattr("backer.serverless.repositories.create", lambda *_: created.append(True))
+    passphrase_file = tmp_path / "passphrase"
+    passphrase_file.write_text("repo-pass")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "repo", "add", "Cloud", "--init", "--adopt", "--type", "s3", "--bucket", "bucket",
+            "--endpoint", "https://s3.example", "--region", "us-east-1",
+            "--storage-stdin", "--passphrase-file", str(passphrase_file), "--headless",
+        ],
+        input='{"access_key_id":"access","secret_access_key":"storage-secret"}\n',
+    )
+
+    assert result.exit_code == 0, result.output
+    assert created == []
+    assert any("storage-secret" in value for _, value in puts)
+    assert "repo-pass" not in (tmp_path / "config.yaml").read_text()
+    assert "storage-secret" not in (tmp_path / "config.yaml").read_text()

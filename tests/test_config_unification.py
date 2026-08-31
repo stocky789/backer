@@ -198,6 +198,8 @@ def test_client_agent_reexports_config_dir() -> None:
 def test_from_config_reads_unified_file(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     BackerConfig(agent_id="agent-1", server=_server()).save(tmp_path / "config.yaml")
+    monkeypatch.setattr("backer.core.keystore.put", lambda *_args, **_kwargs: "file")
+    monkeypatch.setattr("backer.core.keystore.get", lambda *_args, **_kwargs: "secret")
 
     agent = BackerAgent.from_config()
 
@@ -217,6 +219,34 @@ def test_saved_agent_secret_moves_to_keystore(monkeypatch, tmp_path: Path) -> No
     saved = BackerConfig.load(tmp_path / "config.yaml")
     assert saved.server.client_secret == ""
     assert saved.server.client_secret_ref == "backer/server/agent-1/secret"
+
+
+def test_from_config_migrates_inline_secret_only_after_keystore_verifies(monkeypatch, tmp_path: Path) -> None:
+    """A failed keystore write must leave the inline credential recoverable."""
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    BackerConfig(agent_id="agent-1", server=_server()).save(tmp_path / "config.yaml")
+    values: dict[str, str] = {}
+    monkeypatch.setattr("backer.core.keystore.put", lambda key, value, **_: values.__setitem__(key, value) or "file")
+    monkeypatch.setattr("backer.core.keystore.get", lambda key, **_: values.get(key))
+
+    agent = BackerAgent.from_config()
+
+    assert agent.client_secret == "secret"
+    saved = BackerConfig.load(tmp_path / "config.yaml")
+    assert saved.server.client_secret == ""
+    assert saved.server.client_secret_ref == "backer/server/agent-1/secret"
+
+
+def test_from_config_preserves_inline_secret_when_keystore_migration_fails(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    BackerConfig(agent_id="agent-1", server=_server()).save(tmp_path / "config.yaml")
+    def fail(*_args, **_kwargs):
+        raise OSError("keystore unavailable")
+
+    monkeypatch.setattr("backer.core.keystore.put", fail)
+
+    assert BackerAgent.from_config().client_secret == "secret"
+    assert BackerConfig.load(tmp_path / "config.yaml").server.client_secret == "secret"
 
 
 def test_from_config_falls_back_to_agent_yaml(monkeypatch, tmp_path: Path) -> None:
