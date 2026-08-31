@@ -1128,6 +1128,22 @@ Acceptance:
 - `grep -n "rclone" pyproject.toml src/backer/tools/manager.py` returns nothing after this phase,
   in every outcome except an explicit v2 adoption decision recorded under the results heading.
 
+### Spike results (2026-09-01)
+
+| Arm | Platform | Device / firmware | Dialect | Op | Count | ms | Credential on argv | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | Windows 10.0.26200 | local Windows share `Script` | local | `net view`, depth-1 listing | 2 shares, 6 entries | 55, 1 | no | Native discovery completed locally; this is not a consumer NAS result. |
+| B | Windows 10.0.26200 | local Windows share `Script` | local | `smbclient` discovery | unreachable | 6 | no | unreachable: `smbclient` is not installed. |
+| D | Windows 10.0.26200 | local Windows share `Script` | local | rclone provider preflight | unreachable | n/a | no | unreachable: rclone is not installed. |
+| D | Windows 10.0.26200 | argv guard fixture | local | inline remote secret | n/a | n/a | rejected | `argv_leak` correctly exited non-zero; the recorded remote redacted the secret. |
+| A/B/D | Windows/Linux | Samba (`dperson/samba`) | 2.0.2, 2.1, 3.0, 3.1.1 signed/encrypted | matrix | unreachable | n/a | n/a | unreachable: no pre-existing Samba container/image; pulling one would persist a machine change. |
+| A/B/D | Windows/Linux | consumer NAS / firmware unavailable | 2.0.2, 2.1, 3.0, 3.1.1 signed/encrypted | matrix | unreachable | n/a | n/a | unreachable: no physical consumer NAS credentials or device were available. |
+| D | Windows/Linux | dependency price | n/a | packaging assessment | n/a | n/a | n/a | rclone would add a pinned binary, checksum source, installer payload, and subprocess; Kopia marks its rclone provider unmaintained. |
+
+Discovery decision: use native Windows `net view` plus `Path(unc).iterdir()` for `backer.core.smb_browse.list_shares(server, credentials)` and `list_directories(server, share, path)`; use the existing Linux `SMBBrowser`/`smbclient` auth-file path for those entry points. With fewer than two devices reached per arm, item 8 applies explicitly: ship arm A on Windows and arm B on Linux, and keep mount and UNC as the data path.
+
+Arm D is dropped for v2 until a future complete matrix rerun; the deciding cell was the local Windows preflight, which was unreachable because rclone is absent, while fewer than two devices reached also requires the item-8 default.
+
 ## Phase 4 - the serverless engine
 
 Every step consumes `core/runner.py` from Phase 2; no backup or restore logic is rewritten. New
