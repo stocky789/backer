@@ -89,5 +89,16 @@ class S3Sidecar:
     def put_atomic(self, key: str, data: bytes) -> None:
         temporary = f"{key}.{uuid4().hex[:8]}.tmp"
         self._request("PUT", temporary, data)
-        self._request("PUT", key, extra={"x-amz-copy-source": f"/{self.bucket}/{self._key(temporary)}"})
-        self._request("DELETE", temporary)
+        copy_source = f"/{quote(self.bucket, safe='-_.~')}/{quote(self._key(temporary), safe='/-_.~')}"
+        copy_error: BaseException | None = None
+        try:
+            self._request("PUT", key, extra={"x-amz-copy-source": copy_source})
+        except BaseException as error:
+            copy_error = error
+            raise
+        finally:
+            try:
+                self._request("DELETE", temporary)
+            except Exception:
+                if copy_error is None:
+                    raise

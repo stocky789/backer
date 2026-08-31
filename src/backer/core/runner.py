@@ -1,6 +1,6 @@
 """Server-independent backup and restore runner."""
 
-import getpass
+import json
 import logging
 import platform
 import shutil
@@ -474,31 +474,15 @@ def _write_repo_metadata(
             job.get("source_path", ""),
         )
         if job.get("serverless") and job.get("repository_hint", {}).get("type") == "s3":
-            import json
-
             from backer.serverless.s3_sidecar import S3Sidecar
+            from backer.serverless.sidecar import build_serverless_job_document
 
             credentials = job.get("repository_options", {}).get("s3", {})
             sidecar = S3Sidecar(job["repository_hint"], credentials)
             job_key = f".backer/jobs/{get_job_subfolder(job_name)}/config.json"
             existing = sidecar.get(job_key)
             current = json.loads(existing) if existing else {}
-            now = finished_at.astimezone().isoformat()
-            document = {
-                "schema_version": "2",
-                "job_name": job_name,
-                "owner_agent_id": agent_id,
-                "created_at": current.get("created_at", now),
-                "updated_at": now,
-                "config": {
-                    "source_path": source_path,
-                    "source_hostname": socket.gethostname(),
-                    "source_platform": sys.platform,
-                    "kopia_source": f"{getpass.getuser()}@{socket.gethostname()}:{source_path}",
-                    "subfolder": get_job_subfolder(job_name),
-                    "repository_hint": job["repository_hint"],
-                },
-            }
+            document = build_serverless_job_document(job, job_name, source_path, agent_id, current)
             sidecar.put_atomic(job_key, json.dumps(document).encode())
             return
         if sys.platform != "win32" and mounts.is_smb_path(dest_path):
@@ -565,26 +549,13 @@ def _write_metadata_to_path(
         },
     )
     if serverless_job:
-        from backer.serverless.sidecar import save_job_config
+        from backer.serverless.sidecar import build_serverless_job_document
 
-        save_job_config(
-            repo_path,
-            job_name,
-            agent_id or "unknown",
-            {
-                "source_path": source_path,
-                "source_hostname": socket.gethostname(),
-                "source_platform": sys.platform,
-                "kopia_source": f"{getpass.getuser()}@{socket.gethostname()}:{source_path}",
-                "subfolder": get_job_subfolder(job_name),
-                "excludes": serverless_job.get("excludes", []),
-                "schedule": serverless_job.get("schedule"),
-                "retention": serverless_job.get("retention"),
-                "repository_hint": serverless_job.get("repository_hint", {}),
-                "client_id": agent_id,
-            },
-            [value for value in (serverless_job.get("smb_password"),) if value],
-        )
+        path = repo_path / ".backer" / "jobs" / get_job_subfolder(job_name) / "config.json"
+        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        from backer.serverless.sidecar import _write_json
+
+        _write_json(path, build_serverless_job_document(serverless_job, job_name, source_path, agent_id, current))
     else:
         repo.save_job(job_name=job_name, job_config={"source_path": source_path, "client_id": agent_id})
     repo.save_job_run(

@@ -1007,7 +1007,7 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
 @click.option("--headless", is_flag=True, help="Remove the machine local scheduler")
 @click.option("--keep-config", is_flag=True, help="Keep configuration files")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
-def agent_uninstall(mode: str, headless: bool, keep_config: bool, yes: bool) -> None:
+def agent_uninstall(mode: str = "server", headless: bool = False, keep_config: bool = False, yes: bool = False) -> None:
     """Remove agent from system startup and optionally uninstall."""
     import shutil
     import subprocess
