@@ -188,11 +188,19 @@ def _passphrase(values: dict[str, Any]) -> None:
 
     phrase = _generated_passphrase()
     words = phrase.split("-")
-    position = 3
-    console.print(f"[bold]Repository passphrase[/bold]\n{phrase}")
-    if Prompt.ask(f"Enter word {position} to confirm") != words[position - 1]:
-        raise ValueError("Passphrase confirmation did not match")
     export = Prompt.ask("Save recovery copy to (leave blank to print once)", default="").strip()
+    console.print(f"[bold]Repository passphrase[/bold]\n{phrase}")
+    if export:
+        console.print(f"This writes your passphrase to {export} in plain text.")
+    Prompt.ask("Press Enter after saving it", default="")
+    console.clear()
+    while Prompt.ask("Type words 3 and 6, separated by a space") != f"{words[2]} {words[5]}":
+        console.print("[red]That does not match. Words are numbered left to right starting at 1.[/red]")
+        if not Confirm.ask("Show the passphrase again?", default=True):
+            raise WizardAbortError()
+        console.print(phrase)
+        Prompt.ask("Press Enter after saving it", default="")
+        console.clear()
     values["generate_passphrase"] = True
     values["_generated_passphrase"] = phrase
     values["passphrase_out"] = Path(export) if export else None
