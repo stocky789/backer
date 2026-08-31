@@ -27,6 +27,19 @@ def test_no_password_on_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all("sentinel-password" not in argument for command in commands for argument in command)
 
 
+def test_create_directory_keeps_password_off_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert SMBBrowser.make_directory("nas", "backup", "laptops/matt", "user", "sentinel-password")
+    assert all("sentinel-password" not in argument for command in commands for argument in command)
+
+
 def _spike_module():
     script = Path(__file__).parents[1] / "scripts" / "spike_smb_discovery.py"
     if not script.exists():

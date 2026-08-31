@@ -256,6 +256,28 @@ class SMBBrowser:
                 return False, str(e)
 
     @staticmethod
+    def make_directory(
+        server: str,
+        share: str,
+        path: str,
+        username: str | None = None,
+        password: str | None = None,
+        domain: str | None = None,
+    ) -> bool:
+        """Create one relative folder without putting credentials on argv."""
+        path = path.replace("\\", "/").strip("/")
+        if not path or '"' in path or any(part in {"", ".", ".."} for part in path.split("/")):
+            return False
+        with smb_auth_file(username, password, domain) as auth_path:
+            command = ["smbclient", f"//{server}/{share}", "-t", "5"]
+            command.extend(["-A", auth_path] if auth_path else ["-N"])
+            command.extend(["-c", f'mkdir "{path}"'])
+            try:
+                return subprocess.run(command, capture_output=True, text=True, timeout=30).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+
+    @staticmethod
     def test_connection(
         server: str,
         share: str,

@@ -492,11 +492,49 @@ def init(
         "update_passphrase": update_passphrase,
         "install": install,
     }
+    if _interactive():
+        from backer.client.serverless_wizard import WizardAbortError, run_wizard
+
+        try:
+            values = run_wizard(values)
+        except WizardAbortError:
+            ctx.exit(130)
     missing = _init_missing(values)
     if missing:
         _missing_flags("init", missing)
-    if _interactive():
-        raise click.ClickException("Interactive setup is provided by the Phase 5b wizard")
+    repository_type = values["repository_type"]
+    path = values["path"]
+    host = values["host"]
+    share = values["share"]
+    username = values["username"]
+    password_stdin = values["password_stdin"]
+    password_file = values["password_file"]
+    bucket = values["bucket"]
+    prefix = values["prefix"]
+    endpoint = values["endpoint"]
+    region = values["region"]
+    access_key_id = values["access_key_id"]
+    secret_key_stdin = values["secret_key_stdin"]
+    secret_key_file = values["secret_key_file"]
+    source = values["source"]
+    exclude = values["exclude"]
+    schedule = values["schedule"]
+    no_schedule = values["no_schedule"]
+    keep_last = values["keep_last"]
+    keep_daily = values["keep_daily"]
+    keep_weekly = values["keep_weekly"]
+    keep_monthly = values["keep_monthly"]
+    keep_yearly = values["keep_yearly"]
+    repo_name = values["repo_name"]
+    job_name = values["job_name"]
+    passphrase_stdin = values["passphrase_stdin"]
+    passphrase_file = values["passphrase_file"]
+    generate_passphrase = values["generate_passphrase"]
+    passphrase_out = values["passphrase_out"]
+    print_passphrase = values["print_passphrase"]
+    update_password = values["update_password"]
+    update_passphrase = values["update_passphrase"]
+    install = values["install"]
     ctx.invoke(
         repo_add,
         name=repo_name,
@@ -528,6 +566,8 @@ def init(
         update_passphrase=update_passphrase,
         headless=True,
         yes=True,
+        storage_password=values.get("_storage_password"),
+        generated_passphrase=values.get("_generated_passphrase"),
     )
     ctx.invoke(
         job_create,
@@ -1181,6 +1221,8 @@ def repo_add(
     update_passphrase: bool,
     headless: bool,
     yes: bool,
+    storage_password: str | None = None,
+    generated_passphrase: str | None = None,
 ) -> None:
     """Attach or explicitly create one repository."""
     from backer.core.config import BackerConfig, RepositoryConfig, load_config
@@ -1195,15 +1237,15 @@ def repo_add(
                 raise click.UsageError("Choose one passphrase source")
             if not _interactive() and not (passphrase_out or print_passphrase):
                 _missing_flags("repo add " + name, ["--passphrase-out FILE or --print-passphrase"])
-            passphrase = _generated_passphrase()
+            passphrase = generated_passphrase or _generated_passphrase()
             if passphrase_out:
                 passphrase_out.parent.mkdir(parents=True, exist_ok=True)
                 passphrase_out.write_text(passphrase + "\n", encoding="utf-8")
-            if print_passphrase:
+            if print_passphrase and generated_passphrase is None:
                 console.print(passphrase)
         else:
             passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
-        raw_storage = _read_storage(storage_stdin, storage_file)
+        raw_storage = storage_password if storage_password is not None else _read_storage(storage_stdin, storage_file)
         if raw_storage is None and repository_type == "smb":
             raw_storage = os.environ.get("BACKER_SMB_PASSWORD")
         if raw_storage is None and repository_type == "s3":
