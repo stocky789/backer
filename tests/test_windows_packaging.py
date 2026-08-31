@@ -81,7 +81,7 @@ def test_service_config_honors_explicit_config_directory(monkeypatch, tmp_path: 
 
     source = tmp_path / "agent-config"
     source.mkdir()
-    (source / "agent.yaml").write_text("client_id: agent-1\n")
+    (source / "config.yaml").write_text("agent_id: agent-1\nrepositories: {}\njobs: {}\n")
     target = tmp_path / "program-data"
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(source))
     monkeypatch.setenv("ProgramData", str(target))
@@ -91,7 +91,7 @@ def test_service_config_honors_explicit_config_directory(monkeypatch, tmp_path: 
 
     windows_service._prepare_service_config()
 
-    assert (target / "Backer" / "agent.yaml").read_text() == "client_id: agent-1\n"
+    assert (target / "Backer" / "config.yaml").read_text() == "agent_id: agent-1\nrepositories: {}\njobs: {}\n"
 
 
 def test_service_config_restricts_copied_credentials_to_system_and_administrators(monkeypatch, tmp_path: Path) -> None:
@@ -99,12 +99,12 @@ def test_service_config_restricts_copied_credentials_to_system_and_administrator
 
     source = tmp_path / "agent-config"
     source.mkdir()
-    (source / "agent.yaml").write_text("client_secret: secret\n")
+    (source / "config.yaml").write_text("agent_id: agent-1\nrepositories: {}\njobs: {}\n")
     target = tmp_path / "program-data"
     commands: list[list[str]] = []
 
     def fake_run(command: list[str], **_: object) -> SimpleNamespace:
-        assert (target / "Backer" / "agent.yaml").exists()
+        assert (target / "Backer" / "config.yaml").exists()
         commands.append(command)
         return SimpleNamespace(returncode=0)
 
@@ -125,7 +125,7 @@ def test_service_config_fails_when_acl_hardening_fails(monkeypatch, tmp_path: Pa
 
     source = tmp_path / "agent-config"
     source.mkdir()
-    (source / "agent.yaml").write_text("client_secret: secret\n")
+    (source / "config.yaml").write_text("agent_id: agent-1\nrepositories: {}\njobs: {}\n")
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(source))
     monkeypatch.setenv("ProgramData", str(tmp_path / "program-data"))
     monkeypatch.setattr(
@@ -136,5 +136,5 @@ def test_service_config_fails_when_acl_hardening_fails(monkeypatch, tmp_path: Pa
         windows_service._prepare_service_config()
 
     target = tmp_path / "program-data" / "Backer"
-    assert not (target / "agent.yaml").exists()
+    assert not (target / "config.yaml").exists()
     assert not target.exists()

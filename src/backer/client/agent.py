@@ -21,6 +21,8 @@ import httpx
 from backer import __version__
 from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
+from backer.core.config import ClientConfig, load_config
+from backer.core.paths import get_config_dir, get_data_dir  # noqa: F401
 from backer.core.repo_metadata import RepositoryMetadata
 
 logger = logging.getLogger(__name__)
@@ -59,55 +61,6 @@ def _backend_for_location(location: str, options: dict[str, Any]):
     return get_backend("kopia", options)
 
 
-def get_config_dir() -> Path:
-    """Get platform-appropriate config directory.
-
-    Linux: /etc/backer (system-wide)
-    Windows: %APPDATA%/Backer
-
-    An XDG branch for unprivileged desktop users belongs here, but resolving
-    it on whether /etc/backer exists makes the answer change mid-process:
-    `backer agent setup` rmtree()s that directory and then calls this again,
-    so the wizard would save to ~/.config/backer while the systemd unit still
-    looks in /etc/backer. It needs the unified config work to be done safely.
-    """
-    # Check environment variable first (for custom locations)
-    env_config = os.environ.get("BACKER_CONFIG_DIR")
-    if env_config:
-        return Path(env_config)
-
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "Backer"
-        return Path.home() / "AppData" / "Roaming" / "Backer"
-    else:
-        # Linux/Mac: always system-wide
-        return Path("/etc/backer")
-
-
-def get_data_dir() -> Path:
-    """Get platform-appropriate data directory.
-
-    Deliberately does NOT honour BACKER_DATA_DIR, unlike tools/manager.py.
-    install.sh sets BACKER_DATA_DIR=/var/lib/backer in the systemd unit and
-    the /usr/local/bin/backer wrapper, and the sole caller of this function
-    is `backer agent uninstall` (cli.py), which shutil.rmtree()s the result -
-    so honouring it here deletes the SERVER's database when an admin
-    uninstalls the agent on a host running both.
-    """
-    if sys.platform == "win32":
-        localappdata = os.environ.get("LOCALAPPDATA")
-        if localappdata:
-            return Path(localappdata) / "Backer"
-        return Path.home() / "AppData" / "Local" / "Backer"
-    else:
-        xdg_data = os.environ.get("XDG_DATA_HOME")
-        if xdg_data:
-            return Path(xdg_data) / "backer"
-        return Path.home() / ".local" / "share" / "backer"
-
-
 class BackerAgent:
     """Agent that runs on client machines.
 
@@ -128,7 +81,7 @@ class BackerAgent:
         self.server_url = server_url.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret
-        self.config_path = config_path or get_config_dir() / "agent.yaml"
+        self.config_path = config_path or get_config_dir() / "config.yaml"
         self.hostname = socket.gethostname()
 
         # Threading synchronization
@@ -190,43 +143,29 @@ class BackerAgent:
 
     def _save_credentials(self) -> None:
         """Save client credentials to config file."""
-        import yaml
-
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        config = {
-            "server_url": self.server_url,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-        }
-
-        with open(self.config_path, "w") as f:
-            yaml.dump(config, f)
-
-        # Secure the file (skip on Windows where chmod doesn't work the same)
-        if sys.platform != "win32":
-            self.config_path.chmod(0o600)
+        config = load_config(self.config_path)
+        config.agent_id = self.client_id or config.agent_id
+        config.server = ClientConfig(
+            server_url=self.server_url, client_id=self.client_id or "", client_secret=self.client_secret or ""
+        )
+        config.save(self.config_path)
 
     @classmethod
     def from_config(cls, config_path: Path | None = None) -> "BackerAgent":
         """Load agent from saved configuration."""
+        config_path = config_path or get_config_dir() / "config.yaml"
+        if config_path.exists():
+            config = load_config(config_path)
+            if config.server is None:
+                raise FileNotFoundError(f"Agent config not found: {config_path}")
+            return cls(config.server.server_url, config.server.client_id, config.server.client_secret, config_path)
+        legacy_path = get_config_dir() / "agent.yaml"
+        if not legacy_path.exists():
+            raise FileNotFoundError(f"Agent config not found: {config_path}")
         import yaml
 
-        if config_path is None:
-            config_path = get_config_dir() / "agent.yaml"
-
-        if not config_path.exists():
-            raise FileNotFoundError(f"Agent config not found: {config_path}")
-
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        return cls(
-            server_url=config["server_url"],
-            client_id=config.get("client_id"),
-            client_secret=config.get("client_secret"),
-            config_path=config_path,
-        )
+        legacy = yaml.safe_load(legacy_path.read_text(encoding="utf-8")) or {}
+        return cls(legacy["server_url"], legacy.get("client_id"), legacy.get("client_secret"), legacy_path)
 
     def heartbeat(self) -> dict[str, Any]:
         """Send heartbeat to server and get any pending commands."""

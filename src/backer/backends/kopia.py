@@ -156,11 +156,11 @@ class KopiaBackend(BackendBase):
         same way ServerKopia._serialized_kopia_operation does for local
         repositories.
         """
-        from backer.core.config import get_state_dir  # local import: avoids a circular import at module load time
+        from backer.core.paths import get_data_dir  # local import: avoids a circular import at module load time
 
         env = self._env.copy()
         key = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
-        repo_dir = get_state_dir() / "kopia-repos" / key
+        repo_dir = get_data_dir() / "kopia-repos" / key
         env["KOPIA_CONFIG_PATH"] = str(repo_dir / "repository.config")
         env["KOPIA_CACHE_DIRECTORY"] = str(repo_dir / "cache")
         return env
@@ -168,10 +168,10 @@ class KopiaBackend(BackendBase):
     def _repo_lock_path(self, path: str) -> Path:
         """Lock file path for the repository at `path` - next to its per-repo config, not inside
         the repository itself, so this works for repositories on a network share too."""
-        from backer.core.config import get_state_dir  # local import: avoids a circular import at module load time
+        from backer.core.paths import get_data_dir  # local import: avoids a circular import at module load time
 
         key = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
-        return get_state_dir() / "kopia-repos" / key / "repo.lock"
+        return get_data_dir() / "kopia-repos" / key / "repo.lock"
 
     def _repo_lock(self, path: str):
         """Serialize connect/use/disconnect sequences against one repository.

@@ -1,29 +1,31 @@
-"""Configuration management for Backer."""
+"""Unified client configuration."""
 
+import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from backer.core.paths import get_config_dir
+
+logger = logging.getLogger(__name__)
 
 
-class SourceConfig(BaseModel):
-    """Configuration for a backup source."""
+class ConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
+
+class SourceConfig(ConfigModel):
     path: str
     excludes: list[str] = Field(default_factory=list)
     includes: list[str] = Field(default_factory=list)
 
 
-class DestinationConfig(BaseModel):
-    """Configuration for a backup destination."""
-
-    path: str
-
-
-class RetentionConfig(BaseModel):
-    """Retention policy configuration."""
-
+class RetentionConfig(ConfigModel):
     keep_last: int | None = None
     keep_daily: int | None = None
     keep_weekly: int | None = None
@@ -31,101 +33,125 @@ class RetentionConfig(BaseModel):
     keep_yearly: int | None = None
 
 
-class ScheduleConfig(BaseModel):
-    """Schedule configuration for a job."""
-
-    cron: str | None = None  # Cron expression
-    interval: str | None = None  # Alternative: "hourly", "daily", "weekly"
+class ScheduleConfig(ConfigModel):
+    cron: str | None = None
+    interval: str | None = None
 
 
-class JobConfig(BaseModel):
-    """Configuration for a backup job."""
+class ClientConfig(ConfigModel):
+    server_url: str = "http://localhost:8420"
+    client_id: str = ""
+    client_secret: str = ""
+    heartbeat_interval: int = 60
 
+
+class RepositoryConfig(ConfigModel):
     name: str
+    type: str
+    path: str | None = None
+    server: str | None = None
+    share: str | None = None
+    username: str | None = None
+    domain: str | None = None
+    bucket: str | None = None
+    prefix: str | None = None
+    endpoint: str | None = None
+    region: str | None = None
+    access_key_id: str | None = None
+    scope: str | None = None
+    storage_password_ref: str | None = None
+    passphrase_ref: str | None = None
+    repository_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobConfig(ConfigModel):
+    repository: str
     source: SourceConfig
-    destination: DestinationConfig
     schedule: ScheduleConfig | None = None
     retention: RetentionConfig | None = None
     enabled: bool = True
     pre_scripts: list[str] = Field(default_factory=list)
     post_scripts: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
-    client_id: str | None = None  # Which client this job runs on
 
 
-class ServerConfig(BaseModel):
-    """Server-specific configuration."""
-
-    host: str = "0.0.0.0"
-    port: int = 8420
-    secret_key: str = ""  # For signing tokens
-    data_dir: str = "/var/lib/backer"
-    allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
-    public_url: str = "http://localhost:8420"  # Public URL for reverse proxy (Cloudflare, nginx, etc.)
-
-
-class ClientConfig(BaseModel):
-    """Client/agent-specific configuration."""
-
-    server_url: str = "http://localhost:8420"
-    client_id: str = ""
-    client_secret: str = ""
-    heartbeat_interval: int = 60  # seconds
-
-
-class BackerConfig(BaseModel):
-    """Main Backer configuration."""
-
-    version: str = "1"
-    mode: str = "standalone"  # standalone, server, client
-    server: ServerConfig = Field(default_factory=ServerConfig)
-    client: ClientConfig = Field(default_factory=ClientConfig)
-    jobs: list[JobConfig] = Field(default_factory=list)
-    defaults: dict[str, Any] = Field(default_factory=dict)
-    log_level: str = "info"
-    log_file: str | None = None
+class BackerConfig(ConfigModel):
+    agent_id: str = Field(default_factory=lambda: str(uuid4())[:8])
+    server: ClientConfig | None = None
+    repositories: dict[str, RepositoryConfig] = Field(default_factory=dict)
+    jobs: dict[str, JobConfig] = Field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "BackerConfig":
-        """Load configuration from YAML file."""
-        with open(path) as f:
-            data = yaml.safe_load(f)
+        try:
+            with path.open(encoding="utf-8") as file:
+                data = yaml.safe_load(file)
+        except yaml.YAMLError as error:
+            raise ValueError(f"Invalid configuration at {path}: {error}") from error
         return cls.model_validate(data or {})
 
     def save(self, path: Path) -> None:
-        """Save configuration to YAML file."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            yaml.dump(self.model_dump(exclude_none=True), f, default_flow_style=False)
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                yaml.safe_dump(self.model_dump(exclude_none=True), file, default_flow_style=False, sort_keys=False)
+            os.replace(temporary, path)
+            if os.name != "nt":
+                path.chmod(0o600)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
     def get_job(self, name: str) -> JobConfig | None:
-        """Get a job by name."""
-        for job in self.jobs:
-            if job.name == name:
-                return job
+        return self.jobs.get(name)
+
+
+def _read_legacy(directory: Path) -> dict[str, str] | None:
+    agent = directory / "agent.yaml"
+    gui = directory / "config.json"
+    if not agent.exists() and not gui.exists():
         return None
+    data: dict[str, str] = {}
+    if gui.exists():
+        import json
+
+        gui_data = json.loads(gui.read_text(encoding="utf-8"))
+        data.update({key: value for key, value in gui_data.items() if key != "hostname"})
+    if agent.exists():
+        loaded = yaml.safe_load(agent.read_text(encoding="utf-8")) or {}
+        data.update(
+            {key: value for key, value in loaded.items() if key in {"server_url", "client_id", "client_secret"}}
+        )
+    return data
 
 
-def get_default_config_path() -> Path:
-    """Get the default configuration file path."""
-    xdg_config = Path.home() / ".config" / "backer"
-    return xdg_config / "config.yaml"
+def migrate_legacy(config_dir: Path | None = None) -> BackerConfig | None:
+    """Write the unified file once from legacy agent and GUI credentials."""
+    config_dir = config_dir or get_config_dir()
+    from backer.core import paths
 
-
-def get_state_dir() -> Path:
-    """Get the state directory for backer data."""
-    state_dir = Path.home() / ".local" / "share" / "backer"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    return state_dir
+    candidates = [config_dir, paths._user_config_dir(), paths._machine_config_dir()]
+    candidates = list(dict.fromkeys(candidates))
+    present = [(directory, data) for directory in candidates if (data := _read_legacy(directory))]
+    if not present:
+        return None
+    chosen_dir, chosen = next((pair for pair in present if pair[0] == config_dir), present[0])
+    chosen_id = chosen.get("client_id", "")
+    for directory, other in present:
+        if directory != chosen_dir and other.get("client_id") and other.get("client_id") != chosen_id:
+            logger.warning("Skipping legacy credentials for client_id %s in %s", other["client_id"], directory)
+    config = BackerConfig(agent_id=chosen_id or str(uuid4())[:8], server=ClientConfig.model_validate(chosen))
+    config.save(config_dir / "config.yaml")
+    return config
 
 
 def load_config(path: Path | None = None) -> BackerConfig:
-    """Load configuration from file, or return default config."""
-    if path is None:
-        path = get_default_config_path()
-
+    path = path or get_config_dir() / "config.yaml"
     if path.exists():
         return BackerConfig.load(path)
-
+    if path.name == "config.yaml":
+        migrated = migrate_legacy(path.parent)
+        if migrated:
+            return migrated
     return BackerConfig()
-

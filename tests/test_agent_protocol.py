@@ -726,14 +726,14 @@ def _patch_etc_backer_exists(monkeypatch: pytest.MonkeyPatch, exists: bool) -> N
     real_exists = pathlib.Path.exists
 
     def fake_exists(self: pathlib.Path) -> bool:
-        if self == pathlib.Path("/etc/backer"):
+        if self == pathlib.Path("/etc/backer/config.yaml"):
             return exists
         return real_exists(self)
 
     monkeypatch.setattr(pathlib.Path, "exists", fake_exists)
 
 
-def test_linux_config_dir_prefers_etc_backer_when_it_already_exists(
+def test_linux_config_dir_prefers_etc_backer_when_it_holds_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An existing root install (scripts/install-agent.sh) must keep working after upgrade."""
@@ -743,4 +743,3 @@ def test_linux_config_dir_prefers_etc_backer_when_it_already_exists(
     _patch_etc_backer_exists(monkeypatch, exists=True)
 
     assert client_agent.get_config_dir() == Path("/etc/backer")
-

@@ -41,13 +41,15 @@ def _prepare_service_config() -> None:
     """Copy the interactive user's registered agent config for SYSTEM."""
     config_dir = os.environ.get("BACKER_CONFIG_DIR")
     source = Path(config_dir) if config_dir else Path(os.environ.get("APPDATA", "")) / "Backer"
-    config = source / "agent.yaml"
+    config = source / "config.yaml"
+    if not config.exists():
+        config = source / "agent.yaml"
     if not config.exists():
         raise FileNotFoundError("Agent config not found; register the agent before installing the service")
     target = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
     target_existed = target.exists()
     target.mkdir(parents=True, exist_ok=True)
-    target_config = target / "agent.yaml"
+    target_config = target / config.name
     shutil.copy2(config, target_config)
     result = subprocess.run(
         [

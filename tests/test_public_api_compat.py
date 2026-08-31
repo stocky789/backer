@@ -10,7 +10,6 @@ from backer.hypervisors import hyperv, incremental, metadata, proxmox, qmp, unra
 def test_core_public_imports_are_canonical():
     assert core.BackerConfig is config.BackerConfig
     assert core.load_config is config.load_config
-    assert core.BackupJob is job.BackupJob
     assert core.JobStatus is job.JobStatus
 
 

@@ -12,6 +12,11 @@ from backer.backends.base import BackupDestination, BackupSource
 console = Console()
 
 
+def _is_server_data_dir(path: Path) -> bool:
+    """Keep a colocated server database when uninstalling the agent."""
+    return (path / "backer.db").exists()
+
+
 @click.group()
 @click.version_option(version=__version__)
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="Config file path")
@@ -592,16 +597,16 @@ def agent_setup() -> None:
     Guides you through connecting to a server and registering this machine.
     Automatically removes any existing configuration to start fresh.
     """
-    import shutil
-
     from backer.client.agent import get_config_dir
     from backer.client.setup_wizard import run_wizard
+    from backer.core.config import load_config
 
-    # Remove existing config to start fresh - if running setup, you want a clean slate
     config_dir = get_config_dir()
-    if config_dir.exists():
-        console.print(f"[yellow]Removing existing config: {config_dir}[/yellow]")
-        shutil.rmtree(config_dir)
+    config_path = config_dir / "config.yaml"
+    if config_path.exists():
+        config = load_config(config_path)
+        config.server = None
+        config.save(config_path)
 
     success = run_wizard()
     if not success:
@@ -652,7 +657,7 @@ def agent_configure(server: str, client_id: str, client_secret: str) -> None:
         ag = BackerAgent(server_url=server)
         ag.client_id = client_id
         ag.client_secret = client_secret
-        ag._save_credentials(client_id, client_secret)
+        ag._save_credentials()
 
         # Verify the credentials work by doing a heartbeat
         console.print("Verifying connection...")
@@ -959,7 +964,9 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
                 console.print(f"[yellow]Could not remove {install_dir} (permission denied)[/yellow]")
 
     # Remove data directory
-    if has_data:
+    if has_data and _is_server_data_dir(data_dir):
+        console.print(f"[yellow]Keeping {data_dir}: it contains a Backer server database[/yellow]")
+    elif has_data:
         shutil.rmtree(data_dir, ignore_errors=True)
         console.print(f"[green]✓ Removed {data_dir}[/green]")
 

@@ -569,7 +569,7 @@ class TestKopiaBackend:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Two operations against the same repository must never run their critical sections concurrently."""
-        monkeypatch.setattr("backer.core.config.get_state_dir", lambda: tmp_path)
+        monkeypatch.setattr("backer.core.paths.get_data_dir", lambda: tmp_path)
         backend = KopiaBackend()
         order: list[str] = []
 
@@ -593,7 +593,7 @@ class TestKopiaBackend:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Two operations against different repositories must be able to run concurrently."""
-        monkeypatch.setattr("backer.core.config.get_state_dir", lambda: tmp_path)
+        monkeypatch.setattr("backer.core.paths.get_data_dir", lambda: tmp_path)
         backend = KopiaBackend()
         barrier = threading.Barrier(2, timeout=5)
         entered: list[str] = []

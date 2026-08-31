@@ -156,17 +156,27 @@ class BackerAgentApp:
 
     def load_config(self) -> dict:
         """Load configuration from file."""
-        if CONFIG_FILE.exists():
-            try:
-                return json.loads(CONFIG_FILE.read_text())
-            except Exception:
-                pass
+        try:
+            from backer.core.config import load_config
+
+            config = load_config()
+            return config.server.model_dump(exclude_none=True) if config.server else {}
+        except Exception:
+            pass
         return {}
 
     def save_config(self):
         """Save configuration to file."""
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(self.config, indent=2))
+        from backer.core.config import ClientConfig, load_config
+        from backer.core.paths import get_config_dir
+
+        config = load_config()
+        config.agent_id = self.config.get("client_id") or config.agent_id
+        config.server = ClientConfig.model_validate({
+            key: value for key, value in self.config.items()
+            if key in {"server_url", "client_id", "client_secret", "heartbeat_interval"}
+        })
+        config.save(get_config_dir() / "config.yaml")
 
     def setup_ui(self):
         """Setup the main UI."""

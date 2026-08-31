@@ -17,6 +17,7 @@ from rich.table import Table
 
 from backer import __version__
 from backer.client.agent import get_config_dir
+from backer.core.config import ClientConfig, load_config
 
 console = Console()
 
@@ -34,12 +35,11 @@ def print_header() -> None:
 
 def check_existing_config() -> dict[str, Any] | None:
     """Check if agent is already configured."""
-    config_path = get_config_dir() / "agent.yaml"
+    config_path = get_config_dir() / "config.yaml"
     if config_path.exists():
         try:
-            import yaml
-            with open(config_path) as f:
-                return yaml.safe_load(f)
+            config = load_config(config_path)
+            return config.server.model_dump() if config.server else None
         except Exception:
             pass
     return None
@@ -116,16 +116,11 @@ def register_agent(server_url: str, enrollment_token: str) -> tuple[bool, str, d
 def save_config(config: dict[str, Any]) -> bool:
     """Save agent configuration."""
     try:
-        import yaml
-        config_path = get_config_dir() / "agent.yaml"
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        # Secure permissions on Linux/Mac
-        if sys.platform != "win32":
-            config_path.chmod(0o600)
+        config_path = get_config_dir() / "config.yaml"
+        unified = load_config(config_path)
+        unified.agent_id = config.get("client_id") or unified.agent_id
+        unified.server = ClientConfig.model_validate(config)
+        unified.save(config_path)
 
         return True
     except Exception as e:
@@ -222,7 +217,7 @@ def run_wizard() -> bool:
     console.print("[bold]Step 3:[/bold] Save Configuration")
 
     if credentials and save_config(credentials):
-        config_path = get_config_dir() / "agent.yaml"
+        config_path = get_config_dir() / "config.yaml"
         console.print(f"[green]Configuration saved to {config_path}[/green]")
     else:
         return False

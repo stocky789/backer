@@ -1,0 +1,52 @@
+agent_id: 3f9a2c11
+server:
+  server_url: https://backer.office.example
+  client_id: 3f9a2c11
+  client_secret: 8f21c0b4d95e17aa
+  heartbeat_interval: 60
+repositories:
+  home-nas:
+    name: Home NAS
+    type: smb
+    server: 192.168.0.254
+    share: Backups
+    path: Backer
+    username: matt
+    domain: ''
+    scope: machine
+    storage_password_ref: backer/repo/home-nas/storage
+    passphrase_ref: backer/repo/home-nas/passphrase
+  usb-vault:
+    name: USB Vault
+    type: local
+    path: E:\\BackerVault
+    scope: user
+    passphrase_ref: backer/repo/usb-vault/passphrase
+  offsite:
+    name: Offsite
+    type: s3
+    bucket: backer-offsite
+    prefix: matt-desk
+    endpoint: https://s3.us-west-002.backblazeb2.com
+    region: us-west-002
+    access_key_id: 002abc1234567890000000001
+    scope: user
+    storage_password_ref: backer/repo/offsite/storage
+    passphrase_ref: backer/repo/offsite/passphrase
+jobs:
+  Nightly Documents:
+    enabled: true
+    repository: home-nas
+    source:
+      path: C:\\Users\\matt\\Documents
+      excludes: ['**/node_modules/**', '*.tmp']
+    schedule:
+      cron: '0 2 * * *'
+    retention: null
+  Photos:
+    enabled: true
+    repository: usb-vault
+    source:
+      path: C:\\Users\\matt\\Pictures
+    schedule: null
+    retention: null
