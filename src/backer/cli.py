@@ -35,6 +35,14 @@ def _generated_passphrase() -> str:
     return "-".join(choice(words) for _ in range(6))
 
 
+def _redact_error(error: BaseException, *secrets: str | None) -> str:
+    text = str(error)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
 def _stale_cutoff(cron: str, now) -> object:
     """Return the age boundary after two complete schedule intervals."""
     from croniter import croniter
@@ -122,13 +130,10 @@ def setup(force: bool, quiet: bool) -> None:
 
 # Shared with the later rich wizard: each value maps to one non-interactive flag.
 INIT_STEPS = (
-    ("repository_type", "--type"),
-    ("path", "--path"),
-    ("host", "--host"),
-    ("share", "--share"),
-    ("username", "--username"),
-    ("source", "--source"),
-    ("schedule", "--schedule"),
+    ("repository_type", "--type", "Where backups are stored", lambda value: value in {"local", "smb", "s3"}),
+    ("path", "--path", "Repository path", lambda value: bool(value)),
+    ("source", "--source", "Folder to back up", lambda value: bool(value)),
+    ("schedule", "--schedule", "Schedule", lambda value: bool(value)),
 )
 
 
@@ -141,6 +146,13 @@ INIT_STEPS = (
 @click.option("--source", multiple=True)
 @click.option("--schedule")
 @click.option("--no-schedule", is_flag=True)
+@click.option("--repo-name", default="repository")
+@click.option("--job-name", default="backup")
+@click.option("--passphrase-stdin", is_flag=True)
+@click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--generate-passphrase", is_flag=True)
+@click.option("--passphrase-out", type=click.Path(path_type=Path))
+@click.option("--print-passphrase", is_flag=True)
 @click.pass_context
 def init(
     ctx: click.Context,
@@ -152,6 +164,13 @@ def init(
     source: tuple[str, ...],
     schedule: str | None,
     no_schedule: bool,
+    repo_name: str,
+    job_name: str,
+    passphrase_stdin: bool,
+    passphrase_file: Path | None,
+    generate_passphrase: bool,
+    passphrase_out: Path | None,
+    print_passphrase: bool,
 ) -> None:
     """Start serverless setup; `setup` downloads Kopia and `agent setup` enrolls a server agent."""
     missing: list[str] = []
@@ -173,8 +192,63 @@ def init(
     if missing:
         _missing_flags("init", missing)
     if not _interactive():
-        _missing_flags("init", ["--passphrase-stdin or --generate-passphrase"])
-    raise click.ClickException("Interactive setup is provided by the Phase 5b wizard")
+        if not (passphrase_stdin or passphrase_file or generate_passphrase):
+            _missing_flags("init", ["--passphrase-stdin or --generate-passphrase"])
+    if _interactive():
+        raise click.ClickException("Interactive setup is provided by the Phase 5b wizard")
+    if repository_type != "local":
+        raise click.ClickException("Non-interactive SMB and S3 setup is provided by their repo add flags")
+    ctx.invoke(
+        repo_add,
+        name=repo_name,
+        attach=False,
+        initialize=True,
+        repository_type=repository_type,
+        path=path,
+        server=None,
+        share=None,
+        username=None,
+        domain=None,
+        bucket=None,
+        prefix=None,
+        endpoint=None,
+        region=None,
+        path_style=False,
+        storage_stdin=False,
+        storage_file=None,
+        access_key_id=None,
+        secret_key_stdin=False,
+        secret_key_file=None,
+        adopt=False,
+        passphrase_stdin=passphrase_stdin,
+        passphrase_file=passphrase_file,
+        generate_passphrase=generate_passphrase,
+        passphrase_out=passphrase_out,
+        print_passphrase=print_passphrase,
+        update_password=False,
+        update_passphrase=False,
+        headless=True,
+        yes=True,
+    )
+    ctx.invoke(
+        job_create,
+        name=job_name,
+        legacy_name=None,
+        source=source,
+        dest=None,
+        schedule=schedule,
+        daily=None,
+        no_schedule=no_schedule,
+        repository_id=repo_name,
+        keep_last=None,
+        keep_daily=None,
+        keep_weekly=None,
+        keep_monthly=None,
+        keep_yearly=None,
+        server=None,
+        username=None,
+        password=None,
+    )
 
 
 @main.command()
@@ -219,19 +293,12 @@ def tools() -> None:
 @main.command()
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination")
-@click.option(
-    "--repository-password",
-    envvar="BACKER_REPOSITORY_PASSWORD",
-    required=True,
-    help="Repository encryption password",
-)
 @click.option("--exclude", "-e", multiple=True, help="Exclude patterns")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def backup(
     source: Path,
     destination: str,
-    repository_password: str,
     exclude: tuple[str, ...],
     dry_run: bool,
     verbose: bool,
@@ -246,6 +313,9 @@ def backup(
         backer backup /home/user/docs /mnt/backup/docs
 
     """
+    repository_password = os.environ.get("BACKER_REPOSITORY_PASSWORD")
+    if not repository_password:
+        raise click.UsageError("BACKER_REPOSITORY_PASSWORD is required")
     from backer.backends.kopia import KopiaBackend
 
     console.print(f"[bold]Backing up[/bold] {source} → {destination}")
@@ -285,7 +355,7 @@ def backup(
             console.print(result.output[:2000])
 
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_redact_error(e, repository_password)}")
         raise SystemExit(1)
 
 
@@ -296,12 +366,6 @@ def backup(
 @click.option("--from", "from_path")
 @click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]))
 @click.option("--destination", type=click.Path(path_type=Path))
-@click.option(
-    "--repository-password",
-    envvar="BACKER_REPOSITORY_PASSWORD",
-    required=False,
-    help="Repository encryption password",
-)
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
 @click.option("--before")
 @click.option("--latest", is_flag=True)
@@ -313,7 +377,6 @@ def backup(
 def restore(
     source: str | None,
     legacy_destination: Path | None,
-    repository_password: str | None,
     snapshot: str | None,
     job: str | None,
     from_path: str | None,
@@ -343,6 +406,7 @@ def restore(
         if sum(bool(value) for value in (snapshot, before, latest)) != 1:
             raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
         raise click.ClickException("Serverless restore execution is provided by Phase 5c")
+    repository_password = os.environ.get("BACKER_REPOSITORY_PASSWORD")
     if not source or not destination or not repository_password:
         raise click.UsageError("SOURCE and DESTINATION are required")
     from backer.backends.kopia import KopiaBackend
@@ -365,7 +429,7 @@ def restore(
             raise SystemExit(1)
 
     except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[red]Error:[/red] {_redact_error(e, repository_password)}")
         raise SystemExit(1)
 
 
@@ -725,8 +789,11 @@ def repo() -> None:
 
 def _read_passphrase(stream: bool, file: Path | None) -> str:
     if stream == (file is not None):
-        raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
-    value = sys.stdin.read() if stream else file.read_text(encoding="utf-8")
+        if stream:
+            raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
+        value = os.environ.get("BACKER_REPOSITORY_PASSWORD", "")
+    else:
+        value = sys.stdin.read() if stream else file.read_text(encoding="utf-8")
     value = value.rstrip("\r\n")
     if not value:
         raise click.UsageError("Repository passphrase is required")
@@ -832,6 +899,12 @@ def repo_add(
         else:
             passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
         raw_storage = _read_storage(storage_stdin, storage_file)
+        if raw_storage is None and repository_type == "smb":
+            raw_storage = os.environ.get("BACKER_SMB_PASSWORD")
+        if raw_storage is None and repository_type == "s3":
+            secret = os.environ.get("BACKER_S3_SECRET_KEY")
+            if secret:
+                raw_storage = json.dumps({"access_key_id": access_key_id or "", "secret_access_key": secret})
         if secret_key_stdin and secret_key_file:
             raise click.UsageError("Choose at most one of --secret-key-stdin or --secret-key-file")
         secret_key = (
@@ -1014,6 +1087,20 @@ def _repository(config, name: str):
     return item
 
 
+def _resolve_job_repository(config, requested: str | None, name: str | None = None) -> str:
+    if requested:
+        if requested not in config.repositories:
+            raise click.ClickException(f"Repository '{requested}' is not configured")
+        if name and name in config.jobs and config.jobs[name].repository != requested:
+            raise click.UsageError(f"Job '{name}' does not belong to repository '{requested}'")
+        return requested
+    if name and name in config.jobs:
+        return config.jobs[name].repository
+    if len(config.repositories) == 1:
+        return next(iter(config.repositories))
+    raise click.UsageError("--repo is required when more than one local repository is configured")
+
+
 @repo.command("list")
 @click.option("--json", "as_json", is_flag=True)
 @click.pass_context
@@ -1087,16 +1174,19 @@ def repo_passphrase(ctx: click.Context, name: str, passphrase_out: Path | None, 
 @repo.command("rm")
 @click.argument("name")
 @click.option("--yes", is_flag=True)
+@click.option("--confirm", help="Type the repository name to confirm local-access removal")
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.pass_context
-def repo_rm(ctx: click.Context, name: str, yes: bool, passphrase_out: Path | None) -> None:
+def repo_rm(ctx: click.Context, name: str, yes: bool, confirm: str | None, passphrase_out: Path | None) -> None:
     """Remove local access only; repository data is left untouched."""
     from backer.core import keystore
 
     path, config = _local_config(ctx)
     key, record = _repository(config, name)
     if not yes:
-        raise click.UsageError("--yes confirms removal of this computer's only configured passphrase")
+        raise click.UsageError("--yes acknowledges that backup data will be left unreadable on this computer")
+    if confirm != name:
+        raise click.UsageError(f"--confirm must exactly match repository name '{name}'")
     if not passphrase_out:
         raise click.UsageError("--passphrase-out FILE is required before removing local access")
     value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
@@ -1964,14 +2054,14 @@ def job_list(
     ctx: click.Context, repo: str | None, server: str | None, as_json: bool, username: str | None, password: str | None
 ) -> None:
     """List all backup jobs."""
-    if repo:
-        if server:
-            raise click.UsageError("Choose --repo or --server, not both")
+    if repo and server:
+        raise click.UsageError("Choose --repo or --server, not both")
+    if not server:
         _, config = _local_config(ctx)
         items = [
             {"name": name, **item.model_dump(exclude_none=True)}
             for name, item in config.jobs.items()
-            if item.repository == repo
+            if not repo or item.repository == repo
         ]
         click.echo(json.dumps(items) if as_json else "\n".join(item["name"] for item in items))
         return
@@ -2075,14 +2165,13 @@ def job_create(
     source_path = source[0]
     if repository_id and server:
         raise click.UsageError("Choose --repo or --server, not both")
-    if repository_id:
+    if not server:
         from backer.core.config import JobConfig, RetentionConfig, ScheduleConfig, SourceConfig, load_config
         from backer.core.paths import get_config_dir
 
         path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
         config = load_config(path)
-        if repository_id not in config.repositories:
-            raise click.ClickException(f"Repository '{repository_id}' is not configured")
+        repository_id = _resolve_job_repository(config, repository_id)
         owner = next(
             (
                 other
@@ -2151,9 +2240,16 @@ def job_create(
 @click.option("--json", "as_json", is_flag=True)
 def job_history(name: str, limit: int, repo: str | None, server: str | None, as_json: bool) -> None:
     """Show local serverless attempt history."""
-    from backer.core.paths import get_data_dir
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir, get_data_dir
     from backer.serverless.store import read_runs
 
+    if repo and server:
+        raise click.UsageError("Choose --repo or --server, not both")
+    if server:
+        raise click.ClickException("Server job history is not implemented by the local CLI")
+    config = load_config(get_config_dir() / "config.yaml")
+    _resolve_job_repository(config, repo, name)
     attempts = read_runs(get_data_dir(), name, limit)
     if as_json:
         click.echo(json.dumps([item.to_dict() for item in attempts], default=str))
@@ -2221,12 +2317,20 @@ def prune(name: str, list_only: bool, apply: bool, yes_remove: int | None, as_js
     from backer.core.paths import get_config_dir
     from backer.serverless.retention import prune_job
 
-    try:
-        count, _ = prune_job(load_config(get_config_dir() / "config.yaml"), name, apply=apply)
-    except ValueError as error:
-        raise click.ClickException(str(error)) from error
     if apply and yes_remove is None:
         raise click.UsageError("--yes-remove N is required with --apply")
+    config = load_config(get_config_dir() / "config.yaml")
+    try:
+        count, _ = prune_job(config, name, apply=False)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    if apply and yes_remove != count:
+        raise click.UsageError(f"--yes-remove must equal the previewed count ({count})")
+    if apply:
+        try:
+            count, _ = prune_job(config, name, apply=True)
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
     message = f"{count} snapshot(s) {'deleted' if apply else 'would be deleted'}"
     click.echo(json.dumps({"count": count, "applied": apply}) if as_json else message)
 
@@ -2351,6 +2455,8 @@ def job_run(
                 raise click.ClickException("Backup failed")
         return
     if due or (name and name in local_config.jobs):
+        if name:
+            _resolve_job_repository(local_config, repo, name)
         from backer.serverless.runs import run_due_jobs, run_local_job
 
         try:
@@ -2375,6 +2481,8 @@ def job_run(
         return
     if not name:
         raise click.UsageError("NAME, --all, or --due is required")
+    if not server:
+        raise click.ClickException(f"Job '{name}' is not configured locally; pass --server for a server job")
     import httpx
 
     server_url = server or "http://localhost:8420"

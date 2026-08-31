@@ -268,8 +268,10 @@ def create_local_scheduled_task() -> tuple[bool, str]:
         return False, "Administrator privileges required. Run as Administrator."
     data_dir = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
     command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
-    arguments = "job run --due" if getattr(sys, "frozen", False) else "-m backer job run --due"
-    task_name = "BackerLocalBackup"
+    arguments = (
+        "job run --due --no-progress" if getattr(sys, "frozen", False) else "-m backer job run --due --no-progress"
+    )
+    task_name = "BackerLocalSchedule"
     action = (
         f'cmd.exe /d /c "set BACKER_DATA_DIR={data_dir}&& set BACKER_CONFIG_DIR={data_dir}'
         f'&& set BACKER_RUN_AS_SYSTEM=1&& "{command}" {arguments}"'
@@ -309,7 +311,7 @@ def remove_local_scheduled_task() -> bool:
     if not is_windows():
         return False
     result = subprocess.run(
-        ["schtasks", "/delete", "/tn", "BackerLocalBackup", "/f"],
+        ["schtasks", "/delete", "/tn", "BackerLocalSchedule", "/f"],
         capture_output=True,
         creationflags=get_subprocess_flags(),
     )
@@ -742,7 +744,7 @@ def create_local_systemd_timer(*, headless: bool = False) -> tuple[bool, str]:
     prefix = "backer-local"
     service = directory / f"{prefix}.service"
     timer = directory / f"{prefix}.timer"
-    command = f"{get_python_path()} -m backer job run --due"
+    command = f"{get_python_path()} -m backer job run --due --no-progress"
     service.write_text(f"[Service]\nType=oneshot\nExecStart={command}\n", encoding="utf-8")
     timer.write_text(
         "[Unit]\nDescription=Backer local backup scheduler\n\n[Timer]\n"

@@ -57,5 +57,35 @@ def test_generated_passphrase_needs_visible_output_off_tty(tmp_path):
 
 def test_every_init_step_has_a_flag():
     result = CliRunner().invoke(main, ["init", "--help"])
-    for _, flag in INIT_STEPS:
+    for _, flag, prompt, validator in INIT_STEPS:
         assert flag in result.output
+        assert prompt
+        assert callable(validator)
+
+
+def test_prune_checks_confirmation_before_any_delete(monkeypatch):
+    calls = []
+
+    def prune_job(*args, **kwargs):
+        calls.append(kwargs)
+        return 2, ""
+
+    monkeypatch.setattr("backer.serverless.retention.prune_job", prune_job)
+    result = CliRunner().invoke(main, ["prune", "job", "--apply"])
+    assert result.exit_code == 2
+    assert calls == []
+
+
+def test_repo_rm_refuses_before_mutating_without_typed_name(tmp_path, monkeypatch):
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config_path = tmp_path / "config.yaml"
+    config = BackerConfig(repositories={"r1": RepositoryConfig(name="r1", type="local", path=str(tmp_path))})
+    config.save(config_path)
+    monkeypatch.setattr("backer.core.keystore.get", lambda *args, **kwargs: "secret")
+    deleted = []
+    monkeypatch.setattr("backer.core.keystore.delete", lambda *args, **kwargs: deleted.append(args))
+    result = CliRunner().invoke(main, ["--config", str(config_path), "repo", "rm", "r1", "--yes"])
+    assert result.exit_code == 2
+    assert deleted == []
+    assert "r1" in BackerConfig.load(config_path).repositories
