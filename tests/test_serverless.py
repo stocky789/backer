@@ -346,3 +346,84 @@ def test_repo_add_s3_stores_credentials_outside_config_and_adopt_never_creates(m
     assert any("storage-secret" in value for _, value in puts)
     assert "repo-pass" not in (tmp_path / "config.yaml").read_text()
     assert "storage-secret" not in (tmp_path / "config.yaml").read_text()
+
+
+@pytest.mark.parametrize(
+    ("attach", "init", "states", "expected"),
+    [
+        (True, False, [("present", "id", "")], ["connect", "probe", "disconnect"]),
+        (
+            False, True, [("absent", None, ""), ("present", "id", "")],
+            ["connect", "probe", "create", "probe", "disconnect"],
+        ),
+    ],
+)
+def test_smb_repository_add_authenticates_before_every_probe(
+    monkeypatch, tmp_path: Path, attach, init, states, expected
+) -> None:
+    """Removing the setup-time SMB session would probe or create a UNC unauthenticated."""
+    from backer.serverless.repositories import add_repository
+
+    order: list[str] = []
+
+    class Manager:
+        serverless_session_created = True
+
+        def connect_serverless(self, *_args, **_kwargs) -> bool:
+            order.append("connect")
+            return True
+
+        def disconnect_serverless(self, *_args) -> None:
+            order.append("disconnect")
+
+    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
+    monkeypatch.setattr("backer.serverless.repositories.keystore.put", lambda *_args, **_kwargs: "file")
+
+    def checked_probe(*_args):
+        assert order and order[0] == "connect"
+        order.append("probe")
+        return states.pop(0)
+
+    monkeypatch.setattr("backer.serverless.repositories.probe", checked_probe)
+    monkeypatch.setattr("backer.serverless.repositories.create", lambda *_args: order.append("create") or (True, ""))
+    record = RepositoryConfig(name="NAS", type="smb", server="nas", share="backups", username="backup", path="backer")
+
+    add_repository(
+        BackerConfig(), tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=attach, init=init,
+        storage="smb-password", headless=True,
+    )
+
+    assert order == expected
+
+
+def test_smb_repository_add_disconnects_after_probe_failure(monkeypatch, tmp_path: Path) -> None:
+    """An SMB setup failure must not leave this process's temporary session behind."""
+    from backer.serverless.repositories import add_repository
+
+    order: list[str] = []
+
+    class Manager:
+        serverless_session_created = True
+
+        def connect_serverless(self, *_args, **_kwargs) -> bool:
+            order.append("connect")
+            return True
+
+        def disconnect_serverless(self, *_args) -> None:
+            order.append("disconnect")
+
+    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
+    monkeypatch.setattr(
+        "backer.serverless.repositories.probe", lambda *_args: order.append("probe") or ("unreachable", None, "offline")
+    )
+    record = RepositoryConfig(name="NAS", type="smb", server="nas", share="backups", username="backup")
+
+    with pytest.raises(ValueError, match="offline"):
+        add_repository(
+            BackerConfig(), tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=True, init=False,
+            storage="smb-password", headless=True,
+        )
+
+    assert order == ["connect", "probe", "disconnect"]

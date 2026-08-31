@@ -77,47 +77,66 @@ def add_repository(
     if record.type == "s3":
         parsed = parse_s3_config({**record.model_dump(exclude_none=True), **(storage or {})})
         record = record.model_copy(update={**parsed.public_config, "path": None})
-    status, unique_id, message = probe(record, passphrase, storage)
-    if attach and status != "present":
-        raise ValueError(message or f"Repository is {status}; nothing was created")
-    if init:
-        if status == "present":
-            if not adopt:
-                raise ValueError("Repository already exists; use --attach or --adopt")
-        elif adopt:
-            raise ValueError(message or "Repository is absent; adoption requires an existing repository")
-        elif status != "absent":
-            raise ValueError(message or f"Repository is {status}; refusing to create")
-        elif status == "absent":
-            created, error = create(record, passphrase, storage)
-            if not created:
-                raise ValueError(error or "Repository creation failed")
-            status, unique_id, message = probe(record, passphrase, storage)
-            if status != "present":
-                raise ValueError(message or "Created repository could not be verified")
-    repo_id = record.id or uuid4().hex[:12]
-    passphrase_ref = f"backer/repo/{repo_id}/passphrase"
-    storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
-    backend = keystore.put(passphrase_ref, passphrase)
-    if storage_ref:
-        import json
+    smb_manager = None
+    smb_session_created = False
+    if record.type == "smb":
+        if not isinstance(storage, str) or not all((record.server, record.share, record.username)):
+            raise ValueError("SMB server, share, username and password are required")
+        from backer.core.mounts import SMBConnectionManager
 
-        keystore.put(storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False)
-    saved = record.model_copy(
-        update={
-            "id": repo_id,
-            "name": name,
-            "unique_id": unique_id,
-            "added_at": datetime.now(UTC).isoformat(),
-            "last_check_status": "present",
-            "last_check_at": datetime.now(UTC).isoformat(),
-            "passphrase_ref": passphrase_ref,
-            "storage_password_ref": storage_ref,
-        }
-    )
-    config.repositories[repo_id] = saved
-    config.save(config_path)
-    return repo_id, backend
+        smb_manager = SMBConnectionManager()
+        if not smb_manager.connect_serverless(
+            record.server, record.share, record.username, storage, domain=record.domain
+        ):
+            raise ValueError(f"Could not connect to SMB repository '{record.name}'")
+        smb_session_created = getattr(smb_manager, "serverless_session_created", True)
+    try:
+        status, unique_id, message = probe(record, passphrase, storage)
+        if attach and status != "present":
+            raise ValueError(message or f"Repository is {status}; nothing was created")
+        if init:
+            if status == "present":
+                if not adopt:
+                    raise ValueError("Repository already exists; use --attach or --adopt")
+            elif adopt:
+                raise ValueError(message or "Repository is absent; adoption requires an existing repository")
+            elif status != "absent":
+                raise ValueError(message or f"Repository is {status}; refusing to create")
+            elif status == "absent":
+                created, error = create(record, passphrase, storage)
+                if not created:
+                    raise ValueError(error or "Repository creation failed")
+                status, unique_id, message = probe(record, passphrase, storage)
+                if status != "present":
+                    raise ValueError(message or "Created repository could not be verified")
+        repo_id = record.id or uuid4().hex[:12]
+        passphrase_ref = f"backer/repo/{repo_id}/passphrase"
+        storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
+        backend = keystore.put(passphrase_ref, passphrase)
+        if storage_ref:
+            import json
+
+            keystore.put(
+                storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False
+            )
+        saved = record.model_copy(
+            update={
+                "id": repo_id,
+                "name": name,
+                "unique_id": unique_id,
+                "added_at": datetime.now(UTC).isoformat(),
+                "last_check_status": "present",
+                "last_check_at": datetime.now(UTC).isoformat(),
+                "passphrase_ref": passphrase_ref,
+                "storage_password_ref": storage_ref,
+            }
+        )
+        config.repositories[repo_id] = saved
+        config.save(config_path)
+        return repo_id, backend
+    finally:
+        if smb_manager and smb_session_created:
+            smb_manager.disconnect_serverless(record.server or "", record.share or "")
 
 
 def rescope_secrets_for_system(config: BackerConfig) -> None:

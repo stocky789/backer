@@ -162,7 +162,7 @@ class BackerAgent:
                             update={"client_secret": "", "client_secret_ref": secret_ref}
                         )
                         config.save(config_path)
-                except OSError:
+                except Exception:
                     pass
             return cls(config.server.server_url, config.server.client_id, secret, config_path)
         legacy_path = get_config_dir() / "agent.yaml"

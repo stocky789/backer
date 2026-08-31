@@ -249,6 +249,21 @@ def test_from_config_preserves_inline_secret_when_keystore_migration_fails(monke
     assert BackerConfig.load(tmp_path / "config.yaml").server.client_secret == "secret"
 
 
+def test_from_config_preserves_inline_secret_when_keystore_raises_runtime_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    BackerConfig(agent_id="agent-1", server=_server()).save(tmp_path / "config.yaml")
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("locked")
+
+    monkeypatch.setattr("backer.core.keystore.put", fail)
+
+    assert BackerAgent.from_config().client_secret == "secret"
+    saved = BackerConfig.load(tmp_path / "config.yaml")
+    assert saved.server.client_secret == "secret"
+    assert saved.server.client_secret_ref is None
+
+
 def test_from_config_falls_back_to_agent_yaml(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     (tmp_path / "agent.yaml").write_text("server_url: https://agent\nclient_id: agent-1\nclient_secret: secret\n")
