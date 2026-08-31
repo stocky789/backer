@@ -127,12 +127,22 @@ def test_sanitize_removes_colon_and_slash_inline_suffix() -> None:
     assert "def/ghi" not in module.sanitize(":smb,pass=abc:def/ghi")
 
 
-def test_arm_d_records_unc_baseline_and_failure_observations(tmp_path: Path) -> None:
+def test_arm_d_runs_controlled_unc_baseline_and_records_ratio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _spike_module()
 
     assert module is not None
     record: dict[str, object] = {"elapsed_ms": {}, "repository_size": None}
     assert hasattr(module, "record_unc_baseline")
-    module.record_unc_baseline(record, "nas", "share", tmp_path, lambda *_args, **_kwargs: None)
-    assert "unc_snapshot_create" in record["elapsed_ms"]
-    assert "failure_observations" in record
+    monkeypatch.setenv("SPIKE_SMB_COMPARISON_PATH", str(tmp_path))
+
+    def runner(argv, *_args, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, '[{"id":"snap"}]' if "list" in argv else "", "")
+
+    record["elapsed_ms"] = {"snapshot_create": 10}
+    module.record_unc_baseline(record, "nas", "share", tmp_path, runner)
+    assert "unc_ratio" in record
+    assert record["unc_within_1_25x"] is False
+    assert record["failure_observations"] == {
+        "rclone_startup_timeout": "not observed",
+        "connection_drop": "not observed",
+    }

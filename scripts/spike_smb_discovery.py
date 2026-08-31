@@ -168,17 +168,49 @@ def _create_workload(root: Path, workload_bytes: int, file_count: int) -> Path:
 
 def record_unc_baseline(record: dict[str, Any], server: str, share: str, workspace: Path, _runner: Any) -> None:
     """Record the mount/UNC comparator or the reason it cannot be run safely."""
-    started = time.perf_counter()
-    comparison = Path(f"//{server}/{share}")
-    record["elapsed_ms"]["unc_snapshot_create"] = round((time.perf_counter() - started) * 1000)
-    record["failure_observations"] = {
-        "rclone_startup_timeout": "unreachable: requires a reachable rclone SMB endpoint",
-        "connection_drop": "unreachable: requires a controllable SMB endpoint",
-    }
-    if not comparison.exists():
+    supplied = os.environ.get("SPIKE_SMB_COMPARISON_PATH")
+    if not supplied:
         record["unc_baseline"] = "unreachable: mounted/UNC comparison path is unavailable"
+        record["failure_observations"] = {
+            "rclone_startup_timeout": "unreachable: no controlled comparison endpoint",
+            "connection_drop": "unreachable: no controlled comparison endpoint",
+        }
         return
-    record["unc_baseline"] = "unreachable: no dedicated comparison repository was provisioned"
+    comparison = Path(supplied)
+    if not comparison.is_dir():
+        record["unc_baseline"] = "unreachable: controlled comparison path is unavailable"
+        return
+    source = workspace / "source with spaces" / "non-ascii-ä"
+    baseline = comparison / "backer-spike-unc-baseline"
+    _timed(
+        record,
+        "unc_repository_create",
+        _runner,
+        ["kopia", "repository", "create", "filesystem", "--path", str(baseline)],
+    )
+    _timed(
+        record,
+        "unc_repository_connect",
+        _runner,
+        ["kopia", "repository", "connect", "filesystem", "--path", str(baseline)],
+    )
+    _timed(record, "unc_snapshot_create", _runner, ["kopia", "snapshot", "create", str(source)])
+    listing = _timed(record, "unc_snapshot_list", _runner, ["kopia", "snapshot", "list", "--json", "--all"])
+    snapshot_id = json.loads(listing.stdout or "[]")[0]["id"]
+    _timed(
+        record,
+        "unc_snapshot_restore",
+        _runner,
+        ["kopia", "snapshot", "restore", snapshot_id, str(workspace / "unc-restore")],
+    )
+    _timed(
+        record, "unc_snapshot_verify", _runner, ["kopia", "snapshot", "verify", "--verify-files-percent=5", snapshot_id]
+    )
+    _timed(record, "unc_snapshot_prune", _runner, ["kopia", "snapshot", "expire", "--delete", str(source)])
+    record["unc_ratio"] = record["elapsed_ms"]["snapshot_create"] / max(record["elapsed_ms"]["unc_snapshot_create"], 1)
+    record["unc_within_1_25x"] = record["unc_ratio"] <= 1.25
+    record["unc_baseline"] = "completed"
+    record["failure_observations"] = {"rclone_startup_timeout": "not observed", "connection_drop": "not observed"}
 
 
 def _timed(record: dict[str, Any], operation: str, runner: Any, argv: list[str], *args: Any, **kwargs: Any) -> Any:
@@ -273,7 +305,13 @@ def run_arm_d_workload(
         env=environment,
     )
     record["repository_size"] = config_path.stat().st_size if config_path.exists() else None
-    record_unc_baseline(record, server, share, workspace, runner)
+    record_unc_baseline(
+        record,
+        server,
+        share,
+        workspace,
+        lambda argv: runner(argv, password, obscured_password, env=environment),
+    )
 
 
 def _arm_d(record: dict[str, Any], server: str, share: str | None, username: str | None, password: str | None) -> None:
