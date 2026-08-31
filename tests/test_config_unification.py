@@ -101,6 +101,18 @@ def test_repository_options_reject_nested_inline_secrets() -> None:
         })
 
 
+@pytest.mark.parametrize("secret_key", ["credential", "private_key"])
+def test_repository_options_cannot_round_trip_arbitrary_secret_values(secret_key: str, tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent_id: agent\nrepositories:\n  repo:\n    name: Repo\n    type: local\n"
+        f"    repository_options: {{{secret_key}: plaintext}}\njobs: {{}}\n"
+    )
+
+    with pytest.raises(ValidationError):
+        BackerConfig.load(path)
+
+
 def test_invalid_model_config_names_the_resolved_path(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("agent_id: agent\nrepositories: {}\njobs: {}\nfuture: true\n")

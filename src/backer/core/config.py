@@ -4,11 +4,10 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backer.core.paths import get_config_dir
 
@@ -61,27 +60,6 @@ class RepositoryConfig(ConfigModel):
     scope: str | None = None
     storage_password_ref: str | None = None
     passphrase_ref: str | None = None
-    repository_options: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("repository_options")
-    @classmethod
-    def reject_inline_secrets(cls, options: dict[str, Any]) -> dict[str, Any]:
-        def check(value: Any) -> None:
-            if isinstance(value, list):
-                for item in value:
-                    check(item)
-                return
-            if not isinstance(value, dict):
-                return
-            for key, item in value.items():
-                lowered = str(key).lower()
-                if any(part in lowered for part in ("password", "passphrase", "secret", "token", "access_key")):
-                    if not lowered.endswith("_ref"):
-                        raise ValueError(f"Repository secret {key!r} must use a *_ref key")
-                check(item)
-
-        check(options)
-        return options
 
 
 class JobConfig(ConfigModel):
