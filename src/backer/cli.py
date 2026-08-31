@@ -165,12 +165,14 @@ INIT_STEPS = (
 @click.option("--share")
 @click.option("--username")
 @click.option("--password-stdin", is_flag=True)
+@click.option("--password-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--bucket")
 @click.option("--prefix")
 @click.option("--endpoint")
 @click.option("--region")
 @click.option("--access-key-id")
 @click.option("--secret-key-stdin", is_flag=True)
+@click.option("--secret-key-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--source", multiple=True)
 @click.option("--exclude", multiple=True)
 @click.option("--schedule")
@@ -187,6 +189,8 @@ INIT_STEPS = (
 @click.option("--generate-passphrase", is_flag=True)
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.option("--print-passphrase", is_flag=True)
+@click.option("--update-password", is_flag=True)
+@click.option("--update-passphrase", is_flag=True)
 @click.option("--install", is_flag=True)
 @click.pass_context
 def init(
@@ -197,12 +201,14 @@ def init(
     share: str | None,
     username: str | None,
     password_stdin: bool,
+    password_file: Path | None,
     bucket: str | None,
     prefix: str | None,
     endpoint: str | None,
     region: str | None,
     access_key_id: str | None,
     secret_key_stdin: bool,
+    secret_key_file: Path | None,
     source: tuple[str, ...],
     exclude: tuple[str, ...],
     schedule: str | None,
@@ -219,6 +225,8 @@ def init(
     generate_passphrase: bool,
     passphrase_out: Path | None,
     print_passphrase: bool,
+    update_password: bool,
+    update_passphrase: bool,
     install: bool,
 ) -> None:
     """Start serverless setup; `setup` downloads Kopia and `agent setup` enrolls a server agent."""
@@ -231,7 +239,17 @@ def init(
             for flag, value in (("--host", host), ("--share", share), ("--path", path), ("--username", username))
             if not value
         )
-        missing.append("--password-stdin")
+        if not (password_stdin or password_file or os.environ.get("BACKER_SMB_PASSWORD")):
+            missing.append("--password-stdin or --password-file")
+    elif repository_type == "s3":
+        missing.extend(
+            flag
+            for flag, value in (("--bucket", bucket), ("--prefix", prefix), ("--endpoint", endpoint),
+                                ("--region", region), ("--access-key-id", access_key_id))
+            if not value
+        )
+        if not (secret_key_stdin or secret_key_file or os.environ.get("BACKER_S3_SECRET_KEY")):
+            missing.append("--secret-key-stdin or --secret-key-file")
     elif not path:
         missing.append("--path")
     if not source:
@@ -245,8 +263,6 @@ def init(
             _missing_flags("init", ["--passphrase-stdin or --generate-passphrase"])
     if _interactive():
         raise click.ClickException("Interactive setup is provided by the Phase 5b wizard")
-    if repository_type != "local":
-        raise click.ClickException("Non-interactive SMB and S3 setup is provided by their repo add flags")
     ctx.invoke(
         repo_add,
         name=repo_name,
@@ -254,28 +270,28 @@ def init(
         initialize=True,
         repository_type=repository_type,
         path=path,
-        server=None,
-        share=None,
-        username=None,
+        server=host,
+        share=share,
+        username=username,
         domain=None,
-        bucket=None,
-        prefix=None,
-        endpoint=None,
-        region=None,
+        bucket=bucket,
+        prefix=prefix,
+        endpoint=endpoint,
+        region=region,
         path_style=False,
-        storage_stdin=False,
-        storage_file=None,
-        access_key_id=None,
-        secret_key_stdin=False,
-        secret_key_file=None,
+        storage_stdin=password_stdin,
+        storage_file=password_file,
+        access_key_id=access_key_id,
+        secret_key_stdin=secret_key_stdin,
+        secret_key_file=secret_key_file,
         adopt=False,
         passphrase_stdin=passphrase_stdin,
         passphrase_file=passphrase_file,
         generate_passphrase=generate_passphrase,
         passphrase_out=passphrase_out,
         print_passphrase=print_passphrase,
-        update_password=False,
-        update_passphrase=False,
+        update_password=update_password,
+        update_passphrase=update_passphrase,
         headless=True,
         yes=True,
     )
@@ -284,20 +300,25 @@ def init(
         name=job_name,
         legacy_name=None,
         source=source,
+        exclude=exclude,
         dest=None,
         schedule=schedule,
         daily=None,
         no_schedule=no_schedule,
         repository_id=repo_name,
-        keep_last=None,
-        keep_daily=None,
-        keep_weekly=None,
-        keep_monthly=None,
-        keep_yearly=None,
+        keep_last=keep_last,
+        keep_daily=keep_daily,
+        keep_weekly=keep_weekly,
+        keep_monthly=keep_monthly,
+        keep_yearly=keep_yearly,
         server=None,
         username=None,
         password=None,
     )
+    if install:
+        from backer.client.windows_service import is_windows
+
+        ctx.invoke(agent_install, mode="local", headless=False, method="service" if is_windows() else "systemd")
 
 
 @main.command()
@@ -2163,6 +2184,7 @@ def job_list(
 @click.argument("name", required=False)
 @click.option("--name", "legacy_name", help="Job name")
 @click.option("--source", "-s", required=True, multiple=True, help="Source path")
+@click.option("--exclude", multiple=True)
 @click.option("--dest", "-d", help="Destination path")
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
 @click.option("--daily")
@@ -2182,6 +2204,7 @@ def job_create(
     name: str | None,
     legacy_name: str | None,
     source: tuple[str, ...],
+    exclude: tuple[str, ...],
     dest: str | None,
     schedule: str | None,
     daily: str | None,
@@ -2239,7 +2262,7 @@ def job_create(
         )
         config.jobs[name] = JobConfig(
             repository=repository_id,
-            source=SourceConfig(path=source_path),
+            source=SourceConfig(path=source_path, excludes=list(exclude)),
             schedule=ScheduleConfig(cron=schedule) if schedule and not no_schedule else None,
             retention=retention if any(retention.model_dump().values()) else None,
         )

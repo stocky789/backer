@@ -107,3 +107,29 @@ def test_repo_discover_reads_password_only_from_stdin_or_environment():
     )
     assert result.exit_code == 0
     assert "not-in-output" not in result.output
+
+
+def test_init_forwards_local_parameters_to_shared_commands(monkeypatch, tmp_path):
+    calls = []
+
+    def repo_add(**kwargs):
+        calls.append(("repo", kwargs))
+
+    def job_create(**kwargs):
+        calls.append(("job", kwargs))
+
+    monkeypatch.setattr("backer.cli.repo_add", repo_add)
+    monkeypatch.setattr("backer.cli.job_create", job_create)
+    result = CliRunner().invoke(
+        main,
+        [
+            "init", "--type", "local", "--path", str(tmp_path), "--source", str(tmp_path), "--no-schedule",
+            "--passphrase-stdin", "--repo-name", "r1", "--job-name", "j1", "--exclude", "*.tmp",
+        ],
+        input="passphrase\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0][1]["name"] == "r1"
+    assert calls[0][1]["path"] == str(tmp_path)
+    assert calls[1][1]["repository_id"] == "r1"
+    assert calls[1][1]["exclude"] == ("*.tmp",)
