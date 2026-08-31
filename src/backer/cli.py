@@ -667,7 +667,7 @@ def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: b
     from backer.core.paths import get_config_dir
     from backer.core.repo_metadata import RepositoryMetadata
     from backer.serverless.repositories import _destination, probe
-    from backer.serverless.sidecar import adopt_jobs
+    from backer.serverless.sidecar import adopt_documents, adopt_jobs
 
     config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
     config = load_config(config_path)
@@ -684,18 +684,52 @@ def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: b
     status, _, message = probe(record, passphrase, storage)
     if status != "present":
         raise click.ClickException(message or f"Repository is {status}; adoption did not change local config")
+    smb_manager = None
+    smb_created = False
+    if record.type == "smb":
+        from backer.core.mounts import SMBConnectionManager
+
+        smb_manager = SMBConnectionManager()
+        smb_created = smb_manager._find_existing_connection(record.server or "") is None
+        if not smb_manager.connect_serverless(
+            record.server or "", record.share or "", record.username or "", raw_storage or "", domain=record.domain
+        ):
+            raise click.ClickException("Could not connect to SMB repository for adoption")
     root = Path(_destination(record))
-    discovery = RepositoryMetadata(root, record.type).discover_all()
-    available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
+    documents = None
+    if record.type == "s3":
+        from backer.serverless.s3_sidecar import S3Sidecar
+
+        if not storage:
+            raise click.ClickException(f"Repository '{record.name}' storage credential is unavailable")
+        sidecar = S3Sidecar(record.model_dump(exclude_none=True), storage)
+        documents = {}
+        for key in sidecar.list(".backer/jobs/"):
+            if key.endswith("/config.json"):
+                document = sidecar.get(key.removeprefix(f"{record.prefix.strip('/')}/"))
+                if document:
+                    payload = json.loads(document)
+                    documents[payload["job_name"]] = payload
+        available = list(documents)
+    else:
+        discovery = RepositoryMetadata(root, record.type).discover_all()
+        available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
     selected = available if all_jobs else list(jobs)
     if not selected:
         raise click.ClickException("Choose --job NAME or --all")
     mapping = dict(item.split("=", 1) for item in sources if "=" in item)
     try:
-        adopted = adopt_jobs(config, repository_id, root, selected, source_paths=mapping)
+        adopted = (
+            adopt_documents(config, repository_id, documents, selected, source_paths=mapping)
+            if documents is not None
+            else adopt_jobs(config, repository_id, root, selected, source_paths=mapping)
+        )
         config.save(config_path)
     except ValueError as error:
         raise click.ClickException(str(error)) from error
+    finally:
+        if smb_manager and smb_created:
+            smb_manager.disconnect_serverless(record.server or "", record.share or "")
     for job_name in adopted:
         console.print(f"Adopted {job_name}")
 

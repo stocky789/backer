@@ -106,3 +106,33 @@ def adopt_jobs(
         )
         adopted.append(name)
     return adopted
+
+
+def adopt_documents(
+    config: BackerConfig,
+    repository_id: str,
+    documents: dict[str, dict[str, Any]],
+    names: list[str],
+    *,
+    source_paths: dict[str, str] | None = None,
+) -> list[str]:
+    """Import already-read sidecar documents without writing them back."""
+    source_paths = source_paths or {}
+    adopted: list[str] = []
+    for name in names:
+        document = documents.get(name)
+        if not document:
+            raise ValueError(f"No sidecar job named '{name}'")
+        details = document.get("config", {})
+        source = source_paths.get(name, details.get("source_path"))
+        if not source:
+            raise ValueError(f"Job '{name}' has no source path")
+        config.jobs[name] = JobConfig(
+            repository=repository_id,
+            source=SourceConfig(path=source, excludes=details.get("excludes", [])),
+            schedule=details.get("schedule"),
+            retention=details.get("retention"),
+            enabled=details.get("enabled", True),
+        )
+        adopted.append(name)
+    return adopted

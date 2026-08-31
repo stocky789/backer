@@ -198,6 +198,15 @@ class SMBConnectionManager:
         )
         return connect().returncode == 0
 
+    def disconnect_serverless(self, server: str, share: str) -> None:
+        """Remove only the non-persistent session this serverless invocation created."""
+        subprocess.run(
+            ["net", "use", f"\\\\{server}\\{share}", "/delete", "/y"],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+
     def _find_server_conflict(self, server: str, username: str | None) -> str | None:
         """Check if there's a conflicting connection to this server.
 

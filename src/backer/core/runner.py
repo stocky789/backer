@@ -473,6 +473,34 @@ def _write_repo_metadata(
             job.get("run_id", "unknown"),
             job.get("source_path", ""),
         )
+        if job.get("serverless") and job.get("repository_hint", {}).get("type") == "s3":
+            import json
+
+            from backer.serverless.s3_sidecar import S3Sidecar
+
+            credentials = job.get("repository_options", {}).get("s3", {})
+            sidecar = S3Sidecar(job["repository_hint"], credentials)
+            job_key = f".backer/jobs/{get_job_subfolder(job_name)}/config.json"
+            existing = sidecar.get(job_key)
+            current = json.loads(existing) if existing else {}
+            now = finished_at.astimezone().isoformat()
+            document = {
+                "schema_version": "2",
+                "job_name": job_name,
+                "owner_agent_id": agent_id,
+                "created_at": current.get("created_at", now),
+                "updated_at": now,
+                "config": {
+                    "source_path": source_path,
+                    "source_hostname": socket.gethostname(),
+                    "source_platform": sys.platform,
+                    "kopia_source": f"{getpass.getuser()}@{socket.gethostname()}:{source_path}",
+                    "subfolder": get_job_subfolder(job_name),
+                    "repository_hint": job["repository_hint"],
+                },
+            }
+            sidecar.put_atomic(job_key, json.dumps(document).encode())
+            return
         if sys.platform != "win32" and mounts.is_smb_path(dest_path):
             server, share, subpath = mounts.parse_smb_path(dest_path)
             print(f"[METADATA] Mounting SMB share //{server}/{share} for metadata")
