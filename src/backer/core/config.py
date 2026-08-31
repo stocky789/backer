@@ -44,6 +44,10 @@ class ClientConfig(ConfigModel):
     heartbeat_interval: int = 60
 
 
+class RepositoryOptions(ConfigModel):
+    """Reserved typed public repository settings."""
+
+
 class RepositoryConfig(ConfigModel):
     name: str
     type: str
@@ -60,6 +64,7 @@ class RepositoryConfig(ConfigModel):
     scope: str | None = None
     storage_password_ref: str | None = None
     passphrase_ref: str | None = None
+    repository_options: RepositoryOptions | None = None
 
 
 class JobConfig(ConfigModel):

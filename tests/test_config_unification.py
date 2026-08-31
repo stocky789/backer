@@ -113,6 +113,25 @@ def test_repository_options_cannot_round_trip_arbitrary_secret_values(secret_key
         BackerConfig.load(path)
 
 
+def test_repository_options_accepts_empty_mapping() -> None:
+    config = RepositoryConfig.model_validate({
+        "name": "repo",
+        "type": "local",
+        "repository_options": {},
+    })
+
+    assert config.repository_options.model_dump() == {}
+
+
+def test_repository_options_rejects_arbitrary_keys() -> None:
+    with pytest.raises(ValidationError):
+        RepositoryConfig.model_validate({
+            "name": "repo",
+            "type": "local",
+            "repository_options": {"credential": "plaintext"},
+        })
+
+
 def test_invalid_model_config_names_the_resolved_path(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("agent_id: agent\nrepositories: {}\njobs: {}\nfuture: true\n")
