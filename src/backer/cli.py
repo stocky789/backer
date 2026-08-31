@@ -14,6 +14,17 @@ from backer.backends.base import BackupDestination, BackupSource
 console = Console()
 
 
+def _stale_cutoff(cron: str, now) -> object:
+    """Return the age boundary after two complete schedule intervals."""
+    from croniter import croniter
+
+    iterator = croniter(cron, now)
+    previous = iterator.get_prev(type(now))
+    prior = iterator.get_prev(type(now))
+    following = croniter(cron, previous).get_next(type(now))
+    return now - ((following - previous) + (previous - prior))
+
+
 def _is_server_data_dir(path: Path) -> bool:
     """Keep a colocated server database when uninstalling the agent."""
     return (path / "backer.db").exists()
@@ -1720,8 +1731,6 @@ def status(exit_code: bool) -> None:
     """Show local serverless backup status."""
     from datetime import UTC, datetime
 
-    from croniter import croniter
-
     from backer.core.config import load_config
     from backer.core.paths import get_config_dir, get_data_dir
     from backer.serverless.store import read_runs
@@ -1736,9 +1745,7 @@ def status(exit_code: bool) -> None:
         latest = attempts[0] if attempts else None
         failed = latest is None or latest.status.value != "success"
         if latest and configured.schedule and configured.schedule.cron:
-            iterator = croniter(configured.schedule.cron, now)
-            stale_before = iterator.get_prev(datetime)
-            stale_before = croniter(configured.schedule.cron, stale_before).get_prev(datetime)
+            stale_before = _stale_cutoff(configured.schedule.cron, now)
             failed = failed or latest.started_at.astimezone(UTC) < stale_before.astimezone(UTC)
         console.print(f"{name}: {'failed' if failed else 'success'}")
         unhealthy = unhealthy or failed

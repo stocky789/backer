@@ -232,3 +232,19 @@ def test_progress_is_local_and_removed_after_preflight_failure(monkeypatch, tmp_
     assert not run_local_job(config, "nightly")["success"]
     assert not list((tmp_path / "progress").glob("*.json"))
     assert list((tmp_path / "logs").glob("*.log"))
+
+
+def test_stale_cutoff_counts_two_complete_daily_intervals() -> None:
+    from backer.cli import _stale_cutoff
+
+    now = datetime(2026, 9, 1, 15, tzinfo=UTC)
+
+    assert _stale_cutoff("0 2 * * *", now) == datetime(2026, 8, 30, 15, tzinfo=UTC)
+
+
+def test_stale_cutoff_uses_uneven_cron_intervals() -> None:
+    from backer.cli import _stale_cutoff
+
+    now = datetime(2026, 3, 20, tzinfo=UTC)
+
+    assert _stale_cutoff("0 0 1,15 * *", now) == datetime(2026, 2, 17, tzinfo=UTC)
