@@ -1605,21 +1605,55 @@ def job_list(server: str | None, username: str | None, password: str | None) -> 
 @job.command("create")
 @click.option("--name", "-n", required=True, help="Job name")
 @click.option("--source", "-s", required=True, help="Source path")
-@click.option("--dest", "-d", required=True, help="Destination path")
+@click.option("--dest", "-d", help="Destination path")
 @click.option("--schedule", help="Cron schedule (e.g., '0 2 * * *')")
+@click.option("--repository", "repository_id", help="Local serverless repository id")
+@click.option("--keep-last", type=click.IntRange(min=1))
+@click.option("--keep-daily", type=click.IntRange(min=1))
+@click.option("--keep-weekly", type=click.IntRange(min=1))
+@click.option("--keep-monthly", type=click.IntRange(min=1))
+@click.option("--keep-yearly", type=click.IntRange(min=1))
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
 @click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
 def job_create(
     name: str,
     source: str,
-    dest: str,
+    dest: str | None,
     schedule: str | None,
+    repository_id: str | None,
+    keep_last: int | None,
+    keep_daily: int | None,
+    keep_weekly: int | None,
+    keep_monthly: int | None,
+    keep_yearly: int | None,
     server: str | None,
     username: str | None,
     password: str | None,
 ) -> None:
     """Create a new backup job."""
+    if repository_id:
+        from backer.core.config import JobConfig, RetentionConfig, ScheduleConfig, SourceConfig, load_config
+        from backer.core.paths import get_config_dir
+
+        path = get_config_dir() / "config.yaml"
+        config = load_config(path)
+        if repository_id not in config.repositories:
+            raise click.ClickException(f"Repository '{repository_id}' is not configured")
+        owner = next((other for other, item in config.jobs.items()
+                      if item.repository == repository_id and item.source.path == source), None)
+        if owner:
+            raise click.ClickException(f"Source '{source}' is already owned by job '{owner}'")
+        retention = RetentionConfig(keep_last=keep_last, keep_daily=keep_daily, keep_weekly=keep_weekly,
+                                    keep_monthly=keep_monthly, keep_yearly=keep_yearly)
+        config.jobs[name] = JobConfig(repository=repository_id, source=SourceConfig(path=source),
+                                      schedule=ScheduleConfig(cron=schedule) if schedule else None,
+                                      retention=retention if any(retention.model_dump().values()) else None)
+        config.save(path)
+        console.print(f"Job '{name}' created")
+        return
+    if not dest:
+        raise click.UsageError("--dest is required for server-managed jobs")
     import httpx
 
     server_url = server or "http://localhost:8420"
@@ -1652,6 +1686,66 @@ def job_create(
         raise SystemExit(1)
 
 
+@job.command("history")
+@click.argument("name")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(min=1))
+def job_history(name: str, limit: int) -> None:
+    """Show local serverless attempt history."""
+    from backer.core.paths import get_data_dir
+    from backer.serverless.store import read_runs
+
+    for attempt in read_runs(get_data_dir(), name, limit):
+        console.print(f"{attempt.started_at.isoformat()} {attempt.status.value} {attempt.error_message or ''}".rstrip())
+
+
+@main.command("prune")
+@click.argument("name")
+@click.option("--apply", is_flag=True, help="Delete the snapshots shown by the preview")
+def prune(name: str, apply: bool) -> None:
+    """Preview a job's retention; pass --apply to delete."""
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+    from backer.serverless.retention import prune_job
+
+    try:
+        count, _ = prune_job(load_config(get_config_dir() / "config.yaml"), name, apply=apply)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    console.print(f"{count} snapshot(s) {'deleted' if apply else 'would be deleted'}")
+
+
+@main.command("status")
+@click.option("--exit-code", is_flag=True, help="Exit non-zero for failed or stale local jobs")
+def status(exit_code: bool) -> None:
+    """Show local serverless backup status."""
+    from datetime import UTC, datetime
+
+    from croniter import croniter
+
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir, get_data_dir
+    from backer.serverless.store import read_runs
+
+    config = load_config(get_config_dir() / "config.yaml")
+    unhealthy = False
+    now = datetime.now(UTC)
+    for name, configured in config.jobs.items():
+        if not configured.enabled:
+            continue
+        attempts = read_runs(get_data_dir(), name, 1)
+        latest = attempts[0] if attempts else None
+        failed = latest is None or latest.status.value != "success"
+        if latest and configured.schedule and configured.schedule.cron:
+            iterator = croniter(configured.schedule.cron, now)
+            stale_before = iterator.get_prev(datetime)
+            stale_before = croniter(configured.schedule.cron, stale_before).get_prev(datetime)
+            failed = failed or latest.started_at.astimezone(UTC) < stale_before.astimezone(UTC)
+        console.print(f"{name}: {'failed' if failed else 'success'}")
+        unhealthy = unhealthy or failed
+    if exit_code and unhealthy:
+        raise click.ClickException("One or more backups need attention")
+
+
 @job.command("run")
 @click.argument("name", required=False)
 @click.option("--due", is_flag=True, help="Run locally due serverless jobs")
@@ -1673,7 +1767,9 @@ def job_run(
         try:
             system_run = os.environ.get("BACKER_RUN_AS_SYSTEM") == "1"
             reports = (
-                run_due_jobs(local_config, run_as_system=system_run) if due else [run_local_job(local_config, name)]
+                run_due_jobs(local_config, run_as_system=system_run)
+                if due
+                else [run_local_job(local_config, name, run_as_system=system_run)]
             )
         except ValueError as error:
             raise click.ClickException(str(error)) from error

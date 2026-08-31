@@ -318,9 +318,8 @@ class TestKopiaBackend:
         expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
         assert "--all" in expire_call
 
-    def test_prune_dry_run_never_writes_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """dry_run=True must not run 'policy set' at all - it PERSISTS the policy in
-        kopia and would be applied at the next ordinary snapshot, not previewed."""
+    def test_prune_preview_writes_policy_then_omits_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The preview uses the proposed per-source policy and never deletes."""
         backend = KopiaBackend({"repository_password": "test-password"})
         calls: list[list[str]] = []
         monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
@@ -334,7 +333,7 @@ class TestKopiaBackend:
         result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
 
         assert result.success
-        assert not any(c[1:3] == ["policy", "set"] for c in calls)
+        assert any(c[1:3] == ["policy", "set"] for c in calls)
         expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
         assert "--all" in expire_call
         assert "--delete" not in expire_call

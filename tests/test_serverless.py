@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from backer.backends.base import BackupDestination
 from backer.backends.kopia import KopiaBackend
 from backer.cli import main
+from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, RetentionConfig, SourceConfig
 
 
 def test_probe_distinguishes_absent_unreachable_and_wrong_passphrase(monkeypatch) -> None:
@@ -138,3 +139,61 @@ def test_repository_config_keeps_s3_keys_out_of_config() -> None:
         id="repo", name="Repo", type="s3", bucket="bucket", prefix="", endpoint="https://s3.example", region="us-east-1"
     )
     assert "access_key_id" not in record.model_dump(exclude_none=True)
+
+
+def test_preflight_failure_writes_one_local_attempt(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless.runs import run_local_job
+    from backer.serverless.store import read_runs
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    config = BackerConfig(
+        agent_id="agent-one",
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="repo")},
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))},
+    )
+    report = run_local_job(config, "nightly")
+    attempts = read_runs(tmp_path, "nightly", 2)
+
+    assert not report["success"]
+    assert len(attempts) == 1
+    assert attempts[0].error_stage == "keystore"
+    assert (tmp_path / "last_attempt" / "nightly.json").exists()
+
+
+def test_preview_and_apply_differ_only_by_delete(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless.retention import prune_job
+
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="repo", passphrase_ref="pass")},
+        jobs={
+            "nightly": JobConfig(
+                repository="repo", source=SourceConfig(path="/data"), retention=RetentionConfig(keep_last=1)
+            )
+        },
+    )
+    monkeypatch.setattr("backer.serverless.retention.keystore.get", lambda *_args, **_kwargs: "passphrase")
+    calls: list[bool] = []
+
+    class Backend:
+        def prune(self, *_args, **kwargs):
+            calls.append(kwargs["dry_run"])
+            return type("Result", (), {"success": True, "output": "2 snapshot(s) of source would be deleted"})()
+
+    monkeypatch.setattr("backer.serverless.retention._backend", lambda *_: Backend())
+    assert prune_job(config, "nightly") == (2, "2 snapshot(s) of source would be deleted")
+    prune_job(config, "nightly", apply=True)
+    assert calls == [True, False]
+
+
+def test_local_job_create_refuses_duplicate_source(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    config = BackerConfig(repositories={"repo": RepositoryConfig(name="Repo", type="local", path="repo")},
+                          jobs={"first": JobConfig(repository="repo", source=SourceConfig(path="/data"))})
+    config.save(tmp_path / "config.yaml")
+
+    result = CliRunner().invoke(
+        main, ["job", "create", "--name", "second", "--source", "/data", "--repository", "repo"]
+    )
+
+    assert result.exit_code != 0
+    assert "first" in result.output

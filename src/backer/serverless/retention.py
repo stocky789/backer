@@ -1,0 +1,44 @@
+"""Serverless retention is an explicit, per-source operation."""
+
+from __future__ import annotations
+
+import json
+import re
+
+from backer.backends.base import BackupDestination
+from backer.core import keystore
+from backer.core.config import BackerConfig
+from backer.serverless.repositories import _backend, _destination
+
+
+def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
+    job = config.jobs.get(name)
+    if not job or not job.retention:
+        raise ValueError(f"Job '{name}' has no retention policy configured")
+    repository = config.repositories.get(job.repository)
+    if not repository:
+        raise ValueError(f"Job '{name}' names an unknown repository")
+    passphrase = keystore.get(repository.passphrase_ref or "", machine_scope=repository.scope == "machine")
+    if not passphrase:
+        raise ValueError(f"Repository '{repository.name}' passphrase is unavailable")
+    storage = None
+    if repository.type == "s3":
+        raw = keystore.get(repository.storage_password_ref or "", machine_scope=repository.scope == "machine")
+        if not raw:
+            raise ValueError(f"Repository '{repository.name}' storage credential is unavailable")
+        storage = json.loads(raw)
+    policy = job.retention
+    result = _backend(repository, passphrase, storage).prune(
+        BackupDestination(_destination(repository)),
+        keep_last=policy.keep_last,
+        keep_daily=policy.keep_daily,
+        keep_weekly=policy.keep_weekly,
+        keep_monthly=policy.keep_monthly,
+        keep_yearly=policy.keep_yearly,
+        dry_run=not apply,
+        source_path=job.source.path,
+    )
+    if not result.success:
+        raise ValueError("\n".join(result.errors) or "Retention failed")
+    match = re.search(r"(\d+) snapshot\(s\).*would be deleted", result.output, re.I)
+    return int(match.group(1)) if match else 0, result.output

@@ -26,6 +26,8 @@ class JobRun:
     result: BackendResult | None = None
     error_message: str | None = None
     client_id: str | None = None
+    repository_id: str | None = None
+    error_stage: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +38,8 @@ class JobRun:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "error_message": self.error_message,
             "client_id": self.client_id,
+            "repository_id": self.repository_id,
+            "error_stage": self.error_stage,
             "result": {
                 "success": self.result.success,
                 "bytes_transferred": self.result.bytes_transferred,
@@ -50,4 +54,5 @@ class JobRun:
         return cls(job_name=data["job_name"], run_id=data["run_id"], status=JobStatus(data["status"]),
                    started_at=datetime.fromisoformat(data["started_at"]),
                    finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
-                   error_message=data.get("error_message"), client_id=data.get("client_id"))
+                   error_message=data.get("error_message"), client_id=data.get("client_id"),
+                   repository_id=data.get("repository_id"), error_stage=data.get("error_stage"))

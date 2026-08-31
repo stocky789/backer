@@ -8,9 +8,12 @@ from typing import Any
 
 from backer.core import keystore
 from backer.core.config import BackerConfig
+from backer.core.job import JobRun, JobStatus
 from backer.core.paths import get_data_dir
 from backer.core.runner import run_backup
+from backer.serverless.repositories import probe
 from backer.serverless.schedule import due_jobs, run_lock
+from backer.serverless.store import append_run
 
 
 def _destination(repository: Any) -> str:
@@ -24,32 +27,56 @@ def _destination(repository: Any) -> str:
 
 
 def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any]:
-    job = config.jobs.get(name)
-    if not job:
-        raise ValueError(f"Job '{name}' is not configured")
-    repository = config.repositories.get(job.repository)
-    if not repository:
-        raise ValueError(f"Job '{name}' names an unknown repository")
-    machine_scope = run_as_system or repository.scope == "machine"
-    passphrase = keystore.get(repository.passphrase_ref or "", machine_scope=machine_scope)
-    if not passphrase:
-        raise ValueError(f"Repository '{repository.name}' passphrase is unavailable")
-    options: dict[str, Any] = {"repository_password": passphrase}
-    if repository.type == "s3":
-        raw = keystore.get(repository.storage_password_ref or "", machine_scope=machine_scope)
-        if not raw:
-            raise ValueError(f"Repository '{repository.name}' storage credential is unavailable")
-        options["s3"] = {
-            **json.loads(raw),
-            "bucket": repository.bucket,
-            "prefix": repository.prefix or "",
-            "endpoint": repository.endpoint,
-            "region": repository.region,
-        }
-    smb_password = keystore.get(repository.storage_password_ref or "", machine_scope=machine_scope)
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}"
-    return run_backup(
-        {
+    started = datetime.now(UTC)
+    data_dir = get_data_dir()
+    report: dict[str, Any] = {"run_id": run_id, "job_name": name, "success": False, "errors": []}
+    stage = "prepare_destination"
+    repository_id = None
+    secrets: list[str] = []
+    try:
+        job = config.jobs.get(name)
+        if not job:
+            raise ValueError(f"Job '{name}' is not configured")
+        repository_id = job.repository
+        repository = config.repositories.get(job.repository)
+        if not repository:
+            raise ValueError(f"Job '{name}' names an unknown repository")
+        machine_scope = run_as_system or repository.scope == "machine"
+        stage = "keystore"
+        passphrase = keystore.get(repository.passphrase_ref or "", machine_scope=machine_scope)
+        if not passphrase:
+            raise ValueError(f"Repository '{repository.name}' passphrase is unavailable")
+        secrets.append(passphrase)
+        options: dict[str, Any] = {"repository_password": passphrase}
+        storage = None
+        if repository.type == "s3":
+            raw = keystore.get(repository.storage_password_ref or "", machine_scope=machine_scope)
+            if not raw:
+                raise ValueError(f"Repository '{repository.name}' storage credential is unavailable")
+            storage = json.loads(raw)
+            secrets.extend(str(value) for value in storage.values())
+            options["s3"] = {
+                **storage,
+                "bucket": repository.bucket,
+                "prefix": repository.prefix or "",
+                "endpoint": repository.endpoint,
+                "region": repository.region,
+            }
+        smb_password = (
+            keystore.get(repository.storage_password_ref, machine_scope=machine_scope)
+            if repository.storage_password_ref
+            else None
+        )
+        if smb_password:
+            secrets.append(smb_password)
+        stage = "connect"
+        status, unique_id, message = probe(repository, passphrase, storage)
+        if status != "present" or (repository.unique_id and unique_id != repository.unique_id):
+            stage = "prepare_destination" if status != "wrong_passphrase" else "connect"
+            raise ValueError(message or f"Repository is {status}; backup did not start")
+        stage = "backup"
+        report = run_backup({
             "serverless": True,
             "run_as_system": run_as_system,
             "run_id": run_id,
@@ -79,9 +106,22 @@ def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fals
                     "passphrase_ref",
                 }
             },
-        },
-        agent_credentials=(config.agent_id, ""),
-    )
+        }, agent_credentials=(config.agent_id, ""))
+        if not report["success"]:
+            raise RuntimeError("; ".join(report.get("errors") or ["Backup failed"]))
+        return report
+    except Exception as error:
+        text = str(error)
+        for secret in secrets:
+            text = text.replace(secret, "***")
+        report = {**report, "success": False, "errors": [text]}
+        return report
+    finally:
+        finished = datetime.now(UTC)
+        error_message = "; ".join(report.get("errors") or []) or None
+        append_run(data_dir, JobRun(name, run_id, JobStatus.SUCCESS if report.get("success") else JobStatus.FAILED,
+                                   started, finished, error_message=error_message, client_id=config.agent_id,
+                                   repository_id=repository_id, error_stage=None if report.get("success") else stage))
 
 
 def run_due_jobs(
