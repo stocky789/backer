@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from backer.agent.service import AgentService
 from backer.core.repo_metadata import RepositoryMetadata
-from backer.server.app import _build_backup_command_payload, create_app
+from backer.server.app import ServerKopia, _build_backup_command_payload, create_app
 from backer.server.auth import generate_proxy_capability
 from backer.server.models import Client, ClientStatus, JobCreate
 from backer.server.web.auth import get_setup_token
@@ -296,7 +296,7 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
         def __init__(self, repo_path: str, password: str):
             self.repo_path = Path(repo_path)
 
-        def ensure_repo(self) -> bool:
+        def ensure_repo(self, create_if_absent: bool = False) -> bool:
             return True
 
         def snapshot_create(self, source_dir: Path, **_: str) -> dict[str, str | bool]:
@@ -354,6 +354,90 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
     assert "backend_type" not in metadata.get_job("photos")["config"]
 
 
+def _patch_kopia_connect(monkeypatch, stderr: str) -> list[list[str]]:
+    """Make ServerKopia._run_cmd fail every 'repository connect' with `stderr`
+    and record every command issued, so a test can assert 'repository create'
+    was never one of them."""
+    calls: list[list[str]] = []
+
+    def fake_run_cmd(self, args, timeout=300, check=True):
+        calls.append(args)
+        if args[:2] == ["repository", "connect"]:
+            return 1, "", stderr
+        if args[:2] == ["repository", "create"]:
+            raise AssertionError(f"must never create a repository, got: {args}")
+        return 0, "", ""
+
+    monkeypatch.setattr(ServerKopia, "_run_cmd", fake_run_cmd)
+    return calls
+
+
+def test_ensure_repo_wrong_password_fails_closed_without_creating(tmp_path: Path, monkeypatch) -> None:
+    """A wrong passphrase must be reported as such and must never trigger repository creation."""
+    calls = _patch_kopia_connect(monkeypatch, "unable to create format manager: invalid repository password")
+    kopia = ServerKopia(str(tmp_path / "repo"), "wrong-password")
+
+    with pytest.raises(RuntimeError, match="(?i)wrong repository password"):
+        kopia.ensure_repo(create_if_absent=True)
+
+    assert not any(c[:2] == ["repository", "create"] for c in calls)
+    assert not (tmp_path / "repo" / ".kopia-repo").exists()
+
+
+def test_ensure_repo_unreachable_path_fails_closed_without_creating(tmp_path: Path, monkeypatch) -> None:
+    """An unmounted/unreachable storage path must surface the real error, never auto-init."""
+    calls = _patch_kopia_connect(
+        monkeypatch, "can't connect to storage: cannot access storage path: no such path"
+    )
+    kopia = ServerKopia(str(tmp_path / "repo"), "some-password")
+
+    with pytest.raises(RuntimeError, match="cannot access storage path"):
+        kopia.ensure_repo(create_if_absent=True)
+
+    assert not any(c[:2] == ["repository", "create"] for c in calls)
+    assert not (tmp_path / "repo" / ".kopia-repo").exists()
+
+
+def test_proxy_backup_cannot_auto_create_missing_local_repository(tmp_path: Path, monkeypatch) -> None:
+    """The live backup path must fail closed rather than silently create a fresh, empty
+    repository when the destination looks like 'nothing here yet' (e.g. an unmounted share)."""
+    calls = _patch_kopia_connect(monkeypatch, "repository not initialized in the provided storage")
+    monkeypatch.setattr(ServerKopia, "_disconnect", lambda self: None)
+
+    app = create_app(tmp_path / "server")
+    storage_path = tmp_path / "repository"
+    storage_path.mkdir()
+    storage = app.state.storage
+    storage.add_repository("repo-1", "local", "local", share=str(storage_path))
+    storage.set_repository_password("repo-1", "test-password")
+    storage.add_client(
+        Client(
+            id="agent-1", name="agent-1", hostname="agent-1", ip_address="127.0.0.1",
+            status=ClientStatus.ONLINE, registered_at=datetime.now(), version="test",
+        ),
+        hashlib.sha256(b"agent-secret").hexdigest(),
+    )
+    token = generate_proxy_capability(
+        client_id="agent-1", repo_id="repo-1", job_name="photos", run_id="run-1",
+        subfolder="Agents/photos", operation="backup",
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _complete_setup(client)
+        response = client.post(
+            "/api/repo/repo-1/backup",
+            content=_archive({"a.txt": "1"}),
+            auth=("agent-1", "agent-secret"),
+            headers={"X-Backup-Subfolder": "Agents/photos", "X-Backer-Capability": token},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert not any(c[:2] == ["repository", "create"] for c in calls)
+    assert not (storage_path / ".kopia-repo").exists()
+
+
 class _FakeMaintenanceKopia:
     """Records every maintenance() call instead of touching a real repo."""
 
@@ -365,7 +449,7 @@ class _FakeMaintenanceKopia:
         # exercises the "no matching source" refusal path.
         self.sources: dict[str, str] = {}
 
-    def ensure_repo(self) -> bool:
+    def ensure_repo(self, create_if_absent: bool = False) -> bool:
         return True
 
     def snapshot_list(self, job_name: str | None = None) -> list[dict[str, object]]:

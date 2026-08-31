@@ -163,13 +163,26 @@ class ServerKopia:
             raise RuntimeError(f"Command timed out: {' '.join(args)}")
 
     @_serialized_kopia_operation
-    def ensure_repo(self) -> bool:
-        """Ensure kopia repository exists, creating if necessary.
+    def ensure_repo(self, create_if_absent: bool = False) -> bool:
+        """Ensure the kopia repository is reachable, optionally creating it.
+
+        Args:
+            create_if_absent: only pass True from an explicit "set this repo
+                up" call site (repo creation, the /init endpoint). Every
+                other caller means "this must already exist" and must never
+                create one - see KopiaBackend.backup() for why silently
+                creating on a connect failure is dangerous (an unmounted
+                share or missing drive can resolve to an empty local
+                directory that looks identical to "no repo here yet").
 
         Returns:
-            True if repository is ready
+            True if the repository is reachable (or was just created).
+
+        Raises:
+            RuntimeError: on a wrong password or an unreachable storage path
+                - both are real failures, never a reason to create a new
+                repository.
         """
-        # Try to connect first
         rc, stdout, stderr = self._run_cmd(
             [
                 "repository",
@@ -186,7 +199,26 @@ class ServerKopia:
             self._disconnect()
             return True
 
-        # Repository doesn't exist - initialize it
+        from backer.backends.kopia import _is_wrong_password_error
+
+        if _is_wrong_password_error(stderr):
+            raise RuntimeError(f"Wrong repository password for {self.kopia_repo_path}: {stderr}")
+
+        if "repository not initialized in the provided storage" not in stderr.lower():
+            # Unreachable path, permission error, etc. - kopia told us
+            # something other than "nothing here". Never paper over that by
+            # creating a fresh repository.
+            raise RuntimeError(f"Failed to connect to repository at {self.kopia_repo_path}: {stderr}")
+
+        # kopia reports "not initialized" both for a genuinely absent
+        # repository AND for an unmounted network share/missing drive that
+        # resolves to an empty local directory - it cannot tell those apart,
+        # so neither can we. Only create when the caller explicitly asked
+        # for "set this up" semantics.
+        if not create_if_absent:
+            logger.error(f"[SERVER KOPIA] Repository not initialized at {self.kopia_repo_path}: {stderr}")
+            return False
+
         logger.info(f"[SERVER KOPIA] Initializing repository at {self.kopia_repo_path}")
         self.kopia_repo_path.mkdir(parents=True, exist_ok=True)
 
@@ -4747,7 +4779,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             kopia_password = _repository_password_or_error(repository_password)
             try:
                 kopia = ServerKopia(local_path, kopia_password)
-                if kopia.ensure_repo():
+                if kopia.ensure_repo(create_if_absent=True):
                     logger.info(f"[CREATE REPO] Kopia repository initialized at {local_path}")
                 else:
                     logger.warning(f"[CREATE REPO] Failed to initialize kopia repository at {local_path}")
@@ -12646,7 +12678,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         try:
             if repo.get("repo_type") == "local":
                 kopia = ServerKopia(str(path), _repository_password_or_error(repo_password))
-                return {"success": kopia.ensure_repo(), "integrity": "repository validation"}
+                return {
+                    "success": kopia.ensure_repo(create_if_absent=True),
+                    "integrity": "repository validation",
+                }
             # Import here to avoid circular imports
             from backer.backends.base import BackupDestination
             from backer.backends.registry import get_backend
@@ -12702,7 +12737,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 password = _repository_password_or_error(repo_password)
                 kopia = ServerKopia(local_path, password)
 
-                if not kopia.ensure_repo():
+                if not kopia.ensure_repo(create_if_absent=False):
                     return {"success": False, "error": "Kopia repository not initialized", "snapshots": []}
 
                 snapshots = kopia.snapshot_list(job_name=job)
@@ -12781,7 +12816,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # _verify_repo_access already rejects any repo_type other than
             # "local" with a 400, so this is the only branch that ever runs.
             kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
-            if not kopia.ensure_repo():
+            if not kopia.ensure_repo(create_if_absent=False):
                 return {"success": False, "error": "Kopia repository not initialized"}
 
             # source_path is the caller-supplied (agent-side) path and can
@@ -12859,7 +12894,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             # _verify_repo_access already rejects any repo_type other than
             # "local" with a 400, so this is the only branch that ever runs.
             kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
-            if not kopia.ensure_repo():
+            if not kopia.ensure_repo(create_if_absent=False):
                 return {
                     "success": False,
                     "error": "Kopia repository not initialized",
@@ -12976,7 +13011,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {backup_dir}")
                     password = _repository_password_or_error(repo_password)
                     kopia = ServerKopia(local_path, password)
-                    if not kopia.ensure_repo():
+                    if not kopia.ensure_repo(create_if_absent=False):
                         raise RuntimeError("Failed to initialize kopia repository")
                     result = kopia.snapshot_create(
                         source_dir=backup_dir,
@@ -13207,7 +13242,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Initialize kopia
         kopia = ServerKopia(local_path, password)
 
-        if not kopia.ensure_repo():
+        try:
+            repo_ready = kopia.ensure_repo(create_if_absent=False)
+        except RuntimeError as e:
+            return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+        if not repo_ready:
             return JSONResponse(
                 status_code=500,
                 content={"success": False, "error": "Kopia repository not initialized"},

@@ -1,5 +1,7 @@
 """Tests for backup backends."""
 
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -436,3 +438,195 @@ class TestKopiaBackend:
         backend.check(BackupDestination("repo"))
 
         assert calls[0] == ["kopia", "snapshot", "verify", "--verify-files-percent=100"]
+
+    def test_repo_env_isolates_config_and_cache_per_repository(self) -> None:
+        """Two repositories must never share a kopia config file or cache dir."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        env_a = backend._repo_env("/backup/repoA")
+        env_b = backend._repo_env("/backup/repoB")
+
+        assert env_a["KOPIA_CONFIG_PATH"] != env_b["KOPIA_CONFIG_PATH"]
+        assert env_a["KOPIA_CACHE_DIRECTORY"] != env_b["KOPIA_CACHE_DIRECTORY"]
+        # Same repo path -> same config every time, so a later disconnect for
+        # that repo always lands on that repo's own connection state.
+        assert backend._repo_env("/backup/repoA")["KOPIA_CONFIG_PATH"] == env_a["KOPIA_CONFIG_PATH"]
+
+    def test_disconnect_cannot_touch_a_different_repositorys_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One operation's disconnect must not be able to tear down a sibling repo's connection."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[tuple[list[str], dict[str, str]]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+
+        def run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+            calls.append((command, kwargs["env"]))
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        backend._disconnect_repo("/backup/repoA")
+        backend._disconnect_repo("/backup/repoB")
+
+        assert calls[0][1]["KOPIA_CONFIG_PATH"] != calls[1][1]["KOPIA_CONFIG_PATH"]
+
+    def test_backup_connect_failure_that_is_not_absent_does_not_init(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An unreachable/unmounted destination must fail closed, not auto-create a repo there."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["repository", "connect"]:
+                return CompletedProcess(
+                    command, 1, "", "can't connect to storage: cannot access storage path"
+                )
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.backup(BackupSource(tmp_path), BackupDestination("repo"))
+
+        assert not result.success
+        assert not any(c[1:3] == ["repository", "create"] for c in calls)
+        assert "can't connect to storage" in result.errors[0]
+
+    def test_backup_wrong_password_reports_as_such_not_as_init_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A wrong passphrase against a real repository must be reported as such, never auto-init."""
+        backend = KopiaBackend({"repository_password": "wrong-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["repository", "connect"]:
+                return CompletedProcess(
+                    command, 1, "", "unable to create format manager: invalid repository password"
+                )
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.backup(BackupSource(tmp_path), BackupDestination("repo"))
+
+        assert not result.success
+        assert not any(c[1:3] == ["repository", "create"] for c in calls)
+        assert "wrong repository password" in result.errors[0].lower()
+
+    def test_backup_auto_inits_when_repository_genuinely_not_initialized(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The first backup to a never-created SMB/NFS/S3 repository must create it, not fail forever."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["repository", "connect"]:
+                return CompletedProcess(
+                    command, 1, "", "error connecting to repository: repository not initialized in the provided storage"
+                )
+            if command[1:3] == ["repository", "create"]:
+                return CompletedProcess(command, 0, "Connected to repository.", "")
+            return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.backup(BackupSource(tmp_path), BackupDestination(str(tmp_path / "repo")))
+
+        assert result.success
+        assert any(c[1:3] == ["repository", "create"] for c in calls)
+
+    def test_backup_does_not_auto_init_into_a_nonempty_existing_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A 'not initialized' path that already resolves to a non-empty local directory must not be created into."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "unrelated.txt").write_text("not a kopia repo")
+
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["repository", "connect"]:
+                return CompletedProcess(
+                    command, 1, "", "error connecting to repository: repository not initialized in the provided storage"
+                )
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.backup(BackupSource(tmp_path), BackupDestination(str(repo_dir)))
+
+        assert not result.success
+        assert not any(c[1:3] == ["repository", "create"] for c in calls)
+
+    def test_repo_lock_serializes_operations_on_the_same_repository(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two operations against the same repository must never run their critical sections concurrently."""
+        monkeypatch.setattr("backer.core.config.get_state_dir", lambda: tmp_path)
+        backend = KopiaBackend()
+        order: list[str] = []
+
+        def worker(label: str, hold: float) -> None:
+            with backend._repo_lock("/backup/shared-repo"):
+                order.append(f"{label}-start")
+                time.sleep(hold)
+                order.append(f"{label}-end")
+
+        t1 = threading.Thread(target=worker, args=("first", 0.15))
+        t2 = threading.Thread(target=worker, args=("second", 0.0))
+        t1.start()
+        time.sleep(0.05)
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert order == ["first-start", "first-end", "second-start", "second-end"]
+
+    def test_repo_lock_does_not_block_across_different_repositories(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two operations against different repositories must be able to run concurrently."""
+        monkeypatch.setattr("backer.core.config.get_state_dir", lambda: tmp_path)
+        backend = KopiaBackend()
+        barrier = threading.Barrier(2, timeout=5)
+        entered: list[str] = []
+
+        def worker(label: str, repo_path: str) -> None:
+            with backend._repo_lock(repo_path):
+                entered.append(label)
+                barrier.wait()  # only reachable by both if neither is blocked on the other's lock
+
+        t1 = threading.Thread(target=worker, args=("A", "/backup/repoA"))
+        t2 = threading.Thread(target=worker, args=("B", "/backup/repoB"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert set(entered) == {"A", "B"}
+
+    def test_find_latest_snapshot_refuses_basename_only_match(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A snapshot from an unrelated directory that merely shares a basename must never be selected."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        snapshot_json = (
+            '[{"id": "wrong-repo-snapshot", "source": {"path": "D:/Archive/Documents"}, '
+            '"startTime": "2024-01-01T00:00:00Z"}]'
+        )
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            return CompletedProcess(command, 0, snapshot_json, "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend._find_latest_snapshot_for_source("repo", "C:/Users/alice/Documents")
+
+        assert result is None

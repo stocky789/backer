@@ -112,7 +112,7 @@ def test_expired_proxy_capability_requires_its_pending_command(tmp_path: Path, m
         def __init__(self, *_):
             pass
 
-        def ensure_repo(self):
+        def ensure_repo(self, create_if_absent: bool = False):
             return True
 
         def snapshot_create(self, *_args, **_kwargs):
@@ -227,7 +227,7 @@ def test_proxy_snapshot_failure_restores_previous_contents(tmp_path: Path, monke
         def __init__(self, *_):
             pass
 
-        def ensure_repo(self):
+        def ensure_repo(self, create_if_absent: bool = False):
             return True
 
         def snapshot_create(self, *_args, **_kwargs):
@@ -274,7 +274,7 @@ def test_proxy_rollback_retains_previous_contents_when_restore_fails(tmp_path: P
         def __init__(self, *_):
             pass
 
-        def ensure_repo(self):
+        def ensure_repo(self, create_if_absent: bool = False):
             return True
 
         def snapshot_create(self, *_args, **_kwargs):
@@ -329,7 +329,7 @@ def test_proxy_backup_succeeds_when_previous_cleanup_fails(tmp_path: Path, monke
         def __init__(self, *_):
             pass
 
-        def ensure_repo(self):
+        def ensure_repo(self, create_if_absent: bool = False):
             return True
 
         def snapshot_create(self, *_args, **_kwargs):
