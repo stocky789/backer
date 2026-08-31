@@ -1,0 +1,68 @@
+from datetime import datetime
+from pathlib import Path
+
+from backer.backends.base import BackendResult, OperationType
+from backer.client.agent import BackerAgent
+from backer.core import runner
+
+
+class _Backend:
+    def check_available(self):
+        return True, "ready"
+
+    def backup(self, **_):
+        return BackendResult(True, OperationType.BACKUP, datetime.now(), datetime.now())
+
+    def restore(self, **_):
+        return BackendResult(True, OperationType.RESTORE, datetime.now(), datetime.now())
+
+
+def test_proxy_backup_passes_both_agent_credentials(tmp_path: Path, monkeypatch):
+    """Dropping either proxy credential prevents server-managed local backups."""
+    options = []
+    monkeypatch.setattr(runner, "get_backend", lambda _name, value: options.append(value) or _Backend())
+
+    runner.run_backup(
+        {"job_name": "job", "source_path": str(tmp_path), "destination_path": "proxy://repo"},
+        agent_credentials=("agent", "secret"),
+    )
+
+    assert options == [{"client_id": "agent", "client_secret": "secret", "location": "proxy://repo"}]
+
+
+def test_proxy_restore_passes_both_agent_credentials(tmp_path: Path, monkeypatch):
+    """Dropping either proxy credential prevents server-managed local restores."""
+    options = []
+    monkeypatch.setattr(runner, "get_backend", lambda _name, value: options.append(value) or _Backend())
+
+    runner.run_restore(
+        {"job_name": "job", "source_path": "proxy://repo", "destination_path": str(tmp_path)},
+        agent_credentials=("agent", "secret"),
+    )
+
+    assert options == [{"client_id": "agent", "client_secret": "secret", "location": "proxy://repo"}]
+
+
+def test_one_backend_instance_per_run_and_agent_forwards_credentials(tmp_path: Path, monkeypatch):
+    """Reusing a backend shares its stateful Kopia connection between runs."""
+    instances = []
+    monkeypatch.setattr(runner, "get_backend", lambda *_: instances.append(_Backend()) or instances[-1])
+    job = {"job_name": "job", "source_path": str(tmp_path), "destination_path": "proxy://repo"}
+
+    runner.run_backup(job)
+    runner.run_backup(job)
+
+    received = []
+    monkeypatch.setattr("backer.client.agent.run_backup", lambda *_args, **kwargs: received.append(kwargs) or {})
+    BackerAgent("http://example.test", "agent", "secret").execute_backup(job)
+
+    assert len(instances) == 2
+    assert instances[0] is not instances[1]
+    assert received == [
+        {
+            "dry_run": False,
+            "on_progress": received[0]["on_progress"],
+            "on_result": received[0]["on_result"],
+            "agent_credentials": ("agent", "secret"),
+        }
+    ]

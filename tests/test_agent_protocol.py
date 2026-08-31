@@ -281,7 +281,7 @@ def test_clean_restore_keeps_destination_when_validation_fails(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=False)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -314,7 +314,7 @@ def test_clean_kopia_restore_uses_one_immutable_snapshot(
     destination = tmp_path / "restore"
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -342,7 +342,7 @@ def test_clean_kopia_restore_keeps_destination_when_no_files_match(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=True, restore_files=0)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -374,7 +374,7 @@ def test_clean_kopia_restore_rolls_back_when_actual_restore_matches_nothing(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=True, restore_files=0)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -408,7 +408,7 @@ def test_clean_kopia_restore_rolls_back_when_only_directories_restored(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=True, restore_dirs_only=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -436,7 +436,7 @@ def test_clean_kopia_restore_reports_failure_into_new_destination_that_restores_
     assert not destination.exists()
     backend = _RestoreBackend(validation_success=True, restore_files=0)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -462,7 +462,7 @@ def test_clean_restore_validates_before_clearing_destination(
     (destination / "old.txt").write_text("old")
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -491,7 +491,7 @@ def test_clean_proxy_restore_keeps_destination_untouched(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -518,7 +518,7 @@ def test_clean_restore_restores_destination_after_preparation_failure(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -554,7 +554,7 @@ def test_clean_restore_restores_destination_after_backend_failure(
     original.write_text("keep")
     backend = _RestoreBackend(validation_success=True, restore_success=False)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -579,7 +579,7 @@ def test_clean_restore_removes_partial_new_destination_after_backend_failure(
     destination = tmp_path / "restore"
     backend = _RestoreBackend(validation_success=True, restore_success=False)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -605,7 +605,7 @@ def test_clean_restore_reports_rollback_failure(
     (destination / "keep.txt").write_text("keep")
     backend = _RestoreBackend(validation_success=True, restore_success=False)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
     original_rmtree = client_agent.shutil.rmtree
@@ -635,7 +635,7 @@ def test_clean_restore_refuses_filesystem_root(
 ) -> None:
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -667,7 +667,7 @@ def test_clean_restore_refuses_symlink_destination(
         pytest.skip("symlink creation requires Windows developer mode or privilege")
     backend = _RestoreBackend(validation_success=True)
     agent = _agent(tmp_path)
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_: backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
@@ -737,7 +737,7 @@ def test_execute_backup_writes_repo_metadata_on_failure(tmp_path: Path, monkeypa
             return_code=1,
         ),
     )
-    monkeypatch.setattr(client_agent, "get_backend", lambda *_a, **_k: failing_backend)
+    monkeypatch.setattr("backer.core.runner.get_backend", lambda *_a, **_k: failing_backend)
     monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
     monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
 
