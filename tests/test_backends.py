@@ -308,13 +308,34 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, "", "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=False)
 
         assert result.success
         policy_call = next(c for c in calls if c[1:3] == ["policy", "set"])
         assert "--global" in policy_call
         expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
         assert "--all" in expire_call
+
+    def test_prune_dry_run_never_writes_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """dry_run=True must not run 'policy set' at all - it PERSISTS the policy in
+        kopia and would be applied at the next ordinary snapshot, not previewed."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
+
+        assert result.success
+        assert not any(c[1:3] == ["policy", "set"] for c in calls)
+        expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
+        assert "--all" in expire_call
+        assert "--delete" not in expire_call
 
     def test_prune_with_source_path_scopes_to_source_and_skips_global(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """source_path -> target that one source, never --global."""
@@ -333,7 +354,7 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, "", "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True, source_path="/data/app")
+        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=False, source_path="/data/app")
 
         assert result.success
         policy_call = next(c for c in calls if c[1:3] == ["policy", "set"])
@@ -375,7 +396,7 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, "", "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-        result = backend.prune(BackupDestination("repo"), keep_yearly=3, dry_run=True)
+        result = backend.prune(BackupDestination("repo"), keep_yearly=3, dry_run=False)
 
         assert result.success
         policy_call = next(c for c in calls if c[1:3] == ["policy", "set"])

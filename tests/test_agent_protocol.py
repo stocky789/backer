@@ -21,6 +21,7 @@ class _RestoreBackend:
         validation_success: bool,
         restore_success: bool = True,
         restore_files: int | None = None,
+        restore_dirs_only: bool = False,
         resolved_snapshot: str = "a" * 64,
     ):
         self.validation_success = validation_success
@@ -29,6 +30,10 @@ class _RestoreBackend:
         # destination. None means "write one", 0 simulates a restore that
         # reports success but matches/restores nothing.
         self.restore_files = restore_files
+        # Simulates a restore (or include_path-scoped subtree) that contains
+        # only directories: Kopia reports success and writes the directory
+        # tree but no files.
+        self.restore_dirs_only = restore_dirs_only
         self.resolved_snapshot = resolved_snapshot
         self.dry_runs: list[bool] = []
         self.snapshots: list[str | None] = []
@@ -56,9 +61,13 @@ class _RestoreBackend:
             (destination / "partial.txt").write_text("partial")
             files_written = 0
         elif not dry_run:
-            files_written = self.restore_files if self.restore_files is not None else 1
-            for i in range(files_written):
-                (destination / f"restored{i}.txt").write_text("restored")
+            if self.restore_dirs_only:
+                (destination / "empty_subdir").mkdir(parents=True, exist_ok=True)
+                files_written = 0
+            else:
+                files_written = self.restore_files if self.restore_files is not None else 1
+                for i in range(files_written):
+                    (destination / f"restored{i}.txt").write_text("restored")
         else:
             files_written = 0
         return BackendResult(
@@ -324,6 +333,65 @@ def test_clean_kopia_restore_rolls_back_when_actual_restore_matches_nothing(
     assert original.exists()
     assert original.read_text() == "keep"
     assert backend.dry_runs == [False]
+
+
+def test_clean_kopia_restore_rolls_back_when_only_directories_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A snapshot (or include_path-scoped subtree) containing only directories
+    # restores with exit code 0 and creates the directory tree but no files -
+    # any(destination.iterdir()) would see that as "non-empty" and let the
+    # staged original be discarded. Directories alone must not count as
+    # restored content.
+    destination = tmp_path / "restore"
+    destination.mkdir()
+    original = destination / "keep.txt"
+    original.write_text("keep")
+    backend = _RestoreBackend(validation_success=True, restore_dirs_only=True)
+    agent = _agent(tmp_path)
+    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
+    monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
+
+    report = agent.execute_restore({
+        "run_id": "run-1",
+        "job_name": "job",
+        "backend": "kopia",
+        "source_path": str(tmp_path / "repo"),
+        "destination_path": str(destination),
+        "clean_restore": True,
+    })
+
+    assert not report["success"]
+    assert original.exists()
+    assert original.read_text() == "keep"
+
+
+def test_clean_kopia_restore_reports_failure_into_new_destination_that_restores_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Disaster-recovery case: the destination does not exist yet, so nothing
+    # is staged. A restore that matches nothing must still be reported as a
+    # failure rather than a green run over an empty directory.
+    destination = tmp_path / "restore"
+    assert not destination.exists()
+    backend = _RestoreBackend(validation_success=True, restore_files=0)
+    agent = _agent(tmp_path)
+    monkeypatch.setattr(client_agent, "get_backend", lambda *_: backend)
+    monkeypatch.setattr(agent, "_report_progress", lambda **_: None)
+    monkeypatch.setattr(agent, "_get_client", lambda: type("Client", (), {"post": lambda *_a, **_k: None})())
+
+    report = agent.execute_restore({
+        "run_id": "run-1",
+        "job_name": "job",
+        "backend": "kopia",
+        "source_path": str(tmp_path / "repo"),
+        "destination_path": str(destination),
+        "clean_restore": True,
+    })
+
+    assert not report["success"]
+    assert any("no files" in error.lower() for error in report["errors"])
 
 
 def test_clean_restore_validates_before_clearing_destination(

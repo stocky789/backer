@@ -672,7 +672,16 @@ class KopiaBackend(BackendBase):
         dry_run: bool = False,
         source_path: str | None = None,
     ) -> BackendResult:
-        """Prune old snapshots using kopia policy and maintenance."""
+        """Prune old snapshots using kopia policy and maintenance.
+
+        dry_run=True never writes the retention policy - kopia has no
+        preview mode for "policy set"; it persists immediately and is
+        applied at the next snapshot regardless of --delete. So a dry run
+        here reports what the CURRENTLY PERSISTED policy would expire, not
+        what keep_last/keep_daily/... passed to this call would expire. Run
+        with dry_run=False to actually apply and evaluate the proposed
+        policy.
+        """
         started_at = datetime.now()
 
         # FAIL CLOSED: never expire snapshots under a retention policy nobody
@@ -739,43 +748,57 @@ class KopiaBackend(BackendBase):
             # Set retention policy - scoped to the resolved source when given,
             # otherwise the repository-wide global policy (a caller that
             # deliberately prunes the whole repository is legitimate).
-            policy_cmd = [str(binary), "policy", "set"]
-            policy_cmd.append(target if target is not None else "--global")
+            #
+            # NEVER run this on a dry run: "policy set" is not a preview, it
+            # PERSISTS the retention policy to the repository. Kopia applies
+            # whatever policy is persisted at the *next* "snapshot create" -
+            # not just on an explicit "snapshot expire --delete" - so writing
+            # it here would mean a dry run has already armed real deletion at
+            # the next ordinary backup, with nothing linking the loss back to
+            # the preview. A dry run must only ever read state, never write it.
+            if not dry_run:
+                policy_cmd = [str(binary), "policy", "set"]
+                policy_cmd.append(target if target is not None else "--global")
 
-            if keep_last:
-                policy_cmd.extend(["--keep-latest", str(keep_last)])
-            if keep_daily:
-                policy_cmd.extend(["--keep-daily", str(keep_daily)])
-            if keep_weekly:
-                policy_cmd.extend(["--keep-weekly", str(keep_weekly)])
-            if keep_monthly:
-                policy_cmd.extend(["--keep-monthly", str(keep_monthly)])
-            if keep_yearly:
-                policy_cmd.extend(["--keep-annual", str(keep_yearly)])
+                if keep_last:
+                    policy_cmd.extend(["--keep-latest", str(keep_last)])
+                if keep_daily:
+                    policy_cmd.extend(["--keep-daily", str(keep_daily)])
+                if keep_weekly:
+                    policy_cmd.extend(["--keep-weekly", str(keep_weekly)])
+                if keep_monthly:
+                    policy_cmd.extend(["--keep-monthly", str(keep_monthly)])
+                if keep_yearly:
+                    policy_cmd.extend(["--keep-annual", str(keep_yearly)])
 
-            # Apply policy
-            policy_result = subprocess.run(
-                policy_cmd,
-                capture_output=True,
-                text=True,
-                env=self._env,
-                timeout=60,
-            )
-
-            if policy_result.returncode != 0:
-                return BackendResult(
-                    success=False,
-                    operation=OperationType.PRUNE,
-                    started_at=started_at,
-                    finished_at=datetime.now(),
-                    errors=[policy_result.stderr],
-                    output=policy_result.stdout + policy_result.stderr,
-                    return_code=policy_result.returncode,
+                policy_result = subprocess.run(
+                    policy_cmd,
+                    capture_output=True,
+                    text=True,
+                    env=self._env,
+                    timeout=60,
                 )
+
+                if policy_result.returncode != 0:
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.PRUNE,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=[policy_result.stderr],
+                        output=policy_result.stdout + policy_result.stderr,
+                        return_code=policy_result.returncode,
+                    )
 
             # Run snapshot expire to apply retention. "snapshot expire" without
             # --delete only reports what would be removed, so that IS the dry
             # run; there is no --dry-run flag (kopia rejects it as unknown).
+            #
+            # NOTE: because the policy above is never written on a dry run,
+            # this reports what the CURRENTLY PERSISTED policy would expire,
+            # not what the keep_* args passed to this call would expire. A
+            # dry run answers "what would happen if a backup ran right now",
+            # not "what would happen if this proposed policy were applied".
             expire_cmd = [str(binary), "snapshot", "expire"]
             if target is not None:
                 expire_cmd.append(target)
@@ -810,6 +833,13 @@ class KopiaBackend(BackendBase):
             errors = []
             if return_code != 0:
                 errors = [line for line in output.split("\n") if line.strip() and "error" in line.lower()]
+
+            if dry_run:
+                output = (
+                    "[dry-run] Proposed policy was NOT saved. This shows what the "
+                    "CURRENTLY PERSISTED retention policy would expire, not the "
+                    "policy passed to this call.\n" + output
+                )
 
             return BackendResult(
                 success=return_code == 0,

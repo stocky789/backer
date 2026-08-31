@@ -360,9 +360,17 @@ class _FakeMaintenanceKopia:
     def __init__(self, repo_path: str, password: str):
         self.repo_path = Path(repo_path)
         self.calls: list[list[str]] = []
+        # job_name -> the source path kopia would report for that job's
+        # snapshots. Empty by default so a test that never populates it
+        # exercises the "no matching source" refusal path.
+        self.sources: dict[str, str] = {}
 
     def ensure_repo(self) -> bool:
         return True
+
+    def snapshot_list(self, job_name: str | None = None) -> list[dict[str, object]]:
+        source = self.sources.get(job_name or "")
+        return [{"source": source}] if source else []
 
     def maintenance(self, args: list[str]) -> dict[str, object]:
         self.calls.append(args)
@@ -387,6 +395,9 @@ def _prune_setup(tmp_path: Path, monkeypatch) -> tuple[TestClient, str]:
         ),
         hashlib.sha256(b"agent-secret").hexdigest(),
     )
+    # The server derives the prune target from the job kopia actually
+    # recorded a snapshot for - never from the caller-supplied source_path.
+    fake.sources["photos"] = str(storage_path / "Agents" / "photos" / "contents")
     token = generate_proxy_capability(
         client_id="agent-1", repo_id="repo-1", job_name="photos", run_id="run-1",
         subfolder="Agents/photos", operation="prune",
@@ -454,8 +465,13 @@ def test_prune_rejects_a_source_path_that_smuggles_a_flag(tmp_path: Path, monkey
 
 
 def test_prune_applies_the_supplied_policy_and_nothing_else(tmp_path: Path, monkeypatch) -> None:
+    """The wire-supplied source_path must NOT pass through to kopia - it is
+    the agent's path, which kopia never records (see proxy_repo_backup). The
+    target is instead resolved server-side from the job the capability was
+    issued for."""
     client, token = _prune_setup(tmp_path, monkeypatch)
     fake = client.state_fake  # type: ignore[attr-defined]
+    resolved = fake.sources["photos"]
 
     response = client.post(
         "/api/repo/repo-1/prune",
@@ -467,8 +483,95 @@ def test_prune_applies_the_supplied_policy_and_nothing_else(tmp_path: Path, monk
     assert response.status_code == 200, response.text
     assert response.json()["success"] is True
     policy_call, expire_call = fake.calls
-    assert policy_call == ["policy", "set", "/data/photos", "--keep-daily", "7", "--keep-annual", "2"]
-    assert expire_call == ["snapshot", "expire", "/data/photos", "--delete"]
+    assert policy_call == ["policy", "set", resolved, "--keep-daily", "7", "--keep-annual", "2"]
+    assert expire_call == ["snapshot", "expire", resolved, "--delete"]
+    assert resolved != "/data/photos"
+
+
+def test_prune_refuses_when_kopia_has_no_recorded_source_for_the_job(tmp_path: Path, monkeypatch) -> None:
+    """A capability's job is trusted, but if kopia never actually recorded a
+    snapshot for it, pruning must refuse rather than fall back to a
+    repository-wide target."""
+    client, token = _prune_setup(tmp_path, monkeypatch)
+    fake = client.state_fake  # type: ignore[attr-defined]
+    fake.sources.clear()
+
+    response = client.post(
+        "/api/repo/repo-1/prune",
+        json={"keep_last": 3},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert "could not resolve" in body["error"].lower()
+    assert fake.calls == []
+
+
+def test_prune_dry_run_does_not_persist_the_policy(tmp_path: Path, monkeypatch) -> None:
+    """Previewing a retention policy must never write it - kopia applies a
+    persisted policy at the next ordinary snapshot, so a preview that wrote
+    the policy would silently arm deletion with nothing connecting it back
+    to the preview."""
+    client, token = _prune_setup(tmp_path, monkeypatch)
+    fake = client.state_fake  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/api/repo/repo-1/prune",
+        json={"keep_last": 1, "dry_run": True},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert "policy" in body["note"].lower()
+    (expire_call,) = fake.calls
+    assert expire_call == ["snapshot", "expire", fake.sources["photos"]]
+
+
+def test_check_integrity_actually_verifies_snapshot_data(tmp_path: Path, monkeypatch) -> None:
+    """"repository status" only reports connection/config state - it
+    validates nothing about the stored data. The local-repo branch must run
+    a real "snapshot verify", not that."""
+    import backer.server.app as server_app
+
+    fake = _FakeMaintenanceKopia("", "")
+    monkeypatch.setattr(server_app, "ServerKopia", lambda *a, **k: fake)
+    app = create_app(tmp_path / "server")
+    storage_path = tmp_path / "repository"
+    storage_path.mkdir()
+    storage = app.state.storage
+    storage.add_repository("repo-1", "local", "local", share=str(storage_path))
+    storage.set_repository_password("repo-1", "test-password")
+    storage.add_client(
+        Client(
+            id="agent-1", name="agent-1", hostname="agent-1", ip_address="127.0.0.1",
+            status=ClientStatus.ONLINE, registered_at=datetime.now(), version="test",
+        ),
+        hashlib.sha256(b"agent-secret").hexdigest(),
+    )
+    token = generate_proxy_capability(
+        client_id="agent-1", repo_id="repo-1", job_name="photos", run_id="run-1",
+        subfolder="Agents/photos", operation="check",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    _complete_setup(client)
+
+    response = client.post(
+        "/api/repo/repo-1/check-integrity",
+        json={},
+        auth=("agent-1", "agent-secret"),
+        headers={"X-Backer-Capability": token},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["success"] is True
+    (call,) = fake.calls
+    assert call == ["snapshot", "verify", "--verify-files-percent=0"]
 
 
 def test_proxy_backend_prune_sends_policy_in_request_body(monkeypatch) -> None:

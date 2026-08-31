@@ -12514,7 +12514,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         1. Bearer token (JWT) via Authorization header
         2. HTTP Basic auth (client_id:client_secret)
 
-        Returns: (repository_dict, password)
+        Returns: (repository_dict, password, capability_claims)
         Raises: HTTPException if access denied
         """
         # Verify repository exists and is local type
@@ -12567,7 +12567,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         # Get repository password (secure)
         password = storage.get_repository_password(repo_id) or ""
 
-        return repo, password
+        return repo, password, claims
 
     @app.get("/api/repo/{repo_id}/check")
     async def proxy_repo_check(
@@ -12578,7 +12578,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Check if a repository is available (health check for proxy backend)."""
         auth_header = request.headers.get("authorization")
-        repo, _ = _verify_repo_access(
+        repo, _, _claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -12614,7 +12614,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Initialize a backup repository on the server."""
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(
+        repo, repo_password, _claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -12684,7 +12684,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             job: Optional job name to filter snapshots (LOCAL repos only)
         """
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(
+        repo, repo_password, _claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -12740,7 +12740,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Prune the repository to remove unused data."""
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(
+        repo, repo_password, capability_claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -12778,12 +12778,42 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         try:
             local_path = repo.get("share")
-            if repo.get("repo_type") == "local":
-                kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
-                if not kopia.ensure_repo():
-                    return {"success": False, "error": "Kopia repository not initialized"}
+            # _verify_repo_access already rejects any repo_type other than
+            # "local" with a 400, so this is the only branch that ever runs.
+            kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
+            if not kopia.ensure_repo():
+                return {"success": False, "error": "Kopia repository not initialized"}
 
-                policy_args = ["policy", "set", source_path if source_path else "--global"]
+            # source_path is the caller-supplied (agent-side) path and can
+            # never match what kopia recorded: the server snapshots
+            # {share}/Agents/{job}/contents under its own OS identity and only
+            # keeps the agent path as a "source:" tag (see proxy_repo_backup).
+            # Trusting it as a kopia positional target either creates a
+            # phantom policy that prunes nothing, or - for forms like
+            # "user@host" - silently widens to every source in the
+            # repository. Derive the target instead from the job the
+            # capability was actually issued for, resolved against kopia's
+            # own snapshot list, and refuse if nothing matches.
+            job_name = capability_claims.get("job") if capability_claims else None
+            matches = kopia.snapshot_list(job_name=job_name) if job_name else []
+            target = matches[0].get("source") if matches else None
+            if not target:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Could not resolve a kopia snapshot source for job "
+                        f"'{job_name}' - refusing to prune rather than risk "
+                        "applying the policy repository-wide."
+                    ),
+                }
+
+            # Only write the policy on a real run. "snapshot expire" has no
+            # ad-hoc keep flags of its own - it only ever evaluates the
+            # policy already persisted - so a dry run must not persist one:
+            # doing so previously armed deletion at the next ordinary
+            # snapshot, with nothing connecting it back to the preview.
+            if not dry_run:
+                policy_args = ["policy", "set", target]
                 for key, flag in _RETENTION_KOPIA_FLAGS.items():
                     if key in policy:
                         policy_args.extend([flag, str(policy[key])])
@@ -12791,38 +12821,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if not policy_result.get("success"):
                     return policy_result
 
-                expire_args = ["snapshot", "expire", source_path if source_path else "--all"]
-                if not dry_run:
-                    expire_args.append("--delete")
-                return kopia.maintenance(expire_args)
-
-            from backer.backends.base import BackupDestination
-            from backer.backends.registry import get_backend
-
-            backend = get_backend(
-                "kopia",
-                {
-                    "repository_password": _repository_password_or_error(repo_password),
-                },
-            )
-
-            dest = BackupDestination(path=str(local_path))
-            result = backend.prune(
-                dest,
-                keep_last=policy.get("keep_last"),
-                keep_daily=policy.get("keep_daily"),
-                keep_weekly=policy.get("keep_weekly"),
-                keep_monthly=policy.get("keep_monthly"),
-                keep_yearly=policy.get("keep_yearly"),
-                dry_run=dry_run,
-                source_path=source_path,
-            )
-
-            return {
-                "success": result.success,
-                "output": result.output,
-                "error": result.errors[0] if result.errors else None,
-            }
+            expire_args = ["snapshot", "expire", target]
+            if not dry_run:
+                expire_args.append("--delete")
+            result = kopia.maintenance(expire_args)
+            if dry_run:
+                result["note"] = (
+                    "Dry run: this reports against the retention policy currently "
+                    "persisted in kopia, not the policy proposed in this request - "
+                    "kopia cannot preview a policy without saving it first."
+                )
+            return result
         except Exception as e:
             logger.error(f"Failed to prune repository {repo_id}: {e}")
             return {"success": False, "error": str(e)}
@@ -12836,7 +12845,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Check repository integrity."""
         auth_header = request.headers.get("authorization")
-        repo, repo_password = _verify_repo_access(
+        repo, repo_password, _claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -12847,35 +12856,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         try:
             local_path = repo.get("share")
-            if repo.get("repo_type") == "local":
-                kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
-                if not kopia.ensure_repo():
-                    return {
-                        "success": False,
-                        "error": "Kopia repository not initialized",
-                        "integrity": "repository validation",
-                    }
-                result = kopia.maintenance(["repository", "status"])
-                return {**result, "integrity": "repository validation"}
-            from backer.backends.base import BackupDestination
-            from backer.backends.registry import get_backend
-
-            backend = get_backend(
-                "kopia",
-                {
-                    "repository_password": _repository_password_or_error(repo_password),
-                },
-            )
-
-            dest = BackupDestination(path=str(local_path))
-            result = backend.check(dest)
-
-            return {
-                "success": result.success,
-                "output": result.output,
-                "error": result.errors[0] if result.errors else None,
-                "integrity": "repository validation",
-            }
+            # _verify_repo_access already rejects any repo_type other than
+            # "local" with a 400, so this is the only branch that ever runs.
+            kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
+            if not kopia.ensure_repo():
+                return {
+                    "success": False,
+                    "error": "Kopia repository not initialized",
+                    "integrity": "snapshot verification",
+                }
+            # "repository status" only reports config/connection state - it
+            # validates nothing about the stored data. "snapshot verify" is
+            # the actual integrity check; --verify-files-percent=0 verifies
+            # metadata/structure without reading file content, matching
+            # KopiaBackend.check()'s default.
+            result = kopia.maintenance(["snapshot", "verify", "--verify-files-percent=0"])
+            return {**result, "integrity": "snapshot verification"}
         except Exception as e:
             logger.error(f"Failed to check repository {repo_id}: {e}")
             return {"success": False, "error": str(e)}
@@ -12900,7 +12896,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         auth_header = request.headers.get("authorization")
         subfolder = request.headers.get("X-Backup-Subfolder", "").strip("/\\").replace("\\", "/")
-        repo, repo_password = _verify_repo_access(
+        repo, repo_password, _claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -13170,7 +13166,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         auth_header = request.headers.get("authorization")
         subfolder = request.headers.get("X-Restore-Subfolder", "").strip("/\\").replace("\\", "/")
-        repo, repo_password = _verify_repo_access(
+        repo, repo_password, _claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,

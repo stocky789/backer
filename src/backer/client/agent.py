@@ -1379,16 +1379,22 @@ class BackerAgent:
                         ) from rollback_err
                 raise
 
-            # A clean restore that reports success but left the destination empty is
-            # more dangerous than an outright failure: the staged original would be
-            # discarded below and the run reported green while the user's data is
-            # simply gone. Treat "restored nothing" as a failure so the existing
-            # rollback path below restores the staged original instead.
-            if clean_restore and not dry_run and staged_destination and result.success:
-                if not destination.exists() or not any(destination.iterdir()):
+            # A clean restore that reports success but left the destination without
+            # any actual file content is more dangerous than an outright failure:
+            # when an original was staged it would be discarded below and the run
+            # reported green while the user's data is simply gone; when nothing was
+            # staged (fresh destination) it would report a DR restore as complete
+            # when nothing was written. Directories alone don't count - Kopia exits
+            # 0 and creates the tree for a snapshot containing only directories.
+            # Treat "restored no files" as a failure so the rollback path below
+            # restores the staged original (or removes the empty output) instead.
+            if clean_restore and not dry_run and result.success:
+                if not destination.exists() or not any(p.is_file() for p in destination.rglob("*")):
                     result.success = False
                     result.errors.append(
                         "Clean restore produced no files; keeping original destination"
+                        if staged_destination
+                        else "Clean restore produced no files"
                     )
 
             if clean_restore and not dry_run and not result.success:
