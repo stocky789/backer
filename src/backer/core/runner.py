@@ -488,6 +488,7 @@ def _write_repo_metadata(
                     finished_at,
                     snapshot_id,
                     agent_id,
+                    job if job.get("serverless") else None,
                 )
         else:
             _write_metadata_to_path(
@@ -501,6 +502,7 @@ def _write_repo_metadata(
                 finished_at,
                 snapshot_id,
                 agent_id,
+                job if job.get("serverless") else None,
             )
         print(f"[METADATA] Successfully wrote metadata to: {dest_path}")
     except Exception as e:
@@ -518,6 +520,7 @@ def _write_metadata_to_path(
     finished_at: datetime,
     snapshot_id: str | None,
     agent_id: str | None,
+    serverless_job: dict[str, Any] | None = None,
 ) -> None:
     repo = RepositoryMetadata(repo_path)
     if not repo.is_initialized():
@@ -531,7 +534,25 @@ def _write_metadata_to_path(
             "os_info": f"{platform.system()} {platform.release()}",
         },
     )
-    repo.save_job(job_name=job_name, job_config={"source_path": source_path, "client_id": agent_id})
+    if serverless_job:
+        from backer.serverless.sidecar import save_job_config
+
+        save_job_config(
+            repo_path,
+            job_name,
+            agent_id or "unknown",
+            {
+                "source_path": source_path,
+                "excludes": serverless_job.get("excludes", []),
+                "schedule": serverless_job.get("schedule"),
+                "retention": serverless_job.get("retention"),
+                "repository_hint": serverless_job.get("repository_hint", {}),
+                "client_id": agent_id,
+            },
+            [value for value in (serverless_job.get("smb_password"),) if value],
+        )
+    else:
+        repo.save_job(job_name=job_name, job_config={"source_path": source_path, "client_id": agent_id})
     repo.save_job_run(
         job_name,
         run_id,

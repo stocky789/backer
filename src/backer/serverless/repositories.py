@@ -88,3 +88,17 @@ def add_repository(
     config.repositories[repo_id] = saved
     config.save(config_path)
     return repo_id, backend
+
+
+def rescope_secrets_for_system(config: BackerConfig) -> None:
+    """Copy every configured repository secret into the machine scope and verify it."""
+    for repository_id, record in config.repositories.items():
+        for reference in (record.passphrase_ref, record.storage_password_ref):
+            if not reference:
+                continue
+            value = keystore.get(reference, machine_scope=True) or keystore.get(reference)
+            if value is None:
+                raise ValueError(f"Repository '{record.name or repository_id}' secret cannot be read")
+            keystore.put(reference, value, machine_scope=True)
+            if keystore.get(reference, machine_scope=True) != value:
+                raise ValueError(f"Repository '{record.name or repository_id}' secret cannot be read at machine scope")

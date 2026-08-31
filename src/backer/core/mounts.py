@@ -152,6 +152,45 @@ class SMBConnectionManager:
         )
         return result.returncode == 0
 
+    def connect_serverless(
+        self,
+        server: str,
+        share: str,
+        username: str,
+        password: str,
+        *,
+        domain: str | None = None,
+        is_system: bool = False,
+    ) -> bool:
+        """Connect without Credential Manager; SYSTEM may reclaim its own 1219 connection."""
+        full_user = f"{domain}\\{username}" if domain else username
+        unc_path = f"\\\\{server}\\{share}"
+
+        def connect() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["net", "use", unc_path, f"/user:{full_user}", "*", "/persistent:no"],
+                input=f"{password}\n",
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+
+        result = connect()
+        if result.returncode == 0:
+            return True
+        if "1219" not in result.stderr:
+            return False
+        existing = self._find_existing_connection(server) or unc_path
+        if not is_system:
+            raise RuntimeError(f"SMB connection conflict: {existing}. Disconnect it or use the same credentials.")
+        subprocess.run(
+            ["net", "use", existing.split()[-1], "/delete", "/y"],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+        return connect().returncode == 0
+
     def _find_server_conflict(self, server: str, username: str | None) -> str | None:
         """Check if there's a conflicting connection to this server.
 

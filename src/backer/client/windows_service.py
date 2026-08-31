@@ -259,6 +259,29 @@ def create_background_scheduled_task(server_url: str | None = None) -> tuple[boo
             pass
 
 
+def create_local_scheduled_task() -> tuple[bool, str]:
+    """Install the independent SYSTEM minute trigger for ``job run --due``."""
+    if not is_windows():
+        return False, "Windows scheduled task only available on Windows"
+    if not is_admin():
+        return False, "Administrator privileges required. Run as Administrator."
+    data_dir = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
+    command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
+    arguments = "job run --due" if getattr(sys, "frozen", False) else "-m backer job run --due"
+    task_name = "BackerLocalBackup"
+    action = f'cmd.exe /d /c "set BACKER_DATA_DIR={data_dir}&& \"{command}\" {arguments}"'
+    subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True,
+                   creationflags=get_subprocess_flags())
+    result = subprocess.run(
+        ["schtasks", "/create", "/tn", task_name, "/tr", action, "/sc", "minute", "/mo", "1",
+         "/ru", "SYSTEM", "/rl", "highest", "/f"], capture_output=True, text=True,
+        creationflags=get_subprocess_flags(),
+    )
+    if result.returncode:
+        return False, result.stderr.strip() or "Failed to create local backup task"
+    return True, f"Local backup task '{task_name}' created."
+
+
 def _create_background_task_simple(server_url: str | None = None) -> tuple[bool, str]:
     """Fallback method using simpler schtasks command."""
     task_name = "BackerAgentService"

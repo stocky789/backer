@@ -215,12 +215,26 @@ def _prepare_windows_smb(path: str, job: dict[str, Any]) -> None:
         return
     server, share, _ = parse_smb_path(path)
     if _smb_manager is None:
-        from backer.agent.service import SMBConnectionManager
+        if job.get("serverless"):
+            from backer.core.mounts import SMBConnectionManager
+        else:
+            from backer.agent.service import SMBConnectionManager
 
         _smb_manager = SMBConnectionManager()
-    if not _smb_manager.connect(
-        server, share, job.get("smb_username"), job.get("smb_password"), job.get("smb_domain")
-    ):
+    if job.get("serverless"):
+        connected = _smb_manager.connect_serverless(
+            server,
+            share,
+            job.get("smb_username") or "",
+            job.get("smb_password") or "",
+            domain=job.get("smb_domain"),
+            is_system=job.get("run_as_system", False),
+        )
+    else:
+        connected = _smb_manager.connect(
+            server, share, job.get("smb_username"), job.get("smb_password"), job.get("smb_domain")
+        )
+    if not connected:
         raise RuntimeError(f"Failed to connect to SMB share: \\\\{server}\\{share}")
 
 

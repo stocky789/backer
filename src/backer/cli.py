@@ -620,8 +620,17 @@ def _read_passphrase(stream: bool, file: Path | None) -> str:
 @click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--headless", is_flag=True, help="Allow the protected local-file secret fallback")
 @click.pass_context
-def repo_add(ctx: click.Context, name: str, attach: bool, initialize: bool, repository_type: str, path: str | None,
-             passphrase_stdin: bool, passphrase_file: Path | None, headless: bool) -> None:
+def repo_add(
+    ctx: click.Context,
+    name: str,
+    attach: bool,
+    initialize: bool,
+    repository_type: str,
+    path: str | None,
+    passphrase_stdin: bool,
+    passphrase_file: Path | None,
+    headless: bool,
+) -> None:
     """Attach or explicitly create one repository."""
     from backer.core.config import BackerConfig, RepositoryConfig, load_config
     from backer.core.paths import get_config_dir
@@ -640,6 +649,42 @@ def repo_add(ctx: click.Context, name: str, attach: bool, initialize: bool, repo
             console.print("Warning: secrets are stored in protected local files")
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error
+
+
+@repo.command("adopt")
+@click.argument("name")
+@click.option("--job", "jobs", multiple=True, help="Sidecar job name to import (repeatable)")
+@click.option("--all", "all_jobs", is_flag=True, help="Import every discovered sidecar job")
+@click.option("--source", "sources", multiple=True, help="NAME=local source path")
+@click.pass_context
+def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: bool, sources: tuple[str, ...]) -> None:
+    """Copy existing repository sidecar jobs into this machine's config."""
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+    from backer.core.repo_metadata import RepositoryMetadata
+    from backer.serverless.sidecar import adopt_jobs
+
+    config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
+    config = load_config(config_path)
+    repository_id = next((key for key, value in config.repositories.items() if key == name or value.name == name), None)
+    if not repository_id:
+        raise click.ClickException(f"Repository '{name}' is not configured")
+    record = config.repositories[repository_id]
+    if record.type != "local" or not record.path:
+        raise click.ClickException("Adoption currently requires the repository root to be locally reachable")
+    discovery = RepositoryMetadata(record.path, record.type).discover_all()
+    available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
+    selected = available if all_jobs else list(jobs)
+    if not selected:
+        raise click.ClickException("Choose --job NAME or --all")
+    mapping = dict(item.split("=", 1) for item in sources if "=" in item)
+    try:
+        adopted = adopt_jobs(config, repository_id, Path(record.path), selected, source_paths=mapping)
+        config.save(config_path)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    for job_name in adopted:
+        console.print(f"Adopted {job_name}")
 
 
 @agent.command("setup")
@@ -810,6 +855,7 @@ def agent_status() -> None:
 
 
 @agent.command("install")
+@click.option("--mode", type=click.Choice(["server", "local"]), default="server", show_default=True)
 @click.option(
     "--method",
     "-m",
@@ -817,7 +863,7 @@ def agent_status() -> None:
     type=click.Choice(["service", "task", "startup", "systemd"]),
     help="Installation method (Windows: service/task/startup, Linux: systemd)",
 )
-def agent_install(method: str) -> None:
+def agent_install(mode: str, method: str) -> None:
     """Install agent to run at system startup.
 
     On Windows, the default method is 'service' which creates a background task
@@ -838,8 +884,33 @@ def agent_install(method: str) -> None:
         backer agent install --method task    # Legacy: runs at user logon
         backer agent install --method systemd # Linux systemd service
     """
+    from backer.client.windows_service import (
+        create_local_scheduled_task,
+        create_systemd_service,
+        install_service,
+        is_admin,
+        is_windows,
+    )
+
+    if mode == "local":
+        from backer.core.config import load_config
+        from backer.core.paths import get_config_dir
+        from backer.serverless.repositories import rescope_secrets_for_system
+
+        config = load_config(get_config_dir() / "config.yaml")
+        try:
+            rescope_secrets_for_system(config)
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+        if not is_windows():
+            raise click.ClickException("Local scheduling on Linux is installed by the systemd local mode")
+        success, message = create_local_scheduled_task()
+        if not success:
+            raise click.ClickException(message)
+        console.print(f"[green]✓[/green] {message}")
+        return
+
     from backer.client.agent import BackerAgent
-    from backer.client.windows_service import create_systemd_service, install_service, is_admin, is_windows
 
     # Check if registered
     try:
@@ -1512,13 +1583,35 @@ def job_create(
 
 
 @job.command("run")
-@click.argument("name")
+@click.argument("name", required=False)
+@click.option("--due", is_flag=True, help="Run locally due serverless jobs")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
 @click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
-def job_run(name: str, dry_run: bool, server: str | None, username: str | None, password: str | None) -> None:
+def job_run(
+    name: str | None, due: bool, dry_run: bool, server: str | None, username: str | None, password: str | None
+) -> None:
     """Run a backup job."""
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+
+    local_config = load_config(get_config_dir() / "config.yaml")
+    if due or (name and name in local_config.jobs):
+        from backer.serverless.runs import run_due_jobs, run_local_job
+
+        try:
+            reports = run_due_jobs(local_config) if due else [run_local_job(local_config, name)]
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+        if due and not reports:
+            console.print("No jobs due")
+        for report in reports:
+            if not report["success"]:
+                raise click.ClickException("Backup failed")
+        return
+    if not name:
+        raise click.UsageError("NAME is required unless --due is used")
     import httpx
 
     server_url = server or "http://localhost:8420"
