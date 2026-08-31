@@ -6,12 +6,11 @@ import platform
 import shutil
 import signal
 import socket
-import subprocess
+import subprocess  # noqa: F401
 import sys
 import tempfile
 import threading
 from collections.abc import Generator
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,14 +21,31 @@ from backer import __version__
 from backer.backends import get_backend
 from backer.backends.base import BackupDestination, BackupSource
 from backer.core.config import ClientConfig, load_config
+from backer.core.mounts import (
+    check_cifs_available,
+    check_nfs_available,
+    is_nfs_path,
+    is_smb_path,
+    nfs_mount_context,
+    parse_nfs_path,
+    parse_smb_path,
+    smb_mount_context,
+)
 from backer.core.paths import get_config_dir, get_data_dir  # noqa: F401
 from backer.core.repo_metadata import RepositoryMetadata
 
 logger = logging.getLogger(__name__)
 
 _SENSITIVE_OPTION_PARTS = (
-    "password", "token", "secret", "access_key", "api_key", "private_key", "authorization",
-    "credential", "proxy_capability",
+    "password",
+    "token",
+    "secret",
+    "access_key",
+    "api_key",
+    "private_key",
+    "authorization",
+    "credential",
+    "proxy_capability",
 )
 
 
@@ -37,7 +53,8 @@ def _redact_repository_options(value: Any) -> Any:
     """Return a safe-to-log copy of backend options."""
     if isinstance(value, dict):
         return {
-            key: "***" if any(part in str(key).lower() for part in _SENSITIVE_OPTION_PARTS)
+            key: "***"
+            if any(part in str(key).lower() for part in _SENSITIVE_OPTION_PARTS)
             else _redact_repository_options(item)
             for key, item in value.items()
         }
@@ -234,7 +251,7 @@ class BackerAgent:
                     target=self._run_backup_worker,
                     args=(job_data, dry_run, job_name, cmd_id),
                     daemon=True,
-                    name=f"backup-{job_name}"
+                    name=f"backup-{job_name}",
                 )
                 backup_thread.start()
 
@@ -255,7 +272,7 @@ class BackerAgent:
                     target=self._run_restore_worker,
                     args=(payload, dry_run, restore_key, cmd_id),
                     daemon=True,
-                    name=f"restore-{job_name}"
+                    name=f"restore-{job_name}",
                 )
                 restore_thread.start()
 
@@ -280,6 +297,7 @@ class BackerAgent:
         except Exception as e:
             print(f"Backup worker failed: {e}")
             import traceback
+
             traceback.print_exc()
         finally:
             if cmd_id:
@@ -295,6 +313,7 @@ class BackerAgent:
         except Exception as e:
             print(f"Restore worker failed: {e}")
             import traceback
+
             traceback.print_exc()
         finally:
             if cmd_id:
@@ -328,18 +347,22 @@ class BackerAgent:
                 # Return root directories - Home and /
                 home = Path.home()
                 if home.exists():
-                    entries.append({
-                        "name": "Home",
-                        "path": str(home),
+                    entries.append(
+                        {
+                            "name": "Home",
+                            "path": str(home),
+                            "is_dir": True,
+                            "size": 0,
+                        }
+                    )
+                entries.append(
+                    {
+                        "name": "/",
+                        "path": "/",
                         "is_dir": True,
                         "size": 0,
-                    })
-                entries.append({
-                    "name": "/",
-                    "path": "/",
-                    "is_dir": True,
-                    "size": 0,
-                })
+                    }
+                )
                 actual_path = ""
             else:
                 # List contents of the specified path
@@ -438,101 +461,39 @@ class BackerAgent:
         """Report progress update to server."""
         try:
             client = self._get_client()
-            client.post("/api/v1/progress", json={
-                "run_id": run_id,
-                "status": status,
-                "progress_percent": progress_percent,
-                "current_file": current_file,
-                "bytes_processed": bytes_processed,
-                "files_processed": files_processed,
-                "message": message,
-            })
+            client.post(
+                "/api/v1/progress",
+                json={
+                    "run_id": run_id,
+                    "status": status,
+                    "progress_percent": progress_percent,
+                    "current_file": current_file,
+                    "bytes_processed": bytes_processed,
+                    "files_processed": files_processed,
+                    "message": message,
+                },
+            )
         except Exception as e:
             print(f"Failed to report progress: {e}")
 
     def _is_smb_path(self, path: str) -> bool:
-        """Check if a path is an SMB/UNC path."""
-        return path.startswith("//") or path.startswith("\\\\")
+        return is_smb_path(path)
 
     def _is_nfs_path(self, path: str) -> bool:
-        """Check if a path is an NFS path (server:/export format)."""
-        # NFS paths look like: server:/export/path or 192.168.1.1:/share/path
-        # But NOT like /local/path or C:\path
-        if path.startswith(("/", "\\")) or "://" in path:
-            return False
-        if ":" in path:
-            # Check it's not a Windows drive letter (C:)
-            parts = path.split(":", 1)
-            if len(parts) == 2 and len(parts[0]) > 1:
-                # More than one char before colon, likely NFS
-                return parts[1].startswith("/")
-        return False
+        return is_nfs_path(path)
 
     def _parse_smb_path(self, path: str) -> tuple[str, str, str]:
-        """Parse an SMB path into (server, share, subpath).
-
-        Examples:
-            //192.168.0.254/HomeNetwork/Backer -> (192.168.0.254, HomeNetwork, Backer)
-            //server/share -> (server, share, "")
-        """
-        # Normalize to forward slashes
-        path = path.replace("\\", "/").lstrip("/")
-        parts = path.split("/")
-
-        server = parts[0] if len(parts) > 0 else ""
-        share = parts[1] if len(parts) > 1 else ""
-        subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
-
-        return server, share, subpath
+        return parse_smb_path(path)
 
     def _parse_nfs_path(self, path: str) -> tuple[str, str, str]:
-        """Parse an NFS path into (server, export, subpath).
-
-        Examples:
-            192.168.0.254:/exports/backup/data -> (192.168.0.254, /exports/backup, data)
-            server:/share -> (server, /share, "")
-        """
-        # Split on first colon
-        parts = path.split(":", 1)
-        server = parts[0]
-        export_path = parts[1] if len(parts) > 1 else "/"
-
-        # The export is typically the first part, subpath is the rest
-        # Common pattern: server:/export/subpath
-        # We'll treat the entire path after : as the export initially
-        # The actual export point is determined by the NFS server
-        return server, export_path, ""
+        return parse_nfs_path(path)
 
     def _check_cifs_available(self) -> bool:
-        """Check if cifs-utils is installed for SMB mounting."""
-        try:
-            result = subprocess.run(
-                ["mount.cifs", "-V"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return check_cifs_available()
 
     def _check_nfs_available(self) -> bool:
-        """Check if NFS mount tools are installed."""
-        try:
-            # Check for mount.nfs (provided by nfs-common on Debian/Ubuntu)
-            result = subprocess.run(
-                ["mount.nfs", "-V"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            # mount.nfs might not have -V, try checking if it exists
-            import shutil
-            return shutil.which("mount.nfs") is not None
+        return check_nfs_available()
 
-    @contextmanager
     def _smb_mount_context(
         self,
         server: str,
@@ -541,150 +502,10 @@ class BackerAgent:
         password: str | None = None,
         domain: str | None = None,
     ) -> Generator[Path, None, None]:
-        """Context manager that mounts an SMB share and yields the mount path.
+        return smb_mount_context(server, share, username, password, domain, cifs_check=self._check_cifs_available)
 
-        Used by Kopia on Linux, which needs a local filesystem path.
-        Requires cifs-utils to be installed.
-        """
-        # Check if cifs-utils is available
-        if not self._check_cifs_available():
-            raise RuntimeError(
-                "cifs-utils not installed. Install it with:\n"
-                "  Debian/Ubuntu: sudo apt install cifs-utils\n"
-                "  RHEL/Fedora: sudo dnf install cifs-utils\n"
-                "  Arch: sudo pacman -S cifs-utils"
-            )
-
-        mount_point = Path(tempfile.mkdtemp(prefix="backer_smb_"))
-        credentials_path: Path | None = None
-
-        try:
-            # Build mount command
-            smb_url = f"//{server}/{share}"
-            cmd = ["mount", "-t", "cifs", smb_url, str(mount_point)]
-
-            # Build mount options
-            opts = ["rw"]
-            if username or password or domain:
-                fd, credentials_name = tempfile.mkstemp(prefix="backer_smb_credentials_")
-                os.close(fd)
-                credentials_path = Path(credentials_name)
-                credentials_path.write_text(
-                    "\n".join(
-                        filter(
-                            None,
-                            (
-                                f"username={username}" if username else "",
-                                f"password={password}" if password else "",
-                                f"domain={domain}" if domain else "",
-                            ),
-                        )
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                credentials_path.chmod(0o600)
-                opts.append(f"credentials={credentials_path}")
-            if not username and not password:
-                opts.append("guest")
-
-            cmd.extend(["-o", ",".join(opts)])
-
-            print(f"[SMB] Mounting {smb_url} to {mount_point}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                error_msg = result.stderr.strip()
-                if "Permission denied" in error_msg:
-                    raise RuntimeError(f"SMB mount permission denied. Check credentials for //{server}/{share}")
-                elif "No such file or directory" in error_msg:
-                    raise RuntimeError(f"SMB share not found: //{server}/{share}")
-                elif "Connection refused" in error_msg or "Host is down" in error_msg:
-                    raise RuntimeError(f"Cannot connect to SMB server: {server}")
-                else:
-                    raise RuntimeError(f"Failed to mount SMB share: {error_msg}")
-
-            print("[SMB] Mounted successfully")
-            yield mount_point
-
-        finally:
-            # Unmount
-            print(f"[SMB] Unmounting {mount_point}")
-            try:
-                subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=30)
-            except Exception as e:
-                print(f"[SMB] Warning: unmount failed: {e}")
-
-            # Clean up mount point directory
-            try:
-                mount_point.rmdir()
-            except Exception:
-                pass
-            if credentials_path:
-                credentials_path.unlink(missing_ok=True)
-
-    @contextmanager
-    def _nfs_mount_context(
-        self,
-        server: str,
-        export_path: str,
-    ) -> Generator[Path, None, None]:
-        """Context manager that mounts an NFS export and yields the mount path.
-
-        Used by Kopia on Linux, which needs a local filesystem path.
-        Requires nfs-common (Debian/Ubuntu) or nfs-utils (RHEL/Fedora) to be installed.
-        """
-        # Check if NFS tools are available
-        if not self._check_nfs_available():
-            raise RuntimeError(
-                "NFS mount tools not installed. Install with:\n"
-                "  Debian/Ubuntu: sudo apt install nfs-common\n"
-                "  RHEL/Fedora: sudo dnf install nfs-utils\n"
-                "  Arch: sudo pacman -S nfs-utils"
-            )
-
-        mount_point = Path(tempfile.mkdtemp(prefix="backer_nfs_"))
-
-        try:
-            # Build NFS mount command
-            nfs_url = f"{server}:{export_path}"
-            cmd = ["mount", "-t", "nfs", nfs_url, str(mount_point)]
-
-            # Add common NFS mount options for reliability
-            cmd.extend(["-o", "rw,soft,timeo=30,retrans=3"])
-
-            print(f"[NFS] Mounting {nfs_url} to {mount_point}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-
-            if result.returncode != 0:
-                error_msg = result.stderr.strip()
-                if "Permission denied" in error_msg or "access denied" in error_msg.lower():
-                    raise RuntimeError(f"NFS mount permission denied: {nfs_url}")
-                elif "No such file or directory" in error_msg:
-                    raise RuntimeError(f"NFS export not found: {nfs_url}")
-                elif "Connection refused" in error_msg or "Host is down" in error_msg:
-                    raise RuntimeError(f"Cannot connect to NFS server: {server}")
-                elif "not responding" in error_msg.lower():
-                    raise RuntimeError(f"NFS server not responding: {server}")
-                else:
-                    raise RuntimeError(f"Failed to mount NFS export: {error_msg}")
-
-            print("[NFS] Mounted successfully")
-            yield mount_point
-
-        finally:
-            # Unmount
-            print(f"[NFS] Unmounting {mount_point}")
-            try:
-                subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=30)
-            except Exception as e:
-                print(f"[NFS] Warning: unmount failed: {e}")
-
-            # Clean up mount point directory
-            try:
-                mount_point.rmdir()
-            except Exception:
-                pass
+    def _nfs_mount_context(self, server: str, export_path: str) -> Generator[Path, None, None]:
+        return nfs_mount_context(server, export_path, nfs_check=self._check_nfs_available)
 
     def _prepare_destination_for_backend(
         self,
@@ -739,7 +560,7 @@ class BackerAgent:
                 _, full_path, _ = self._parse_nfs_path(dest_path)
                 # Remove the export prefix to get subpath
                 if full_path.startswith(nfs_export):
-                    subpath = full_path[len(nfs_export):].lstrip("/")
+                    subpath = full_path[len(nfs_export) :].lstrip("/")
                 else:
                     # Export doesn't match - maybe path format differs, use full path as subpath
                     subpath = full_path.lstrip("/")
@@ -908,8 +729,7 @@ class BackerAgent:
 
             # Check if backend supports progress callback
             supports_progress = (
-                hasattr(backend.backup, '__code__') and
-                'progress_callback' in backend.backup.__code__.co_varnames
+                hasattr(backend.backup, "__code__") and "progress_callback" in backend.backup.__code__.co_varnames
             )
 
             print(f"[BACKUP] Executing backup: {source.path} -> {dest_path}")
@@ -1077,7 +897,7 @@ class BackerAgent:
                 _, full_path, _ = self._parse_nfs_path(source_path)
                 # Remove the export prefix to get subpath
                 if full_path.startswith(nfs_export):
-                    subpath = full_path[len(nfs_export):].lstrip("/")
+                    subpath = full_path[len(nfs_export) :].lstrip("/")
                 else:
                     # Export doesn't match - maybe path format differs, use full path as subpath
                     subpath = full_path.lstrip("/")
@@ -1108,6 +928,7 @@ class BackerAgent:
         server, share, _ = self._parse_smb_path(path)
         if self._smb_manager is None:
             from backer.agent.service import SMBConnectionManager
+
             self._smb_manager = SMBConnectionManager()
         if not self._smb_manager.connect(
             server, share, job.get("smb_username"), job.get("smb_password"), job.get("smb_domain")
@@ -1243,9 +1064,11 @@ class BackerAgent:
                 if backend_name == "kopia":
                     snapshots = backend.list_snapshots(source)
                     selected = job.get("snapshot")
-                    if not snapshots or (selected and selected != "latest" and not any(
-                        selected in (item.get("id"), item.get("full_id")) for item in snapshots
-                    )):
+                    if not snapshots or (
+                        selected
+                        and selected != "latest"
+                        and not any(selected in (item.get("id"), item.get("full_id")) for item in snapshots)
+                    ):
                         raise RuntimeError(
                             "Clean restore requires an accessible Kopia repository and selected snapshot"
                         )
@@ -1277,9 +1100,7 @@ class BackerAgent:
                         if destination.is_symlink() or not destination.is_dir():
                             raise RuntimeError("Clean restore destination must be a non-symlink directory")
                         destination_mode = destination.stat().st_mode & 0o7777
-                        staged_destination = Path(tempfile.mkdtemp(
-                            prefix=".backer-restore-", dir=destination.parent
-                        ))
+                        staged_destination = Path(tempfile.mkdtemp(prefix=".backer-restore-", dir=destination.parent))
                         staged_destination.rmdir()
                         destination.replace(staged_destination)
                         try:
@@ -1509,14 +1330,28 @@ class BackerAgent:
                     else:
                         local_path = mount_point
                     self._write_metadata_to_path(
-                        local_path, job_name, run_id, source_path, backend_name,
-                        result, started_at, finished_at, snapshot_id,
+                        local_path,
+                        job_name,
+                        run_id,
+                        source_path,
+                        backend_name,
+                        result,
+                        started_at,
+                        finished_at,
+                        snapshot_id,
                     )
             else:
                 # Local path or Windows UNC path
                 self._write_metadata_to_path(
-                    Path(dest_path), job_name, run_id, source_path, backend_name,
-                    result, started_at, finished_at, snapshot_id,
+                    Path(dest_path),
+                    job_name,
+                    run_id,
+                    source_path,
+                    backend_name,
+                    result,
+                    started_at,
+                    finished_at,
+                    snapshot_id,
                 )
 
             print(f"[METADATA] Successfully wrote metadata to: {dest_path}")

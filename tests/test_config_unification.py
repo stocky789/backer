@@ -25,7 +25,8 @@ def test_agent_yaml_and_gui_json_merge_into_one_config(monkeypatch, tmp_path: Pa
 
     assert config.agent_id == "agent-1"
     assert config.server.model_dump(exclude_none=True) == _server() | {
-        "server_url": "https://agent", "heartbeat_interval": 60
+        "server_url": "https://agent",
+        "heartbeat_interval": 60,
     }
     assert (config_dir / "config.yaml").exists()
     assert (config_dir / "agent.yaml").exists()
@@ -75,6 +76,10 @@ def test_data_dir_honours_backer_data_dir(monkeypatch, tmp_path: Path) -> None:
     assert paths.get_data_dir() == tmp_path / "data"
 
 
+def test_job_subfolder_replaces_unsafe_path_characters() -> None:
+    assert paths.get_job_subfolder("Daily:VM/Backup?*") == "Daily_VM_Backup__"
+
+
 def test_agent_uninstall_preserves_a_server_data_directory(tmp_path: Path) -> None:
     from backer import cli
 
@@ -85,20 +90,24 @@ def test_agent_uninstall_preserves_a_server_data_directory(tmp_path: Path) -> No
 
 def test_repository_options_reject_inline_secrets() -> None:
     with pytest.raises(ValidationError):
-        RepositoryConfig.model_validate({
-            "name": "repo",
-            "type": "s3",
-            "repository_options": {"secret_access_key": "plaintext"},
-        })
+        RepositoryConfig.model_validate(
+            {
+                "name": "repo",
+                "type": "s3",
+                "repository_options": {"secret_access_key": "plaintext"},
+            }
+        )
 
 
 def test_repository_options_reject_nested_inline_secrets() -> None:
     with pytest.raises(ValidationError):
-        RepositoryConfig.model_validate({
-            "name": "repo",
-            "type": "s3",
-            "repository_options": {"nested": [{"password": "plaintext"}]},
-        })
+        RepositoryConfig.model_validate(
+            {
+                "name": "repo",
+                "type": "s3",
+                "repository_options": {"nested": [{"password": "plaintext"}]},
+            }
+        )
 
 
 @pytest.mark.parametrize("secret_key", ["credential", "private_key"])
@@ -114,22 +123,26 @@ def test_repository_options_cannot_round_trip_arbitrary_secret_values(secret_key
 
 
 def test_repository_options_accepts_empty_mapping() -> None:
-    config = RepositoryConfig.model_validate({
-        "name": "repo",
-        "type": "local",
-        "repository_options": {},
-    })
+    config = RepositoryConfig.model_validate(
+        {
+            "name": "repo",
+            "type": "local",
+            "repository_options": {},
+        }
+    )
 
     assert config.repository_options.model_dump() == {}
 
 
 def test_repository_options_rejects_arbitrary_keys() -> None:
     with pytest.raises(ValidationError):
-        RepositoryConfig.model_validate({
-            "name": "repo",
-            "type": "local",
-            "repository_options": {"credential": "plaintext"},
-        })
+        RepositoryConfig.model_validate(
+            {
+                "name": "repo",
+                "type": "local",
+                "repository_options": {"credential": "plaintext"},
+            }
+        )
 
 
 def test_invalid_model_config_names_the_resolved_path(monkeypatch, tmp_path: Path) -> None:
@@ -148,8 +161,8 @@ def test_uninstall_preserves_colocated_server_config_and_data(monkeypatch, tmp_p
 
     (tmp_path / "backer.db").write_text("server")
     removals: list[Path] = []
-    monkeypatch.setattr("backer.client.agent.get_config_dir", lambda: tmp_path)
-    monkeypatch.setattr("backer.client.agent.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("backer.core.paths.get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr("backer.core.paths.get_data_dir", lambda: tmp_path)
     monkeypatch.setattr("backer.client.windows_service.is_windows", lambda: False)
     monkeypatch.setattr(cli.Path, "home", lambda: tmp_path / "home")
     monkeypatch.setattr(shutil, "rmtree", lambda path, **_kwargs: removals.append(path))

@@ -16,8 +16,8 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from backer import __version__
-from backer.client.agent import get_config_dir
 from backer.core.config import ClientConfig, load_config
+from backer.core.paths import get_config_dir
 
 console = Console()
 
@@ -25,11 +25,12 @@ console = Console()
 def print_header() -> None:
     """Print the setup wizard header."""
     console.print()
-    console.print(Panel.fit(
-        "[bold blue]Backer Agent Setup Wizard[/bold blue]\n"
-        f"[dim]Version {__version__}[/dim]",
-        border_style="blue",
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold blue]Backer Agent Setup Wizard[/bold blue]\n[dim]Version {__version__}[/dim]",
+            border_style="blue",
+        )
+    )
     console.print()
 
 
@@ -85,6 +86,7 @@ def register_agent(server_url: str, enrollment_token: str) -> tuple[bool, str, d
     try:
         hostname = socket.gethostname()
         import platform
+
         os_info = f"{platform.system()} {platform.release()}"
 
         response = httpx.post(
@@ -101,11 +103,15 @@ def register_agent(server_url: str, enrollment_token: str) -> tuple[bool, str, d
 
         if response.status_code == 200:
             data = response.json()
-            return True, "Agent registered successfully!", {
-                "server_url": server_url,
-                "client_id": data["client_id"],
-                "client_secret": data["client_secret"],
-            }
+            return (
+                True,
+                "Agent registered successfully!",
+                {
+                    "server_url": server_url,
+                    "client_id": data["client_id"],
+                    "client_secret": data["client_secret"],
+                },
+            )
         else:
             return False, f"Registration failed: {response.text}", None
 
@@ -159,10 +165,7 @@ def run_wizard() -> bool:
     console.print()
 
     # Directly prompt for server URL (skip auto-discovery)
-    server_url = Prompt.ask(
-        "Enter your Backer server URL",
-        default="http://localhost:8420"
-    )
+    server_url = Prompt.ask("Enter your Backer server URL", default="http://localhost:8420")
 
     # Normalize URL
     if not server_url.startswith("http"):
@@ -224,13 +227,15 @@ def run_wizard() -> bool:
 
     # Success!
     console.print()
-    console.print(Panel.fit(
-        "[bold green]Setup Complete![/bold green]\n\n"
-        f"Server: {server_url}\n"
-        f"Client ID: {credentials['client_id']}\n\n"
-        "[dim]The agent is now configured and ready to run.[/dim]",
-        border_style="green",
-    ))
+    console.print(
+        Panel.fit(
+            "[bold green]Setup Complete![/bold green]\n\n"
+            f"Server: {server_url}\n"
+            f"Client ID: {credentials['client_id']}\n\n"
+            "[dim]The agent is now configured and ready to run.[/dim]",
+            border_style="green",
+        )
+    )
     console.print()
 
     console.print("[bold]Next Steps:[/bold]")

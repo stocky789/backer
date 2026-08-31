@@ -129,7 +129,9 @@ def tools() -> None:
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination")
 @click.option(
-    "--repository-password", envvar="BACKER_REPOSITORY_PASSWORD", required=True,
+    "--repository-password",
+    envvar="BACKER_REPOSITORY_PASSWORD",
+    required=True,
     help="Repository encryption password",
 )
 @click.option("--exclude", "-e", multiple=True, help="Exclude patterns")
@@ -200,7 +202,9 @@ def backup(
 @click.argument("source")
 @click.argument("destination", type=click.Path(path_type=Path))
 @click.option(
-    "--repository-password", envvar="BACKER_REPOSITORY_PASSWORD", required=True,
+    "--repository-password",
+    envvar="BACKER_REPOSITORY_PASSWORD",
+    required=True,
     help="Repository encryption password",
 )
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
@@ -272,10 +276,7 @@ def _check_server_dependencies() -> None:
 
     if missing_modules:
         missing_list = ", ".join(missing_modules)
-        raise ImportError(
-            f"Server dependencies missing: {missing_list}. "
-            "Install with: pip install 'backer[server]'"
-        )
+        raise ImportError(f"Server dependencies missing: {missing_list}. Install with: pip install 'backer[server]'")
 
 
 @server.command("start")
@@ -292,6 +293,7 @@ def server_start(host: str, port: int, data_dir: Path | None) -> None:
 
         # Import and run the server daemon
         from backer.server.daemon import run_server
+
         run_server(host=host, port=port, data_dir=data_dir)
     except ImportError as e:
         console.print(f"[red]Error:[/red] Server dependencies not installed: {e}")
@@ -434,6 +436,7 @@ def server_update(dev: bool, version: str | None, yes: bool) -> None:
     # Step 5: Verify service is running
     console.print("\n[bold]4. Verifying...[/bold]")
     import time
+
     time.sleep(2)  # Give service time to start
 
     try:
@@ -597,9 +600,9 @@ def agent_setup() -> None:
     Guides you through connecting to a server and registering this machine.
     Automatically removes any existing configuration to start fresh.
     """
-    from backer.client.agent import get_config_dir
     from backer.client.setup_wizard import run_wizard
     from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
 
     config_dir = get_config_dir()
     config_path = config_dir / "config.yaml"
@@ -758,8 +761,13 @@ def agent_status() -> None:
 
 
 @agent.command("install")
-@click.option("--method", "-m", default="service", type=click.Choice(["service", "task", "startup", "systemd"]),
-              help="Installation method (Windows: service/task/startup, Linux: systemd)")
+@click.option(
+    "--method",
+    "-m",
+    default="service",
+    type=click.Choice(["service", "task", "startup", "systemd"]),
+    help="Installation method (Windows: service/task/startup, Linux: systemd)",
+)
 def agent_install(method: str) -> None:
     """Install agent to run at system startup.
 
@@ -828,8 +836,8 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     import shutil
     import subprocess
 
-    from backer.client.agent import get_config_dir, get_data_dir
     from backer.client.windows_service import is_windows, uninstall_service
+    from backer.core.paths import get_config_dir, get_data_dir
 
     if is_windows():
         success, message = uninstall_service()
@@ -861,8 +869,7 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     has_install_dir = install_dir.exists()
     has_system_bin = system_bin.exists() or system_bin.is_symlink()
 
-    if not any([has_user_service, has_system_service, has_config, has_data,
-                has_install_dir, has_system_bin]):
+    if not any([has_user_service, has_system_service, has_config, has_data, has_install_dir, has_system_bin]):
         console.print("[yellow]No agent installation found.[/yellow]")
         return
 
@@ -888,44 +895,23 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
     # Stop and disable system service (installed via install-agent.sh)
     if has_system_service:
         console.print("Stopping system service...")
-        subprocess.run(
-            ["systemctl", "stop", "backer-agent"],
-            capture_output=True
-        )
-        subprocess.run(
-            ["systemctl", "disable", "backer-agent"],
-            capture_output=True
-        )
+        subprocess.run(["systemctl", "stop", "backer-agent"], capture_output=True)
+        subprocess.run(["systemctl", "disable", "backer-agent"], capture_output=True)
         try:
             system_service.unlink(missing_ok=True)
         except PermissionError:
             # Try with sudo via shell
-            subprocess.run(
-                ["sudo", "rm", "-f", str(system_service)],
-                capture_output=True
-            )
-        subprocess.run(
-            ["systemctl", "daemon-reload"],
-            capture_output=True
-        )
+            subprocess.run(["sudo", "rm", "-f", str(system_service)], capture_output=True)
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
         console.print("[green]✓ System service removed[/green]")
 
     # Stop and disable user systemd service (legacy/manual install)
     if has_user_service:
         console.print("Stopping user service...")
-        subprocess.run(
-            ["systemctl", "--user", "stop", "backer-agent"],
-            capture_output=True
-        )
-        subprocess.run(
-            ["systemctl", "--user", "disable", "backer-agent"],
-            capture_output=True
-        )
+        subprocess.run(["systemctl", "--user", "stop", "backer-agent"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", "backer-agent"], capture_output=True)
         user_service.unlink(missing_ok=True)
-        subprocess.run(
-            ["systemctl", "--user", "daemon-reload"],
-            capture_output=True
-        )
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
         console.print("[green]✓ User service removed[/green]")
 
     # Remove user symlink (~/.local/bin/backer)
@@ -939,10 +925,7 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
             system_bin.unlink(missing_ok=True)
             console.print(f"[green]✓ Removed {system_bin}[/green]")
         except PermissionError:
-            result = subprocess.run(
-                ["sudo", "rm", "-f", str(system_bin)],
-                capture_output=True
-            )
+            result = subprocess.run(["sudo", "rm", "-f", str(system_bin)], capture_output=True)
             if result.returncode == 0:
                 console.print(f"[green]✓ Removed {system_bin}[/green]")
             else:
@@ -954,10 +937,7 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
             shutil.rmtree(install_dir, ignore_errors=False)
             console.print(f"[green]✓ Removed {install_dir}[/green]")
         except PermissionError:
-            result = subprocess.run(
-                ["sudo", "rm", "-rf", str(install_dir)],
-                capture_output=True
-            )
+            result = subprocess.run(["sudo", "rm", "-rf", str(install_dir)], capture_output=True)
             if result.returncode == 0:
                 console.print(f"[green]✓ Removed {install_dir}[/green]")
             else:
@@ -978,10 +958,7 @@ def agent_uninstall(keep_config: bool, yes: bool) -> None:
             shutil.rmtree(config_dir, ignore_errors=True)
         except PermissionError:
             # /etc/backer needs sudo
-            subprocess.run(
-                ["sudo", "rm", "-rf", str(config_dir)],
-                capture_output=True
-            )
+            subprocess.run(["sudo", "rm", "-rf", str(config_dir)], capture_output=True)
         console.print(f"[green]✓ Removed {config_dir}[/green]")
 
     console.print()
@@ -1034,7 +1011,8 @@ def agent_progress(server: str | None, refresh: int, username: str | None, passw
         """Fetch currently running backup jobs from server."""
         try:
             response = httpx.get(
-                f"{server_url}/api/v1/running", timeout=10,
+                f"{server_url}/api/v1/running",
+                timeout=10,
                 auth=(username, password) if username and password else None,
             )
             response.raise_for_status()
@@ -1057,6 +1035,7 @@ def agent_progress(server: str | None, refresh: int, username: str | None, passw
         except Exception:
             # Don't hide errors in development
             import traceback
+
             console.print(f"[dim]Debug: {traceback.format_exc()}[/dim]")
             return []
 
@@ -1096,7 +1075,7 @@ def agent_progress(server: str | None, refresh: int, username: str | None, passw
                 "[yellow]Tip:[/yellow] Start a backup from the web UI or run:\n"
                 "  [cyan]backer job run <job-name>[/cyan]",
                 title="[bold]Backup Progress[/bold]",
-                border_style="blue"
+                border_style="blue",
             )
 
         table = Table(show_header=False, box=None, padding=(0, 1))
@@ -1154,9 +1133,7 @@ def agent_progress(server: str | None, refresh: int, username: str | None, passw
             table.add_row("")
 
         return Panel(
-            table,
-            title=f"[bold]Backup Progress[/bold] ([green]{len(jobs)}[/green] running)",
-            border_style="green"
+            table, title=f"[bold]Backup Progress[/bold] ([green]{len(jobs)}[/green] running)", border_style="green"
         )
 
     # Live display loop
@@ -1254,7 +1231,8 @@ def agent_update(dev: bool, yes: bool) -> None:
         try:
             result = subprocess.run(
                 [str(venv_pip.parent / "python"), "-c", "from backer import __version__; print(__version__)"],
-                capture_output=True, text=True
+                capture_output=True,
+                text=True,
             )
             new_version = result.stdout.strip()
         except Exception:
@@ -1465,7 +1443,8 @@ def job_create(
 
     try:
         response = httpx.post(
-            f"{server_url}/api/v1/jobs", json=job_data,
+            f"{server_url}/api/v1/jobs",
+            json=job_data,
             auth=(username, password) if username and password else None,
         )
         response.raise_for_status()

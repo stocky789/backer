@@ -1,6 +1,7 @@
 """Platform paths shared by Backer client configuration and data."""
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -37,3 +38,8 @@ def get_data_dir() -> Path:
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Backer"
     return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "backer"
+
+
+def get_job_subfolder(job_name: str) -> str:
+    """Return a filesystem-safe subfolder name for a backup job."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", job_name)

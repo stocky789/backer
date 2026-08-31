@@ -24,6 +24,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from backer import __version__
+from backer.core.paths import get_job_subfolder as _get_job_subfolder
 from backer.core.repo_metadata import file_lock
 from backer.server import timezone as tz
 from backer.server.auth import (
@@ -47,7 +48,6 @@ from backer.server.models import (
     JobRunRequest,
     JobRunResponse,
 )
-from backer.server.repository_paths import get_job_subfolder as _get_job_subfolder
 from backer.server.scheduler import BackupScheduler
 from backer.server.storage import Storage
 from backer.server.tasks import Task, get_task_manager

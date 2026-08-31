@@ -78,15 +78,15 @@ def test_public_url_is_configured_in_the_setup_wizard() -> None:
     setup_template = (ROOT / "src/backer/server/web/templates/setup.html").read_text(encoding="utf-8")
 
     assert "BACKER_PUBLIC_URL" not in compose_text
-    assert "name=\"public_url\"" in setup_template
+    assert 'name="public_url"' in setup_template
     assert "https://backer.example.com" in readme_text
     assert "http://192.168.1.100:8420" in readme_text
 
 
 def test_repository_job_subfolder_replaces_unsafe_path_characters() -> None:
-    repository_paths = importlib.import_module("backer.server.repository_paths")
+    repository_paths = importlib.import_module("backer.core.paths")
 
-    assert repository_paths.get_job_subfolder('Daily:VM/Backup?*') == "Daily_VM_Backup__"
+    assert repository_paths.get_job_subfolder("Daily:VM/Backup?*") == "Daily_VM_Backup__"
 
 
 def test_expected_backend_names_are_registered() -> None:
@@ -171,9 +171,7 @@ def test_rolling_release_workflows_only_publish_after_pr_validation() -> None:
 
 def test_rolling_release_permissions_are_scoped_to_publish_jobs() -> None:
     github = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-    active_gitea = yaml.safe_load(
-        (ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8")
-    )
+    active_gitea = yaml.safe_load((ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8"))
     gitea = yaml.safe_load((ROOT / ".gitea/workflows/main-release.yml").read_text(encoding="utf-8"))
 
     assert github["permissions"] == {"contents": "read"}
@@ -194,9 +192,7 @@ def test_rolling_release_permissions_are_scoped_to_publish_jobs() -> None:
 
 def test_github_release_concurrency_keeps_branch_pushes_independent() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-    gitea_workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8")
-    )
+    gitea_workflow = yaml.safe_load((ROOT / ".github/workflows/gitea-release.yml").read_text(encoding="utf-8"))
     concurrency = workflow["concurrency"]
     gitea_concurrency = gitea_workflow["concurrency"]
 
@@ -223,8 +219,7 @@ def test_github_release_workflow_is_github_only() -> None:
         step["uses"]
         for job in jobs.values()
         for step in job["steps"]
-        if step.get("uses", "").split("@", maxsplit=1)[0]
-        in {"actions/upload-artifact", "actions/download-artifact"}
+        if step.get("uses", "").split("@", maxsplit=1)[0] in {"actions/upload-artifact", "actions/download-artifact"}
     ] == [
         "actions/upload-artifact@v4",
         "actions/upload-artifact@v4",
@@ -248,10 +243,7 @@ def test_github_release_workflow_is_github_only() -> None:
     assert "dev) tag=release-dev" in metadata
 
     branch_guard = "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')"
-    github_guard = (
-        "github.server_url == 'https://github.com' && "
-        f"github.event_name != 'pull_request' && {branch_guard}"
-    )
+    github_guard = f"github.server_url == 'https://github.com' && github.event_name != 'pull_request' && {branch_guard}"
     for job_name in ("docker-publish", "publish-release"):
         assert jobs[job_name]["if"] == github_guard
 
@@ -279,8 +271,7 @@ def test_gitea_release_workflow_is_gitea_only() -> None:
         step["uses"]
         for job in jobs.values()
         for step in job["steps"]
-        if step.get("uses", "").split("@", maxsplit=1)[0]
-        in {"actions/upload-artifact", "actions/download-artifact"}
+        if step.get("uses", "").split("@", maxsplit=1)[0] in {"actions/upload-artifact", "actions/download-artifact"}
     ] == [
         "actions/upload-artifact@v3.2.2-node20",
         "actions/upload-artifact@v3.2.2-node20",
@@ -293,9 +284,7 @@ def test_gitea_release_workflow_is_gitea_only() -> None:
         ("windows-agent-package", "windows-release-files", "release-assets/*"),
     ):
         upload = next(
-            step
-            for step in jobs[job_name]["steps"]
-            if step.get("uses") == "actions/upload-artifact@v3.2.2-node20"
+            step for step in jobs[job_name]["steps"] if step.get("uses") == "actions/upload-artifact@v3.2.2-node20"
         )
         assert upload["with"] == {
             "name": artifact_name,
@@ -423,7 +412,7 @@ def test_windows_agent_build_stages_installer_tool_files() -> None:
     build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
 
     assert 'DIST_TOOLS_DIR = DIST_DIR / "tools"' in build_script
-    assert 'download_windows_tool(tool)' in build_script
+    assert "download_windows_tool(tool)" in build_script
     assert '"kopia.exe"' in build_script
     assert "shutil.copy(src, DIST_TOOLS_DIR / tool)" in build_script
 
