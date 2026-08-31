@@ -1,3 +1,6 @@
+import shlex
+
+import pytest
 from click.testing import CliRunner
 
 from backer.cli import INIT_STEPS, main
@@ -46,6 +49,27 @@ def test_init_no_tty_names_all_missing_flags():
     assert "--password-stdin" in result.output
 
 
+@pytest.mark.parametrize(
+    ("arguments", "missing"),
+    [
+        (["--type", "local"], ["--path", "--source", "--schedule or --no-schedule", "--passphrase-stdin"]),
+        (
+            ["--type", "smb", "--host", "nas", "--username", "svc"],
+            ["--path", "--share", "--password-stdin", "--source"],
+        ),
+        (
+            ["--type", "s3", "--bucket", "b"],
+            ["--prefix", "--endpoint", "--region", "--access-key-id", "--secret-key-stdin"],
+        ),
+    ],
+)
+def test_init_no_tty_aggregates_missing_flags_for_each_repository_type(arguments, missing):
+    result = CliRunner().invoke(main, ["init", *arguments])
+    assert result.exit_code == 2
+    for flag in missing:
+        assert flag in result.output
+
+
 def test_generated_passphrase_needs_visible_output_off_tty(tmp_path):
     result = CliRunner().invoke(
         main,
@@ -57,10 +81,52 @@ def test_generated_passphrase_needs_visible_output_off_tty(tmp_path):
 
 def test_every_init_step_has_a_flag():
     result = CliRunner().invoke(main, ["init", "--help"])
-    for _, flag, prompt, validator in INIT_STEPS:
-        assert flag in result.output
-        assert prompt
-        assert callable(validator)
+    for step in INIT_STEPS:
+        if step.flag.startswith("--"):
+            assert step.flag in result.output
+        assert step.prompt
+        assert callable(step.validator)
+
+
+def test_init_step_table_covers_every_noninteractive_input():
+    keys = {step.key for step in INIT_STEPS}
+    assert {
+        "repository_type",
+        "path",
+        "host",
+        "share",
+        "username",
+        "password_stdin",
+        "password_file",
+        "password_env",
+        "bucket",
+        "prefix",
+        "endpoint",
+        "region",
+        "access_key_id",
+        "secret_key_stdin",
+        "secret_key_file",
+        "secret_key_env",
+        "passphrase_stdin",
+        "passphrase_file",
+        "generate_passphrase",
+        "passphrase_out",
+        "print_passphrase",
+        "update_password",
+        "update_passphrase",
+        "source",
+        "exclude",
+        "schedule",
+        "no_schedule",
+        "keep_last",
+        "keep_daily",
+        "keep_weekly",
+        "keep_monthly",
+        "keep_yearly",
+        "repo_name",
+        "job_name",
+        "install",
+    } <= keys
 
 
 def test_prune_checks_confirmation_before_any_delete(monkeypatch):
@@ -102,7 +168,8 @@ def test_repository_name_resolves_to_its_canonical_config_key():
 
 def test_repo_discover_reads_password_only_from_stdin_or_environment():
     result = CliRunner().invoke(
-        main, ["repo", "discover", "--host", "nas", "--username", "svc", "--json"],
+        main,
+        ["repo", "discover", "--host", "nas", "--username", "svc", "--json"],
         env={"BACKER_SMB_PASSWORD": "not-in-output"},
     )
     assert result.exit_code == 0
@@ -123,8 +190,21 @@ def test_init_forwards_local_parameters_to_shared_commands(monkeypatch, tmp_path
     result = CliRunner().invoke(
         main,
         [
-            "init", "--type", "local", "--path", str(tmp_path), "--source", str(tmp_path), "--no-schedule",
-            "--passphrase-stdin", "--repo-name", "r1", "--job-name", "j1", "--exclude", "*.tmp",
+            "init",
+            "--type",
+            "local",
+            "--path",
+            str(tmp_path),
+            "--source",
+            str(tmp_path),
+            "--no-schedule",
+            "--passphrase-stdin",
+            "--repo-name",
+            "r1",
+            "--job-name",
+            "j1",
+            "--exclude",
+            "*.tmp",
         ],
         input="passphrase\n",
     )
@@ -133,3 +213,114 @@ def test_init_forwards_local_parameters_to_shared_commands(monkeypatch, tmp_path
     assert calls[0][1]["path"] == str(tmp_path)
     assert calls[1][1]["repository_id"] == "r1"
     assert calls[1][1]["exclude"] == ("*.tmp",)
+
+
+def test_init_prints_a_reparseable_safe_command(monkeypatch, tmp_path):
+    calls = []
+    secret_file = tmp_path / "passphrase"
+    secret_file.write_text("secret\n", encoding="utf-8")
+
+    monkeypatch.setattr("backer.cli.repo_add", lambda **kwargs: calls.append(("repo", kwargs)))
+    monkeypatch.setattr("backer.cli.job_create", lambda **kwargs: calls.append(("job", kwargs)))
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            "--type",
+            "local",
+            "--path",
+            str(tmp_path),
+            "--source",
+            str(tmp_path),
+            "--no-schedule",
+            "--passphrase-file",
+            str(secret_file),
+            "--repo-name",
+            "r1",
+            "--job-name",
+            "j1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    command = next(
+        line.removeprefix("Run again: ") for line in result.output.splitlines() if line.startswith("Run again: ")
+    )
+    assert "secret" not in command
+    assert "--passphrase-file" in command
+    parsed = CliRunner().invoke(main, shlex.split(command.removeprefix("backer ")), input="")
+    assert parsed.exit_code == 0, parsed.output
+    assert calls[0][1] == calls[2][1]
+    assert calls[1][1] == calls[3][1]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "repository_expectation"),
+    [
+        (
+            ["--type", "local", "--path", "repo"],
+            {"repository_type": "local", "path": "repo"},
+        ),
+        (
+            ["--type", "smb", "--host", "nas", "--share", "backups", "--path", "laptop", "--username", "svc"],
+            {"repository_type": "smb", "server": "nas", "share": "backups", "path": "laptop", "username": "svc"},
+        ),
+        (
+            [
+                "--type",
+                "s3",
+                "--bucket",
+                "bucket",
+                "--prefix",
+                "laptop",
+                "--endpoint",
+                "https://s3.example",
+                "--region",
+                "au",
+                "--access-key-id",
+                "key",
+            ],
+            {
+                "repository_type": "s3",
+                "bucket": "bucket",
+                "prefix": "laptop",
+                "endpoint": "https://s3.example",
+                "region": "au",
+                "access_key_id": "key",
+            },
+        ),
+    ],
+)
+def test_init_forwards_each_repository_type_to_shared_commands(
+    monkeypatch, tmp_path, arguments, repository_expectation
+):
+    calls = []
+    passphrase = tmp_path / "passphrase"
+    storage = tmp_path / "storage"
+    passphrase.write_text("passphrase\n", encoding="utf-8")
+    storage.write_text("storage\n", encoding="utf-8")
+    monkeypatch.setattr("backer.cli.repo_add", lambda **kwargs: calls.append(("repo", kwargs)))
+    monkeypatch.setattr("backer.cli.job_create", lambda **kwargs: calls.append(("job", kwargs)))
+    credential = (
+        ["--secret-key-file", str(storage)]
+        if repository_expectation["repository_type"] == "s3"
+        else ["--password-file", str(storage)]
+        if repository_expectation["repository_type"] == "smb"
+        else []
+    )
+    result = CliRunner().invoke(
+        main,
+        [
+            "init",
+            *arguments,
+            *credential,
+            "--source",
+            str(tmp_path),
+            "--no-schedule",
+            "--passphrase-file",
+            str(passphrase),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    for key, value in repository_expectation.items():
+        assert calls[0][1][key] == value
+    assert calls[1][1]["source"] == (str(tmp_path),)

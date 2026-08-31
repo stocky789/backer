@@ -2,9 +2,13 @@
 
 import json
 import os
+import shlex
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from secrets import choice
+from typing import Any
 
 import click
 from rich.console import Console
@@ -128,34 +132,253 @@ def setup(force: bool, quiet: bool) -> None:
         console.print("Run 'backer tools' to see Kopia status.")
 
 
-# Shared with the later rich wizard: each value maps to one non-interactive flag.
+@dataclass(frozen=True)
+class InitStep:
+    key: str
+    flag: str
+    prompt: str
+    validator: Callable[[Any], bool]
+    applicable: Callable[[dict[str, Any]], bool]
+    required: bool | str
+    serializer: Callable[[Any], list[str]]
+
+
+def _always(_: dict[str, Any]) -> bool:
+    return True
+
+
+def _is_type(*types: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda values: values["repository_type"] in types
+
+
+def _not_interactive(_: dict[str, Any]) -> bool:
+    return not _interactive()
+
+
+def _value(flag: str) -> Callable[[Any], list[str]]:
+    return lambda value: [flag, str(value)] if value is not None and value != "" else []
+
+
+def _switch(flag: str) -> Callable[[Any], list[str]]:
+    return lambda value: [flag] if value else []
+
+
+def _repeated(flag: str) -> Callable[[Any], list[str]]:
+    return lambda value: [part for item in value for part in (flag, str(item))]
+
+
+def _never(_: Any) -> list[str]:
+    return []
+
+
+# Shared with the later rich wizard: validation and rendering use this one flag source.
 INIT_STEPS = (
-    ("repository_type", "--type", "Where backups are stored", lambda value: value in {"local", "smb", "s3"}),
-    ("path", "--path", "Repository path", lambda value: bool(value)),
-    ("host", "--host", "SMB host", lambda value: bool(value)),
-    ("share", "--share", "SMB share", lambda value: bool(value)),
-    ("username", "--username", "File-server user", lambda value: bool(value)),
-    ("password_stdin", "--password-stdin", "File-server sign-in", lambda value: bool(value)),
-    ("bucket", "--bucket", "S3 bucket", lambda value: bool(value)),
-    ("prefix", "--prefix", "S3 prefix", lambda value: value is not None),
-    ("endpoint", "--endpoint", "S3 endpoint", lambda value: bool(value)),
-    ("region", "--region", "S3 region", lambda value: bool(value)),
-    ("access_key_id", "--access-key-id", "S3 access key", lambda value: bool(value)),
-    ("secret_key_stdin", "--secret-key-stdin", "S3 secret key", lambda value: bool(value)),
-    ("passphrase_stdin", "--passphrase-stdin", "Repository passphrase", lambda value: bool(value)),
-    ("generate_passphrase", "--generate-passphrase", "Generate passphrase", lambda value: bool(value)),
-    ("passphrase_out", "--passphrase-out", "Passphrase export", lambda value: bool(value)),
-    ("source", "--source", "Folder to back up", lambda value: bool(value)),
-    ("exclude", "--exclude", "Exclude pattern", lambda value: value is not None),
-    ("schedule", "--schedule", "Schedule", lambda value: bool(value)),
-    ("keep_last", "--keep-last", "Keep latest", lambda value: value is not None),
-    ("keep_daily", "--keep-daily", "Keep daily", lambda value: value is not None),
-    ("keep_weekly", "--keep-weekly", "Keep weekly", lambda value: value is not None),
-    ("keep_monthly", "--keep-monthly", "Keep monthly", lambda value: value is not None),
-    ("keep_yearly", "--keep-yearly", "Keep yearly", lambda value: value is not None),
-    ("job_name", "--job-name", "Job name", lambda value: bool(value)),
-    ("install", "--install", "Install schedule", lambda value: bool(value)),
+    InitStep(
+        "repository_type",
+        "--type",
+        "Where backups are stored",
+        lambda value: value in {"local", "smb", "s3"},
+        _always,
+        True,
+        _value("--type"),
+    ),
+    InitStep("path", "--path", "Repository path", bool, _is_type("local", "smb"), True, _value("--path")),
+    InitStep("host", "--host", "SMB host", bool, _is_type("smb"), True, _value("--host")),
+    InitStep("share", "--share", "SMB share", bool, _is_type("smb"), True, _value("--share")),
+    InitStep("username", "--username", "File-server user", bool, _is_type("smb"), True, _value("--username")),
+    InitStep(
+        "password_stdin",
+        "--password-stdin",
+        "File-server sign-in",
+        bool,
+        _is_type("smb"),
+        "smb-password",
+        _switch("--password-stdin"),
+    ),
+    InitStep(
+        "password_file",
+        "--password-file",
+        "File-server sign-in",
+        lambda value: value is not None,
+        _is_type("smb"),
+        "smb-password",
+        _value("--password-file"),
+    ),
+    InitStep(
+        "password_env", "$BACKER_SMB_PASSWORD", "File-server sign-in", bool, _is_type("smb"), "smb-password", _never
+    ),
+    InitStep("bucket", "--bucket", "S3 bucket", bool, _is_type("s3"), True, _value("--bucket")),
+    InitStep("prefix", "--prefix", "S3 prefix", bool, _is_type("s3"), True, _value("--prefix")),
+    InitStep("endpoint", "--endpoint", "S3 endpoint", bool, _is_type("s3"), True, _value("--endpoint")),
+    InitStep("region", "--region", "S3 region", bool, _is_type("s3"), True, _value("--region")),
+    InitStep(
+        "access_key_id", "--access-key-id", "S3 access key", bool, _is_type("s3"), True, _value("--access-key-id")
+    ),
+    InitStep(
+        "secret_key_stdin",
+        "--secret-key-stdin",
+        "S3 secret key",
+        bool,
+        _is_type("s3"),
+        "s3-secret",
+        _switch("--secret-key-stdin"),
+    ),
+    InitStep(
+        "secret_key_file",
+        "--secret-key-file",
+        "S3 secret key",
+        lambda value: value is not None,
+        _is_type("s3"),
+        "s3-secret",
+        _value("--secret-key-file"),
+    ),
+    InitStep("secret_key_env", "$BACKER_S3_SECRET_KEY", "S3 secret key", bool, _is_type("s3"), "s3-secret", _never),
+    InitStep(
+        "passphrase_stdin",
+        "--passphrase-stdin",
+        "Repository passphrase",
+        bool,
+        _not_interactive,
+        "passphrase",
+        _switch("--passphrase-stdin"),
+    ),
+    InitStep(
+        "passphrase_file",
+        "--passphrase-file",
+        "Repository passphrase",
+        lambda value: value is not None,
+        _not_interactive,
+        "passphrase",
+        _value("--passphrase-file"),
+    ),
+    InitStep(
+        "generate_passphrase",
+        "--generate-passphrase",
+        "Generate passphrase",
+        bool,
+        _not_interactive,
+        "passphrase",
+        _switch("--generate-passphrase"),
+    ),
+    InitStep(
+        "passphrase_out",
+        "--passphrase-out",
+        "Passphrase export",
+        lambda value: value is not None,
+        _always,
+        False,
+        _value("--passphrase-out"),
+    ),
+    InitStep(
+        "print_passphrase",
+        "--print-passphrase",
+        "Print passphrase",
+        bool,
+        _always,
+        False,
+        _switch("--print-passphrase"),
+    ),
+    InitStep(
+        "update_password",
+        "--update-password",
+        "Update storage password",
+        bool,
+        _always,
+        False,
+        _switch("--update-password"),
+    ),
+    InitStep(
+        "update_passphrase",
+        "--update-passphrase",
+        "Update repository passphrase",
+        bool,
+        _always,
+        False,
+        _switch("--update-passphrase"),
+    ),
+    InitStep("source", "--source", "Folder to back up", bool, _always, True, _repeated("--source")),
+    InitStep(
+        "exclude",
+        "--exclude",
+        "Exclude pattern",
+        lambda value: value is not None,
+        _always,
+        False,
+        _repeated("--exclude"),
+    ),
+    InitStep("schedule", "--schedule", "Schedule", bool, _always, "schedule", _value("--schedule")),
+    InitStep("no_schedule", "--no-schedule", "No schedule", bool, _always, "schedule", _switch("--no-schedule")),
+    InitStep(
+        "keep_last",
+        "--keep-last",
+        "Keep latest",
+        lambda value: value is not None,
+        _always,
+        False,
+        _value("--keep-last"),
+    ),
+    InitStep(
+        "keep_daily",
+        "--keep-daily",
+        "Keep daily",
+        lambda value: value is not None,
+        _always,
+        False,
+        _value("--keep-daily"),
+    ),
+    InitStep(
+        "keep_weekly",
+        "--keep-weekly",
+        "Keep weekly",
+        lambda value: value is not None,
+        _always,
+        False,
+        _value("--keep-weekly"),
+    ),
+    InitStep(
+        "keep_monthly",
+        "--keep-monthly",
+        "Keep monthly",
+        lambda value: value is not None,
+        _always,
+        False,
+        _value("--keep-monthly"),
+    ),
+    InitStep(
+        "keep_yearly",
+        "--keep-yearly",
+        "Keep yearly",
+        lambda value: value is not None,
+        _always,
+        False,
+        _value("--keep-yearly"),
+    ),
+    InitStep("repo_name", "--repo-name", "Repository name", bool, _always, True, _value("--repo-name")),
+    InitStep("job_name", "--job-name", "Job name", bool, _always, True, _value("--job-name")),
+    InitStep("install", "--install", "Install schedule", bool, _always, False, _switch("--install")),
 )
+
+
+def _init_missing(values: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    groups: dict[str, list[InitStep]] = {}
+    for step in INIT_STEPS:
+        if not step.applicable(values) or not step.required:
+            continue
+        if step.required is True:
+            if not step.validator(values[step.key]):
+                missing.append(step.flag)
+        else:
+            groups.setdefault(step.required, []).append(step)
+    for steps in groups.values():
+        if not any(step.validator(values[step.key]) for step in steps):
+            missing.append(" or ".join(step.flag for step in steps if step.flag.startswith("--")))
+    return missing
+
+
+def _render_init_command(values: dict[str, Any]) -> str:
+    arguments = [part for step in INIT_STEPS if step.applicable(values) for part in step.serializer(values[step.key])]
+    return "backer init " + " ".join(shlex.quote(argument) for argument in arguments)
 
 
 @main.command("init")
@@ -230,37 +453,46 @@ def init(
     install: bool,
 ) -> None:
     """Start serverless setup; `setup` downloads Kopia and `agent setup` enrolls a server agent."""
-    missing: list[str] = []
-    if not repository_type:
-        missing.append("--type")
-    if repository_type == "smb":
-        missing.extend(
-            flag
-            for flag, value in (("--host", host), ("--share", share), ("--path", path), ("--username", username))
-            if not value
-        )
-        if not (password_stdin or password_file or os.environ.get("BACKER_SMB_PASSWORD")):
-            missing.append("--password-stdin or --password-file")
-    elif repository_type == "s3":
-        missing.extend(
-            flag
-            for flag, value in (("--bucket", bucket), ("--prefix", prefix), ("--endpoint", endpoint),
-                                ("--region", region), ("--access-key-id", access_key_id))
-            if not value
-        )
-        if not (secret_key_stdin or secret_key_file or os.environ.get("BACKER_S3_SECRET_KEY")):
-            missing.append("--secret-key-stdin or --secret-key-file")
-    elif not path:
-        missing.append("--path")
-    if not source:
-        missing.append("--source")
-    if not (schedule or no_schedule):
-        missing.append("--schedule or --no-schedule")
+    values = {
+        "repository_type": repository_type,
+        "path": path,
+        "host": host,
+        "share": share,
+        "username": username,
+        "password_stdin": password_stdin,
+        "password_file": password_file,
+        "password_env": bool(os.environ.get("BACKER_SMB_PASSWORD")),
+        "bucket": bucket,
+        "prefix": prefix,
+        "endpoint": endpoint,
+        "region": region,
+        "access_key_id": access_key_id,
+        "secret_key_stdin": secret_key_stdin,
+        "secret_key_file": secret_key_file,
+        "secret_key_env": bool(os.environ.get("BACKER_S3_SECRET_KEY")),
+        "source": source,
+        "exclude": exclude,
+        "schedule": schedule,
+        "no_schedule": no_schedule,
+        "keep_last": keep_last,
+        "keep_daily": keep_daily,
+        "keep_weekly": keep_weekly,
+        "keep_monthly": keep_monthly,
+        "keep_yearly": keep_yearly,
+        "repo_name": repo_name,
+        "job_name": job_name,
+        "passphrase_stdin": passphrase_stdin,
+        "passphrase_file": passphrase_file,
+        "generate_passphrase": generate_passphrase,
+        "passphrase_out": passphrase_out,
+        "print_passphrase": print_passphrase,
+        "update_password": update_password,
+        "update_passphrase": update_passphrase,
+        "install": install,
+    }
+    missing = _init_missing(values)
     if missing:
         _missing_flags("init", missing)
-    if not _interactive():
-        if not (passphrase_stdin or passphrase_file or generate_passphrase):
-            _missing_flags("init", ["--passphrase-stdin or --generate-passphrase"])
     if _interactive():
         raise click.ClickException("Interactive setup is provided by the Phase 5b wizard")
     ctx.invoke(
@@ -319,6 +551,7 @@ def init(
         from backer.client.windows_service import is_windows
 
         ctx.invoke(agent_install, mode="local", headless=False, method="service" if is_windows() else "systemd")
+    click.echo(f"Run again: {_render_init_command(values)}")
 
 
 @main.command()
