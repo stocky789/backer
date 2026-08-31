@@ -127,6 +127,35 @@ def test_sanitize_removes_colon_and_slash_inline_suffix() -> None:
     assert "def/ghi" not in module.sanitize(":smb,pass=abc:def/ghi")
 
 
+def test_comparison_path_requires_unc_or_actual_mount() -> None:
+    module = _spike_module()
+
+    assert module is not None
+    assert module.comparison_path(r"\\nas\share", is_dir=lambda: True, is_mount=lambda _path: False)
+    assert module.comparison_path("/tmp/not-a-mount", is_dir=lambda: True, is_mount=lambda _path: False) is None
+    assert module.comparison_path("/mnt/smb", is_dir=lambda: True, is_mount=lambda _path: True)
+
+
+def test_failure_observations_record_actual_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _spike_module()
+
+    assert module is not None
+    monkeypatch.setenv("SPIKE_SMB_DROP_COMMAND_JSON", '["drop-smb"]')
+    calls: list[list[str]] = []
+
+    def runner(argv, *_args, **_kwargs):
+        calls.append(argv)
+        failed = "--rclone-startup-timeout=1ms" in argv or argv[0] == "kopia"
+        return subprocess.CompletedProcess(argv, int(failed), "", "dropped")
+
+    record: dict[str, object] = {}
+    module.record_failure_observations(record, ":smb:share", "secret", "obscured", runner, {})
+
+    assert record["failure_observations"]["rclone_startup_timeout"]["observed"] is True
+    assert record["failure_observations"]["connection_drop"]["observed"] is True
+    assert ["drop-smb"] in calls
+
+
 def test_arm_d_runs_controlled_unc_baseline_and_records_ratio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _spike_module()
 
@@ -134,6 +163,9 @@ def test_arm_d_runs_controlled_unc_baseline_and_records_ratio(tmp_path: Path, mo
     record: dict[str, object] = {"elapsed_ms": {}, "repository_size": None}
     assert hasattr(module, "record_unc_baseline")
     monkeypatch.setenv("SPIKE_SMB_COMPARISON_PATH", str(tmp_path))
+    monkeypatch.setenv("SPIKE_SMB_COMPARISON_SERVER", "nas")
+    monkeypatch.setenv("SPIKE_SMB_COMPARISON_SHARE", "share")
+    monkeypatch.setattr(module.os.path, "ismount", lambda _path: True)
 
     def runner(argv, *_args, **_kwargs):
         return subprocess.CompletedProcess(argv, 0, '[{"id":"snap"}]' if "list" in argv else "", "")
@@ -143,6 +175,6 @@ def test_arm_d_runs_controlled_unc_baseline_and_records_ratio(tmp_path: Path, mo
     assert "unc_ratio" in record
     assert record["unc_within_1_25x"] is False
     assert record["failure_observations"] == {
-        "rclone_startup_timeout": "not observed",
-        "connection_drop": "not observed",
+        "rclone_startup_timeout": "unreachable: no controlled failure endpoint",
+        "connection_drop": "unreachable: no controlled failure endpoint",
     }

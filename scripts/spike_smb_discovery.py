@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Any
 
 import click
@@ -166,19 +167,66 @@ def _create_workload(root: Path, workload_bytes: int, file_count: int) -> Path:
     return source
 
 
-def record_unc_baseline(record: dict[str, Any], server: str, share: str, workspace: Path, _runner: Any) -> None:
-    """Record the mount/UNC comparator or the reason it cannot be run safely."""
+def _is_unc_path(value: str) -> bool:
+    path = PureWindowsPath(value)
+    return value.startswith("\\\\") and path.drive.startswith("\\\\") and "\\" in path.drive.lstrip("\\")
+
+
+def comparison_path(
+    value: str,
+    *,
+    is_dir: Any = None,
+    is_mount: Any = None,
+) -> Path | None:
+    """Accept only a reachable UNC path or a real filesystem mount."""
+    path = Path(value)
+    is_dir = is_dir or path.is_dir
+    is_mount = is_mount or os.path.ismount
+    if not is_dir():
+        return None
+    if _is_unc_path(value) or is_mount(path):
+        return path
+    return None
+
+
+def _controlled_comparison(record: dict[str, Any], server: str, share: str) -> Path | None:
     supplied = os.environ.get("SPIKE_SMB_COMPARISON_PATH")
     if not supplied:
+        return None
+    comparison = comparison_path(supplied)
+    if not comparison:
+        record["unc_baseline"] = "unreachable: comparison path is not a UNC path or mount"
+        return None
+    if _is_unc_path(supplied):
+        unc = PureWindowsPath(supplied)
+        unc_server, unc_share = unc.drive.lstrip("\\").split("\\", 1)
+        if unc_server.casefold() != server.casefold() or unc_share.casefold() != share.casefold():
+            record["unc_baseline"] = "unreachable: comparison UNC is not the selected SMB device"
+            return None
+    elif (
+        os.environ.get("SPIKE_SMB_COMPARISON_SERVER", "").casefold() != server.casefold()
+        or os.environ.get("SPIKE_SMB_COMPARISON_SHARE", "").casefold() != share.casefold()
+    ):
+        record["unc_baseline"] = "unreachable: mounted comparison device is not declared as selected SMB device"
+        return None
+    return comparison
+
+
+def record_unc_baseline(record: dict[str, Any], server: str, share: str, workspace: Path, _runner: Any) -> None:
+    """Record the mount/UNC comparator or the reason it cannot be run safely."""
+    comparison = _controlled_comparison(record, server, share)
+    if not comparison:
+        if record.get("unc_baseline"):
+            record["failure_observations"] = {
+                "rclone_startup_timeout": "unreachable: no controlled comparison endpoint",
+                "connection_drop": "unreachable: no controlled comparison endpoint",
+            }
+            return
         record["unc_baseline"] = "unreachable: mounted/UNC comparison path is unavailable"
         record["failure_observations"] = {
             "rclone_startup_timeout": "unreachable: no controlled comparison endpoint",
             "connection_drop": "unreachable: no controlled comparison endpoint",
         }
-        return
-    comparison = Path(supplied)
-    if not comparison.is_dir():
-        record["unc_baseline"] = "unreachable: controlled comparison path is unavailable"
         return
     source = workspace / "source with spaces" / "non-ascii-ä"
     baseline = comparison / "backer-spike-unc-baseline"
@@ -210,7 +258,63 @@ def record_unc_baseline(record: dict[str, Any], server: str, share: str, workspa
     record["unc_ratio"] = record["elapsed_ms"]["snapshot_create"] / max(record["elapsed_ms"]["unc_snapshot_create"], 1)
     record["unc_within_1_25x"] = record["unc_ratio"] <= 1.25
     record["unc_baseline"] = "completed"
-    record["failure_observations"] = {"rclone_startup_timeout": "not observed", "connection_drop": "not observed"}
+    record["failure_observations"] = {
+        "rclone_startup_timeout": "unreachable: no controlled failure endpoint",
+        "connection_drop": "unreachable: no controlled failure endpoint",
+    }
+
+
+def _drop_command() -> list[str] | None:
+    encoded = os.environ.get("SPIKE_SMB_DROP_COMMAND_JSON")
+    if not encoded:
+        return None
+    command = json.loads(encoded)
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise RuntimeError("SPIKE_SMB_DROP_COMMAND_JSON must be a JSON argv array")
+    return command
+
+
+def record_failure_observations(
+    record: dict[str, Any], remote: str, password: str, obscured_password: str, runner: Any, environment: dict[str, str]
+) -> None:
+    """Force the two unattended failure modes only on an explicitly controlled endpoint."""
+    drop_command = _drop_command()
+    if not drop_command:
+        record["failure_observations"] = {
+            "rclone_startup_timeout": "unreachable: no controlled failure endpoint",
+            "connection_drop": "unreachable: no controlled failure endpoint",
+        }
+        return
+
+    observations: dict[str, Any] = {"rclone_startup_timeout": {"attempted": True}}
+    started = time.perf_counter()
+    timeout_result = runner(
+        ["kopia", "repository", "connect", "rclone", f"--remote-path={remote}", "--rclone-startup-timeout=1ms"],
+        password,
+        obscured_password,
+        env=environment,
+    )
+    observations["rclone_startup_timeout"].update(
+        elapsed_ms=round((time.perf_counter() - started) * 1000), observed=timeout_result.returncode != 0
+    )
+    if timeout_result.returncode == 0:
+        observations["rclone_startup_timeout"]["error"] = "controlled timeout was not observed"
+
+    assert_argv_safe(drop_command, password, obscured_password)
+    control_result = runner(drop_command, password, obscured_password, env=environment)
+    if control_result.returncode:
+        raise RuntimeError(control_result.stderr.strip() or control_result.stdout.strip() or "drop control failed")
+    started = time.perf_counter()
+    drop_result = runner(["kopia", "snapshot", "list", "--json", "--all"], password, obscured_password, env=environment)
+    observations["connection_drop"] = {
+        "attempted": True,
+        "control": "completed",
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+        "observed": drop_result.returncode != 0,
+    }
+    record["failure_observations"] = observations
+    if not all(observation["observed"] for observation in observations.values()):
+        raise RuntimeError("controlled SMB failure was not observed")
 
 
 def _timed(record: dict[str, Any], operation: str, runner: Any, argv: list[str], *args: Any, **kwargs: Any) -> Any:
@@ -312,6 +416,8 @@ def run_arm_d_workload(
         workspace,
         lambda argv: runner(argv, password, obscured_password, env=environment),
     )
+    if record.get("unc_baseline") == "completed":
+        record_failure_observations(record, remote, password, obscured_password, runner, environment)
 
 
 def _arm_d(record: dict[str, Any], server: str, share: str | None, username: str | None, password: str | None) -> None:
