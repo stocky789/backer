@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 from collections import deque
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from backer.agent.gui import theme
-from backer.agent.gui.views import HomeView, SettingsView, SimpleView, load_config, save_config
+from backer.agent.gui.views import (
+    HomeView,
+    SettingsView,
+    SimpleView,
+    load_config,
+    save_config,
+    save_schedule_pause,
+    supported_repository_types,
+)
 from backer.agent.gui.wizard import RepositoryWizard
 from backer.core.messages import explain_failure
 from backer.core.paths import get_data_dir
 from backer.serverless.runs import run_local_job
+from backer.serverless.schedule import scheduling_paused
 
 REPOSITORY_URL = "https://git.stockhome.com.au/stocky789/backer"
 INSTALLER_URL = f"{REPOSITORY_URL}/releases/download/release-main/backer-agent-setup.exe"
@@ -32,6 +44,17 @@ try:
     TRAY_AVAILABLE = sys.platform == "win32"
 except ImportError:
     TRAY_AVAILABLE = False
+
+
+def notification_allowed(state: dict, name: str, report: dict, today: str) -> bool:
+    """Keep backup notifications useful rather than a nightly source of spam."""
+    if report.get("cancelled"):
+        return False
+    if report.get("needs_input"):
+        return state.get("input", {}).get(name) != report.get("run_id")
+    if report.get("success"):
+        return name not in state.get("first_success", [])
+    return state.get("failure_day", {}).get(name) != today
 
 
 class BackerAgentApp:
@@ -56,9 +79,12 @@ class BackerAgentApp:
         self.run_cancel = threading.Event()
         self.progress_log = deque(maxlen=500)
         self.tray_icon = None
+        self._notification_run = None
+        self._notification_state = self._read_notification_state()
         self.container = ttk.Frame(self.root)
         self.container.pack(fill=tk.BOTH, expand=True)
         self.status_var = tk.StringVar(value="OK · Ready")
+        self.pause_var = tk.StringVar(value="")
         self.subtitle_var = tk.StringVar(value="Local backups")
         self._setup_menu()
         self._setup_status()
@@ -66,6 +92,7 @@ class BackerAgentApp:
         self._make_tray()
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
         self._show("welcome" if not self.config.repositories and not self.config.server else "home")
+        self.root.after(0, self._replay_pending_notifications)
 
     def _setup_menu(self):
         menu = tk.Menu(self.root)
@@ -82,6 +109,7 @@ class BackerAgentApp:
         strip = ttk.Frame(self.root, padding=(12, 7))
         strip.pack(fill=tk.X, side=tk.BOTTOM)
         ttk.Label(strip, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT)
+        ttk.Label(strip, textvariable=self.pause_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=12)
         ttk.Label(strip, textvariable=self.subtitle_var, style="Muted.TLabel").pack(side=tk.RIGHT)
 
     def apply_theme(self, override=None):
@@ -120,6 +148,8 @@ class BackerAgentApp:
         if name == "home":
             return HomeView(self)
         if name == "repository":
+            if not supported_repository_types():
+                return SimpleView(self, "Local backups unavailable", "No tested storage path is available here.")
             return RepositoryWizard(self)
         if name == "settings":
             return SettingsView(self)
@@ -165,11 +195,72 @@ class BackerAgentApp:
             self.progress_log.append(message)
             logging.getLogger(__name__).error(message)
 
+    def _notification_path(self):
+        return get_data_dir() / "gui-notifications.json"
+
+    def _read_notification_state(self):
+        try:
+            with self._notification_path().open(encoding="utf-8") as handle:
+                state = json.load(handle)
+            return state if isinstance(state, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_notification_state(self):
+        path = self._notification_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self._notification_state), encoding="utf-8")
+        temporary.replace(path)
+
+    def _record_run_notification(self, name, report):
+        """Persist the intentionally small notification policy and attention count."""
+        today = datetime.now(UTC).date().isoformat()
+        if not notification_allowed(self._notification_state, name, report, today):
+            return
+        if report.get("needs_input"):
+            self._notification_state.setdefault("input", {})[name] = report.get("run_id")
+            title, body = "Backer needs input", f"{name} needs your attention."
+        elif report.get("success"):
+            self._notification_state.setdefault("first_success", []).append(name)
+            self._notification_state.setdefault("attention", {}).pop(name, None)
+            title, body = "Backer", f"{name} completed its first backup."
+        else:
+            self._notification_state.setdefault("failure_day", {})[name] = today
+            self._notification_state.setdefault("attention", {})[name] = report.get("run_id") or "latest"
+            self._notification_run = name
+            title, body = "Backer", f"{name} backup did not run. Open Backer for details."
+        self._save_notification_state()
+        self._refresh_tray_menu()
+        self.notify(title, body)
+
+    def _replay_pending_notifications(self):
+        """Surface a scheduled failure once when the desktop next starts."""
+        from backer.serverless.store import read_runs
+
+        for name in self.config.jobs:
+            rows = read_runs(get_data_dir(), name, 1)
+            if not rows:
+                continue
+            run = rows[0]
+            self._record_run_notification(name, {
+                "success": run.status.value == "success", "run_id": run.run_id,
+                "needs_input": bool(run.error_message and "needs" in run.error_message.lower()),
+            })
+
+    def record_run_result(self, name, report):
+        self._record_run_notification(name, report or {})
+
+    def backup_job(self, name):
+        if name not in self.config.jobs:
+            return
+        self._show("run")
+        self.views["run"].start(name)
+
     def backup_selected(self):
         home = self.views.get("home")
         if home and home.tree.selection():
-            self._show("run")
-            self.views["run"].start(home.tree.selection()[0])
+            self.backup_job(home.tree.selection()[0])
 
     def restore_selected(self):
         home = self.views.get("home")
@@ -217,26 +308,97 @@ class BackerAgentApp:
             return
         try:
             image = Image.open(str(APP_DIR / "backer.ico"))
-            self.tray_icon = pystray.Icon(
-                "backer",
-                image,
-                "Backer",
-                pystray.Menu(pystray.MenuItem("Open", self._show_window), pystray.MenuItem("Quit", self.on_exit)),
-            )
+            self.tray_icon = pystray.Icon("backer", image, "Backer")
+            self._refresh_tray_menu()
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
         except Exception:
             self.tray_icon = None
 
+    def _refresh_tray_menu(self):
+        paused = scheduling_paused(self.config, datetime.now(UTC))
+        self.pause_var.set("Paused" if paused else "")
+        if not self.tray_icon:
+            return
+        until = self.config.local_scheduled_pause_until
+        pause_label = "Paused" if paused and until is None else (
+            f"Paused until {until.astimezone().strftime('%H:%M')}" if paused and until else "Backups active"
+        )
+        jobs = tuple(
+            pystray.MenuItem(name, lambda _icon, _item, job=name: self.root.after(0, lambda: self.backup_job(job)))
+            for name in self.config.jobs
+        )
+        pause = pystray.Menu(
+            pystray.MenuItem("For 1 hour", lambda *_: self.root.after(0, lambda: self.pause_backups("hour"))),
+            pystray.MenuItem("Until tomorrow", lambda *_: self.root.after(0, lambda: self.pause_backups("tomorrow"))),
+            pystray.MenuItem(
+                "Until turned back on", lambda *_: self.root.after(0, lambda: self.pause_backups("forever"))
+            ),
+            pystray.MenuItem("Resume backups", lambda *_: self.root.after(0, self.resume_backups)),
+        )
+        items = [
+            pystray.MenuItem(pause_label, None, enabled=False),
+            pystray.MenuItem("Back up now", pystray.Menu(*jobs), enabled=bool(jobs)),
+            pystray.MenuItem("Pause backups", pause),
+        ]
+        if self._notification_run:
+            items.append(pystray.MenuItem("Open failed run", lambda *_: self._show_window()))
+        items.extend((pystray.MenuItem("View logs", lambda *_: self.root.after(0, self._open_logs)),
+                      pystray.MenuItem("Settings", lambda *_: self.root.after(0, lambda: self._show("settings"))),
+                      pystray.MenuItem("Exit", self.on_exit)))
+        self.tray_icon.menu = pystray.Menu(*items)
+        count = len(self._notification_state.get("attention", {}))
+        self.tray_icon.title = (
+            f"Backer - {count} backup{'s' if count != 1 else ''} needs attention" if count else "Backer"
+        )
+        self.tray_icon.update_menu()
+
+    def pause_backups(self, mode):
+        now = datetime.now().astimezone()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        until = {"hour": now + timedelta(hours=1), "tomorrow": tomorrow, "forever": None}[mode]
+        self.config = self.config.model_copy(
+            update={"local_scheduled_paused": True, "local_scheduled_pause_until": until}
+        )
+        save_schedule_pause(self.config)
+        self.set_status("Paused · scheduled backups are paused")
+        self._refresh_tray_menu()
+
+    def resume_backups(self):
+        self.config = self.config.model_copy(
+            update={"local_scheduled_paused": False, "local_scheduled_pause_until": None}
+        )
+        save_schedule_pause(self.config)
+        self.set_status("Scheduled backups resumed")
+        self._refresh_tray_menu()
+
+    def _open_logs(self):
+        directory = get_data_dir() / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(directory)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(directory)])
+
     def notify(self, title, body):
         if self.tray_icon:
             self.tray_icon.notify(body, title)
-        elif sys.platform != "win32" and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-            subprocess.run(["notify-send", title, body], check=False)
+        elif (sys.platform.startswith("linux") and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+              and shutil.which("notify-send")):
+            subprocess.run(
+                ["notify-send", title, body], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         else:
             self.set_status(body)
 
     def _show_window(self, *_):
-        self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
+        def show():
+            self.root.deiconify()
+            self.root.lift()
+            if self._notification_run:
+                self.backup_job(self._notification_run)
+                self._notification_run = None
+                self._refresh_tray_menu()
+        self.root.after(0, show)
 
     def on_window_close(self):
         if self.running and not self.confirm_quit_during_run():
@@ -244,6 +406,8 @@ class BackerAgentApp:
         if self.tray_icon:
             self.root.withdraw()
         else:
+            if sys.platform.startswith("linux"):
+                self.set_status("Scheduled backups continue from the systemd timer after this window closes")
             self.on_exit()
 
     def on_exit(self, *_):
@@ -287,6 +451,7 @@ class RunView(ttk.Frame):
         from backer.backends.kopia import KopiaProcessOwner
 
         self.app.running = True
+        self.job_name = name
         self.app.run_cancel.clear()
         self.app.progress_frame = None
         self.app.progress_at = time.monotonic()
@@ -366,6 +531,7 @@ class RunView(ttk.Frame):
         self.details.insert(tk.END, "\n".join(self.app.progress_log))
         self.details.configure(state=tk.DISABLED)
         self.app.set_status(self.label.get(), error=not bool(report and report.get("success")))
+        self.app.record_run_result(self.job_name, report or {})
 
     def stop(self):
         self.app.cancel_running()

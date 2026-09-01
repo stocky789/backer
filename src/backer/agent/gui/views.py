@@ -27,6 +27,14 @@ from backer.core.paths import get_config_dir, get_data_dir, get_machine_config_d
 from backer.core.repo_metadata import RepositoryMetadata
 from backer.serverless.store import read_runs
 
+# These are the six mandatory Phase 7 CI cells, not a capability guess.
+SUPPORTED_REPOSITORY_TYPES = {"win32": ("local", "smb", "s3"), "linux": ("local", "smb", "s3")}
+
+
+def supported_repository_types(platform: str | None = None) -> tuple[str, ...]:
+    platform = platform or sys.platform
+    return SUPPORTED_REPOSITORY_TYPES.get("linux" if platform.startswith("linux") else platform, ())
+
 
 class ModeApplyResult(NamedTuple):
     ok: bool
@@ -50,6 +58,20 @@ def load_config() -> BackerConfig:
 def save_config(config: BackerConfig) -> None:
     """Phase 1 config wrapper retained for the desktop application."""
     config.save(get_config_dir() / "config.yaml")
+
+
+def save_schedule_pause(config: BackerConfig) -> None:
+    """Update the unattended copy before the interactive copy can advertise a pause."""
+    machine_path = get_machine_config_dir() / "config.yaml"
+    if machine_path.is_file():
+        machine = BackerConfig.load(machine_path).model_copy(
+            update={
+                "local_scheduled_paused": config.local_scheduled_paused,
+                "local_scheduled_pause_until": config.local_scheduled_pause_until,
+            }
+        )
+        machine.save(machine_path)
+    save_config(config)
 
 
 def unattended_blocker(config: BackerConfig) -> str | None:

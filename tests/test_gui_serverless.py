@@ -20,22 +20,60 @@ def test_gui_tests_actually_ran():
 
 
 def test_no_colour_literals_and_tokens_meet_contrast():
-    from backer.agent.gui.theme import DARK, LIGHT, resolve_tokens
+    from backer.agent.gui import theme
 
     source = "\n".join(path.read_text() for path in ROOT.glob("*.py"))
     assert "foreground='" not in source and 'foreground="' not in source
     assert "background='" not in source and 'background="' not in source
-    assert resolve_tokens("#101214").mode == "dark"
-    assert resolve_tokens("#f5f5f5").mode == "light"
-    for tokens in (DARK, LIGHT):
-        assert tokens.text != tokens.surface
+    assert theme.resolve_tokens("#101214").mode == "dark"
+    assert theme.resolve_tokens("#f5f5f5").mode == "light"
+    for tokens in (theme.DARK, theme.LIGHT):
+        for foreground in (tokens.text, tokens.muted, tokens.success, tokens.danger, tokens.accent):
+            lighter, darker = sorted((theme._luminance(foreground), theme._luminance(tokens.surface)))
+            assert (darker + 0.05) / (lighter + 0.05) >= 4.5
 
 
 def test_show_leaves_one_child_and_constructs_no_toplevel():
+    from backer.agent.gui.app import BackerAgentApp
+
     source = _source("app.py")
-    assert "def _show(" in source
     assert "ttk.Notebook" not in source and "tk.Toplevel" not in source
-    assert "pack_forget" in source and "<Escape>" in source
+
+    packed, bindings = [], {}
+
+    class View:
+        primary = None
+
+        def __init__(self, name):
+            self.name = name
+
+        def pack(self, **_kwargs):
+            packed[:] = [self]
+
+        def pack_forget(self):
+            packed.remove(self)
+
+        def refresh(self):
+            pass
+
+    class Root:
+        def bind_all(self, key, callback):
+            bindings[key] = callback
+
+        def bind(self, *_args):
+            pass
+
+    app = object.__new__(BackerAgentApp)
+    app.visible, app.views, app._generations = "", {}, {}
+    app.root = Root()
+    app.subtitle_var = type("Value", (), {"set": lambda *_args: None})()
+    app._build = lambda name: View(name)
+
+    app._show("home")
+    app._show("settings")
+    bindings["<Escape>"](None)
+
+    assert [view.name for view in packed] == ["home"] and app.visible == "home"
 
 
 def test_share_listing_does_not_block_the_event_loop():
@@ -1082,3 +1120,123 @@ def test_repository_second_secret_write_is_compensated(monkeypatch, tmp_path):
         raise AssertionError("second secret write must fail setup")
     assert config.repositories == {}
     assert {reference for reference, _scope in removed} == set(calls)
+
+
+def test_scheduled_pause_is_durable_and_due_runner_keeps_jobs():
+    from datetime import UTC, datetime, timedelta
+
+    from backer.core.config import BackerConfig, JobConfig, ScheduleConfig, SourceConfig
+    from backer.serverless.schedule import due_jobs
+
+    now = datetime.now(UTC)
+    config = BackerConfig(
+        local_scheduled_paused=True,
+        local_scheduled_pause_until=now + timedelta(hours=1),
+        jobs={
+            "Documents": JobConfig(
+                repository="repo", source=SourceConfig(path="source"), schedule=ScheduleConfig(cron="* * * * *")
+            )
+        },
+    )
+
+    assert due_jobs(config, now, Path("unused")) == []
+    assert list(config.jobs) == ["Documents"]
+
+
+def test_schedule_pause_updates_the_unattended_copy_first(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    BackerConfig().save(machine / "config.yaml")
+    config = BackerConfig(local_scheduled_paused=True)
+    monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+
+    views.save_schedule_pause(config)
+
+    assert BackerConfig.load(machine / "config.yaml").local_scheduled_paused
+    assert BackerConfig.load(user / "config.yaml").local_scheduled_paused
+
+
+def test_tray_notification_policy_is_once_per_job_and_persistent_shape():
+    from backer.agent.gui.app import notification_allowed
+
+    state = {}
+    assert notification_allowed(state, "Documents", {"success": False}, "2026-09-01")
+    state["failure_day"] = {"Documents": "2026-09-01"}
+    assert not notification_allowed(state, "Documents", {"success": False}, "2026-09-01")
+    assert notification_allowed(state, "Documents", {"success": False}, "2026-09-02")
+    assert notification_allowed(state, "Documents", {"success": True}, "2026-09-01")
+    state["first_success"] = ["Documents"]
+    assert not notification_allowed(state, "Documents", {"success": True}, "2026-09-02")
+    assert not notification_allowed(state, "Documents", {"cancelled": True}, "2026-09-02")
+
+
+def test_run_progress_retains_kopia_counts_and_reverts_after_stale_frame(monkeypatch):
+    import time
+
+    from backer.agent.gui.app import RunView
+
+    changes, labels = [], []
+    view = object.__new__(RunView)
+    view.bar = type(
+        "Bar", (), {"configure": lambda _self, **kwargs: changes.append(kwargs), "start": lambda *_args: None,
+                   "stop": lambda *_args: None}
+    )()
+    view.label = type("Label", (), {"set": lambda _self, value: labels.append(value)})()
+    view._last_progress = view._last_frame = None
+    view._throughput = 0
+    view.app = type(
+        "App", (), {"running": True, "progress_frame": {"bytes_processed": 2, "total_bytes": 4,
+                                                      "hashed_bytes": 2, "cached_bytes": 1},
+                    "progress_at": time.monotonic(), "root": type("Root", (), {"after": lambda *_args: None})()}
+    )()
+
+    view.tick()
+    assert {"mode": "determinate", "maximum": 4, "value": 2} in changes
+    assert "2 hashed, 1 cached" in labels[-1] and "%" not in labels[-1]
+    view.app.progress_frame = None
+    view.app.progress_at = time.monotonic() - 6
+    view.tick()
+    assert {"mode": "indeterminate"} in changes
+
+
+def test_support_map_only_advertises_the_six_ci_cells():
+    from backer.agent.gui.views import supported_repository_types
+
+    assert supported_repository_types("win32") == ("local", "smb", "s3")
+    assert supported_repository_types("linux") == ("local", "smb", "s3")
+    assert supported_repository_types("darwin") == ()
+
+
+def test_linux_close_states_scheduled_runs_continue(monkeypatch):
+    from backer.agent.gui import app as gui_app
+
+    seen = []
+    app = object.__new__(gui_app.BackerAgentApp)
+    app.running = False
+    app.tray_icon = None
+    app.set_status = lambda value, **_kwargs: seen.append(value)
+    app.on_exit = lambda: seen.append("exit")
+    monkeypatch.setattr(gui_app.sys, "platform", "linux")
+
+    app.on_window_close()
+
+    assert seen == ["Scheduled backups continue from the systemd timer after this window closes", "exit"]
+
+
+def test_failure_notification_open_runs_the_named_job():
+    from backer.agent.gui.app import BackerAgentApp
+
+    opened = []
+    app = object.__new__(BackerAgentApp)
+    app._notification_run = "Photos"
+    app.root = type("Root", (), {"after": lambda _self, _delay, callback: callback(), "deiconify": lambda _self: None,
+                                  "lift": lambda _self: None})()
+    app.backup_job = lambda name: opened.append(name)
+    app._refresh_tray_menu = lambda: None
+
+    app._show_window()
+
+    assert opened == ["Photos"] and app._notification_run is None

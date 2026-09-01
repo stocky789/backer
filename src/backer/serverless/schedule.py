@@ -71,8 +71,22 @@ def _write(path: Path, values: dict[str, str]) -> None:
         raise
 
 
+def scheduling_paused(config: BackerConfig, now: datetime) -> bool:
+    """Whether the durable local pause still covers ``now``."""
+    if not config.local_scheduled_paused:
+        return False
+    until = config.local_scheduled_pause_until
+    if until is None:
+        return True
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    return until > now
+
+
 def due_jobs(config: BackerConfig, now: datetime, data_dir: Path) -> list[str]:
     """Return due jobs and persist their fire time before a caller starts work."""
+    if scheduling_paused(config, now):
+        return []
     schedule_path = data_dir / "schedule.json"
     fires = _read(schedule_path)
     due: list[str] = []

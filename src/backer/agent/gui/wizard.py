@@ -14,6 +14,7 @@ from tkinter import filedialog, ttk
 
 from croniter import croniter
 
+from backer.agent.gui.views import supported_repository_types
 from backer.core import keystore
 from backer.core.config import JobConfig, RepositoryConfig, ScheduleConfig, SourceConfig
 from backer.core.paths import get_config_dir
@@ -221,16 +222,25 @@ class RepositoryWizard(ttk.Frame):
 
     def _storage(self):
         ttk.Label(self.body, text="Add repository", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
-        kind = tk.StringVar(value=self.values["type"])
-        for value, label in (
+        options = (
             ("smb", "Network share"),
             ("local", "Drive on this computer"),
             ("s3", "S3-compatible storage"),
-        ):
+        )
+        supported = supported_repository_types()
+        if self.values["type"] not in supported:
+            self.values["type"] = supported[0] if supported else ""
+        kind = tk.StringVar(value=self.values["type"])
+        for value, label in options:
+            if value not in supported:
+                continue
             ttk.Radiobutton(self.body, text=label, value=value, variable=kind).pack(anchor=tk.W, pady=4)
 
         def next_step():
             self.values["type"] = kind.get()
+            if kind.get() not in supported:
+                self.app.set_status("This storage type has no passing platform test", error=True)
+                return
             if kind.get() == "local":
                 self.values["path"] = filedialog.askdirectory() or self.values["path"]
                 if self.values["path"]:
