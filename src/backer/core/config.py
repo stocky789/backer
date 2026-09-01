@@ -3,7 +3,6 @@
 import logging
 import os
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -90,12 +89,6 @@ class JobConfig(ConfigModel):
 class BackerConfig(ConfigModel):
     agent_id: str = Field(default_factory=lambda: str(uuid4())[:8])
     server: ClientConfig | None = None
-    local_scheduled_mode: bool = False
-    # ``None`` means no pause.  A past value is deliberately harmless: due_jobs
-    # treats it as resumed without making the scheduler write configuration.
-    local_scheduled_paused: bool = False
-    local_scheduled_pause_until: datetime | None = None
-    server_agent_mode: bool = False
     repositories: dict[str, RepositoryConfig] = Field(default_factory=dict)
     jobs: dict[str, JobConfig] = Field(default_factory=dict)
 

@@ -409,11 +409,11 @@ class BackerAgentApp:
             self.tray_icon.title = "Backer - pause state unknown"
             self.tray_icon.update_menu()
             return
-        paused = scheduling_paused(self.config, datetime.now(UTC))
+        paused = scheduling_paused(get_data_dir(), datetime.now(UTC))
         self.pause_var.set("Paused" if paused else "")
         if not self.tray_icon:
             return
-        until = self.config.local_scheduled_pause_until
+        _, until = schedule_pause_consensus()
         pause_label = "Paused" if paused and until is None else (
             f"Paused until {until.astimezone().strftime('%H:%M')}" if paused and until else "Backups active"
         )
@@ -456,15 +456,12 @@ class BackerAgentApp:
         self._change_schedule_pause(False, None, "Scheduled backups resumed")
 
     def _change_schedule_pause(self, paused, until, success):
-        previous = self.config.model_copy(deep=True)
         snapshot = schedule_pause_snapshot()
-        desired = previous.model_copy(update={"local_scheduled_paused": paused, "local_scheduled_pause_until": until})
         try:
-            save_schedule_pause(desired)
-            if not schedule_pause_matches(desired):
+            save_schedule_pause(paused, until)
+            if not schedule_pause_matches(paused, until):
                 raise OSError("Pause state readback did not match the requested change")
         except Exception as error:
-            self.config = previous
             rollback_error = ""
             try:
                 restore_schedule_pause(snapshot)
@@ -473,29 +470,20 @@ class BackerAgentApp:
             except Exception as rollback:
                 rollback_error = f"; rollback failed: {rollback}"
             if rollback_error:
-                paths = ", ".join(str(path) for path in snapshot)
-                self._pause_state_unknown = f"Pause state unknown; reconcile {paths}"
+                self._pause_state_unknown = f"Pause state unknown; reconcile {snapshot[0]}"
                 rollback_error += f"; {self._pause_state_unknown}"
             else:
                 self._pause_state_unknown = ""
             self.set_status(f"Scheduled backup state was not changed: {error}{rollback_error}", error=True)
             self._refresh_tray_menu()
             return False
-        self.config = desired
         self._pause_state_unknown = ""
         self.set_status(success)
         self._refresh_tray_menu()
         return True
 
     def reconcile_schedule_pause(self):
-        if (state := schedule_pause_consensus()) is None:
-            self._pause_state_unknown = "Pause state unknown; local and unattended configuration copies conflict"
-            self.set_status(self._pause_state_unknown, error=True)
-            self._refresh_tray_menu()
-            return False
-        self.config = self.config.model_copy(
-            update={"local_scheduled_paused": state[0], "local_scheduled_pause_until": state[1]}
-        )
+        schedule_pause_consensus()
         self._pause_state_unknown = ""
         self.set_status("Scheduled backup state reconciled")
         self._refresh_tray_menu()

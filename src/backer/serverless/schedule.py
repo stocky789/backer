@@ -52,14 +52,19 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _read(path: Path) -> dict[str, str]:
+def _read(path: Path) -> dict[str, object]:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        values = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    if not isinstance(values, dict):
+        return {}
+    # The original format was a flat map of fire times.  Keep it readable while
+    # moving transient state under the data directory rather than config.yaml.
+    return values if "fires" in values or "pause" in values else {"fires": values}
 
 
-def _write(path: Path, values: dict[str, str]) -> None:
+def _write(path: Path, values: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".schedule.", suffix=".tmp")
     try:
@@ -71,36 +76,64 @@ def _write(path: Path, values: dict[str, str]) -> None:
         raise
 
 
-def scheduling_paused(config: BackerConfig, now: datetime) -> bool:
+def _pause(values: dict[str, object]) -> tuple[bool, datetime | None]:
+    pause = values.get("pause")
+    if not isinstance(pause, dict) or not pause.get("paused"):
+        return False, None
+    until = pause.get("until")
+    if not isinstance(until, str):
+        return True, None
+    try:
+        return True, datetime.fromisoformat(until.replace("Z", "+00:00"))
+    except ValueError:
+        return True, None
+
+
+def schedule_pause(data_dir: Path, paused: bool, until: datetime | None) -> None:
+    """Atomically persist the local scheduler pause beside its other runtime state."""
+    path = data_dir / "schedule.json"
+    values = _read(path)
+    values["pause"] = {"paused": paused, "until": _iso(until) if paused and until else None}
+    _write(path, values)
+
+
+def schedule_pause_state(data_dir: Path) -> tuple[bool, datetime | None]:
+    """Return the raw durable pause selection for the tray and rollback path."""
+    return _pause(_read(data_dir / "schedule.json"))
+
+
+def scheduling_paused(data_dir: Path, now: datetime) -> bool:
     """Whether the durable local pause still covers ``now``."""
-    if not config.local_scheduled_paused:
+    paused, until = schedule_pause_state(data_dir)
+    if not paused:
         return False
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
-    until = config.local_scheduled_pause_until
     if until is None:
         return True
     if until.tzinfo is None:
         until = until.replace(tzinfo=UTC)
     if until > now:
         return True
-    config.local_scheduled_paused = False
-    config.local_scheduled_pause_until = None
+    schedule_pause(data_dir, False, None)
     return False
 
 
 def due_jobs(config: BackerConfig, now: datetime, data_dir: Path) -> list[str]:
     """Return due jobs and persist their fire time before a caller starts work."""
-    if scheduling_paused(config, now):
+    if scheduling_paused(data_dir, now):
         return []
     schedule_path = data_dir / "schedule.json"
-    fires = _read(schedule_path)
+    values = _read(schedule_path)
+    fires = values.setdefault("fires", {})
+    if not isinstance(fires, dict):
+        fires = values["fires"] = {}
     due: list[str] = []
     for name, job in config.jobs.items():
         if not job.enabled or not job.schedule or not job.schedule.cron:
             continue
         last = (
-            datetime.fromisoformat(fires[name].replace("Z", "+00:00"))
+            datetime.fromisoformat(str(fires[name]).replace("Z", "+00:00"))
             if name in fires
             else now.replace(year=now.year - 1)
         )
@@ -108,5 +141,5 @@ def due_jobs(config: BackerConfig, now: datetime, data_dir: Path) -> list[str]:
             fires[name] = _iso(now)
             due.append(name)
     if due:
-        _write(schedule_path, fires)
+        _write(schedule_path, values)
     return due

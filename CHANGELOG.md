@@ -28,6 +28,7 @@ The release workflow publishes the top section verbatim as the release notes.
 ### Minor Features
 
 - Desktop and CLI backup, restore, verification, retention, and repository flows share one serverless configuration model.
+- Agent configuration now stores only identity, server credentials, repositories, and jobs; scheduler pauses live with local runtime state.
 - Serverless jobs store their own metadata, credentials, Kopia config, cache, and logs outside the repository.
 
 ### Bug Fixes

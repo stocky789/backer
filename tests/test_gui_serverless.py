@@ -264,15 +264,6 @@ def test_settings_save_keeps_registered_credentials_when_only_url_changes(monkey
     assert app.config.server.client_secret == "secret"
 
 
-def test_unified_config_persists_both_scheduled_modes():
-    from backer.core.config import BackerConfig
-
-    config = BackerConfig(local_scheduled_mode=True, server_agent_mode=True)
-
-    assert config.model_dump()["local_scheduled_mode"] is True
-    assert config.model_dump()["server_agent_mode"] is True
-
-
 def test_server_url_normalization_adds_scheme_and_default_port():
     from backer.agent.gui.views import normalize_server_url
 
@@ -281,21 +272,17 @@ def test_server_url_normalization_adds_scheme_and_default_port():
     assert normalize_server_url("https://backup-box:9443/") == "https://backup-box:9443"
 
 
-def test_settings_update_keeps_credentials_and_both_enabled_modes():
+def test_settings_update_keeps_credentials_without_a_mode_key():
     from backer.agent.gui.views import settings_update
     from backer.core.config import BackerConfig, ClientConfig
 
     saved = settings_update(
-        BackerConfig(server=ClientConfig(server_url="http://old", client_id="id", client_secret="secret")),
-        "backup-box",
-        local_scheduled_mode=True,
-        server_agent_mode=True,
+        BackerConfig(server=ClientConfig(server_url="http://old", client_id="id", client_secret="secret")), "backup-box"
     )
 
     assert saved.server.server_url == "http://backup-box:8420"
     assert saved.server.client_id == "id"
     assert saved.server.client_secret == "secret"
-    assert saved.local_scheduled_mode and saved.server_agent_mode
 
 
 def test_scheduled_attempt_waits_for_selected_job_and_reports_its_failure():
@@ -388,7 +375,7 @@ def test_mode_apply_returns_one_shape_when_scheduler_snapshot_fails(monkeypatch,
 
     monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", fail_snapshot)
 
-    result = views.apply_scheduled_modes(previous, previous)
+    result = views.apply_scheduled_modes(previous, previous, enable_local_schedule=False)
 
     assert isinstance(result, views.ModeApplyResult)
     assert result == (False, previous, "read")
@@ -399,7 +386,7 @@ def test_mode_apply_restores_real_scheduler_snapshot_after_mutation_failure(monk
     from backer.core.config import BackerConfig
 
     previous = BackerConfig()
-    desired = previous.model_copy(update={"local_scheduled_mode": True})
+    desired = previous
     restored = []
     monkeypatch.setattr(views, "get_config_dir", lambda: tmp_path / "user")
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path / "machine")
@@ -413,7 +400,7 @@ def test_mode_apply_restores_real_scheduler_snapshot_after_mutation_failure(monk
 
     monkeypatch.setattr("backer.client.windows_service.restore_local_scheduler", restore)
 
-    result = views.apply_scheduled_modes(previous, desired)
+    result = views.apply_scheduled_modes(previous, desired, enable_local_schedule=True)
 
     assert result == (False, previous, "create failed")
     assert restored == [{"actual": "task xml"}]
@@ -445,7 +432,7 @@ def test_mode_apply_leaves_durable_config_unchanged_when_scheduler_is_active(mon
     previous = BackerConfig()
     previous.save(user / "config.yaml")
     previous.save(machine / "config.yaml")
-    desired = previous.model_copy(update={"local_scheduled_mode": True})
+    desired = previous
     before = (user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
@@ -460,7 +447,7 @@ def test_mode_apply_leaves_durable_config_unchanged_when_scheduler_is_active(mon
         "backer.client.windows_service.create_local_scheduled_task", lambda: pytest.fail("must not mutate task")
     )
 
-    result = views.apply_scheduled_modes(previous, desired)
+    result = views.apply_scheduled_modes(previous, desired, enable_local_schedule=True)
 
     assert result == (False, previous, "Local scheduled backup is running; retry after it finishes")
     assert ((user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()) == before
@@ -486,7 +473,7 @@ def test_mode_apply_reports_trigger_rollback_failure_after_race(monkeypatch, tmp
         lambda snapshot: attempts.append(snapshot) or (False, "enable denied"),
     )
 
-    result = views.apply_scheduled_modes(previous, previous)
+    result = views.apply_scheduled_modes(previous, previous, enable_local_schedule=False)
 
     assert result == (False, previous, "task could not be re-enabled; rollback failed: scheduler: enable denied")
     assert attempts == [scheduler]
@@ -508,7 +495,7 @@ def test_mode_apply_reports_trigger_restored_on_retry_after_race(monkeypatch, tm
     )
     monkeypatch.setattr("backer.client.windows_service.restore_local_scheduler_trigger", lambda _snapshot: (True, ""))
 
-    result = views.apply_scheduled_modes(previous, previous)
+    result = views.apply_scheduled_modes(previous, previous, enable_local_schedule=False)
 
     assert result == (False, previous, "timer could not be restored; trigger restored on retry")
 
@@ -522,7 +509,7 @@ def test_mode_apply_rolls_back_config_when_final_freeze_check_detects_reactivati
     previous = BackerConfig()
     previous.save(user / "config.yaml")
     previous.save(machine / "config.yaml")
-    desired = previous.model_copy(update={"local_scheduled_mode": True})
+    desired = previous
     before = (user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()
     scheduler = {"platform": "windows", "task": {"exists": True}}
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
@@ -545,7 +532,7 @@ def test_mode_apply_rolls_back_config_when_final_freeze_check_detects_reactivati
     )
     monkeypatch.setattr(BackerConfig, "save", lambda *_args: pytest.fail("must not write config"))
 
-    result = views.apply_scheduled_modes(previous, desired)
+    result = views.apply_scheduled_modes(previous, desired, enable_local_schedule=True)
 
     assert result == (False, previous, "trigger reactivated")
     assert ((user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()) == before
@@ -1072,214 +1059,6 @@ def test_poller_isolates_bad_callbacks_and_tray_actions():
     assert scheduled == [(100, app._poll_tray_intents)]
 
 
-def test_tray_pause_and_resume_restore_state_after_partial_save_failure(monkeypatch, tmp_path):
-    import queue
-    from datetime import UTC, datetime, timedelta
-
-    from backer.agent.gui import app as gui_app
-    from backer.agent.gui import views
-    from backer.core.config import BackerConfig
-
-    user, machine = tmp_path / "user", tmp_path / "machine"
-    monkeypatch.setattr(views, "get_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-
-    class Root:
-        def after(self, *_args):
-            pass
-
-    for intent, initial in (
-        ("pause", BackerConfig()),
-        (
-            "resume",
-            BackerConfig(
-                local_scheduled_paused=True,
-                local_scheduled_pause_until=datetime.now(UTC) + timedelta(hours=1),
-            ),
-        ),
-    ):
-        initial.save(user / "config.yaml")
-        initial.save(machine / "config.yaml")
-
-        def partial_save(desired):
-            BackerConfig.load(machine / "config.yaml").model_copy(
-                update={
-                    "local_scheduled_paused": desired.local_scheduled_paused,
-                    "local_scheduled_pause_until": desired.local_scheduled_pause_until,
-                }
-            ).save(machine / "config.yaml")
-            raise OSError("user write failed")
-
-        monkeypatch.setattr(gui_app, "save_schedule_pause", partial_save)
-        app = object.__new__(gui_app.BackerAgentApp)
-        app.root, app.alive, app.config = Root(), True, initial.model_copy(deep=True)
-        app._ui_callbacks, app._tray_intents = queue.SimpleQueue(), queue.SimpleQueue()
-        status, refresh, later = [], [], []
-        app.set_status = lambda message, **kwargs: status.append((message, kwargs))
-        app._refresh_tray_menu = lambda: refresh.append(
-            (app.config.local_scheduled_paused, app.config.local_scheduled_pause_until)
-        )
-        app.backup_job = lambda name: later.append(name)
-        if intent == "pause":
-            app._queue_tray_intent("pause", "hour")
-        else:
-            app._queue_tray_intent("resume")
-        app._queue_tray_intent("backup", "Photos")
-        app._poll_tray_intents()
-
-        assert (app.config.local_scheduled_paused, app.config.local_scheduled_pause_until) == (
-            initial.local_scheduled_paused,
-            initial.local_scheduled_pause_until,
-        )
-        persisted = BackerConfig.load(machine / "config.yaml")
-        assert (persisted.local_scheduled_paused, persisted.local_scheduled_pause_until) == refresh[-1]
-        assert status[-1][1]["error"] and "not changed" in status[-1][0] and later == ["Photos"]
-
-
-def test_failed_first_pause_restores_absent_user_and_machine_config(monkeypatch, tmp_path):
-    from backer.agent.gui import app as gui_app
-    from backer.agent.gui import views
-    from backer.core.config import BackerConfig
-
-    user, machine = tmp_path / "user", tmp_path / "machine"
-    monkeypatch.setattr(views, "get_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-
-    for create_partial in (False, True):
-        def failed_save(desired):
-            if create_partial:
-                desired.save(user / "config.yaml")
-                desired.save(machine / "config.yaml")
-            raise OSError("write failed")
-
-        monkeypatch.setattr(gui_app, "save_schedule_pause", failed_save)
-        app = object.__new__(gui_app.BackerAgentApp)
-        app.config, app._pause_state_unknown = BackerConfig(), ""
-        app.set_status = lambda *_args, **_kwargs: None
-        app._refresh_tray_menu = lambda: None
-        app.pause_backups("hour")
-        assert not (user / "config.yaml").exists() and not (machine / "config.yaml").exists()
-        assert not app._pause_state_unknown
-
-
-def test_unproven_pause_rollback_shows_unknown_tray_state(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    from backer.agent.gui import app as gui_app
-    from backer.agent.gui import views
-    from backer.core.config import BackerConfig
-
-    user, machine = tmp_path / "user", tmp_path / "machine"
-    monkeypatch.setattr(views, "get_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-
-    def partial_save(desired):
-        desired.save(user / "config.yaml")
-        raise OSError("write failed")
-
-    def delete_denied(*_args):
-        raise OSError("delete denied")
-
-    def write_denied(_snapshot):
-        raise OSError("write denied")
-
-    monkeypatch.setattr(gui_app, "save_schedule_pause", partial_save)
-    monkeypatch.setattr(views, "_remove_created_pause_config", delete_denied)
-
-    class Item:
-        def __init__(self, text, action=None, enabled=True):
-            self.text, self.action, self.enabled = text, action, enabled
-
-    class Menu:
-        def __init__(self, *items):
-            self.items = items
-
-    monkeypatch.setattr(gui_app, "pystray", SimpleNamespace(Menu=Menu, MenuItem=Item))
-    app = object.__new__(gui_app.BackerAgentApp)
-    app.config, app._pause_state_unknown = BackerConfig(), ""
-    app.pause_var = type("Value", (), {"set": lambda _self, value: setattr(_self, "value", value)})()
-    app.tray_icon = type("Tray", (), {"update_menu": lambda _self: None})()
-    status = []
-    app.set_status = lambda message, **kwargs: status.append((message, kwargs))
-    app._tray_intents = __import__("queue").SimpleQueue()
-    app._queue_tray_intent = lambda *_args: None
-
-    app.pause_backups("hour")
-
-    assert "unknown" in app._pause_state_unknown.lower() and status[-1][1]["error"]
-    assert app.pause_var.value == "Pause state unknown" and app.tray_icon.title == "Backer - pause state unknown"
-    assert [(item.text, item.enabled) for item in app.tray_icon.menu.items[:2]] == [
-        ("Pause state unknown", False),
-        ("Recheck pause state", True),
-    ]
-
-    monkeypatch.setattr(gui_app, "restore_schedule_pause", write_denied)
-    app._pause_state_unknown = ""
-    app.pause_backups("hour")
-    assert "rollback failed" in status[-1][0] and "unknown" in app._pause_state_unknown.lower()
-
-
-def test_pause_consensus_prefers_user_and_reconcile_restores_normal_tray(monkeypatch, tmp_path):
-    from datetime import UTC, datetime, timedelta
-    from types import SimpleNamespace
-
-    from backer.agent.gui import app as gui_app
-    from backer.agent.gui import views
-    from backer.core.config import BackerConfig
-
-    user, machine = tmp_path / "user", tmp_path / "machine"
-    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-    deadline = datetime.now(UTC) + timedelta(hours=1)
-    paused = BackerConfig(local_scheduled_paused=True, local_scheduled_pause_until=deadline)
-    paused.save(user / "config.yaml")
-    assert views.schedule_pause_consensus() == (True, deadline)
-    paused.save(machine / "config.yaml")
-    assert views.schedule_pause_consensus() == (True, deadline)
-    BackerConfig().save(machine / "config.yaml")
-    assert views.schedule_pause_consensus() is None
-    (user / "config.yaml").unlink()
-    assert views.schedule_pause_consensus() is None
-    (machine / "config.yaml").unlink()
-    assert views.schedule_pause_consensus() == (False, None)
-    paused.save(user / "config.yaml")
-
-    class Item:
-        def __init__(self, text, action=None, enabled=True):
-            self.text, self.action, self.enabled = text, action, enabled
-
-    class Menu:
-        def __init__(self, *items):
-            self.items = items
-
-    monkeypatch.setattr(gui_app, "pystray", SimpleNamespace(Menu=Menu, MenuItem=Item))
-    app = object.__new__(gui_app.BackerAgentApp)
-    app.config, app._pause_state_unknown = BackerConfig(), "Pause state unknown; rollback failed"
-    app.pause_var = type("Value", (), {"set": lambda _self, value: setattr(_self, "value", value)})()
-    app.tray_icon = type("Tray", (), {"update_menu": lambda _self: None})()
-    app._notification_run = None
-    app._notification_state = {}
-    app._queue_tray_intent = lambda *_args: None
-    status = []
-    app.set_status = lambda message, **kwargs: status.append((message, kwargs))
-    app._refresh_tray_menu()
-    assert app.pause_var.value == "Pause state unknown"
-
-    paused.save(machine / "config.yaml")
-    assert app.reconcile_schedule_pause()
-    reloaded = BackerConfig.load(user / "config.yaml")
-    assert (app.config.local_scheduled_paused, app.config.local_scheduled_pause_until) == (
-        reloaded.local_scheduled_paused,
-        reloaded.local_scheduled_pause_until,
-    ) == (True, deadline)
-    assert not app._pause_state_unknown and app.pause_var.value == "Paused"
-    assert app.tray_icon.title == "Backer"
-    assert any(item.text == "Pause backups" for item in app.tray_icon.menu.items)
-
-
 def test_cancel_running_never_waits_for_kopia_reap():
     import threading
     import time
@@ -1643,44 +1422,6 @@ def test_repository_second_secret_write_is_compensated(monkeypatch, tmp_path):
     assert {reference for reference, _scope in removed} == set(calls)
 
 
-def test_scheduled_pause_is_durable_and_due_runner_keeps_jobs():
-    from datetime import UTC, datetime, timedelta
-
-    from backer.core.config import BackerConfig, JobConfig, ScheduleConfig, SourceConfig
-    from backer.serverless.schedule import due_jobs
-
-    now = datetime.now(UTC)
-    config = BackerConfig(
-        local_scheduled_paused=True,
-        local_scheduled_pause_until=now + timedelta(hours=1),
-        jobs={
-            "Documents": JobConfig(
-                repository="repo", source=SourceConfig(path="source"), schedule=ScheduleConfig(cron="* * * * *")
-            )
-        },
-    )
-
-    assert due_jobs(config, now, Path("unused")) == []
-    assert list(config.jobs) == ["Documents"]
-
-
-def test_schedule_pause_updates_the_unattended_copy_first(monkeypatch, tmp_path):
-    from backer.agent.gui import views
-    from backer.core.config import BackerConfig
-
-    user, machine = tmp_path / "user", tmp_path / "machine"
-    BackerConfig().save(machine / "config.yaml")
-    config = BackerConfig(local_scheduled_paused=True)
-    monkeypatch.setattr(views, "get_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-
-    views.save_schedule_pause(config)
-
-    assert BackerConfig.load(machine / "config.yaml").local_scheduled_paused
-    assert BackerConfig.load(user / "config.yaml").local_scheduled_paused
-
-
 def test_tray_notification_policy_is_once_per_job_and_persistent_shape():
     from backer.agent.gui.app import notification_allowed
 
@@ -1818,49 +1559,6 @@ def test_persisted_run_input_needed_uses_the_shared_catalogue(tmp_path):
         ),
     )
     assert read_runs(tmp_path, "Photos", 1)[0].needs_input
-
-
-def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):
-    from datetime import UTC, datetime, timedelta, timezone
-
-    from backer.agent.gui import app as gui_app
-    from backer.agent.gui import views
-    from backer.core.config import BackerConfig, JobConfig, ScheduleConfig, SourceConfig
-    from backer.serverless.schedule import due_jobs, scheduling_paused
-
-    config = BackerConfig(
-        local_scheduled_paused=True, local_scheduled_pause_until=datetime.now(UTC) - timedelta(seconds=1)
-    )
-    assert not scheduling_paused(config, datetime.now(UTC))
-    assert not config.local_scheduled_paused and config.local_scheduled_pause_until is None
-    user, machine = tmp_path / "user", tmp_path / "machine"
-    BackerConfig().save(machine / "config.yaml")
-    monkeypatch.setattr(views, "get_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
-    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-    app = object.__new__(gui_app.BackerAgentApp)
-    app.config = config
-    app.set_status = lambda *_args, **_kwargs: None
-    app._refresh_tray_menu = lambda: None
-    gui_app.BackerAgentApp.resume_backups(app)
-    assert not BackerConfig.load(user / "config.yaml").local_scheduled_paused
-    assert not BackerConfig.load(machine / "config.yaml").local_scheduled_paused
-    deadline = datetime(2026, 9, 1, 10, tzinfo=timezone(timedelta(hours=10)))
-    offset_config = BackerConfig(local_scheduled_paused=True, local_scheduled_pause_until=deadline)
-    assert scheduling_paused(offset_config, datetime(2026, 8, 31, 23, 59, tzinfo=UTC))
-    assert not scheduling_paused(offset_config, datetime(2026, 9, 1, 0, 1, tzinfo=UTC))
-    resumed = BackerConfig.load(user / "config.yaml").model_copy(
-        update={
-            "jobs": {
-                "Photos": JobConfig(
-                    repository="repo",
-                    source=SourceConfig(path="source"),
-                    schedule=ScheduleConfig(cron="* * * * *"),
-                )
-            }
-        }
-    )
-    assert due_jobs(resumed, datetime.now(UTC), tmp_path / "data") == ["Photos"]
 
 
 def test_notification_policy_persists_reloads_and_tray_opens_details(monkeypatch, tmp_path):

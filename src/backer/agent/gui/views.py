@@ -26,6 +26,8 @@ from backer.core.config import BackerConfig, ClientConfig, ScheduleConfig
 from backer.core.config import load_config as _load_config
 from backer.core.paths import _user_config_dir, get_config_dir, get_data_dir, get_machine_config_dir
 from backer.core.repo_metadata import RepositoryMetadata
+from backer.serverless.schedule import schedule_pause as _schedule_pause
+from backer.serverless.schedule import schedule_pause_state
 from backer.serverless.store import read_runs
 
 
@@ -62,100 +64,49 @@ def get_user_config_dir() -> Path:
     return _user_config_dir()
 
 
-def save_schedule_pause(config: BackerConfig) -> None:
-    """Update the unattended copy before the interactive copy can advertise a pause."""
-    machine_path = get_machine_config_dir() / "config.yaml"
-    if machine_path.is_file():
-        machine = BackerConfig.load(machine_path).model_copy(
-            update={
-                "local_scheduled_paused": config.local_scheduled_paused,
-                "local_scheduled_pause_until": config.local_scheduled_pause_until,
-            }
-        )
-        machine.save(machine_path)
-    config.save(get_user_config_dir() / "config.yaml")
+def save_schedule_pause(paused: bool, until) -> None:
+    """Keep scheduler runtime state out of the shared durable config."""
+    _schedule_pause(get_data_dir(), paused, until)
 
 
 def schedule_pause_snapshot():
-    """Capture just the durable pause state before a tray change."""
-    snapshot = {}
-    for path in (get_user_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml"):
-        target = path.resolve(strict=False)
-        if path.is_file():
-            config = BackerConfig.load(path)
-            snapshot[path] = (True, config.local_scheduled_paused, config.local_scheduled_pause_until, target)
-        else:
-            snapshot[path] = (False, False, None, target)
-    return snapshot
+    """Capture pause state before a tray change for rollback."""
+    path = get_data_dir() / "schedule.json"
+    return path, path.exists(), schedule_pause_state(get_data_dir())
 
 
-def schedule_pause_matches(config: BackerConfig) -> bool:
-    """Verify every existing durable pause copy before advertising it."""
-    paths = (get_user_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml")
-    user, machine = paths
-    if not user.is_file():
-        return False
-    return all(
-        not path.is_file()
-        or (
-            (stored := BackerConfig.load(path)).local_scheduled_paused == config.local_scheduled_paused
-            and stored.local_scheduled_pause_until == config.local_scheduled_pause_until
-        )
-        for path in (user, machine)
-    )
+def schedule_pause_matches(paused: bool, until) -> bool:
+    """Verify the runtime state before advertising it."""
+    return schedule_pause_state(get_data_dir()) == (paused, until)
 
 
 def schedule_pause_consensus():
-    """Return one durable pause state, or ``None`` when copies conflict."""
-    user = get_user_config_dir() / "config.yaml"
-    machine = get_machine_config_dir() / "config.yaml"
-    if not user.is_file():
-        return (False, None) if not machine.is_file() else None
-    config = BackerConfig.load(user)
-    state = (config.local_scheduled_paused, config.local_scheduled_pause_until)
-    if not machine.is_file():
-        return state
-    machine_config = BackerConfig.load(machine)
-    machine_state = (machine_config.local_scheduled_paused, machine_config.local_scheduled_pause_until)
-    return state if state == machine_state else None
+    """The data directory is the single durable pause authority."""
+    return schedule_pause_state(get_data_dir())
 
 
 def _remove_created_pause_config(path: Path, target: Path) -> None:
-    """Remove only the exact config file created by a rejected pause transaction."""
-    if path.resolve(strict=False) != target:
-        raise OSError(f"Refusing to remove unexpected pause configuration: {path}")
+    """Remove only the exact schedule file created by a rejected pause transaction."""
+    if path.resolve(strict=False) != target.resolve(strict=False):
+        raise OSError(f"Refusing to remove unexpected schedule state: {path}")
     path.unlink()
 
 
 def restore_schedule_pause(snapshot) -> None:
-    """Restore only pause fields, preserving unrelated durable configuration."""
-    for path, (existed, paused, until, target) in snapshot.items():
-        if not existed and path.is_file():
-            _remove_created_pause_config(path, target)
-            continue
-        if not path.is_file():
-            if existed:
-                raise OSError(f"Pause configuration disappeared: {path}")
-            continue
-        current = BackerConfig.load(path).model_copy(
-            update={"local_scheduled_paused": paused, "local_scheduled_pause_until": until}
-        )
-        current.save(path)
+    """Restore only pause state, preserving scheduled-fire timestamps."""
+    path, existed, (paused, until) = snapshot
+    if not existed and path.is_file():
+        _remove_created_pause_config(path, path)
+        return
+    if not path.is_file() and existed:
+        raise OSError(f"Schedule state disappeared: {path}")
+    _schedule_pause(get_data_dir(), paused, until)
 
 
 def schedule_pause_snapshot_matches(snapshot) -> bool:
     """Return whether durable pause fields still match their pre-change snapshot."""
-    for path, (existed, paused, until, _target) in snapshot.items():
-        if not path.is_file():
-            if existed:
-                return False
-            continue
-        if not existed:
-            return False
-        stored = BackerConfig.load(path)
-        if stored.local_scheduled_paused != paused or stored.local_scheduled_pause_until != until:
-            return False
-    return True
+    path, existed, state = snapshot
+    return path.exists() == existed and (not existed or schedule_pause_state(get_data_dir()) == state)
 
 
 def unattended_blocker(config: BackerConfig) -> str | None:
@@ -178,24 +129,30 @@ def normalize_server_url(value: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, "")).rstrip("/")
 
 
-def settings_update(
-    config: BackerConfig, value: str, *, local_scheduled_mode: bool, server_agent_mode: bool
-) -> BackerConfig:
+def settings_update(config: BackerConfig, value: str) -> BackerConfig:
     """Return one durable settings update without discarding registered credentials."""
     server = config.server
     if value.strip():
         current = server or ClientConfig()
         server = current.model_copy(update={"server_url": normalize_server_url(value)})
-    return config.model_copy(
-        update={
-            "server": server,
-            "local_scheduled_mode": local_scheduled_mode,
-            "server_agent_mode": server_agent_mode,
-        }
-    )
+    return config.model_copy(update={"server": server})
 
 
-def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> ModeApplyResult:
+def local_schedule_configured() -> bool:
+    """The installed platform trigger is the authoritative local-schedule mode."""
+    from backer.client.windows_service import snapshot_local_scheduler
+
+    snapshot = snapshot_local_scheduler()
+    if snapshot.get("platform") == "windows":
+        task = snapshot.get("task", {})
+        return isinstance(task, dict) and bool(task.get("exists"))
+    units = snapshot.get("units", {})
+    return isinstance(units, dict) and any(units.values())
+
+
+def apply_scheduled_modes(
+    previous: BackerConfig, desired: BackerConfig, *, enable_local_schedule: bool
+) -> ModeApplyResult:
     """Apply local scheduling with full rollback of files, secrets, and real scheduler state."""
     rollback_errors: list[str] = []
     try:
@@ -251,7 +208,7 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
         if not freeze.ready:
             return refuse(freeze)
 
-        if desired.local_scheduled_mode:
+        if enable_local_schedule:
             if blocker := unattended_blocker(desired):
                 raise ValueError(blocker)
             from backer.serverless.repositories import rescope_secrets_for_system
@@ -289,11 +246,7 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
         desired.save(user_path)
         committed = BackerConfig.load(user_path)
         machine = BackerConfig.load(machine_path)
-        if (
-            committed.local_scheduled_mode != desired.local_scheduled_mode
-            or committed.server_agent_mode != desired.server_agent_mode
-            or machine.local_scheduled_mode != desired.local_scheduled_mode
-        ):
+        if committed != desired or machine != desired:
             raise OSError("Settings readback did not match the requested modes")
         return ModeApplyResult(True, desired, "Scheduled modes saved")
     except Exception as error:
@@ -674,8 +627,7 @@ class SettingsView(ttk.Frame):
         self.agent_button = ttk.Button(server_actions, text="Start agent", command=self.start_agent)
         self.agent_button.pack(side=tk.LEFT, padx=6)
         self.mode = tk.StringVar(value="system")
-        self.local_mode = tk.BooleanVar(value=app.config.local_scheduled_mode)
-        self.server_mode = tk.BooleanVar(value=app.config.server_agent_mode)
+        self.local_mode = tk.BooleanVar(value=local_schedule_configured())
         ttk.Label(self, text="Appearance").pack(anchor=tk.W, pady=(14, 0))
         ttk.Combobox(self, textvariable=self.mode, values=("system", "light", "dark"), state="readonly").pack(
             anchor=tk.W
@@ -685,11 +637,8 @@ class SettingsView(ttk.Frame):
         modes = ttk.Frame(self)
         modes.pack(anchor=tk.W, pady=(6, 0))
         ttk.Checkbutton(
-            modes, text="Local scheduled mode", variable=self.local_mode, command=self._local_mode_changed
+            modes, text="Run local backups on schedule", variable=self.local_mode, command=self._local_mode_changed
         ).pack(side=tk.LEFT)
-        ttk.Checkbutton(
-            modes, text="Server agent mode", variable=self.server_mode, command=self._server_mode_changed
-        ).pack(side=tk.LEFT, padx=12)
         scheduled = ttk.Frame(self)
         scheduled.pack(anchor=tk.W, pady=(6, 0))
         self.scheduled_job = tk.StringVar(value=next(iter(app.config.jobs), ""))
@@ -750,12 +699,7 @@ class SettingsView(ttk.Frame):
     def _save(self):
         previous = self.app.config
         try:
-            updated = settings_update(
-                previous,
-                self.server.get(),
-                local_scheduled_mode=self.local_mode.get(),
-                server_agent_mode=self.server_mode.get(),
-            )
+            updated = settings_update(previous, self.server.get())
         except ValueError as error:
             self.app.set_status(f"Settings were not saved: {error}", error=True)
             return
@@ -768,17 +712,16 @@ class SettingsView(ttk.Frame):
     def _local_mode_changed(self):
         self.app.set_status("Save settings to apply scheduled modes")
 
-    def _server_mode_changed(self):
-        self.app.set_status("Save settings to apply scheduled modes")
-
     def _apply_modes(self, previous: BackerConfig, desired: BackerConfig):
-        self._worker("apply-modes", lambda: apply_scheduled_modes(previous, desired), self._modes_applied)
+        self._worker(
+            "apply-modes",
+            lambda: apply_scheduled_modes(previous, desired, enable_local_schedule=self.local_mode.get()),
+            self._modes_applied,
+        )
 
     def _modes_applied(self, result):
         ok, config, message = result
         self.app.config = config
-        self.local_mode.set(config.local_scheduled_mode)
-        self.server_mode.set(config.server_agent_mode)
         if ok:
             self.app.apply_theme(self.mode.get())
         self.app.set_status(message, error=not ok)
@@ -948,7 +891,7 @@ class SettingsView(ttk.Frame):
         def disconnect():
             if service:
                 service.stop()
-            updated = current.model_copy(update={"server": None, "server_agent_mode": False})
+            updated = current.model_copy(update={"server": None})
             save_config(updated)
             return True, updated
 
