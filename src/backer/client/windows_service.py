@@ -306,6 +306,56 @@ def create_local_scheduled_task() -> tuple[bool, str]:
     return True, f"Local backup task '{task_name}' created."
 
 
+def create_local_scheduled_test_task(job_name: str, token: str) -> tuple[bool, str]:
+    """Run one configured local job once as SYSTEM without changing the due scheduler."""
+    if not is_windows():
+        return False, "Windows scheduled task only available on Windows"
+    if not is_admin():
+        return False, "Administrator privileges required. Run as Administrator."
+    if not job_name or any(char in job_name for char in "\r\n\x00"):
+        return False, "Invalid local job name"
+    data_dir = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
+    command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
+    arguments = (
+        f'job run "{job_name}" --no-progress'
+        if getattr(sys, "frozen", False)
+        else f'-m backer job run "{job_name}" --no-progress'
+    )
+    task_name = f"BackerLocalTest-{token}"
+    action = (
+        f'cmd.exe /d /c "set BACKER_DATA_DIR={data_dir}&& set BACKER_CONFIG_DIR={data_dir}'
+        f'&& set BACKER_RUN_AS_SYSTEM=1&& set BACKER_ATTEMPT_TOKEN={token}&& "{command}" {arguments}"'
+    )
+    result = subprocess.run(
+        [
+            "schtasks", "/create", "/tn", task_name, "/tr", action, "/sc", "once", "/st", "00:00", "/ru", "SYSTEM",
+            "/rl", "highest", "/f",
+        ],
+        capture_output=True,
+        text=True,
+        creationflags=get_subprocess_flags(),
+    )
+    if result.returncode:
+        return False, result.stderr.strip() or "Failed to create scheduled test task"
+    launched = subprocess.run(
+        ["schtasks", "/run", "/tn", task_name], capture_output=True, text=True, creationflags=get_subprocess_flags()
+    )
+    if launched.returncode:
+        remove_local_scheduled_test_task(token)
+        return False, launched.stderr.strip() or "Failed to start scheduled test task"
+    return True, task_name
+
+
+def remove_local_scheduled_test_task(token: str) -> None:
+    """Remove only the short-lived selected-job SYSTEM test task."""
+    if is_windows():
+        subprocess.run(
+            ["schtasks", "/delete", "/tn", f"BackerLocalTest-{token}", "/f"],
+            capture_output=True,
+            creationflags=get_subprocess_flags(),
+        )
+
+
 def remove_local_scheduled_task() -> bool:
     """Remove only the SYSTEM task created for local serverless scheduling."""
     if not is_windows():
@@ -766,3 +816,31 @@ def remove_local_systemd_timer(*, headless: bool = False) -> None:
     for suffix in ("service", "timer"):
         (directory / f"backer-local.{suffix}").unlink(missing_ok=True)
     subprocess.run([*systemctl, "daemon-reload"], capture_output=True)
+
+
+def create_local_systemd_test_service(job_name: str, token: str) -> tuple[bool, str]:
+    """Start one selected job through a short-lived root systemd service."""
+    if is_windows() or not job_name or any(char in job_name for char in "\r\n\x00"):
+        return False, "Invalid scheduled test request"
+    service = Path("/etc/systemd/system") / f"backer-local-test-{token}.service"
+    service.write_text(
+        "[Service]\nType=oneshot\n"
+        "Environment=BACKER_CONFIG_DIR=/etc/backer\nEnvironment=BACKER_DATA_DIR=/var/lib/backer\n"
+        "Environment=BACKER_RUN_AS_SYSTEM=1\n"
+        f"Environment=BACKER_ATTEMPT_TOKEN={token}\n"
+        f'ExecStart={get_python_path()} -m backer job run "{job_name}" --no-progress\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    result = subprocess.run(["systemctl", "start", service.name], capture_output=True, text=True)
+    if result.returncode:
+        service.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+        return False, result.stderr.strip() or "Failed to start root scheduled test service"
+    return True, service.stem
+
+
+def remove_local_systemd_test_service(token: str) -> None:
+    service = Path("/etc/systemd/system") / f"backer-local-test-{token}.service"
+    service.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)

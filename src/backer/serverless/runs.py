@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,7 +47,8 @@ def _run_local_job(
     config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None,
     cancel_event: Any | None = None, process_owner: Any | None = None,
 ) -> dict[str, Any]:
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}"
+    suffix = os.environ.get("BACKER_ATTEMPT_TOKEN", "")
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}" + (f"-{suffix}" if suffix else "")
     started = datetime.now(UTC)
     data_dir = get_data_dir()
     report: dict[str, Any] = {"run_id": run_id, "job_name": name, "success": False, "errors": []}

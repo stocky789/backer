@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 from tkinter import filedialog, ttk
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from backer.core import keystore
 from backer.core.config import BackerConfig, ClientConfig
@@ -73,13 +74,20 @@ def settings_update(
 
 
 def wait_for_scheduled_attempt(
-    previous_id: str | None, read, *, timeout: float = 65, sleep=time.sleep
+    previous_id: str | None, read, *, token: str | None = None, timeout: float = 65, sleep=time.sleep
 ) -> tuple[bool, str]:
     """Wait for the scheduled identity's next persisted attempt, never its launch acknowledgement."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         attempts = read()
-        current = next((item for item in attempts if item.get("run_id") != previous_id), None)
+        current = next(
+            (
+                item
+                for item in attempts
+                if item.get("run_id") != previous_id and (token is None or str(item.get("run_id", "")).endswith(token))
+            ),
+            None,
+        )
         if current:
             if current.get("status") == "success":
                 return True, "Scheduled run completed"
@@ -366,6 +374,24 @@ class SettingsView(ttk.Frame):
         )
         ttk.Label(self, textvariable=self.repository_detail, style="Muted.TLabel", wraplength=650).pack(anchor=tk.W)
         self.repository_choice.trace_add("write", lambda *_args: self._show_repository_details())
+        self._recovery_target = None
+        self._recovery_ack = tk.BooleanVar(value=False)
+        self._recovery_warning = tk.StringVar()
+        self._recovery_frame = ttk.Frame(self)
+        ttk.Label(
+            self._recovery_frame, textvariable=self._recovery_warning, style="Danger.TLabel", wraplength=650
+        ).pack(anchor=tk.W)
+        ttk.Checkbutton(
+            self._recovery_frame,
+            text="I understand this file contains my passphrase in plain text",
+            variable=self._recovery_ack,
+            command=self._update_recovery_save_state,
+        ).pack(anchor=tk.W, pady=(6, 0))
+        self._recovery_save_button = ttk.Button(
+            self._recovery_frame, text="Save recovery record", command=self._save_recovery_record
+        )
+        self._recovery_save_button.pack(anchor=tk.W, pady=(6, 0))
+        self._recovery_save_button.configure(state=tk.DISABLED)
         ttk.Button(self, text="Save settings", command=self._save).pack(anchor=tk.W, pady=6)
         ttk.Button(self, text="Back", command=lambda: app._show("home")).pack(anchor=tk.W)
 
@@ -378,13 +404,10 @@ class SettingsView(ttk.Frame):
                 local_scheduled_mode=self.local_mode.get(),
                 server_agent_mode=self.server_mode.get(),
             )
-            save_config(updated)
-        except (OSError, ValueError) as error:
+        except ValueError as error:
             self.app.set_status(f"Settings were not saved: {error}", error=True)
             return
-        self.app.config = updated
-        self.app.apply_theme(self.mode.get())
-        self._apply_modes(previous)
+        self._apply_modes(previous, updated)
 
     def _unattended(self):
         self.local_mode.set(True)
@@ -396,47 +419,101 @@ class SettingsView(ttk.Frame):
     def _server_mode_changed(self):
         self.app.set_status("Save settings to apply scheduled modes")
 
-    def _apply_modes(self, previous: BackerConfig):
-        desired = self.app.config
+    def _apply_modes(self, previous: BackerConfig, desired: BackerConfig):
 
         def apply():
-            if desired.local_scheduled_mode:
-                if blocker := unattended_blocker(desired):
-                    return False, blocker
-                from backer.serverless.repositories import rescope_secrets_for_system
+            user_path = get_config_dir() / "config.yaml"
+            machine_path = get_machine_config_dir() / "config.yaml"
+            snapshots = {path: path.read_bytes() if path.exists() else None for path in (user_path, machine_path)}
+            refs = {
+                ref
+                for record in previous.repositories.values()
+                for ref in (record.passphrase_ref, record.storage_password_ref)
+                if ref
+            }
+            machine_secrets = {ref: keystore.get(ref, machine_scope=True) for ref in refs}
+            changed_task = False
 
-                rescope_secrets_for_system(desired)
-                save_config(desired)
-                desired.save(get_machine_config_dir() / "config.yaml")
+            def restore_file(path, content):
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+
+            def restore_task():
                 if sys.platform == "win32":
-                    from backer.client.windows_service import create_local_scheduled_task
+                    from backer.client.windows_service import create_local_scheduled_task, remove_local_scheduled_task
+                else:
+                    from backer.client.windows_service import create_local_systemd_timer, remove_local_systemd_timer
+                if previous.local_scheduled_mode:
+                    return create_local_scheduled_task() if sys.platform == "win32" else create_local_systemd_timer()
+                remove_local_scheduled_task() if sys.platform == "win32" else remove_local_systemd_timer()
+                return True, ""
 
-                    return create_local_scheduled_task()
-                from backer.client.windows_service import create_local_systemd_timer
-
-                return create_local_systemd_timer()
-            if sys.platform == "win32":
-                from backer.client.windows_service import remove_local_scheduled_task
-
-                removed = remove_local_scheduled_task()
-            else:
-                from backer.client.windows_service import remove_local_systemd_timer
-
-                remove_local_systemd_timer()
-                removed = True
-            return True, "Local scheduled mode disabled" if removed else "No local scheduled task was installed"
-
-        self._worker("apply-modes", apply, lambda result: self._modes_applied(previous, result))
-
-    def _modes_applied(self, previous: BackerConfig, result):
-        if not result[0]:
-            self.app.config = previous
             try:
-                save_config(previous)
-            except OSError as error:
-                self.app.set_status(f"Could not roll back settings: {error}; {result[1]}", error=True)
-                return
-        self.app.set_status(result[1], error=not result[0])
+                if desired.local_scheduled_mode:
+                    if blocker := unattended_blocker(desired):
+                        raise ValueError(blocker)
+                    from backer.serverless.repositories import rescope_secrets_for_system
+
+                    rescope_secrets_for_system(desired)
+                    desired.save(machine_path)
+                    if sys.platform == "win32":
+                        from backer.client.windows_service import create_local_scheduled_task
+
+                        ok, message = create_local_scheduled_task()
+                    else:
+                        from backer.client.windows_service import create_local_systemd_timer
+
+                        ok, message = create_local_systemd_timer()
+                    changed_task = True
+                    if not ok:
+                        raise OSError(message)
+                elif previous.local_scheduled_mode:
+                    if sys.platform == "win32":
+                        from backer.client.windows_service import remove_local_scheduled_task
+
+                        if not remove_local_scheduled_task():
+                            raise OSError("Could not remove the local scheduled task")
+                    else:
+                        from backer.client.windows_service import remove_local_systemd_timer
+
+                        remove_local_systemd_timer()
+                    changed_task = True
+                desired.save(machine_path)
+                desired.save(user_path)
+                committed = BackerConfig.load(user_path)
+                if (
+                    committed.local_scheduled_mode != desired.local_scheduled_mode
+                    or committed.server_agent_mode != desired.server_agent_mode
+                ):
+                    raise OSError("Settings readback did not match the requested modes")
+                machine = BackerConfig.load(machine_path)
+                if machine.local_scheduled_mode != desired.local_scheduled_mode:
+                    raise OSError("Machine settings readback did not match local mode")
+                return True, desired, "Scheduled modes saved"
+            except Exception as error:
+                for reference, value in machine_secrets.items():
+                    keystore.delete(reference, machine_scope=True)
+                    if value is not None:
+                        keystore.put(reference, value, machine_scope=True)
+                for path, content in snapshots.items():
+                    restore_file(path, content)
+                if changed_task:
+                    restore_task()
+                return False, previous, str(error)
+
+        self._worker("apply-modes", apply, lambda result: self._modes_applied(result))
+
+    def _modes_applied(self, result):
+        ok, config, message = result
+        self.app.config = config
+        self.local_mode.set(config.local_scheduled_mode)
+        self.server_mode.set(config.server_agent_mode)
+        if ok:
+            self.app.apply_theme(self.mode.get())
+        self.app.set_status(message, error=not ok)
 
     def _worker(self, name, work, done=None):
         token = self.app.generation("settings")
@@ -465,7 +542,7 @@ class SettingsView(ttk.Frame):
         record = self.app.config.repositories.get(self.repository_choice.get())
         if not record or not record.passphrase_ref:
             return None, "Repository passphrase is unavailable"
-        value = keystore.get(record.passphrase_ref, machine_scope=record.scope == "machine")
+        value = keystore.get(record.passphrase_ref) or keystore.get(record.passphrase_ref, machine_scope=True)
         return value, "" if value else "Repository passphrase is unavailable"
 
     def reveal_passphrase(self):
@@ -488,10 +565,27 @@ class SettingsView(ttk.Frame):
         if not record:
             self.app.set_status("Select a repository", error=True)
             return
-        if not self.app.confirm_reveal_passphrase("Save this repository passphrase in a recovery record?"):
-            return
         target = filedialog.asksaveasfilename(title="Save recovery record", defaultextension=".txt")
         if not target:
+            return
+        self._recovery_target = Path(target)
+        self._recovery_ack.set(False)
+        self._recovery_warning.set(
+            f"This writes your passphrase to {self._recovery_target} in plain text. "
+            "A copy saved on this computer will not help if this computer fails."
+        )
+        self._recovery_frame.pack(fill=tk.X, pady=(6, 0))
+        self._update_recovery_save_state()
+
+    def _update_recovery_save_state(self):
+        ready = self._recovery_target and self._recovery_ack.get()
+        self._recovery_save_button.configure(state=tk.NORMAL if ready else tk.DISABLED)
+
+    def _save_recovery_record(self):
+        record = self.app.config.repositories.get(self.repository_choice.get())
+        target = self._recovery_target
+        if not record or not target or not self._recovery_ack.get():
+            self.app.set_status("Choose a recovery record location and acknowledge the plaintext warning", error=True)
             return
 
         def save():
@@ -502,14 +596,14 @@ class SettingsView(ttk.Frame):
                 return False, message
             location = RepositoryWizard._recovery_location(record)
             command, instruction = RepositoryWizard._recovery_command(record, location)
-            Path(target).write_text(
+            target.write_text(
                 recovery_record(
                     record.name, location, value, connect_command=command, credential_instruction=instruction
                 ),
                 encoding="utf-8",
             )
             if os.name != "nt":
-                Path(target).chmod(0o600)
+                target.chmod(0o600)
             return True, "Recovery record saved; keep it off this computer"
 
         self._worker("recovery-record", save)
@@ -676,23 +770,41 @@ class SettingsView(ttk.Frame):
             config = self.app.config.model_copy(deep=True)
             rescope_secrets_for_system(config)
             config.save(get_machine_config_dir() / "config.yaml")
-            data_dir = get_machine_config_dir()
+            token = uuid4().hex[:12]
+            data_dir = get_machine_config_dir() if sys.platform == "win32" else Path("/var/lib/backer")
             before = read_runs(data_dir, name, 1)
             previous = before[0].run_id if before else None
             if sys.platform == "win32":
-                launched = subprocess.run(
-                    ["schtasks", "/run", "/tn", "BackerLocalSchedule"], capture_output=True, text=True
+                from backer.client.windows_service import (
+                    create_local_scheduled_test_task,
+                    remove_local_scheduled_test_task,
                 )
+
+                launch, message = create_local_scheduled_test_task(name, token)
+
+                def cleanup():
+                    remove_local_scheduled_test_task(token)
+
             else:
-                launched = subprocess.run(
-                    ["systemctl", "--user", "start", "backer-local.service"], capture_output=True, text=True
+                from backer.client.windows_service import (
+                    create_local_systemd_test_service,
+                    remove_local_systemd_test_service,
                 )
-            if launched.returncode:
-                return False, launched.stderr.strip() or "Could not start the scheduled identity"
-            return wait_for_scheduled_attempt(
-                previous,
-                lambda: [item.to_dict() for item in read_runs(data_dir, name, 2)],
-            )
+
+                launch, message = create_local_systemd_test_service(name, token)
+
+                def cleanup():
+                    remove_local_systemd_test_service(token)
+            if not launch:
+                return False, message
+            try:
+                return wait_for_scheduled_attempt(
+                    previous,
+                    lambda: [item.to_dict() for item in read_runs(data_dir, name, 2)],
+                    token=token,
+                )
+            finally:
+                cleanup()
 
         self._worker("scheduled-test", run)
 

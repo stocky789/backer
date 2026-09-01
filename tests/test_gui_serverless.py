@@ -125,7 +125,7 @@ def test_settings_save_keeps_registered_credentials_when_only_url_changes(monkey
     instance.mode = type("Value", (), {"get": lambda _self: "system"})()
     instance.local_mode = type("Value", (), {"get": lambda _self: False})()
     instance.server_mode = type("Value", (), {"get": lambda _self: True})()
-    instance._apply_modes = lambda _previous: None
+    instance._apply_modes = lambda _previous, updated: setattr(app, "config", updated)
     monkeypatch.setattr(views, "save_config", lambda config: saved.append(config.server.server_url))
 
     instance._save()
@@ -177,6 +177,22 @@ def test_scheduled_attempt_waits_for_selected_job_and_reports_its_failure():
     result = wait_for_scheduled_attempt("old", lambda: next(attempts), timeout=1, sleep=lambda _seconds: None)
 
     assert result == (False, "SYSTEM SMB denied")
+
+
+def test_scheduled_attempt_ignores_another_job_test_token():
+    from backer.agent.gui.views import wait_for_scheduled_attempt
+
+    attempts = iter(
+        [
+            [{"run_id": "other-token", "status": "success"}],
+            [{"run_id": "selected-token", "status": "success"}],
+        ]
+    )
+
+    assert wait_for_scheduled_attempt(None, lambda: next(attempts), token="selected-token", sleep=lambda _x: None) == (
+        True,
+        "Scheduled run completed",
+    )
 
 
 def test_repository_details_disclose_type_and_keystore_state_without_secret():

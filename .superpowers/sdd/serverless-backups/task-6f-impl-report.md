@@ -15,3 +15,10 @@
 ## Known environment constraint
 
 - The retained live-Tk checks remain unavailable here because Tcl cannot locate `init.tcl`; they are deliberately not treated as skipped acceptance.
+
+## Fix round 2
+
+- Scheduled test runs use a unique selected-job SYSTEM/root one-shot task/service, pass the exact attempt token through the shared runner, poll only that persisted attempt, and remove the temporary platform unit in `finally` without changing the due scheduler.
+- Mode application now stages user and machine config, snapshots machine secrets and both durable files, verifies both readbacks, compensates files/secrets/task on any failed boundary, then updates Tk variables only from the committed result.
+- Settings recovery uses the wizard's exact-path plaintext acknowledgement and off-machine warning before worker-owned writing; reveal reads the retained user secret before the machine fallback.
+- Focused settings/scheduling/repository checks: `12 passed, 33 deselected`; ruff clean.
