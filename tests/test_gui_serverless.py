@@ -410,6 +410,11 @@ def test_mode_apply_rolls_back_config_when_final_freeze_check_detects_reactivati
     monkeypatch.setattr(
         "backer.client.windows_service.create_local_scheduled_task", lambda: pytest.fail("must not mutate scheduler")
     )
+    monkeypatch.setattr(
+        "backer.serverless.repositories.rescope_secrets_for_system",
+        lambda _config: pytest.fail("must not write secrets"),
+    )
+    monkeypatch.setattr(BackerConfig, "save", lambda *_args: pytest.fail("must not write config"))
 
     result = views.apply_scheduled_modes(previous, desired)
 

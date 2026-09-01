@@ -150,6 +150,9 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
                 raise ValueError(blocker)
             from backer.serverless.repositories import rescope_secrets_for_system
 
+            freeze = verify_local_scheduler_frozen(scheduler)
+            if not freeze.ready:
+                return refuse(freeze)
             mutation_started = True
             rescope_secrets_for_system(desired)
             desired.save(machine_path)
