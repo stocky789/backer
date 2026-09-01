@@ -337,38 +337,49 @@ class BackerAgentApp:
         self._tray_intents.put((intent, value))
 
     def _poll_tray_intents(self):
-        callbacks = getattr(self, "_ui_callbacks", None)
-        if callbacks:
+        try:
+            callbacks = getattr(self, "_ui_callbacks", None)
+            if callbacks:
+                while True:
+                    try:
+                        token, current, callback = callbacks.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        if self.alive and self.current(token) and (current is None or current()):
+                            callback()
+                    except Exception:
+                        logging.getLogger(__name__).exception("GUI worker callback failed")
             while True:
                 try:
-                    token, current, callback = callbacks.get_nowait()
+                    intent, value = self._tray_intents.get_nowait()
                 except queue.Empty:
                     break
-                if self.alive and self.current(token) and (current is None or current()):
-                    callback()
-        while True:
-            try:
-                intent, value = self._tray_intents.get_nowait()
-            except queue.Empty:
-                break
-            if intent == "backup" and value:
-                self.backup_job(value)
-            elif intent == "pause" and value:
-                self.pause_backups(value)
-            elif intent == "resume":
-                self.resume_backups()
-            elif intent == "logs":
-                self._open_logs()
-            elif intent == "settings":
-                self._show("settings")
-            elif intent == "failure":
-                self.show_failed_run()
-            elif intent == "exit":
-                self.on_exit()
-            elif intent == "show":
-                self._show_window()
-        if self.alive:
-            self.root.after(100, self._poll_tray_intents)
+                try:
+                    if intent == "backup" and value:
+                        self.backup_job(value)
+                    elif intent == "pause" and value:
+                        self.pause_backups(value)
+                    elif intent == "resume":
+                        self.resume_backups()
+                    elif intent == "logs":
+                        self._open_logs()
+                    elif intent == "settings":
+                        self._show("settings")
+                    elif intent == "failure":
+                        self.show_failed_run()
+                    elif intent == "exit":
+                        self.on_exit()
+                    elif intent == "show":
+                        self._show_window()
+                except Exception:
+                    logging.getLogger(__name__).exception("GUI tray action failed")
+        finally:
+            if self.alive:
+                try:
+                    self.root.after(100, self._poll_tray_intents)
+                except (RuntimeError, tk.TclError):
+                    pass
 
     def _refresh_tray_menu(self):
         paused = scheduling_paused(self.config, datetime.now(UTC))

@@ -1036,6 +1036,38 @@ def test_worker_marshal_never_calls_tk_from_the_worker_thread():
     assert painted == ["done"] and root_calls == [threading.get_ident()]
 
 
+def test_poller_isolates_bad_callbacks_and_tray_actions():
+    import queue
+
+    from backer.agent.gui.app import BackerAgentApp
+
+    scheduled, seen = [], []
+
+    class Root:
+        def after(self, delay, callback):
+            scheduled.append((delay, callback))
+
+    app = object.__new__(BackerAgentApp)
+    app.root, app.alive, app._generations = Root(), True, {"repository": 1}
+    app._ui_callbacks, app._tray_intents = queue.SimpleQueue(), queue.SimpleQueue()
+    app._ui_callbacks.put((("repository", 1), None, lambda: (_ for _ in ()).throw(RuntimeError("bad callback"))))
+    app._ui_callbacks.put((("repository", 1), None, lambda: seen.append("callback")))
+
+    def backup(name):
+        if name == "bad":
+            raise RuntimeError("bad tray action")
+        seen.append(name)
+
+    app.backup_job = backup
+    app._queue_tray_intent("backup", "bad")
+    app._queue_tray_intent("backup", "good")
+    app._poll_tray_intents()
+    assert seen == ["callback", "good"] and scheduled == [(100, app._poll_tray_intents)]
+    app.alive = False
+    app._poll_tray_intents()
+    assert scheduled == [(100, app._poll_tray_intents)]
+
+
 def test_cancel_running_never_waits_for_kopia_reap():
     import threading
     import time
