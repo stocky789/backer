@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -28,8 +29,13 @@ class HomeView(ttk.Frame):
     def __init__(self, app):
         super().__init__(app.container, padding=18)
         self.app = app
-        self.tree = ttk.Treeview(self, columns=("source", "repository", "schedule", "last"), show="headings")
+        ttk.Label(self, text="Local backups", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
+        self.server_strip = ttk.Label(self, text="Server-managed jobs are not listed here.", style="Muted.TLabel")
+        if app.config.server:
+            self.server_strip.pack(anchor=tk.W, pady=(4, 8))
+        self.tree = ttk.Treeview(self, columns=("job", "source", "repository", "schedule", "last"), show="headings")
         for column, label, width in (
+            ("job", "Job", 130),
             ("source", "Source", 220),
             ("repository", "Repository", 150),
             ("schedule", "Schedule", 120),
@@ -45,8 +51,10 @@ class HomeView(ttk.Frame):
         self.add.pack(side=tk.LEFT)
         self.backup = ttk.Button(buttons, text="Back up now", command=app.backup_selected, state=tk.DISABLED)
         self.backup.pack(side=tk.LEFT, padx=6)
-        self.restore = ttk.Button(buttons, text="Restore", command=lambda: app._show("restore"), state=tk.DISABLED)
+        self.restore = ttk.Button(buttons, text="Restore", command=app.restore_selected, state=tk.DISABLED)
         self.restore.pack(side=tk.LEFT)
+        self.edit = ttk.Button(buttons, text="Edit", command=lambda: app._show("repository"), state=tk.DISABLED)
+        self.edit.pack(side=tk.LEFT, padx=6)
         self.remove = ttk.Button(buttons, text="Remove", command=app.remove_selected_job, state=tk.DISABLED)
         self.remove.pack(side=tk.RIGHT)
         self.tree.bind("<<TreeviewSelect>>", self._selection)
@@ -55,7 +63,7 @@ class HomeView(ttk.Frame):
 
     def _selection(self, _event=None):
         state = tk.NORMAL if self.tree.selection() else tk.DISABLED
-        for button in (self.backup, self.restore, self.remove):
+        for button in (self.backup, self.restore, self.edit, self.remove):
             button.configure(state=state)
 
     def refresh(self):
@@ -68,7 +76,7 @@ class HomeView(ttk.Frame):
                 "",
                 tk.END,
                 iid=name,
-                values=(job.source.path, repository.name if repository else "Missing", schedule, "…"),
+                values=(name, job.source.path, repository.name if repository else "Missing", schedule, "…"),
             )
         if not self.app.config.jobs:
             self.empty.place(relx=0.5, rely=0.45, anchor=tk.CENTER)
@@ -143,7 +151,12 @@ class SettingsView(ttk.Frame):
         self.app.apply_theme(self.mode.get())
 
     def _unattended(self):
-        from backer.client.windows_service import create_local_scheduled_task
+        if sys.platform == "win32":
+            from backer.client.windows_service import create_local_scheduled_task
 
-        ok, message = create_local_scheduled_task()
+            ok, message = create_local_scheduled_task()
+        else:
+            from backer.client.windows_service import create_local_systemd_timer
+
+            ok, message = create_local_systemd_timer()
         self.app.set_status(message, error=not ok)

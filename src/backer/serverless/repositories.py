@@ -112,6 +112,7 @@ def add_repository(
         repo_id = record.id or uuid4().hex[:12]
         passphrase_ref = f"backer/repo/{repo_id}/passphrase"
         storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
+        references = [passphrase_ref, storage_ref]
         backend = keystore.put(passphrase_ref, passphrase)
         if storage_ref:
             import json
@@ -132,7 +133,24 @@ def add_repository(
             }
         )
         config.repositories[repo_id] = saved
-        config.save(config_path)
+        try:
+            config.save(config_path)
+        except Exception:
+            # The record and refs belong exclusively to this invocation.  Do
+            # not leave a runnable-looking partial repository behind.
+            config.repositories.pop(repo_id, None)
+            for reference in references:
+                if reference:
+                    for machine_scope in (False, True):
+                        try:
+                            keystore.delete(reference, machine_scope=machine_scope)
+                        except Exception:
+                            pass
+            try:
+                config.save(config_path)
+            except Exception:
+                pass
+            raise
         return repo_id, backend
     finally:
         if smb_manager and smb_session_created:

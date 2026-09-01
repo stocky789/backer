@@ -27,15 +27,24 @@ def connection_conflict_message(server: str) -> str:
     return "Windows already has a connection to this server with different credentials."
 
 
-def rollback_repository(config, config_path, repository_id: str) -> None:
-    """Undo a partially-created repository, including both secret scopes."""
+def rollback_repository(config, config_path, repository_id: str) -> list[str]:
+    """Undo only this invocation's local record and refs; report every failure."""
     record = config.repositories.pop(repository_id, None)
+    errors = []
     if record:
         for reference in (record.passphrase_ref, record.storage_password_ref):
-            if reference:
-                keystore.delete(reference, machine_scope=False)
-                keystore.delete(reference, machine_scope=True)
-    config.save(config_path)
+            if not reference:
+                continue
+            for machine_scope in (False, True):
+                try:
+                    keystore.delete(reference, machine_scope=machine_scope)
+                except Exception as error:
+                    errors.append(f"Could not remove repository secret: {error}")
+    try:
+        config.save(config_path)
+    except Exception as error:
+        errors.append(f"Could not save repository rollback: {error}")
+    return errors
 
 
 class RepositoryWizard(ttk.Frame):
@@ -54,6 +63,7 @@ class RepositoryWizard(ttk.Frame):
             "passphrase": "",
             "source": "",
             "schedule": "0 2 * * *",
+            "attach": False,
         }
         self.body = ttk.Frame(self)
         self.body.pack(fill=tk.BOTH, expand=True)
@@ -137,19 +147,33 @@ class RepositoryWizard(ttk.Frame):
             self.values.update(values)
             self._go(4)
 
-        self._buttons(next_step)
+        attach = tk.BooleanVar(value=self.values.get("attach", False))
+        ttk.Checkbutton(self.body, text="Connect to an existing repository", variable=attach).pack(anchor=tk.W, pady=8)
+
+        def checked_next():
+            self.values["attach"] = attach.get()
+            next_step()
+
+        self._buttons(checked_next)
 
     def _server(self):
         ttk.Label(self.body, text="Name the file server", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
         self.host = tk.StringVar(value=self.values.get("server", ""))
         self.username = tk.StringVar(value=self.values.get("username", ""))
         self.password = tk.StringVar(value=self.values.get("storage_password", ""))
+        self.domain = tk.StringVar(value=self.values.get("domain", ""))
         self.primary = ttk.Entry(self.body, textvariable=self.host)
         self.primary.pack(fill=tk.X, pady=10)
         ttk.Label(self.body, text="Username").pack(anchor=tk.W)
         ttk.Entry(self.body, textvariable=self.username).pack(fill=tk.X)
         ttk.Label(self.body, text="Password").pack(anchor=tk.W)
         ttk.Entry(self.body, textvariable=self.password, show="*").pack(fill=tk.X)
+        ttk.Label(self.body, text="Domain (optional)").pack(anchor=tk.W)
+        ttk.Entry(self.body, textvariable=self.domain).pack(fill=tk.X)
+        self.attach = tk.BooleanVar(value=self.values.get("attach", False))
+        ttk.Checkbutton(self.body, text="Connect to an existing repository", variable=self.attach).pack(
+            anchor=tk.W, pady=6
+        )
 
         def next_step():
             if not all((self.host.get().strip(), self.username.get().strip(), self.password.get())):
@@ -159,6 +183,8 @@ class RepositoryWizard(ttk.Frame):
                 server=self.host.get().strip(),
                 username=self.username.get().strip(),
                 storage_password=self.password.get(),
+                domain=self.domain.get().strip() or None,
+                attach=self.attach.get(),
             )
             self._go(3)
 
@@ -168,13 +194,26 @@ class RepositoryWizard(ttk.Frame):
         ttk.Label(self.body, text="Pick the share and folder", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
         self.listing = tk.StringVar(value="Loading shares…")
         ttk.Label(self.body, textvariable=self.listing, style="Muted.TLabel").pack(anchor=tk.W, pady=10)
-        self.share = tk.StringVar()
+        self.share = tk.StringVar(value=self.values.get("share", ""))
         self.primary = ttk.Combobox(self.body, textvariable=self.share, state="readonly")
         self.primary.pack(fill=tk.X)
+        self.tree = ttk.Treeview(self, columns=("path",), show="tree", height=8)
+        self.tree.pack(fill=tk.BOTH, expand=True, pady=8)
+        self.resolved = tk.StringVar(value="")
+        ttk.Label(self.body, textvariable=self.resolved, style="Muted.TLabel").pack(anchor=tk.W)
+        self.share.trace_add("write", lambda *_: self._load_folder(""))
+        self.tree.bind("<<TreeviewOpen>>", self._expand_folder)
+        self.tree.bind("<<TreeviewSelect>>", self._select_folder)
+        ttk.Button(self.body, text="New folder", command=self._new_folder).pack(anchor=tk.W, pady=(4, 0))
         generation = self._generation
 
         def worker():
-            ok, result = SMBBrowser.list_shares(self.values["server"])
+            ok, result = SMBBrowser.list_shares(
+                self.values["server"],
+                self.values.get("username"),
+                self.values.get("storage_password"),
+                self.values.get("domain"),
+            )
 
             def done():
                 if generation != self._generation or self.cancel.is_set():
@@ -188,18 +227,115 @@ class RepositoryWizard(ttk.Frame):
             self.app.root.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
-        self._buttons(
-            lambda: (
-                self.values.__setitem__("share", self.share.get()),
-                self.values.__setitem__("path", ""),
-                self._go(4),
+
+        def next_step():
+            if not self.share.get() or not self.tree.selection():
+                self.app.set_status("Choose a share and folder", error=True)
+                return
+            self.values["share"] = self.share.get()
+            self.values["path"] = self.tree.set(self.tree.selection()[0], "path")
+            self._go(4)
+
+        self._buttons(next_step)
+
+    def _load_folder(self, path):
+        if not self.share.get():
+            return
+        generation = self._generation
+
+        def worker():
+            ok, result = SMBBrowser.list_directory(
+                self.values["server"],
+                self.share.get(),
+                path,
+                self.values.get("username"),
+                self.values.get("storage_password"),
+                self.values.get("domain"),
             )
-        )
+
+            def done():
+                if generation != self._generation or self.cancel.is_set() or not ok:
+                    if not ok:
+                        self.listing.set(
+                            connection_conflict_message(self.values["server"]) if "1219" in str(result) else str(result)
+                        )
+                    return
+                parent = (
+                    ""
+                    if not path
+                    else next((item for item in self.tree.get_children("") if self.tree.set(item, "path") == path), "")
+                )
+                if not path:
+                    self.tree.delete(*self.tree.get_children())
+                for entry in result:
+                    if entry.is_dir:
+                        child_path = "/".join(item for item in (path, entry.name) if item)
+                        item = self.tree.insert(parent, tk.END, text=entry.name, values=(child_path,))
+                        self.tree.insert(item, tk.END, text="Loading…")
+
+            self.app.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _expand_folder(self, _event=None):
+        item = self.tree.focus()
+        if item:
+            self.tree.delete(*self.tree.get_children(item))
+            self._load_folder(self.tree.set(item, "path"))
+
+    def _select_folder(self, _event=None):
+        item = self.tree.focus()
+        if item:
+            self.resolved.set(
+                "Repository path: \\\\"
+                + "\\".join((self.values["server"], self.share.get(), self.tree.set(item, "path")))
+            )
+
+    def _new_folder(self):
+        # Keep this inline and non-modal: a temporary entry is safer than an unvalidated prompt.
+        name = tk.StringVar()
+        entry = ttk.Entry(self.body, textvariable=name)
+        entry.pack(fill=tk.X, pady=4)
+        entry.focus_set()
+
+        def create_folder(_event=None):
+            parent = self.tree.focus()
+            path = self.tree.set(parent, "path") if parent else ""
+            full_path = "/".join(item for item in (path, name.get().strip()) if item)
+            if SMBBrowser.make_directory(
+                self.values["server"],
+                self.share.get(),
+                full_path,
+                self.values.get("username"),
+                self.values.get("storage_password"),
+                self.values.get("domain"),
+            ):
+                entry.destroy()
+                self._load_folder(path)
+            else:
+                self.app.set_status("Could not create folder", error=True)
+
+        entry.bind("<Return>", create_folder)
 
     def _passphrase(self):
         ttk.Label(self.body, text="Repository passphrase", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
         from backer.cli import _generated_passphrase
 
+        if self.values.get("attach"):
+            candidate = tk.StringVar()
+            status = tk.StringVar(value="Enter the existing repository passphrase.")
+            ttk.Label(self.body, textvariable=status, style="Muted.TLabel").pack(anchor=tk.W, pady=8)
+            entry = ttk.Entry(self.body, textvariable=candidate, show="*")
+            entry.pack(fill=tk.X)
+            self.primary = entry
+
+            def validate_existing(*_):
+                self.values["passphrase"] = candidate.get()
+                self.app.set_status("Existing repository passphrase will be verified at Review")
+
+            candidate.trace_add("write", validate_existing)
+            self._buttons(lambda: self._go(5))
+            return
         value = self.values.get("passphrase") or _generated_passphrase()
         self.values["passphrase"] = value
         ttk.Label(self.body, text=value, style="Mono.TLabel").pack(anchor=tk.W, pady=8)
@@ -295,6 +431,9 @@ class RepositoryWizard(ttk.Frame):
                 storage = self.values.get("storage_password")
             from backer.serverless.repositories import add_repository, rescope_secrets_for_system
 
+            # add_repository has its own transactional cleanup for a failure
+            # after writing secrets/config.  Mark the id pending before call;
+            # if a future helper reports it on failure this remains safe.
             repository_id, backend = add_repository(
                 self.app.config,
                 config_path,
@@ -319,6 +458,8 @@ class RepositoryWizard(ttk.Frame):
             self.app._show("home")
         except Exception as error:
             self.app.config.jobs.pop(name, None)
-            if created:
-                rollback_repository(self.app.config, config_path, repository_id)
-            self.app.set_status(str(error), error=True)
+            rollback_errors = rollback_repository(self.app.config, config_path, repository_id) if created else []
+            message = str(error)
+            if rollback_errors:
+                message += "; " + "; ".join(rollback_errors)
+            self.app.set_status(message, error=True)

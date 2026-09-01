@@ -98,3 +98,72 @@ def test_rollback_repository_removes_config_and_both_secret_scopes(monkeypatch, 
     rollback_repository(config, tmp_path / "config.yaml", "repo")
     assert config.repositories == {}
     assert set(removed) == {("pass", False), ("pass", True), ("store", False), ("store", True)}
+
+
+def test_rollback_reports_each_failed_secret_or_save_boundary(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+    from backer.agent.gui.wizard import rollback_repository
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="x", passphrase_ref="pass")}
+    )
+    monkeypatch.setattr(wizard.keystore, "delete", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("locked")))
+    monkeypatch.setattr(BackerConfig, "save", lambda _self, _path: (_ for _ in ()).throw(OSError("disk full")))
+    errors = rollback_repository(config, tmp_path / "config.yaml", "repo")
+    assert config.repositories == {}
+    assert any("locked" in error for error in errors)
+    assert any("disk full" in error for error in errors)
+
+
+def test_show_is_a_real_retained_single_view(monkeypatch):
+    from backer.agent.gui import app as gui_app
+    from backer.core.config import BackerConfig
+
+    monkeypatch.setattr(gui_app, "load_config", lambda: BackerConfig())
+    monkeypatch.setattr(gui_app, "TRAY_AVAILABLE", False)
+    app = gui_app.BackerAgentApp()
+    try:
+        app._show("home")
+        app.root.update()
+        packed = [child for child in app.container.winfo_children() if child.winfo_manager() == "pack"]
+        assert len(packed) == 1
+        app._show("repository")
+        app.root.focus_force()
+        app.root.event_generate("<Escape>")
+        app.root.update()
+        assert app.visible == "home"
+    finally:
+        app.root.destroy()
+
+
+def test_repository_save_failure_removes_only_new_refs(monkeypatch, tmp_path):
+    from backer.core.config import BackerConfig, RepositoryConfig
+    from backer.serverless import repositories
+
+    config = BackerConfig(repositories={"unrelated": RepositoryConfig(name="Other", type="local", path="y")})
+    monkeypatch.setattr(repositories, "file_fallback_required", lambda: False)
+    monkeypatch.setattr(repositories, "probe", lambda *_args: ("present", "existing", ""))
+    puts, deleted = [], []
+    monkeypatch.setattr(
+        repositories.keystore, "put", lambda reference, *_args, **_kwargs: puts.append(reference) or "test"
+    )
+    monkeypatch.setattr(
+        repositories.keystore, "delete", lambda reference, *, machine_scope: deleted.append((reference, machine_scope))
+    )
+    calls = []
+    def save(_self, _path):
+        calls.append(True)
+        if len(calls) == 1:
+            raise OSError("disk full")
+    monkeypatch.setattr(BackerConfig, "save", save)
+    record = RepositoryConfig(name="New", type="local", path="x")
+    try:
+        repositories.add_repository(config, tmp_path / "config.yaml", "New", record, "secret", attach=True, init=False)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("save failure must reach the caller")
+    assert set(config.repositories) == {"unrelated"}
+    assert puts and all(reference.startswith("backer/repo/") for reference in puts)
+    assert {reference for reference, _scope in deleted} == set(puts)

@@ -7,10 +7,11 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from collections import deque
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from backer.agent.gui import theme
 from backer.agent.gui.views import HomeView, SettingsView, SimpleView, load_config, save_config
@@ -50,6 +51,8 @@ class BackerAgentApp:
         self._generations = {}
         self.running = False
         self.progress_frame = None
+        self.progress_at = 0.0
+        self.run_cancel = threading.Event()
         self.progress_log = deque(maxlen=500)
         self.tray_icon = None
         self.container = ttk.Frame(self.root)
@@ -128,7 +131,7 @@ class BackerAgentApp:
             view.refresh()
         view.pack(fill=tk.BOTH, expand=True)
         self.subtitle_var.set("Local backups" if name == "home" else name.replace("_", " ").title())
-        self.root.bind("<Escape>", lambda _event: self._show("home") if self.visible != "home" else None)
+        self.root.bind_all("<Escape>", lambda _event: self._show("home") if self.visible != "home" else None)
         self.root.bind(
             "<Return>",
             lambda _event: (
@@ -152,6 +155,12 @@ class BackerAgentApp:
         if home and home.tree.selection():
             self._show("run")
             self.views["run"].start(home.tree.selection()[0])
+
+    def restore_selected(self):
+        home = self.views.get("home")
+        if home and home.tree.selection():
+            self._show("restore")
+            self.views["restore"].load(home.tree.selection()[0])
 
     def remove_selected_job(self):
         home = self.views.get("home")
@@ -242,13 +251,18 @@ class RunView(ttk.Frame):
 
     def start(self, name):
         self.app.running = True
+        self.app.run_cancel.clear()
+        self.app.progress_frame = None
+        self.app.progress_at = time.monotonic()
         self.primary.configure(state=tk.NORMAL)
         self.label.set("Scanning · first backup has no percentage")
         self.bar.configure(mode="indeterminate")
         self.bar.start(12)
 
         def progress(**frame):
-            self.app.progress_frame = frame
+            if not self.app.run_cancel.is_set():
+                self.app.progress_frame = frame
+                self.app.progress_at = time.monotonic()
 
         generation = self.app.generation("run")
 
@@ -261,7 +275,11 @@ class RunView(ttk.Frame):
 
     def tick(self):
         frame = self.app.progress_frame
-        if frame:
+        if self.app.running and time.monotonic() - self.app.progress_at > 5:
+            self.bar.configure(mode="indeterminate")
+            self.bar.start(12)
+            self.label.set("Scanning · waiting for Kopia progress")
+        elif frame:
             done = frame.get("bytes_done", 0)
             total = frame.get("total_bytes")
             if total:
@@ -288,23 +306,154 @@ class RunView(ttk.Frame):
         self.app.set_status(self.label.get(), error=not bool(report and report.get("success")))
 
     def stop(self):
-        self.app.set_status("Stop requested; the current backup will finish cleanup safely", error=True)
+        self.app.run_cancel.set()
+        self.app.generation("run")
+        self.primary.configure(state=tk.DISABLED)
+        self.app.set_status("Stop requested; Backer will safely disconnect after this Kopia operation", error=True)
 
 
-class RestoreView(SimpleView):
+class RestoreView(ttk.Frame):
+    primary = None
+
     def __init__(self, app):
-        super().__init__(
-            app,
-            "Restore",
-            "Select a snapshot, choose all files or one folder, then restore to a new folder, "
-            "overwrite originals, or another folder.",
-            "Restore",
-            self.restore,
+        super().__init__(app.container, padding=18)
+        self.app, self.job_name = app, None
+        ttk.Label(self, text="Restore", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
+        self.status = tk.StringVar(value="Choose a local job from Home.")
+        ttk.Label(self, textvariable=self.status, style="Muted.TLabel").pack(anchor=tk.W, pady=6)
+        self.snapshots = ttk.Treeview(self, columns=("time", "source"), show="headings", height=7)
+        for column, label in (("time", "Snapshot"), ("source", "Source")):
+            self.snapshots.heading(column, text=label)
+            self.snapshots.column(column, width=300)
+        self.snapshots.pack(fill=tk.X)
+        folder_row = ttk.Frame(self)
+        folder_row.pack(fill=tk.X, pady=8)
+        self.include = tk.StringVar()
+        ttk.Label(folder_row, text="Folder (empty restores all)").pack(side=tk.LEFT)
+        ttk.Entry(folder_row, textvariable=self.include).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        self.mode = tk.StringVar(value="NEW")
+        destination = ttk.Frame(self)
+        destination.pack(fill=tk.X)
+        for value, label in (("NEW", "New folder"), ("MERGE", "Another folder"), ("REPLACE", "Overwrite originals")):
+            ttk.Radiobutton(destination, text=label, variable=self.mode, value=value).pack(side=tk.LEFT, padx=(0, 12))
+        self.target = tk.StringVar()
+        ttk.Entry(self, textvariable=self.target).pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(self, text="Choose destination", command=self._choose_destination).pack(anchor=tk.W, pady=4)
+        self.progress = ttk.Progressbar(self, mode="indeterminate")
+        self.progress.pack(fill=tk.X, pady=8)
+        self.primary = ttk.Button(self, text="Restore", command=self.restore, state=tk.DISABLED)
+        self.primary.pack(anchor=tk.W)
+        ttk.Button(self, text="Back", command=lambda: app._show("home")).pack(anchor=tk.W, pady=6)
+
+    def _choose_destination(self):
+        chosen = filedialog.askdirectory()
+        if chosen:
+            self.target.set(chosen)
+
+    def load(self, job_name):
+        self.job_name = job_name
+        self.status.set("Checking repository and loading snapshots…")
+        self.snapshots.delete(*self.snapshots.get_children())
+        self.primary.configure(state=tk.DISABLED)
+        generation = self.app.generation("restore")
+
+        def worker():
+            try:
+                from backer.backends.base import BackupDestination
+                from backer.cli import _repository_backend, _repository_destination
+
+                job = self.app.config.jobs[job_name]
+                repository = self.app.config.repositories[job.repository]
+                backend, _passphrase, _storage = _repository_backend(repository)
+                rows = backend.list_snapshots(BackupDestination(_repository_destination(repository)))
+                result = (rows, None)
+            except Exception as error:
+                result = ([], str(error))
+            self.app.root.after(0, lambda: self._loaded(generation, *result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _loaded(self, generation, rows, error):
+        if not self.app.current(generation):
+            return
+        if error:
+            self.status.set(f"Repository check failed: {error}")
+            self.app.set_status(self.status.get(), error=True)
+            return
+        for row in rows:
+            snapshot = row.get("id") or row.get("snapshotID") or row.get("source", {}).get("path", "")
+            self.snapshots.insert(
+                "", tk.END, iid=snapshot, values=(row.get("startTime", snapshot), row.get("source", {}).get("path", ""))
+            )
+        self.status.set(
+            "Select a snapshot and restore destination." if rows else "No snapshots found; repository was checked."
         )
+        self.primary.configure(state=tk.NORMAL if rows else tk.DISABLED)
 
     def restore(self):
-        if self.app.confirm_restore_overwrite():
-            self.app.set_status("Restore requires a selected snapshot", error=True)
+        selected = self.snapshots.selection()
+        if not self.job_name or not selected:
+            self.app.set_status("Select a snapshot first", error=True)
+            return
+        target = self.target.get().strip()
+        job = self.app.config.jobs[self.job_name]
+        if self.mode.get() == "NEW":
+            from backer.cli import _restore_target
+
+            target = str(_restore_target(Path(target) if target else None, "NEW", Path(job.source.path)))
+        if not target:
+            self.app.set_status("Choose a restore destination", error=True)
+            return
+        from backer.cli import _restore_prepare_destination
+
+        try:
+            _restore_prepare_destination(Path(target), self.mode.get(), config=self.app.config)
+        except Exception as error:
+            self.app.set_status(str(error), error=True)
+            return
+        if self.mode.get() == "REPLACE" and not self.app.confirm_restore_overwrite():
+            return
+        self.primary.configure(state=tk.DISABLED)
+        self.progress.start(12)
+        self.status.set("Restoring…")
+
+        def worker():
+            from backer.cli import _repository_backend, _repository_destination
+            from backer.core.runner import run_restore
+
+            repository = self.app.config.repositories[job.repository]
+            backend, passphrase, storage = _repository_backend(repository)
+            options = {"repository_password": passphrase}
+            if storage and repository.type == "s3":
+                options["s3"] = {
+                    **storage,
+                    "bucket": repository.bucket,
+                    "prefix": repository.prefix or "",
+                    "endpoint": repository.endpoint,
+                    "region": repository.region,
+                }
+            report = run_restore(
+                {
+                    "job_name": self.job_name,
+                    "source_path": _repository_destination(repository),
+                    "destination_path": target,
+                    "snapshot": selected[0],
+                    "source_subfolder": self.include.get().strip(),
+                    "original_source_path": job.source.path,
+                    "clean_restore": self.mode.get() == "REPLACE",
+                    "repository_options": options,
+                }
+            )
+            self.app.root.after(0, lambda: self._done(report))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _done(self, report):
+        self.progress.stop()
+        ok = bool(report.get("success"))
+        self.status.set("Restore completed" if ok else "; ".join(report.get("errors") or ["Restore failed"]))
+        self.app.set_status(self.status.get(), error=not ok)
+        self.primary.configure(state=tk.NORMAL)
 
 
 def main():
