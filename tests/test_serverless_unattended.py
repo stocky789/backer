@@ -341,7 +341,8 @@ def test_runner_s3_sidecar_uses_full_document_and_owner_cannot_be_replaced(monke
     assert "storage-secret" not in stored[0].decode()
     Sidecar.existing = json.dumps({**document, "owner_agent_id": "other"}).encode()
     _write_repo_metadata(job, "s3://bucket", "kopia", result, now, now, None, "owner")
-    assert len(stored) == 1
+    assert len(stored) == 2
+    assert json.loads(stored[1])["run_id"] == "unknown"
 
 
 def test_repo_adopt_s3_reads_prefixed_sidecars_and_saves_only_local_config(monkeypatch, tmp_path: Path) -> None:

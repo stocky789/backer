@@ -585,6 +585,20 @@ def _write_repo_metadata(
             current = json.loads(existing) if existing else {}
             document = build_serverless_job_document(job, job_name, source_path, agent_id, current)
             sidecar.put_atomic(job_key, json.dumps(document).encode())
+            run_key = f".backer/jobs/{get_job_subfolder(job_name)}/runs/{run_id}.json"
+            sidecar.put_atomic(
+                run_key,
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "job_name": job_name,
+                        "status": "success" if result.success else "failed",
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "bytes_transferred": getattr(result, "bytes_transferred", 0),
+                    }
+                ).encode(),
+            )
             return
         if sys.platform != "win32" and mounts.is_smb_path(dest_path):
             server, share, subpath = mounts.parse_smb_path(dest_path)

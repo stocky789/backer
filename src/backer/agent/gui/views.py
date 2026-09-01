@@ -10,11 +10,12 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.request
-import webbrowser
 from pathlib import Path
-from tkinter import ttk
+from tkinter import filedialog, ttk
+from urllib.parse import urlsplit, urlunsplit
 
 from backer.core import keystore
 from backer.core.config import BackerConfig, ClientConfig
@@ -40,6 +41,65 @@ def unattended_blocker(config: BackerConfig) -> str | None:
         if repository.type == "smb" and repository.use_existing_session and not repository.storage_password_ref:
             return f"Repository '{repository.name}' is interactive-only; add a machine-scoped SMB credential first"
     return None
+
+
+def normalize_server_url(value: str) -> str:
+    """Match the established desktop connection defaults without guessing a custom port."""
+    value = value.strip()
+    if not value.startswith(("http://", "https://")):
+        value = "http://" + value
+    parts = urlsplit(value)
+    if not parts.hostname:
+        raise ValueError("Enter a server address")
+    netloc = parts.netloc if parts.port is not None else f"{parts.netloc}:8420"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, "")).rstrip("/")
+
+
+def settings_update(
+    config: BackerConfig, value: str, *, local_scheduled_mode: bool, server_agent_mode: bool
+) -> BackerConfig:
+    """Return one durable settings update without discarding registered credentials."""
+    server = config.server
+    if value.strip():
+        current = server or ClientConfig()
+        server = current.model_copy(update={"server_url": normalize_server_url(value)})
+    return config.model_copy(
+        update={
+            "server": server,
+            "local_scheduled_mode": local_scheduled_mode,
+            "server_agent_mode": server_agent_mode,
+        }
+    )
+
+
+def wait_for_scheduled_attempt(
+    previous_id: str | None, read, *, timeout: float = 65, sleep=time.sleep
+) -> tuple[bool, str]:
+    """Wait for the scheduled identity's next persisted attempt, never its launch acknowledgement."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        attempts = read()
+        current = next((item for item in attempts if item.get("run_id") != previous_id), None)
+        if current:
+            if current.get("status") == "success":
+                return True, "Scheduled run completed"
+            return False, current.get("error_message") or "Scheduled run failed"
+        sleep(1)
+    return False, "Scheduled identity did not write an attempt record"
+
+
+def repository_details(config: BackerConfig, repository_id: str) -> str:
+    record = config.repositories.get(repository_id)
+    if not record:
+        return "Repository unavailable"
+    if record.type == "s3":
+        location = f"s3://{record.bucket}/{record.prefix or ''}".rstrip("/")
+    elif record.type == "smb":
+        location = "\\\\" + "\\".join(part for part in (record.server, record.share, record.path) if part)
+    else:
+        location = record.path or "location unavailable"
+    state = "passphrase stored" if record.passphrase_ref else "passphrase unavailable"
+    return f"{record.name} · {record.type} · {location} · {state}"
 
 
 def _run_started(run) -> str:
@@ -90,6 +150,29 @@ def repository_location(repository) -> Path | None:
     return None
 
 
+def repository_history(repository, job_name: str) -> list[dict[str, object]]:
+    """Read the repository's own run sidecar for every storage type."""
+    if repository.type == "s3":
+        raw = keystore.get(repository.storage_password_ref or "", machine_scope=repository.scope == "machine")
+        if not raw:
+            return []
+        from backer.core.paths import get_job_subfolder
+        from backer.serverless.s3_sidecar import S3Sidecar
+
+        sidecar = S3Sidecar(repository.model_dump(exclude_none=True), json.loads(raw))
+        prefix = f".backer/jobs/{get_job_subfolder(job_name)}/runs/"
+        strip = (repository.prefix or "").strip("/") + "/"
+        records = []
+        for key in sidecar.list(prefix):
+            key = key.removeprefix(strip)
+            if key.endswith(".json") and (payload := sidecar.get(key)):
+                records.append(json.loads(payload))
+        return sorted(records, key=lambda item: str(item.get("started_at") or ""), reverse=True)
+    if location := repository_location(repository):
+        return RepositoryMetadata(location).get_job_runs(job_name, 1)
+    return []
+
+
 class HomeView(ttk.Frame):
     primary = None
 
@@ -128,7 +211,9 @@ class HomeView(ttk.Frame):
         self.remove = ttk.Button(buttons, text="Remove", command=app.remove_selected_job, state=tk.DISABLED)
         self.remove.pack(side=tk.RIGHT)
         self.tree.bind("<<TreeviewSelect>>", self._selection)
-        self.empty = ttk.Label(self, text="No local backup jobs yet. Add a repository to begin.", style="Muted.TLabel")
+        self.empty = ttk.Frame(self)
+        ttk.Label(self.empty, text="No local backup jobs yet.", style="Muted.TLabel").pack()
+        ttk.Button(self.empty, text="Add repository", command=lambda: app._show("repository")).pack(pady=(8, 0))
         self.primary = self.add
 
     def _selection(self, _event=None):
@@ -164,9 +249,9 @@ class HomeView(ttk.Frame):
                 runs = read_runs(get_data_dir(), name, 1)
                 repository = self.app.config.repositories.get(job.repository)
                 remote = None
-                if repository and (location := repository_location(repository)):
+                if repository:
                     try:
-                        records = RepositoryMetadata(location).get_job_runs(name, 1)
+                        records = repository_history(repository, name)
                         remote = records[0] if records else None
                     except Exception:
                         remote = None
@@ -227,8 +312,8 @@ class SettingsView(ttk.Frame):
         self.agent_button = ttk.Button(server_actions, text="Start agent", command=self.start_agent)
         self.agent_button.pack(side=tk.LEFT, padx=6)
         self.mode = tk.StringVar(value="system")
-        self.local_mode = tk.BooleanVar(value=False)
-        self.server_mode = tk.BooleanVar(value=bool(app.config.server))
+        self.local_mode = tk.BooleanVar(value=app.config.local_scheduled_mode)
+        self.server_mode = tk.BooleanVar(value=app.config.server_agent_mode)
         ttk.Label(self, text="Appearance").pack(anchor=tk.W, pady=(14, 0))
         ttk.Combobox(self, textvariable=self.mode, values=("system", "light", "dark"), state="readonly").pack(
             anchor=tk.W
@@ -245,6 +330,10 @@ class SettingsView(ttk.Frame):
         ).pack(side=tk.LEFT, padx=12)
         scheduled = ttk.Frame(self)
         scheduled.pack(anchor=tk.W, pady=(6, 0))
+        self.scheduled_job = tk.StringVar(value=next(iter(app.config.jobs), ""))
+        ttk.Combobox(
+            scheduled, textvariable=self.scheduled_job, values=tuple(app.config.jobs), state="readonly", width=24
+        ).pack(side=tk.LEFT)
         ttk.Button(scheduled, text="Test scheduled run now", command=self.test_scheduled_run).pack(side=tk.LEFT)
         ttk.Button(scheduled, text="Server service status", command=self.service_status).pack(side=tk.LEFT, padx=6)
         ttk.Button(scheduled, text="Install server agent service", command=self.install_server_service).pack(
@@ -258,52 +347,96 @@ class SettingsView(ttk.Frame):
         ttk.Label(self, text=f"Repository secrets use {backend}.", style="Muted.TLabel").pack(
             anchor=tk.W, pady=(10, 0)
         )
-        ttk.Button(self, text="Manage repositories", command=lambda: app._show("home")).pack(anchor=tk.W, pady=(6, 0))
+        self.repository_choice = tk.StringVar(value=next(iter(app.config.repositories), ""))
+        self.repository_detail = tk.StringVar(value=repository_details(app.config, self.repository_choice.get()))
+        repository_actions = ttk.Frame(self)
+        repository_actions.pack(fill=tk.X, pady=(6, 0))
+        ttk.Combobox(
+            repository_actions,
+            textvariable=self.repository_choice,
+            values=tuple(app.config.repositories),
+            state="readonly",
+            width=24,
+        ).pack(side=tk.LEFT)
+        ttk.Button(repository_actions, text="Show passphrase", command=self.reveal_passphrase).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(repository_actions, text="Save recovery record", command=self.save_recovery_record).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(self, textvariable=self.repository_detail, style="Muted.TLabel", wraplength=650).pack(anchor=tk.W)
+        self.repository_choice.trace_add("write", lambda *_args: self._show_repository_details())
         ttk.Button(self, text="Save settings", command=self._save).pack(anchor=tk.W, pady=6)
         ttk.Button(self, text="Back", command=lambda: app._show("home")).pack(anchor=tk.W)
 
     def _save(self):
-        url = self.server.get().strip()
-        if url:
-            current = self.app.config.server or ClientConfig()
-            self.app.config.server = current.model_copy(update={"server_url": url})
-        else:
-            self.app.config.server = None
-        save_config(self.app.config)
-        self.app.set_status("Settings saved")
+        previous = self.app.config
+        try:
+            updated = settings_update(
+                previous,
+                self.server.get(),
+                local_scheduled_mode=self.local_mode.get(),
+                server_agent_mode=self.server_mode.get(),
+            )
+            save_config(updated)
+        except (OSError, ValueError) as error:
+            self.app.set_status(f"Settings were not saved: {error}", error=True)
+            return
+        self.app.config = updated
         self.app.apply_theme(self.mode.get())
+        self._apply_modes(previous)
 
     def _unattended(self):
-        if blocker := unattended_blocker(self.app.config):
-            self.app.set_status(blocker, error=True)
-            return
-        try:
-            from backer.serverless.repositories import rescope_secrets_for_system
-
-            rescope_secrets_for_system(self.app.config)
-            self.app.config.save(get_machine_config_dir() / "config.yaml")
-        except Exception as error:
-            self.app.set_status(f"Could not prepare machine credentials: {error}", error=True)
-            return
-        if sys.platform == "win32":
-            from backer.client.windows_service import create_local_scheduled_task
-
-            ok, message = create_local_scheduled_task()
-        else:
-            from backer.client.windows_service import create_local_systemd_timer
-
-            ok, message = create_local_systemd_timer()
-        self.app.set_status(message, error=not ok)
+        self.local_mode.set(True)
+        self._save()
 
     def _local_mode_changed(self):
-        if self.local_mode.get():
-            self._unattended()
+        self.app.set_status("Save settings to apply scheduled modes")
 
     def _server_mode_changed(self):
-        if self.server_mode.get():
-            self.start_agent()
-        elif self.service:
-            self.start_agent()
+        self.app.set_status("Save settings to apply scheduled modes")
+
+    def _apply_modes(self, previous: BackerConfig):
+        desired = self.app.config
+
+        def apply():
+            if desired.local_scheduled_mode:
+                if blocker := unattended_blocker(desired):
+                    return False, blocker
+                from backer.serverless.repositories import rescope_secrets_for_system
+
+                rescope_secrets_for_system(desired)
+                save_config(desired)
+                desired.save(get_machine_config_dir() / "config.yaml")
+                if sys.platform == "win32":
+                    from backer.client.windows_service import create_local_scheduled_task
+
+                    return create_local_scheduled_task()
+                from backer.client.windows_service import create_local_systemd_timer
+
+                return create_local_systemd_timer()
+            if sys.platform == "win32":
+                from backer.client.windows_service import remove_local_scheduled_task
+
+                removed = remove_local_scheduled_task()
+            else:
+                from backer.client.windows_service import remove_local_systemd_timer
+
+                remove_local_systemd_timer()
+                removed = True
+            return True, "Local scheduled mode disabled" if removed else "No local scheduled task was installed"
+
+        self._worker("apply-modes", apply, lambda result: self._modes_applied(previous, result))
+
+    def _modes_applied(self, previous: BackerConfig, result):
+        if not result[0]:
+            self.app.config = previous
+            try:
+                save_config(previous)
+            except OSError as error:
+                self.app.set_status(f"Could not roll back settings: {error}; {result[1]}", error=True)
+                return
+        self.app.set_status(result[1], error=not result[0])
 
     def _worker(self, name, work, done=None):
         token = self.app.generation("settings")
@@ -325,12 +458,71 @@ class SettingsView(ttk.Frame):
         token = ("settings", self.app._generations.get("settings", 0))
         self.app.marshal(token, lambda: self.app.set_status(status), lambda: self.app.visible == "settings")
 
+    def _show_repository_details(self):
+        self.repository_detail.set(repository_details(self.app.config, self.repository_choice.get()))
+
+    def _repository_passphrase(self) -> tuple[str | None, str]:
+        record = self.app.config.repositories.get(self.repository_choice.get())
+        if not record or not record.passphrase_ref:
+            return None, "Repository passphrase is unavailable"
+        value = keystore.get(record.passphrase_ref, machine_scope=record.scope == "machine")
+        return value, "" if value else "Repository passphrase is unavailable"
+
+    def reveal_passphrase(self):
+        if not self.app.confirm_reveal_passphrase("Reveal this repository passphrase on screen?"):
+            return
+
+        def reveal():
+            value, message = self._repository_passphrase()
+            return bool(value), value or message
+
+        self._worker("reveal-passphrase", reveal, self._revealed_passphrase)
+
+    def _revealed_passphrase(self, result):
+        if result[0]:
+            self.repository_detail.set(self.repository_detail.get().split(" · passphrase")[0] + " · " + result[1])
+        self.app.set_status("Passphrase revealed" if result[0] else result[1], error=not result[0])
+
+    def save_recovery_record(self):
+        record = self.app.config.repositories.get(self.repository_choice.get())
+        if not record:
+            self.app.set_status("Select a repository", error=True)
+            return
+        if not self.app.confirm_reveal_passphrase("Save this repository passphrase in a recovery record?"):
+            return
+        target = filedialog.asksaveasfilename(title="Save recovery record", defaultextension=".txt")
+        if not target:
+            return
+
+        def save():
+            from backer.agent.gui.wizard import RepositoryWizard, recovery_record
+
+            value, message = self._repository_passphrase()
+            if not value:
+                return False, message
+            location = RepositoryWizard._recovery_location(record)
+            command, instruction = RepositoryWizard._recovery_command(record, location)
+            Path(target).write_text(
+                recovery_record(
+                    record.name, location, value, connect_command=command, credential_instruction=instruction
+                ),
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                Path(target).chmod(0o600)
+            return True, "Recovery record saved; keep it off this computer"
+
+        self._worker("recovery-record", save)
+
     def connect(self):
-        url, token = self.server.get().strip(), self.enrollment.get()
-        if not url:
-            self.app.set_status("Enter a server address", error=True)
+        try:
+            url = normalize_server_url(self.server.get())
+        except ValueError as error:
+            self.app.set_status(str(error), error=True)
             self.primary.focus_set()
             return
+        self.server.set(url)
+        token = self.enrollment.get()
 
         def connect():
             from backer._version import __version__
@@ -350,6 +542,7 @@ class SettingsView(ttk.Frame):
             ).encode()
             request = urllib.request.Request(f"{url.rstrip('/')}/api/v1/clients/register", data=payload, method="POST")
             request.add_header("Content-Type", "application/json")
+            request.add_header("User-Agent", f"Backer-Agent/{__version__}")
             current = self.app.config.server
             if current and current.client_id and current.client_secret:
                 credentials = base64.b64encode(f"{current.client_id}:{current.client_secret}".encode()).decode()
@@ -367,7 +560,12 @@ class SettingsView(ttk.Frame):
         self._worker("connect", connect)
 
     def check_connection(self):
-        url = self.server.get().strip()
+        try:
+            url = normalize_server_url(self.server.get())
+        except ValueError as error:
+            self.app.set_status(str(error), error=True)
+            return
+        self.server.set(url)
 
         def check():
             request = urllib.request.Request(f"{url.rstrip('/')}/health", method="GET")
@@ -383,14 +581,27 @@ class SettingsView(ttk.Frame):
             self._disconnect_armed = True
             self.app.set_status("Click Disconnect again to remove the saved server credentials")
             return
-        if self.service:
-            self.service.stop()
+        service, current = self.service, self.app.config
+
+        def disconnect():
+            if service:
+                service.stop()
+            updated = current.model_copy(update={"server": None, "server_agent_mode": False})
+            save_config(updated)
+            return True, updated
+
+        self._worker("disconnect", disconnect, self._disconnected)
+
+    def _disconnected(self, result):
+        if result[0]:
             self.service = None
-        self.app.config.server = None
-        save_config(self.app.config)
-        self.server.set("")
-        self._disconnect_armed = False
-        self.app.set_status("Server disconnected")
+            self.app.config = result[1]
+            self.server.set("")
+            self.server_mode.set(False)
+            self._disconnect_armed = False
+            self.app.set_status("Server disconnected")
+            return
+        self.app.set_status(result[1], error=True)
 
     def start_agent(self):
         server = self.app.config.server
@@ -398,10 +609,13 @@ class SettingsView(ttk.Frame):
             self.app.set_status("Connect to a server first", error=True)
             return
         if self.service:
-            self.service.stop()
-            self.service = None
-            self.agent_button.configure(text="Start agent")
-            self.app.set_status("Server agent stopped")
+            service = self.service
+
+            def stop():
+                service.stop()
+                return True, "Server agent stopped"
+
+            self._worker("stop-agent", stop, self._agent_stopped)
             return
 
         def start():
@@ -424,11 +638,20 @@ class SettingsView(ttk.Frame):
         if result[0]:
             self.agent_button.configure(text="Stop agent")
 
-    def service_status(self):
-        from backer.client.windows_service import get_service_status
+    def _agent_stopped(self, result):
+        self.app.set_status(result[1], error=not result[0])
+        if result[0]:
+            self.service = None
+            self.agent_button.configure(text="Start agent")
 
-        status = get_service_status()
-        self.app.set_status("Server service: " + (status.get("method") or "not installed"))
+    def service_status(self):
+        def probe():
+            from backer.client.windows_service import get_service_status
+
+            status = get_service_status()
+            return True, "Server service: " + (status.get("method") or "not installed")
+
+        self._worker("service-status", probe)
 
     def install_server_service(self):
         server = self.app.config.server
@@ -440,47 +663,67 @@ class SettingsView(ttk.Frame):
         self._worker("server-service", lambda: create_background_scheduled_task(server.server_url))
 
     def test_scheduled_run(self):
-        if sys.platform == "win32":
-            self._worker(
-                "scheduled-test",
-                lambda: (
-                    subprocess.run(["schtasks", "/run", "/tn", "BackerLocalSchedule"], capture_output=True).returncode
-                    == 0,
-                    "Scheduled local backup task started",
-                ),
-            )
-        else:
-            self._worker(
-                "scheduled-test",
-                lambda: (
-                    subprocess.run(
-                        ["systemctl", "--user", "start", "backer-local.service"], capture_output=True
-                    ).returncode
-                    == 0,
-                    "Scheduled local backup service started",
-                ),
+        name = self.scheduled_job.get()
+        if not name or name not in self.app.config.jobs:
+            self.app.set_status("Select a configured local job", error=True)
+            return
+
+        def run():
+            if blocker := unattended_blocker(self.app.config):
+                return False, blocker
+            from backer.serverless.repositories import rescope_secrets_for_system
+
+            config = self.app.config.model_copy(deep=True)
+            rescope_secrets_for_system(config)
+            config.save(get_machine_config_dir() / "config.yaml")
+            data_dir = get_machine_config_dir()
+            before = read_runs(data_dir, name, 1)
+            previous = before[0].run_id if before else None
+            if sys.platform == "win32":
+                launched = subprocess.run(
+                    ["schtasks", "/run", "/tn", "BackerLocalSchedule"], capture_output=True, text=True
+                )
+            else:
+                launched = subprocess.run(
+                    ["systemctl", "--user", "start", "backer-local.service"], capture_output=True, text=True
+                )
+            if launched.returncode:
+                return False, launched.stderr.strip() or "Could not start the scheduled identity"
+            return wait_for_scheduled_attempt(
+                previous,
+                lambda: [item.to_dict() for item in read_runs(data_dir, name, 2)],
             )
 
+        self._worker("scheduled-test", run)
+
     def open_logs(self):
-        directory = get_data_dir() / "logs"
-        directory.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(directory)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(directory)])
-        self.app.set_status(f"Logs: {directory}")
+        def open_directory():
+            directory = get_data_dir() / "logs"
+            directory.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(directory)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(directory)])
+            return True, f"Logs: {directory}"
+
+        self._worker("open-logs", open_directory)
 
     def check_for_updates(self):
         release_url = "https://git.stockhome.com.au/stocky789/backer/releases"
-        if sys.platform != "win32":
-            webbrowser.open(release_url)
-            self.app.set_status("Opened Backer releases")
-            return
-
         def install():
-            destination = get_config_dir() / "backer-agent-setup.exe"
-            urllib.request.urlretrieve(release_url + "/download/release-main/backer-agent-setup.exe", destination)
-            subprocess.Popen([str(destination), "/S"])
-            return True, "Installer started; restart Backer when it completes"
+            if sys.platform == "win32":
+                destination = get_config_dir() / "backer-agent-setup.exe"
+                urllib.request.urlretrieve(release_url + "/download/release-main/backer-agent-setup.exe", destination)
+                subprocess.Popen([str(destination), "/S"])
+                return True, "Installer started; restart Backer when it completes"
+            repository = release_url.removesuffix("/releases")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", f"git+{repository}.git@main"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode:
+                return False, result.stderr.strip() or f"Update failed; releases: {release_url}"
+            return True, "Update complete; restart Backer"
 
         self._worker("update", install)

@@ -123,13 +123,118 @@ def test_settings_save_keeps_registered_credentials_when_only_url_changes(monkey
     instance.app = app
     instance.server = type("Value", (), {"get": lambda _self: "http://new"})()
     instance.mode = type("Value", (), {"get": lambda _self: "system"})()
+    instance.local_mode = type("Value", (), {"get": lambda _self: False})()
+    instance.server_mode = type("Value", (), {"get": lambda _self: True})()
+    instance._apply_modes = lambda _previous: None
     monkeypatch.setattr(views, "save_config", lambda config: saved.append(config.server.server_url))
 
     instance._save()
 
-    assert app.config.server.server_url == "http://new"
+    assert app.config.server.server_url == "http://new:8420"
     assert app.config.server.client_id == "id"
     assert app.config.server.client_secret == "secret"
+
+
+def test_unified_config_persists_both_scheduled_modes():
+    from backer.core.config import BackerConfig
+
+    config = BackerConfig(local_scheduled_mode=True, server_agent_mode=True)
+
+    assert config.model_dump()["local_scheduled_mode"] is True
+    assert config.model_dump()["server_agent_mode"] is True
+
+
+def test_server_url_normalization_adds_scheme_and_default_port():
+    from backer.agent.gui.views import normalize_server_url
+
+    assert normalize_server_url("backup-box") == "http://backup-box:8420"
+    assert normalize_server_url("https://backup-box") == "https://backup-box:8420"
+    assert normalize_server_url("https://backup-box:9443/") == "https://backup-box:9443"
+
+
+def test_settings_update_keeps_credentials_and_both_enabled_modes():
+    from backer.agent.gui.views import settings_update
+    from backer.core.config import BackerConfig, ClientConfig
+
+    saved = settings_update(
+        BackerConfig(server=ClientConfig(server_url="http://old", client_id="id", client_secret="secret")),
+        "backup-box",
+        local_scheduled_mode=True,
+        server_agent_mode=True,
+    )
+
+    assert saved.server.server_url == "http://backup-box:8420"
+    assert saved.server.client_id == "id"
+    assert saved.server.client_secret == "secret"
+    assert saved.local_scheduled_mode and saved.server_agent_mode
+
+
+def test_scheduled_attempt_waits_for_selected_job_and_reports_its_failure():
+    from backer.agent.gui.views import wait_for_scheduled_attempt
+
+    attempts = iter([[], [{"run_id": "new", "status": "failed", "error_message": "SYSTEM SMB denied"}]])
+
+    result = wait_for_scheduled_attempt("old", lambda: next(attempts), timeout=1, sleep=lambda _seconds: None)
+
+    assert result == (False, "SYSTEM SMB denied")
+
+
+def test_repository_details_disclose_type_and_keystore_state_without_secret():
+    from backer.agent.gui.views import repository_details
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config = BackerConfig(repositories={"repo": RepositoryConfig(name="Archive", type="local", path="E:/Backup")})
+
+    assert repository_details(config, "repo") == "Archive · local · E:/Backup · passphrase unavailable"
+
+
+def test_settings_service_probe_is_dispatched_to_a_worker():
+    from backer.agent.gui.views import SettingsView
+
+    calls = []
+    instance = object.__new__(SettingsView)
+    instance._worker = lambda name, work, done=None: calls.append(name)
+
+    instance.service_status()
+
+    assert calls == ["service-status"]
+
+
+def test_s3_repository_history_uses_the_sidecar_backend(monkeypatch):
+    import json
+
+    from backer.agent.gui import views
+    from backer.agent.gui.views import repository_history
+    from backer.core.config import RepositoryConfig
+
+    record = RepositoryConfig(
+        name="Cloud",
+        type="s3",
+        bucket="bucket",
+        prefix="prefix",
+        endpoint="https://s3.example",
+        storage_password_ref="s3",
+    )
+    monkeypatch.setattr(
+        views.keystore,
+        "get",
+        lambda *_args, **_kwargs: json.dumps({"access_key_id": "id", "secret_access_key": "key"}),
+    )
+
+    class Sidecar:
+        def __init__(self, *_args):
+            pass
+
+        def list(self, _prefix):
+            return ["prefix/.backer/jobs/photos/runs/new.json"]
+
+        def get(self, key):
+            assert key == ".backer/jobs/photos/runs/new.json"
+            return b'{"run_id":"new","status":"success","started_at":"2026-01-01T00:00:00Z","bytes_transferred":42}'
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.S3Sidecar", Sidecar)
+
+    assert repository_history(record, "photos")[0]["run_id"] == "new"
 
 
 def test_recovery_record_contains_the_details_needed_on_a_new_machine():
