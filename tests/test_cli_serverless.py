@@ -413,6 +413,66 @@ def test_restore_test_hashes_snapshot_file_and_removes_temporary_target(tmp_path
     assert targets and not targets[0].exists()
 
 
+def test_restore_test_refuses_a_same_named_file_at_the_wrong_relative_path(tmp_path):
+    """A basename fallback could compare a different file and falsely pass a restore test."""
+    from datetime import datetime
+
+    from backer.backends.base import BackendResult, OperationType
+    from backer.cli import _run_restore_test
+
+    source = tmp_path / "source"
+    (source / "one").mkdir(parents=True)
+    (source / "one" / "same.txt").write_text("same", encoding="utf-8")
+
+    class Backend:
+        def get_snapshot_files(self, _destination, _snapshot, path=""):
+            return [{"name": "one", "type": "dir", "size": 0}] if not path else [
+                {"name": "same.txt", "type": "file", "size": 4}
+            ]
+
+        def restore(self, _destination, target, **_kwargs):
+            (target / "other").mkdir()
+            (target / "other" / "same.txt").write_text("same", encoding="utf-8")
+            return BackendResult(True, OperationType.RESTORE, datetime.now(), datetime.now())
+
+    with pytest.raises(click.ClickException, match="did not match"):
+        _run_restore_test(Backend(), object(), {"full_id": "immutable", "paths": [str(source)]})
+
+
+def test_verify_warns_before_starting_a_sampled_content_check(monkeypatch):
+    """Moving the warning after check() would start a costly download without notice."""
+    from datetime import datetime
+
+    from backer.backends.base import BackendResult, OperationType
+
+    events = []
+
+    class Backend:
+        def check(self, *_args, **_kwargs):
+            events.append("check")
+            return BackendResult(True, OperationType.CHECK, datetime.now(), datetime.now())
+
+    config = type(
+        "Config",
+        (),
+        {"jobs": {"job": type("Job", (), {"repository": "repo"})()}, "repositories": {"repo": object()}},
+    )()
+    monkeypatch.setattr("backer.core.config.load_config", lambda _path: config)
+    monkeypatch.setattr("backer.cli._repository_backend", lambda *_args, **_kwargs: (Backend(), "secret", None))
+    monkeypatch.setattr("backer.cli._repository_destination", lambda _record: "repo")
+    original_echo = click.echo
+
+    def echo(message=None, **kwargs):
+        events.append(str(message))
+        return original_echo(message, **kwargs)
+
+    monkeypatch.setattr("backer.cli.click.echo", echo)
+    result = CliRunner().invoke(main, ["verify", "job", "--verify-files-percent", "5"])
+    assert result.exit_code == 0, result.output
+    assert "downloads and rehashes" in events[0].lower()
+    assert events.index("check") > 0
+
+
 def test_legacy_recovery_literal_has_one_dedicated_home():
     from backer.core.recovery import LEGACY_FIXED_PASSPHRASE
 

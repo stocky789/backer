@@ -119,9 +119,6 @@ def _run_restore_test(backend, destination: BackupDestination, snapshot: dict[st
             if not result.success:
                 raise click.ClickException(result.output or "; ".join(result.errors) or "Restore test failed")
             restored = target / relative
-            if not restored.is_file():
-                matches = list(target.rglob(relative.name))
-                restored = matches[0] if len(matches) == 1 else restored
             if not restored.is_file() or _sha256(restored) != _sha256(original):
                 raise click.ClickException(f"Restore test did not match {relative.as_posix()}")
             compared += 1
@@ -3250,6 +3247,11 @@ def verify(
             return
         result = backend.repair_index(destination, commit=True)
     else:
+        if verify_files_percent is not None:
+            click.echo(
+                f"Checking {verify_files_percent:g}% downloads and rehashes real file contents. "
+                "It may take longer on this connection."
+            )
         result = backend.check(destination, verify_files_percent=verify_files_percent)
     if not result.success:
         detail = _redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase)
@@ -3322,7 +3324,7 @@ def status(job: str | None, why: bool, exit_code: bool, as_json: bool) -> None:
         if not as_json:
             console.print(f"{name}: {'failed' if failed else 'success'}")
             if why and message:
-                from backer.core.messages import explain_failure
+                from backer.core.messages import failure_details
 
                 record = config.repositories.get(configured.repository)
                 location = "this repository"
@@ -3335,8 +3337,7 @@ def status(job: str | None, why: bool, exit_code: bool, as_json: bool) -> None:
                         account = record.username
                     elif record.type == "local":
                         location = record.path or location
-                console.print(explain_failure(message))
-                console.print(message)
+                console.print(failure_details(message))
                 console.print(f"Repository: {location}" + (f" as {account}" if account else ""))
                 console.print(f"Try now: backer job run {name}")
                 console.print(f"Details and logs: {get_data_dir() / 'logs'}")

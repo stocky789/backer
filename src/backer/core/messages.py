@@ -29,3 +29,12 @@ def explain_failure(detail: str) -> str:
         if needle in lowered:
             return message
     return "Backer could not finish this backup. The details below are the full output from the backup engine."
+
+
+def failure_details(detail: str, *secrets: str | None) -> str:
+    """Pair the actionable explanation with raw output after removing supplied credentials."""
+    safe = detail
+    for secret in secrets:
+        if secret:
+            safe = safe.replace(secret, "***")
+    return f"{explain_failure(safe)}\n{safe}"

@@ -37,3 +37,20 @@ def test_catalogue_never_uses_an_exclamation_mark():
 def test_every_documented_failure_substring_has_an_actionable_mapping(detail):
     """Removing any documented substring would make a known outage opaque."""
     assert "details below" not in explain_failure(detail).lower()
+
+
+def test_unknown_failure_keeps_sanitized_raw_output():
+    """Removing sanitisation would disclose a passphrase in the diagnostic block."""
+    from backer.core.messages import failure_details
+
+    rendered = failure_details("unexpected failure: secret-value", "secret-value")
+    assert "full output" in rendered.lower()
+    assert "secret-value" not in rendered
+    assert "***" in rendered
+
+
+def test_secret_copy_is_qualified_and_catalogue_is_not_engine_branded():
+    rendered = " ".join(FAILURE_MESSAGES.values()).lower()
+    assert "repository passphrase" in rendered
+    assert "file-server sign-in" in rendered
+    assert "kopia" not in rendered
