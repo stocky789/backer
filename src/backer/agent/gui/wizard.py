@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -96,17 +97,72 @@ class RepositoryWizard(ttk.Frame):
         else:
             self._review()
 
-    def _buttons(self, next_command, label="Continue"):
+    def _buttons(self, next_command, label="Continue", *, back=True):
         row = ttk.Frame(self.body)
         row.pack(fill=tk.X, pady=16)
         if self.step > 1:
-            ttk.Button(row, text="Back", command=lambda: self._go(self.step - 1)).pack(side=tk.LEFT)
+            ttk.Button(
+                row, text="Back", command=lambda: self._go(self.step - 1), state=tk.NORMAL if back else tk.DISABLED
+            ).pack(side=tk.LEFT)
         self.primary = ttk.Button(row, text=label, command=next_command)
         self.primary.pack(side=tk.RIGHT)
 
     def _go(self, step):
         self.step = step
         self._render()
+
+    def _record(self):
+        return RepositoryConfig(
+            name=self.values["name"],
+            type=self.values["type"],
+            path=self.values["path"] or None,
+            server=self.values.get("server"),
+            share=self.values.get("share"),
+            username=self.values.get("username"),
+            domain=self.values.get("domain"),
+            use_existing_session=self.values.get("use_existing_session", False),
+            bucket=self.values.get("bucket"),
+            prefix=self.values.get("prefix"),
+            endpoint=self.values.get("endpoint"),
+            region=self.values.get("region"),
+        )
+
+    def _probe_selected_location(self):
+        """Probe before asking for a passphrase so setup never guesses create versus attach."""
+        record = self._record()
+        storage = (
+            {"access_key_id": self.values["access_key_id"], "secret_access_key": self.values["secret_key"]}
+            if record.type == "s3"
+            else self.values.get("storage_password")
+        )
+        generation = self._generation
+
+        def worker():
+            from backer.serverless.repositories import probe
+
+            status, _unique_id, message = probe(
+                record, self.values.get("passphrase") or "backer-location-probe", storage
+            )
+
+            def done():
+                if generation != self._generation or self.cancel.is_set():
+                    return
+                if status == "absent":
+                    self.values["attach"] = False
+                    self._go(4)
+                elif status in {"present", "wrong_passphrase"}:
+                    self.values["attach"] = True
+                    self._go(4)
+                else:
+                    self.app.set_status(message or f"Repository is {status}", error=True)
+
+            try:
+                self.app.root.after(0, done)
+            except RuntimeError:
+                return
+
+        self.app.set_status("Checking repository location")
+        threading.Thread(target=worker, daemon=True).start()
 
     def _storage(self):
         ttk.Label(self.body, text="Add repository", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
@@ -122,7 +178,8 @@ class RepositoryWizard(ttk.Frame):
             self.values["type"] = kind.get()
             if kind.get() == "local":
                 self.values["path"] = filedialog.askdirectory() or self.values["path"]
-                self._go(4)
+                if self.values["path"]:
+                    self._probe_selected_location()
             elif kind.get() == "s3":
                 self._go("s3")
             else:
@@ -145,16 +202,9 @@ class RepositoryWizard(ttk.Frame):
                 self.app.set_status("All S3 fields are required", error=True)
                 return
             self.values.update(values)
-            self._go(4)
+            self._probe_selected_location()
 
-        attach = tk.BooleanVar(value=self.values.get("attach", False))
-        ttk.Checkbutton(self.body, text="Connect to an existing repository", variable=attach).pack(anchor=tk.W, pady=8)
-
-        def checked_next():
-            self.values["attach"] = attach.get()
-            next_step()
-
-        self._buttons(checked_next)
+        self._buttons(next_step)
 
     def _server(self):
         ttk.Label(self.body, text="Name the file server", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
@@ -234,7 +284,7 @@ class RepositoryWizard(ttk.Frame):
                 return
             self.values["share"] = self.share.get()
             self.values["path"] = self.tree.set(self.tree.selection()[0], "path")
-            self._go(4)
+            self._probe_selected_location()
 
         self._buttons(next_step)
 
@@ -324,14 +374,68 @@ class RepositoryWizard(ttk.Frame):
         if "1219" not in error:
             self.listing.set(error)
             return
+        from backer.core.mounts import SMBConnectionManager
+
+        manager = SMBConnectionManager()
+        conflict = manager._find_existing_connection(server)
+        connection = conflict[0] if conflict else f"\\\\{server}"
         self.listing.set(connection_conflict_message(server))
         actions = ttk.Frame(self.body)
         actions.pack(anchor=tk.W, pady=4)
+
         def use_existing():
-            self.app.set_status("Use the named connection credentials.")
-        ttk.Button(
-            actions, text="Use existing connection", command=use_existing
-        ).pack(side=tk.LEFT)
+            share = connection.rsplit("\\", 1)[-1]
+            generation = self._generation
+            path = self.values.get("path", "")
+
+            def worker():
+                ok = manager.connect_existing_serverless(server, share, path)
+
+                def done():
+                    if generation != self._generation or self.cancel.is_set():
+                        return
+                    if ok:
+                        self.values.update(share=share, storage_password=None, use_existing_session=True)
+                        self.app.set_status(f"Reused and tested {connection} without changing its credentials")
+                        self._probe_selected_location()
+                    else:
+                        self.listing.set(
+                            f"Backer could not write a temporary probe in {connection}. Nothing was disconnected."
+                        )
+
+                try:
+                    self.app.root.after(0, done)
+                except RuntimeError:
+                    return
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def disconnect_existing():
+            if not self.app.confirm_remove_repository(connection):
+                return
+            generation = self._generation
+
+            def worker():
+                ok = manager.disconnect_existing_connection(connection)
+
+                def done():
+                    if generation != self._generation or self.cancel.is_set():
+                        return
+                    if ok:
+                        self.app.set_status(f"Disconnected {connection}; enter the credentials to continue")
+                        self._go(2)
+                    else:
+                        self.listing.set(f"Could not disconnect {connection}. Nothing else was changed.")
+
+                try:
+                    self.app.root.after(0, done)
+                except RuntimeError:
+                    return
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(actions, text="Use existing connection", command=use_existing).pack(side=tk.LEFT)
+        ttk.Button(actions, text=f"Disconnect {connection}", command=disconnect_existing).pack(side=tk.LEFT, padx=6)
         ttk.Button(actions, text="Cancel", command=lambda: self._go(2)).pack(side=tk.LEFT, padx=6)
 
     def _passphrase(self):
@@ -340,7 +444,7 @@ class RepositoryWizard(ttk.Frame):
 
         if self.values.get("attach"):
             candidate = tk.StringVar()
-            status = tk.StringVar(value="Enter the existing repository passphrase.")
+            status = tk.StringVar(value="Enter the existing repository passphrase to verify this location.")
             ttk.Label(self.body, textvariable=status, style="Muted.TLabel").pack(anchor=tk.W, pady=8)
             entry = ttk.Entry(self.body, textvariable=candidate, show="*")
             entry.pack(fill=tk.X)
@@ -348,27 +452,74 @@ class RepositoryWizard(ttk.Frame):
 
             def validate_existing(*_):
                 self.values["passphrase"] = candidate.get()
-                self.app.set_status("Existing repository passphrase will be verified at Review")
+                self.primary.configure(state=tk.DISABLED)
+                if not candidate.get():
+                    status.set("Enter the existing repository passphrase to verify this location.")
+                    return
+                generation = self._generation
+                record = self._record()
+                storage = (
+                    {"access_key_id": self.values["access_key_id"], "secret_access_key": self.values["secret_key"]}
+                    if record.type == "s3"
+                    else self.values.get("storage_password")
+                )
+                passphrase = candidate.get()
+
+                def worker():
+                    from backer.serverless.repositories import probe
+
+                    result, _unique_id, message = probe(record, passphrase, storage)
+
+                    def done():
+                        if generation != self._generation or self.cancel.is_set():
+                            return
+                        if result == "present":
+                            status.set("Repository verified")
+                            self.primary.configure(state=tk.NORMAL)
+                        else:
+                            status.set(message or "Passphrase was not accepted")
+
+                    try:
+                        self.app.root.after(0, done)
+                    except RuntimeError:
+                        return
+
+                threading.Thread(target=worker, daemon=True).start()
 
             candidate.trace_add("write", validate_existing)
             self._buttons(lambda: self._go(5))
+            self.primary.configure(state=tk.DISABLED)
             return
         value = self.values.get("passphrase") or _generated_passphrase()
         self.values["passphrase"] = value
-        ttk.Label(self.body, text=value, style="Mono.TLabel").pack(anchor=tk.W, pady=8)
-        ttk.Button(
-            self.body,
-            text="Copy",
-            command=lambda: (self.app.root.clipboard_clear(), self.app.root.clipboard_append(value)),
+        self.passphrase_frames = (ttk.Frame(self.body), ttk.Frame(self.body))
+        reveal, confirm = self.passphrase_frames
+        ttk.Label(reveal, text="Recovery copy", font=("Segoe UI", 12, "bold")).pack(anchor=tk.W)
+        ttk.Label(reveal, text=value, style="Mono.TLabel").pack(anchor=tk.W, pady=8)
+        ttk.Label(
+            reveal,
+            text=(
+                "Copy this phrase to a recovery record. "
+                f"Backer stores it using {keystore.backend_name()} on this computer."
+            ),
+            style="Muted.TLabel",
+            wraplength=640,
         ).pack(anchor=tk.W)
-        position = 1
+        ttk.Button(reveal, text="Copy", command=lambda: self._copy_passphrase(value)).pack(anchor=tk.W, pady=8)
+        ttk.Button(reveal, text="I saved the recovery copy", command=lambda: self._show_passphrase_frame(confirm)).pack(
+            anchor=tk.W
+        )
+        position = secrets.randbelow(len(value.split("-"))) + 1
         self.confirm = tk.StringVar()
         self.saved = tk.BooleanVar()
-        ttk.Label(self.body, text=f"Enter word {position} to confirm it.").pack(anchor=tk.W, pady=(14, 0))
-        entry = ttk.Entry(self.body, textvariable=self.confirm)
+        ttk.Label(confirm, text=f"Enter word {position} to confirm it.").pack(anchor=tk.W, pady=(14, 0))
+        ttk.Label(confirm, text="The recovery copy is no longer shown on this screen.", style="Muted.TLabel").pack(
+            anchor=tk.W
+        )
+        entry = ttk.Entry(confirm, textvariable=self.confirm)
         entry.pack(anchor=tk.W)
         ttk.Checkbutton(
-            self.body, text="I have saved this somewhere other than this computer", variable=self.saved
+            confirm, text="I have saved this somewhere other than this computer", variable=self.saved
         ).pack(anchor=tk.W, pady=6)
 
         def validate(*_):
@@ -380,8 +531,18 @@ class RepositoryWizard(ttk.Frame):
 
         self.confirm.trace_add("write", validate)
         self.saved.trace_add("write", validate)
-        self._buttons(lambda: self._go(5))
+        self._buttons(lambda: self._go(5), back=False)
         self.primary.configure(state=tk.DISABLED)
+        self._show_passphrase_frame(reveal)
+
+    def _show_passphrase_frame(self, frame):
+        for candidate in self.passphrase_frames:
+            candidate.pack_forget()
+        frame.pack(fill=tk.BOTH, expand=True)
+
+    def _copy_passphrase(self, value):
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append(value)
 
     def _job(self):
         ttk.Label(self.body, text="Source and schedule", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
@@ -433,6 +594,8 @@ class RepositoryWizard(ttk.Frame):
                 server=self.values.get("server"),
                 share=self.values.get("share"),
                 username=self.values.get("username"),
+                domain=self.values.get("domain"),
+                use_existing_session=self.values.get("use_existing_session", False),
                 bucket=self.values.get("bucket"),
                 prefix=self.values.get("prefix"),
                 endpoint=self.values.get("endpoint"),

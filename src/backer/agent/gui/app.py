@@ -177,8 +177,16 @@ class BackerAgentApp:
     def confirm_remove_job(self):
         return messagebox.askyesno("Remove job", "Remove this backup job?", parent=self.root)
 
-    def confirm_remove_repository(self):
-        return messagebox.askyesno("Remove repository", "Remove this repository configuration?", parent=self.root)
+    def confirm_remove_repository(self, connection=None):
+        if connection:
+            title = "Disconnect network share"
+            prompt = (
+                f"Disconnect the existing Windows connection to {connection}? "
+                "Explorer windows using it may stop working."
+            )
+        else:
+            title, prompt = "Remove repository", "Remove this repository configuration?"
+        return messagebox.askyesno(title, prompt, parent=self.root)
 
     def confirm_quit_during_run(self):
         return messagebox.askyesno(

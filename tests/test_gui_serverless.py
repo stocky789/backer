@@ -50,6 +50,21 @@ def test_passphrase_step_requires_confirmation():
     assert "self.primary.configure(state=tk.DISABLED)" in source
 
 
+def test_passphrase_generation_uses_a_separate_reveal_and_confirmation_frame():
+    source = _source("wizard.py")
+    assert "passphrase_frames" in source
+    assert "_show_passphrase_frame" in source
+    assert "Recovery copy" in source
+    assert "keystore.backend_name()" in source
+
+
+def test_1219_actions_use_the_named_connection_without_silent_teardown():
+    source = _source("wizard.py")
+    assert "connect_existing_serverless" in source
+    assert "disconnect_existing_connection" in source
+    assert "confirm_remove_repository(connection)" in source
+
+
 def test_no_percentage_without_a_frame():
     source = _source("app.py")
     assert 'self.bar.configure(mode="indeterminate")' in source

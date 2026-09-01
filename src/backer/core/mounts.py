@@ -214,6 +214,41 @@ class SMBConnectionManager:
             creationflags=get_subprocess_flags(),
         )
 
+    def connect_existing_serverless(self, server: str, share: str, path: str = "") -> bool:
+        """Reuse Windows' named SMB session and prove the selected folder is writable."""
+        if not self._find_existing_connection(server):
+            return False
+        unc_path = f"\\\\{server}\\{share}"
+        result = subprocess.run(
+            ["net", "use", unc_path, "/persistent:no"],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+        if result.returncode:
+            return False
+        target = Path(unc_path, *[part for part in path.replace("\\", "/").split("/") if part])
+        probe = target / f".backer-write-probe-{os.urandom(8).hex()}"
+        try:
+            probe.write_bytes(b"")
+            probe.unlink()
+            return True
+        except OSError:
+            probe.unlink(missing_ok=True)
+            return False
+
+    def disconnect_existing_connection(self, connection: str) -> bool:
+        """Disconnect one explicitly named Windows connection after user confirmation."""
+        if not connection.startswith("\\\\") or any(part in connection for part in ("*", "?")):
+            return False
+        result = subprocess.run(
+            ["net", "use", connection, "/delete", "/y"],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+        return result.returncode == 0
+
     def _find_server_conflict(self, server: str, username: str | None) -> str | None:
         """Check if there's a conflicting connection to this server.
 

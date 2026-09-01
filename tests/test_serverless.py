@@ -428,3 +428,37 @@ def test_smb_repository_add_disconnects_after_probe_failure(monkeypatch, tmp_pat
         )
 
     assert order == ["connect", "probe", "disconnect"]
+
+
+def test_smb_attach_reuses_a_verified_windows_connection_without_tearing_it_down(monkeypatch, tmp_path: Path) -> None:
+    from backer.core.config import BackerConfig, RepositoryConfig
+    from backer.serverless.repositories import add_repository
+
+    order = []
+
+    class Manager:
+        serverless_session_created = False
+
+        def connect_existing_serverless(self, *_args) -> bool:
+            order.append("reuse")
+            return True
+
+        def disconnect_serverless(self, *_args) -> None:
+            order.append("disconnect")
+
+    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
+    monkeypatch.setattr(
+        "backer.serverless.repositories.probe", lambda *_args: order.append("probe") or ("present", "id", "")
+    )
+    monkeypatch.setattr("backer.serverless.repositories.keystore.put", lambda *_args, **_kwargs: "test")
+    record = RepositoryConfig(
+        name="NAS", type="smb", server="nas", share="backups", username="backup", use_existing_session=True
+    )
+
+    add_repository(
+        BackerConfig(), tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=True, init=False,
+        storage=None, headless=True,
+    )
+
+    assert order == ["reuse", "probe"]

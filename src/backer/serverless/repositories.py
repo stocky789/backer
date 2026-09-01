@@ -80,16 +80,25 @@ def add_repository(
     smb_manager = None
     smb_session_created = False
     if record.type == "smb":
-        if not isinstance(storage, str) or not all((record.server, record.share, record.username)):
+        if not all((record.server, record.share, record.username)) or (
+            not record.use_existing_session and not isinstance(storage, str)
+        ):
             raise ValueError("SMB server, share, username and password are required")
         from backer.core.mounts import SMBConnectionManager
 
         smb_manager = SMBConnectionManager()
-        if not smb_manager.connect_serverless(
-            record.server, record.share, record.username, storage, domain=record.domain
-        ):
+        connected = (
+            smb_manager.connect_existing_serverless(record.server, record.share, record.path or "")
+            if record.use_existing_session
+            else smb_manager.connect_serverless(
+                record.server, record.share, record.username, storage, domain=record.domain
+            )
+        )
+        if not connected:
             raise ValueError(f"Could not connect to SMB repository '{record.name}'")
-        smb_session_created = getattr(smb_manager, "serverless_session_created", True)
+        smb_session_created = not record.use_existing_session and getattr(
+            smb_manager, "serverless_session_created", True
+        )
     try:
         status, unique_id, message = probe(record, passphrase, storage)
         if attach and status != "present":

@@ -92,17 +92,26 @@ def _run_local_job(
         if smb_password:
             secrets.append(smb_password)
         if repository.type == "smb":
-            if not smb_password or not repository.server or not repository.share or not repository.username:
+            if not repository.server or not repository.share or not repository.username or (
+                not repository.use_existing_session and not smb_password
+            ):
                 raise ValueError(f"Repository '{repository.name}' SMB credentials are incomplete")
             from backer.core.mounts import SMBConnectionManager
 
             smb_manager = SMBConnectionManager()
-            if not smb_manager.connect_serverless(
-                repository.server, repository.share, repository.username, smb_password,
-                domain=repository.domain, is_system=run_as_system,
-            ):
+            connected = (
+                smb_manager.connect_existing_serverless(repository.server, repository.share, repository.path or "")
+                if repository.use_existing_session and not run_as_system
+                else smb_manager.connect_serverless(
+                    repository.server, repository.share, repository.username, smb_password or "",
+                    domain=repository.domain, is_system=run_as_system,
+                )
+            )
+            if not connected:
                 raise ValueError(f"Could not connect to SMB repository '{repository.name}'")
-            smb_session_created = getattr(smb_manager, "serverless_session_created", True)
+            smb_session_created = (
+                not repository.use_existing_session or run_as_system
+            ) and getattr(smb_manager, "serverless_session_created", True)
         stage = "connect"
         status, unique_id, message = probe(repository, passphrase, storage)
         if status != "present" or (repository.unique_id and unique_id != repository.unique_id):

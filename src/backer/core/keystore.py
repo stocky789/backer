@@ -34,6 +34,13 @@ def file_fallback_required() -> bool:
     return os.name != "nt" and not _secret_tool_available()
 
 
+def backend_name() -> str:
+    """Return the secret backend this machine will use before the first write."""
+    if os.name == "nt":
+        return "Windows DPAPI"
+    return "Secret Service" if _secret_tool_available() else "protected local files"
+
+
 def _secret_tool(args: list[str], value: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["secret-tool", *args], input=value, capture_output=True, text=True, timeout=15, check=False

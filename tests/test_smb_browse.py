@@ -133,6 +133,43 @@ def test_safe_manager_path_keeps_password_off_nested_argv() -> None:
     assert all("sentinel-password" not in value for command in commands for value in command)
 
 
+def test_existing_connection_probe_reuses_without_credentials_and_removes_its_probe(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The 1219 reuse action must not replace Explorer's credentials."""
+    from backer.core import mounts
+    from backer.core.mounts import SMBConnectionManager
+
+    commands: list[list[str]] = []
+    manager = SMBConnectionManager()
+    monkeypatch.setattr(manager, "_find_existing_connection", lambda _server: (r"\\nas\backup", "existing-user"))
+    monkeypatch.setattr(mounts, "Path", lambda *_values: tmp_path)
+    monkeypatch.setattr(
+        mounts.subprocess,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    assert manager.connect_existing_serverless("nas", "backup", "folder")
+    assert commands == [["net", "use", r"\\nas\backup", "/persistent:no"]]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_existing_connection_disconnect_targets_only_the_named_connection(monkeypatch) -> None:
+    from backer.core import mounts
+    from backer.core.mounts import SMBConnectionManager
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        mounts.subprocess,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    assert SMBConnectionManager().disconnect_existing_connection(r"\\nas\backup")
+    assert commands == [["net", "use", r"\\nas\backup", "/delete", "/y"]]
+
+
 def test_sanitize_removes_colon_and_slash_inline_suffix() -> None:
     module = _spike_module()
 
