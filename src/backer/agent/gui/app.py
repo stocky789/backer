@@ -80,6 +80,7 @@ class BackerAgentApp:
         self.run_cancel = threading.Event()
         self.progress_log = deque(maxlen=500)
         self.tray_icon = None
+        self._ui_callbacks: queue.SimpleQueue[tuple[tuple[str, int], object, object]] = queue.SimpleQueue()
         self._tray_intents: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._notification_run = None
         self._linux_close_notice = False
@@ -128,18 +129,10 @@ class BackerAgentApp:
         return self._generations.get(token[0]) == token[1]
 
     def marshal(self, token, callback, current=None):
-        """Post worker results only while this view and root still exist."""
+        """Queue worker results; the Tk poller is their only UI-thread bridge."""
         if not self.alive:
             return
-
-        def guarded():
-            if self.alive and self.current(token) and (current is None or current()):
-                callback()
-
-        try:
-            self.root.after(0, guarded)
-        except (RuntimeError, tk.TclError):
-            pass
+        self._ui_callbacks.put((token, current, callback))
 
     def _build(self, name):
         if name == "welcome":
@@ -344,6 +337,15 @@ class BackerAgentApp:
         self._tray_intents.put((intent, value))
 
     def _poll_tray_intents(self):
+        callbacks = getattr(self, "_ui_callbacks", None)
+        if callbacks:
+            while True:
+                try:
+                    token, current, callback = callbacks.get_nowait()
+                except queue.Empty:
+                    break
+                if self.alive and self.current(token) and (current is None or current()):
+                    callback()
         while True:
             try:
                 intent, value = self._tray_intents.get_nowait()

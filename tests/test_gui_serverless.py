@@ -77,29 +77,37 @@ def test_show_leaves_one_child_and_constructs_no_toplevel():
 
 
 def test_share_listing_does_not_block_the_event_loop():
+    import queue
+    import threading
     import time
     import tkinter as tk
     from tkinter import ttk
 
     from backer.agent.gui import wizard
+    from backer.agent.gui.app import BackerAgentApp
 
     root = tk.Tk()
     root.withdraw()
     try:
-        app = type("App", (), {"root": root, "container": ttk.Frame(root), "_generations": {"repository": 1}})()
-        app.marshal = lambda _token, callback, current: root.after(0, lambda: callback() if current() else None)
+        app = object.__new__(BackerAgentApp)
+        app.root, app.container, app.alive = root, ttk.Frame(root), True
+        app._generations = {"repository": 1}
+        app._ui_callbacks, app._tray_intents = queue.SimpleQueue(), queue.SimpleQueue()
         app.set_status = lambda *_args, **_kwargs: None
         instance = wizard.RepositoryWizard(app)
         instance.values.update(server="nas.local", username="backup", storage_password="secret", domain=None)
         instance.step = 3
         original = wizard.SMBBrowser.list_shares
-        called, completed = [], []
+        called, completed, finished = [], [], threading.Event()
 
         def slow_listing(server, username, password, domain):
             called.append((server, username, password, domain, time.monotonic()))
             time.sleep(3)
-            completed.append(time.monotonic())
-            return True, []
+            try:
+                completed.append(time.monotonic())
+                return True, []
+            finally:
+                finished.set()
 
         wizard.SMBBrowser.list_shares = slow_listing
         try:
@@ -108,19 +116,25 @@ def test_share_listing_does_not_block_the_event_loop():
             deadline = time.monotonic() + 2.6
             while time.monotonic() < deadline:
                 root.update()
+                app._poll_tray_intents()
                 serviced += 1
                 time.sleep(0.1)
             instance._generation += 1
             deadline = time.monotonic() + 0.8
             while time.monotonic() < deadline:
                 root.update()
+                app._poll_tray_intents()
                 time.sleep(0.1)
+            assert finished.wait(1)
+            app._poll_tray_intents()
             assert serviced >= 25 and called[0][:4] == ("nas.local", "backup", "secret", None)
             assert completed and 2.9 <= completed[0] - called[0][4] <= 3.2
             assert instance.listing.get() == "Loading shares…"
         finally:
             wizard.SMBBrowser.list_shares = original
     finally:
+        app.alive = False
+        app._poll_tray_intents()
         root.destroy()
 
 
@@ -984,20 +998,42 @@ def test_restore_progress_uses_the_shared_determinate_frame():
 
 
 def test_worker_marshal_drops_callbacks_after_shutdown():
+    import queue
+
     from backer.agent.gui.app import BackerAgentApp
 
     calls = []
 
-    class Root:
-        def after(self, _delay, callback):
-            callback()
-
     app = object.__new__(BackerAgentApp)
-    app.root, app.alive, app._generations = Root(), False, {"restore": 1}
+    app.alive, app._generations = False, {"restore": 1}
+    app._ui_callbacks = queue.SimpleQueue()
 
     app.marshal(("restore", 1), lambda: calls.append("paint"))
 
     assert calls == []
+
+
+def test_worker_marshal_never_calls_tk_from_the_worker_thread():
+    import queue
+    import threading
+
+    from backer.agent.gui.app import BackerAgentApp
+
+    root_calls, painted = [], []
+
+    class Root:
+        def after(self, _delay, _callback):
+            root_calls.append(threading.get_ident())
+
+    app = object.__new__(BackerAgentApp)
+    app.root, app.alive, app._generations = Root(), True, {"repository": 1}
+    app._ui_callbacks, app._tray_intents = queue.SimpleQueue(), queue.SimpleQueue()
+    worker = threading.Thread(target=lambda: app.marshal(("repository", 1), lambda: painted.append("done")))
+    worker.start()
+    worker.join()
+    assert root_calls == [] and painted == []
+    app._poll_tray_intents()
+    assert painted == ["done"] and root_calls == [threading.get_ident()]
 
 
 def test_cancel_running_never_waits_for_kopia_reap():
