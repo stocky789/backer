@@ -10,15 +10,15 @@ FAILURE_MESSAGES = {
         "No Backer repository exists at this location. Nothing was created."
     ),
     "cannot access storage path": "Backer cannot access the repository path. Check the server, share and permissions.",
-    "system error 53": "Backer could not find the file server. Check its name and network connection.",
-    "system error 67": "Backer could not find the file share. Check the share name.",
-    "system error 1219": (
+    "error 53": "Backer could not find the file server. Check its name and network connection.",
+    "error 67": "Backer could not find the file share. Check the share name.",
+    "error 1219": (
         "Windows already has a connection to this server with different credentials. "
         "Close it or use the same account."
     ),
-    "system error 1326": "The file-server sign-in was rejected. Check the account and password.",
+    "error 1326": "The file-server sign-in was rejected. Check the account and password.",
     "mount error(13)": "The file server denied access. Check the account and write permission.",
-    "no space left on device": "The destination has no free space. Free space before trying again.",
+    "enospc": "The destination has no free space. Free space before trying again.",
 }
 
 

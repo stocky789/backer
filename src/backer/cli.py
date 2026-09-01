@@ -62,14 +62,24 @@ def _restore_include_path(value: str | None) -> str | None:
     return value
 
 
-def _restore_test_files(source: Path, count: int = 12) -> list[Path]:
-    """Return a bounded, deterministic sample of the smallest readable source files."""
-    files = [
-        item.relative_to(source)
-        for item in source.rglob("*")
-        if item.is_file() and not item.is_symlink()
-    ]
-    return sorted(files, key=lambda item: ((source / item).stat().st_size, item.as_posix()))[:count]
+def _snapshot_restore_test_files(
+    backend, destination: BackupDestination, snapshot_id: str, count: int = 12
+) -> list[Path]:
+    """Choose the smallest regular files from the immutable snapshot tree, not the live source."""
+    pending = [""]
+    files: list[tuple[int, Path]] = []
+    while pending:
+        parent = pending.pop()
+        for entry in backend.get_snapshot_files(destination, snapshot_id, path=parent):
+            name = entry.get("name", "")
+            relative = Path(parent, name)
+            if not name or relative.is_absolute() or ".." in relative.parts:
+                raise click.ClickException("Restore test found an unsafe path in the snapshot")
+            if entry.get("type") == "dir":
+                pending.append(relative.as_posix())
+            elif entry.get("type") == "file":
+                files.append((int(entry.get("size", 0)), relative))
+    return [path for _, path in sorted(files, key=lambda item: (item[0], item[1].as_posix()))[:count]]
 
 
 def _sha256(path: Path) -> str:
@@ -80,23 +90,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _run_restore_test(backend, destination: BackupDestination, snapshot: dict[str, Any]) -> int:
+def _run_restore_test(backend, destination: BackupDestination, snapshot: dict[str, Any]) -> tuple[int, int]:
     """Restore only a small snapshot sample, compare still-present source files, then clean up."""
-    source = Path(snapshot["paths"][0])
-    if not source.is_dir():
-        raise click.ClickException("Restore test needs the original source folder on this computer")
-    files = _restore_test_files(source)
-    if not files:
-        raise click.ClickException("Restore test found no regular source files to compare")
     snapshot_id = snapshot.get("full_id") or snapshot.get("id")
     if not snapshot_id:
         raise click.ClickException("Restore test cannot identify the newest immutable snapshot")
+    source = Path(snapshot["paths"][0])
+    if not source.is_dir():
+        raise click.ClickException("Restore test needs the original source folder on this computer")
+    files = _snapshot_restore_test_files(backend, destination, snapshot_id)
+    if not files:
+        raise click.ClickException("Restore test found no regular source files to compare")
     compared = 0
+    skipped = 0
     with TemporaryDirectory(prefix="backer-restore-test-") as temporary:
         target = Path(temporary)
         for relative in files:
             original = source / relative
             if not original.is_file():
+                skipped += 1
                 continue
             result = backend.restore(
                 destination,
@@ -115,7 +127,7 @@ def _run_restore_test(backend, destination: BackupDestination, snapshot: dict[st
             compared += 1
     if not compared:
         raise click.ClickException("Restore test could not compare a source file that still exists")
-    return compared
+    return compared, skipped
 
 
 def _select_restore_snapshot(
@@ -2017,9 +2029,19 @@ def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphra
     )
     if not passphrase:
         raise click.UsageError("A repository passphrase is required")
-    status, _, message = probe(record, passphrase)
+    storage = None
+    storage_secret = None
+    if record.storage_password_ref:
+        storage_secret = keystore.get(record.storage_password_ref, machine_scope=record.scope == "machine")
+        storage = json.loads(storage_secret) if storage_secret and record.type == "s3" else storage_secret
+    status, _, message = probe(record, passphrase, storage)
     if status != "present":
-        raise click.ClickException(message or "The supplied passphrase could not open this existing repository")
+        safe_message = _redact_error(
+            RuntimeError(message or "The supplied passphrase could not open this existing repository"),
+            passphrase,
+            storage_secret,
+        )
+        raise click.ClickException(safe_message)
     reference = record.passphrase_ref or f"backer/repo/{key}/passphrase"
     keystore.put(reference, passphrase, machine_scope=record.scope == "machine")
     config.repositories[key] = record.model_copy(update={"passphrase_ref": reference})
@@ -3231,7 +3253,8 @@ def verify(
         result = backend.check(destination, verify_files_percent=verify_files_percent)
     if not result.success:
         detail = _redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase)
-        if any("timeout" in error.lower() for error in result.errors):
+        timeout_detail = " ".join([result.output, *result.errors]).lower()
+        if "timeout" in timeout_detail or "timed out" in timeout_detail:
             raise click.ClickException(
                 f"The check ran out of time after {timeout or 3600} seconds. "
                 "This does not mean the repository is damaged. "
@@ -3257,11 +3280,13 @@ def verify(
         if not snapshots:
             raise click.ClickException("Restore test needs a reachable repository with a snapshot")
         newest = max(snapshots, key=lambda item: item.get("timestamp") or "")
-        count = _run_restore_test(backend, destination, newest)
+        count, skipped = _run_restore_test(backend, destination, newest)
         click.echo(
             f"Backer restored {count} files from the newest snapshot and they match files on this computer. "
             "This tests the repository, not every file in it."
         )
+        if skipped:
+            click.echo(f"Skipped {skipped} sampled file(s) no longer present on this computer.")
 
 
 @main.command("status")
@@ -3299,8 +3324,22 @@ def status(job: str | None, why: bool, exit_code: bool, as_json: bool) -> None:
             if why and message:
                 from backer.core.messages import explain_failure
 
+                record = config.repositories.get(configured.repository)
+                location = "this repository"
+                account = None
+                if record:
+                    if record.type == "smb":
+                        location = "\\\\" + "\\".join(
+                            part for part in (record.server, record.share, record.path) if part
+                        )
+                        account = record.username
+                    elif record.type == "local":
+                        location = record.path or location
                 console.print(explain_failure(message))
                 console.print(message)
+                console.print(f"Repository: {location}" + (f" as {account}" if account else ""))
+                console.print(f"Try now: backer job run {name}")
+                console.print(f"Details and logs: {get_data_dir() / 'logs'}")
         unhealthy = unhealthy or failed
     if as_json:
         click.echo(json.dumps(results))

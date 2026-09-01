@@ -1,4 +1,5 @@
 import shlex
+from pathlib import Path
 
 import click
 import pytest
@@ -371,23 +372,56 @@ def test_verify_repair_refuses_to_commit_without_a_tty(monkeypatch, tmp_path):
     assert "interactive" in result.output.lower()
 
 
-def test_restore_test_selects_smallest_existing_files(tmp_path):
-    """Changing the sort would turn a bounded health check into a large restore."""
-    from pathlib import Path
+def test_restore_test_selects_smallest_files_from_snapshot_tree():
+    """Changing the snapshot walk would make a health check select current-tree files."""
+    from backer.cli import _snapshot_restore_test_files
 
-    from backer.cli import _restore_test_files
+    class Backend:
+        def get_snapshot_files(self, _destination, _snapshot, path=""):
+            return {
+                "": [{"name": "large.bin", "type": "file", "size": 10}, {"name": "sub", "type": "dir", "size": 0}],
+                "sub": [{"name": "small.txt", "type": "file", "size": 1}],
+            }[path]
+
+    assert _snapshot_restore_test_files(Backend(), object(), "immutable-id", 1) == [Path("sub/small.txt")]
+
+
+def test_restore_test_hashes_snapshot_file_and_removes_temporary_target(tmp_path):
+    """Removing the hash or cleanup would make restore verification claim more than it proves."""
+    from datetime import datetime
+
+    from backer.backends.base import BackendResult, OperationType
+    from backer.cli import _run_restore_test
 
     source = tmp_path / "source"
     source.mkdir()
-    (source / "large.bin").write_bytes(b"x" * 10)
-    (source / "small.txt").write_bytes(b"x")
-    assert _restore_test_files(source, 1) == [Path("small.txt")]
+    (source / "small.txt").write_text("same", encoding="utf-8")
+    targets = []
+
+    class Backend:
+        def get_snapshot_files(self, _destination, _snapshot, path=""):
+            return [{"name": "small.txt", "type": "file", "size": 4}] if not path else []
+
+        def restore(self, _destination, target, **_kwargs):
+            targets.append(target)
+            (target / "small.txt").write_text("same", encoding="utf-8")
+            return BackendResult(True, OperationType.RESTORE, datetime.now(), datetime.now())
+
+    assert _run_restore_test(
+        Backend(), object(), {"full_id": "immutable", "paths": [str(source)]}
+    ) == (1, 0)
+    assert targets and not targets[0].exists()
 
 
 def test_legacy_recovery_literal_has_one_dedicated_home():
     from backer.core.recovery import LEGACY_FIXED_PASSPHRASE
 
-    assert LEGACY_FIXED_PASSPHRASE == "backer-default-password"
+    source_root = Path(__file__).parents[1] / "src" / "backer"
+    shipped_source = [
+        path for path in source_root.rglob("*.py") if "__pycache__" not in path.parts
+    ]
+    matches = [path for path in shipped_source if LEGACY_FIXED_PASSPHRASE in path.read_text(encoding="utf-8")]
+    assert matches == [source_root / "core" / "recovery.py"]
 
 
 @pytest.mark.parametrize(
