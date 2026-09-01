@@ -15,7 +15,6 @@ def test_gui_tests_actually_ran():
     root = tk.Tk()
     root.withdraw()
     root.update()
-    root.destroy()
 
 
 def test_no_colour_literals_and_tokens_meet_contrast():
@@ -167,3 +166,35 @@ def test_repository_save_failure_removes_only_new_refs(monkeypatch, tmp_path):
     assert set(config.repositories) == {"unrelated"}
     assert puts and all(reference.startswith("backer/repo/") for reference in puts)
     assert {reference for reference, _scope in deleted} == set(puts)
+
+
+def test_repository_second_secret_write_is_compensated(monkeypatch, tmp_path):
+    from backer.core.config import BackerConfig, RepositoryConfig
+    from backer.serverless import repositories
+
+    config = BackerConfig()
+    monkeypatch.setattr(repositories, "file_fallback_required", lambda: False)
+    monkeypatch.setattr(repositories, "parse_s3_config", lambda values: type("Parsed", (), {"public_config": values})())
+    monkeypatch.setattr(repositories, "probe", lambda *_args: ("present", "existing", ""))
+    removed, calls = [], []
+    def put(reference, *_args, **_kwargs):
+        calls.append(reference)
+        if len(calls) == 2:
+            raise OSError("storage write failed")
+        return "test"
+    monkeypatch.setattr(repositories.keystore, "put", put)
+    monkeypatch.setattr(
+        repositories.keystore, "delete", lambda reference, *, machine_scope: removed.append((reference, machine_scope))
+    )
+    record = RepositoryConfig(name="S3", type="s3", bucket="bucket", endpoint="https://s3.invalid", region="x")
+    try:
+        repositories.add_repository(
+            config, tmp_path / "config.yaml", "S3", record, "secret", attach=True, init=False,
+            storage={"access_key_id": "id", "secret_access_key": "key"},
+        )
+    except OSError:
+        pass
+    else:
+        raise AssertionError("second secret write must fail setup")
+    assert config.repositories == {}
+    assert {reference for reference, _scope in removed} == set(calls)

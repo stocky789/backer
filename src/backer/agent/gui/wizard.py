@@ -239,26 +239,22 @@ class RepositoryWizard(ttk.Frame):
         self._buttons(next_step)
 
     def _load_folder(self, path):
-        if not self.share.get():
+        share = self.share.get()
+        if not share:
             return
         generation = self._generation
+        server = self.values["server"]
+        username = self.values.get("username")
+        password = self.values.get("storage_password")
+        domain = self.values.get("domain")
 
         def worker():
-            ok, result = SMBBrowser.list_directory(
-                self.values["server"],
-                self.share.get(),
-                path,
-                self.values.get("username"),
-                self.values.get("storage_password"),
-                self.values.get("domain"),
-            )
+            ok, result = SMBBrowser.list_directory(server, share, path, username, password, domain)
 
             def done():
                 if generation != self._generation or self.cancel.is_set() or not ok:
                     if not ok:
-                        self.listing.set(
-                            connection_conflict_message(self.values["server"]) if "1219" in str(result) else str(result)
-                        )
+                        self._show_1219(server, str(result))
                     return
                 parent = (
                     ""
@@ -302,20 +298,41 @@ class RepositoryWizard(ttk.Frame):
             parent = self.tree.focus()
             path = self.tree.set(parent, "path") if parent else ""
             full_path = "/".join(item for item in (path, name.get().strip()) if item)
-            if SMBBrowser.make_directory(
-                self.values["server"],
-                self.share.get(),
-                full_path,
-                self.values.get("username"),
-                self.values.get("storage_password"),
-                self.values.get("domain"),
-            ):
-                entry.destroy()
-                self._load_folder(path)
-            else:
-                self.app.set_status("Could not create folder", error=True)
+            server, share = self.values["server"], self.share.get()
+            username = self.values.get("username")
+            password = self.values.get("storage_password")
+            domain = self.values.get("domain")
+            generation = self._generation
+            entry.configure(state=tk.DISABLED)
+            def worker():
+                ok = SMBBrowser.make_directory(server, share, full_path, username, password, domain)
+                def done():
+                    if generation != self._generation or self.cancel.is_set():
+                        return
+                    if ok:
+                        entry.destroy()
+                        self._load_folder(path)
+                    else:
+                        entry.configure(state=tk.NORMAL)
+                        self.app.set_status("Could not create folder", error=True)
+                self.app.root.after(0, done)
+            threading.Thread(target=worker, daemon=True).start()
 
         entry.bind("<Return>", create_folder)
+
+    def _show_1219(self, server, error):
+        if "1219" not in error:
+            self.listing.set(error)
+            return
+        self.listing.set(connection_conflict_message(server))
+        actions = ttk.Frame(self.body)
+        actions.pack(anchor=tk.W, pady=4)
+        def use_existing():
+            self.app.set_status("Use the named connection credentials.")
+        ttk.Button(
+            actions, text="Use existing connection", command=use_existing
+        ).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Cancel", command=lambda: self._go(2)).pack(side=tk.LEFT, padx=6)
 
     def _passphrase(self):
         ttk.Label(self.body, text="Repository passphrase", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)

@@ -110,46 +110,51 @@ def add_repository(
                 if status != "present":
                     raise ValueError(message or "Created repository could not be verified")
         repo_id = record.id or uuid4().hex[:12]
+        if repo_id in config.repositories:
+            raise ValueError(f"Repository id '{repo_id}' already exists")
         passphrase_ref = f"backer/repo/{repo_id}/passphrase"
         storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
         references = [passphrase_ref, storage_ref]
-        backend = keystore.put(passphrase_ref, passphrase)
-        if storage_ref:
-            import json
-
-            keystore.put(
-                storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False
-            )
-        saved = record.model_copy(
-            update={
-                "id": repo_id,
-                "name": name,
-                "unique_id": unique_id,
-                "added_at": datetime.now(UTC).isoformat(),
-                "last_check_status": "present",
-                "last_check_at": datetime.now(UTC).isoformat(),
-                "passphrase_ref": passphrase_ref,
-                "storage_password_ref": storage_ref,
-            }
-        )
-        config.repositories[repo_id] = saved
         try:
+            backend = keystore.put(passphrase_ref, passphrase)
+            if storage_ref:
+                import json
+
+                keystore.put(
+                    storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False
+                )
+            saved = record.model_copy(
+                update={
+                    "id": repo_id,
+                    "name": name,
+                    "unique_id": unique_id,
+                    "added_at": datetime.now(UTC).isoformat(),
+                    "last_check_status": "present",
+                    "last_check_at": datetime.now(UTC).isoformat(),
+                    "passphrase_ref": passphrase_ref,
+                    "storage_password_ref": storage_ref,
+                }
+            )
+            config.repositories[repo_id] = saved
             config.save(config_path)
-        except Exception:
-            # The record and refs belong exclusively to this invocation.  Do
-            # not leave a runnable-looking partial repository behind.
+        except Exception as error:
+            # These refs are fresh, call-scoped names. Compensate every write
+            # boundary without touching existing config or repository data.
             config.repositories.pop(repo_id, None)
+            cleanup_errors = []
             for reference in references:
                 if reference:
                     for machine_scope in (False, True):
                         try:
                             keystore.delete(reference, machine_scope=machine_scope)
-                        except Exception:
-                            pass
+                        except Exception as cleanup_error:
+                            cleanup_errors.append(str(cleanup_error))
             try:
                 config.save(config_path)
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                cleanup_errors.append(str(cleanup_error))
+            if cleanup_errors:
+                raise RuntimeError(f"{error}; cleanup also failed: {'; '.join(cleanup_errors)}") from error
             raise
         return repo_id, backend
     finally:

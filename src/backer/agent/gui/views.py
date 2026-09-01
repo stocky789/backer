@@ -91,7 +91,12 @@ class HomeView(ttk.Frame):
             for name in self.app.config.jobs:
                 runs = read_runs(get_data_dir(), name, 1)
                 rows[name] = "Never run" if not runs else runs[0].status.value.replace("_", " ").title()
-            self.app.root.after(0, lambda: self._apply_runs(generation, rows))
+            if not self.app.alive:
+                return
+            try:
+                self.app.root.after(0, lambda: self._apply_runs(generation, rows))
+            except RuntimeError:
+                return
 
         threading.Thread(target=worker, daemon=True).start()
         self.app.root.after(60000, lambda: self._refresh_runs() if self.app.visible == "home" else None)

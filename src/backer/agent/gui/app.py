@@ -50,6 +50,7 @@ class BackerAgentApp:
         self.views = {}
         self._generations = {}
         self.running = False
+        self.alive = True
         self.progress_frame = None
         self.progress_at = 0.0
         self.run_cancel = threading.Event()
@@ -226,6 +227,7 @@ class BackerAgentApp:
             return
         if self.tray_icon:
             self.tray_icon.stop()
+        self.alive = False
         self.root.destroy()
 
     def run(self):
@@ -278,7 +280,7 @@ class RunView(ttk.Frame):
         if self.app.running and time.monotonic() - self.app.progress_at > 5:
             self.bar.configure(mode="indeterminate")
             self.bar.start(12)
-            self.label.set("Scanning · waiting for Kopia progress")
+            self.label.set("Scanning · waiting for backup progress")
         elif frame:
             done = frame.get("bytes_done", 0)
             total = frame.get("total_bytes")
@@ -364,7 +366,12 @@ class RestoreView(ttk.Frame):
 
                 job = self.app.config.jobs[job_name]
                 repository = self.app.config.repositories[job.repository]
-                backend, _passphrase, _storage = _repository_backend(repository)
+                backend, passphrase, storage = _repository_backend(repository)
+                from backer.serverless.repositories import probe
+
+                status, _unique_id, message = probe(repository, passphrase, storage)
+                if status != "present":
+                    raise ValueError(message or f"Repository is {status}")
                 rows = backend.list_snapshots(BackupDestination(_repository_destination(repository)))
                 result = (rows, None)
             except Exception as error:
@@ -418,32 +425,35 @@ class RestoreView(ttk.Frame):
         self.status.set("Restoring…")
 
         def worker():
-            from backer.cli import _repository_backend, _repository_destination
-            from backer.core.runner import run_restore
+            try:
+                from backer.cli import _repository_backend, _repository_destination
+                from backer.core.runner import run_restore
 
-            repository = self.app.config.repositories[job.repository]
-            backend, passphrase, storage = _repository_backend(repository)
-            options = {"repository_password": passphrase}
-            if storage and repository.type == "s3":
-                options["s3"] = {
-                    **storage,
-                    "bucket": repository.bucket,
-                    "prefix": repository.prefix or "",
-                    "endpoint": repository.endpoint,
-                    "region": repository.region,
-                }
-            report = run_restore(
-                {
-                    "job_name": self.job_name,
-                    "source_path": _repository_destination(repository),
-                    "destination_path": target,
-                    "snapshot": selected[0],
-                    "source_subfolder": self.include.get().strip(),
-                    "original_source_path": job.source.path,
-                    "clean_restore": self.mode.get() == "REPLACE",
-                    "repository_options": options,
-                }
-            )
+                repository = self.app.config.repositories[job.repository]
+                backend, passphrase, storage = _repository_backend(repository)
+                options = {"repository_password": passphrase}
+                if storage and repository.type == "s3":
+                    options["s3"] = {
+                        **storage,
+                        "bucket": repository.bucket,
+                        "prefix": repository.prefix or "",
+                        "endpoint": repository.endpoint,
+                        "region": repository.region,
+                    }
+                report = run_restore(
+                    {
+                        "job_name": self.job_name,
+                        "source_path": _repository_destination(repository),
+                        "destination_path": target,
+                        "snapshot": selected[0],
+                        "source_subfolder": self.include.get().strip(),
+                        "original_source_path": job.source.path,
+                        "clean_restore": self.mode.get() == "REPLACE",
+                        "repository_options": options,
+                    }
+                )
+            except Exception as error:
+                report = {"success": False, "errors": [str(error)]}
             self.app.root.after(0, lambda: self._done(report))
 
         threading.Thread(target=worker, daemon=True).start()
