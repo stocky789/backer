@@ -547,6 +547,8 @@ def smb_mount_context(
 
     mount_point = Path(tempfile.mkdtemp(prefix="backer_smb_"))
     credentials_path: Path | None = None
+    mounted = False
+    operation_error: BaseException | None = None
 
     try:
         # Build mount command
@@ -594,24 +596,35 @@ def smb_mount_context(
             else:
                 raise RuntimeError(f"Failed to mount SMB share: {error_msg}")
 
+        mounted = True
         print("[SMB] Mounted successfully")
-        yield mount_point
+        try:
+            yield mount_point
+        except BaseException as error:
+            operation_error = error
+            raise
 
     finally:
-        # Unmount
-        print(f"[SMB] Unmounting {mount_point}")
-        try:
-            subprocess.run(["umount", str(mount_point)], capture_output=True, timeout=30)
-        except Exception as e:
-            print(f"[SMB] Warning: unmount failed: {e}")
-
-        # Clean up mount point directory
-        try:
-            mount_point.rmdir()
-        except Exception:
-            pass
+        cleanup_error: BaseException | None = None
+        if mounted:
+            print(f"[SMB] Unmounting {mount_point}")
+            try:
+                result = subprocess.run(["umount", str(mount_point)], capture_output=True, text=True, timeout=30)
+                if result.returncode != 0:
+                    cleanup_error = RuntimeError(f"Failed to unmount SMB share: {result.stderr.strip()}")
+            except Exception as error:
+                cleanup_error = RuntimeError(f"Failed to unmount SMB share: {error}")
+        if not mounted or cleanup_error is None:
+            try:
+                mount_point.rmdir()
+            except OSError as error:
+                cleanup_error = cleanup_error or error
         if credentials_path:
             credentials_path.unlink(missing_ok=True)
+        if cleanup_error:
+            if operation_error:
+                raise cleanup_error from operation_error
+            raise cleanup_error
 
 
 @contextmanager

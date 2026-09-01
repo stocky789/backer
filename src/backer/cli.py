@@ -998,22 +998,28 @@ def restore(
             raise click.ClickException(f"Job '{job}' names an unknown repository")
         destination = _restore_target(destination, into, Path(configured.source.path))
         _restore_prepare_destination(destination, into, config=config, dry_run=dry_run)
-        backend, passphrase, _ = _repository_backend(record)
-        source_path = _repository_destination(record)
-        snapshots = backend.list_snapshots(BackupDestination(source_path))
-        selected, _ = _select_restore_snapshot(snapshots, snapshot, before, latest, computer)
-        if into == "REPLACE" and not dry_run:
-            _confirm_replace(destination, selected)
-        if dry_run:
-            click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
-            return
-        if into in {"NEW", "MERGE"}:
-            destination.mkdir(parents=True, exist_ok=into == "MERGE")
-        moved = _replace_destination(destination) if into == "REPLACE" else None
-        _restore_execute(
-            backend, source_path, destination, selected, include=include, original_source_path=configured.source.path,
-            progress=progress, passphrase=passphrase,
-        )
+        from backer.serverless.repositories import repository_operation_context
+
+        backend, passphrase, storage = _repository_backend(record)
+        with repository_operation_context(record, storage) as operation_record:
+            source_path = _repository_destination(operation_record)
+            snapshots = backend.list_snapshots(BackupDestination(source_path))
+            selected, _ = _select_restore_snapshot(snapshots, snapshot, before, latest, computer)
+            if into == "REPLACE" and not dry_run:
+                _confirm_replace(destination, selected)
+            if dry_run:
+                click.echo(
+                    f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written"
+                )
+                return
+            if into in {"NEW", "MERGE"}:
+                destination.mkdir(parents=True, exist_ok=into == "MERGE")
+            moved = _replace_destination(destination) if into == "REPLACE" else None
+            _restore_execute(
+                backend, source_path, destination, selected,
+                include=include, original_source_path=configured.source.path,
+                progress=progress, passphrase=passphrase,
+            )
         if moved:
             click.echo(f"What was in that folder was moved to {moved}")
             if clean_up_replaced:
@@ -1741,22 +1747,13 @@ def repo_adopt(
     raw_storage = keystore.get(record.storage_password_ref or "", machine_scope=machine_scope)
     storage = json.loads(raw_storage) if record.type == "s3" and raw_storage else None
     operation_context = ExitStack()
-    smb_manager = None
-    smb_created = False
     try:
-        operation_record = operation_context.enter_context(repository_operation_context(record, raw_storage))
+        operation_record = operation_context.enter_context(
+            repository_operation_context(record, raw_storage if record.type == "smb" else storage)
+        )
         status, _, message = probe(operation_record, passphrase, storage)
         if status != "present":
             raise click.ClickException(message or f"Repository is {status}; adoption did not change local config")
-        if record.type == "smb" and sys.platform == "win32":
-            from backer.core.mounts import SMBConnectionManager
-
-            smb_manager = SMBConnectionManager()
-            smb_created = smb_manager._find_existing_connection(record.server or "") is None
-            if not smb_manager.connect_serverless(
-                record.server or "", record.share or "", record.username or "", raw_storage or "", domain=record.domain
-            ):
-                raise click.ClickException("Could not connect to SMB repository for adoption")
         root = Path(_destination(operation_record))
         documents = None
         if record.type == "s3":
@@ -1789,11 +1786,7 @@ def repo_adopt(
     except ValueError as error:
         raise click.ClickException(str(error)) from error
     finally:
-        try:
-            if smb_manager and smb_created:
-                smb_manager.disconnect_serverless(record.server or "", record.share or "")
-        finally:
-            operation_context.close()
+        operation_context.close()
     if as_json:
         click.echo(json.dumps(adopted))
     else:
@@ -2025,15 +2018,13 @@ def repo_list(ctx: click.Context, as_json: bool) -> None:
 @click.pass_context
 def repo_test(ctx: click.Context, name: str) -> None:
     """Probe a repository without creating it."""
-    from backer.core import keystore
-    from backer.serverless.repositories import probe
+    from backer.serverless.repositories import probe, repository_operation_context
 
     _, config = _local_config(ctx)
     _, record = _repository(config, name)
-    passphrase = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
-    if not passphrase:
-        raise click.ClickException("Repository passphrase is unavailable")
-    status, _, message = probe(record, passphrase)
+    _, passphrase, storage = _repository_backend(record)
+    with repository_operation_context(record, storage) as operation_record:
+        status, _, message = probe(operation_record, passphrase, storage)
     if status != "present":
         raise click.ClickException(message or f"Repository is {status}")
     click.echo("Repository connection succeeded")
@@ -2136,7 +2127,7 @@ def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool)
 def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphrase_file: Path | None) -> None:
     """Explicitly store a passphrase only after it opens the existing repository."""
     from backer.core import keystore
-    from backer.serverless.repositories import probe
+    from backer.serverless.repositories import probe, repository_operation_context
 
     if bool(passphrase_stdin) == bool(passphrase_file):
         raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
@@ -2154,7 +2145,8 @@ def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphra
     if record.storage_password_ref:
         storage_secret = keystore.get(record.storage_password_ref, machine_scope=record.scope == "machine")
         storage = json.loads(storage_secret) if storage_secret and record.type == "s3" else storage_secret
-    status, _, message = probe(record, passphrase, storage)
+    with repository_operation_context(record, storage) as operation_record:
+        status, _, message = probe(operation_record, passphrase, storage)
     if status != "present":
         safe_message = _redact_error(
             RuntimeError(message or "The supplied passphrase could not open this existing repository"),

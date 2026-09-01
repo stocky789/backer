@@ -847,6 +847,7 @@ class RestoreView(ttk.Frame):
             try:
                 from backer.cli import _repository_backend, _repository_destination
                 from backer.core.runner import run_restore
+                from backer.serverless.repositories import repository_operation_context
 
                 repository = self.app.config.repositories[repository_name]
                 backend, passphrase, storage = _repository_backend(repository)
@@ -863,18 +864,19 @@ class RestoreView(ttk.Frame):
                         "endpoint": repository.endpoint,
                         "region": repository.region,
                     }
-                report = run_restore(
-                    {
-                        "job_name": self.job_name,
-                        "source_path": _repository_destination(repository),
-                        "destination_path": target,
-                        "snapshot": snapshot,
-                        "source_subfolder": include,
-                        "original_source_path": original_path,
-                        "clean_restore": mode == "REPLACE",
-                        "repository_options": options,
-                    }, on_progress=progress
-                )
+                with repository_operation_context(repository, storage) as operation_record:
+                    report = run_restore(
+                        {
+                            "job_name": self.job_name,
+                            "source_path": _repository_destination(operation_record),
+                            "destination_path": target,
+                            "snapshot": snapshot,
+                            "source_subfolder": include,
+                            "original_source_path": original_path,
+                            "clean_restore": mode == "REPLACE",
+                            "repository_options": options,
+                        }, on_progress=progress
+                    )
             except Exception as error:
                 report = {"success": False, "errors": [str(error)]}
             self.app.marshal(generation, lambda: self._done(report))

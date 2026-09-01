@@ -189,10 +189,11 @@ class RepositoryWizard(ttk.Frame):
         passphrase = self.values.get("passphrase") or "backer-location-probe"
 
         def worker():
-            from backer.serverless.repositories import probe
+            from backer.serverless.repositories import probe, repository_operation_context
 
             try:
-                status, _unique_id, message = probe(record, passphrase, storage)
+                with repository_operation_context(record, storage) as operation_record:
+                    status, _unique_id, message = probe(operation_record, passphrase, storage)
             except Exception as error:
                 status, message = "unavailable", str(error)
 
@@ -546,10 +547,11 @@ class RepositoryWizard(ttk.Frame):
                 passphrase = candidate.get()
 
                 def worker():
-                    from backer.serverless.repositories import probe
+                    from backer.serverless.repositories import probe, repository_operation_context
 
                     try:
-                        result, _unique_id, message = probe(record, passphrase, storage)
+                        with repository_operation_context(record, storage) as operation_record:
+                            result, _unique_id, message = probe(operation_record, passphrase, storage)
                     except Exception as error:
                         result, message = "unavailable", str(error)
 

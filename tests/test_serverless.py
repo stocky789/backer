@@ -1,3 +1,4 @@
+import os
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -756,6 +757,56 @@ def test_linux_smb_repository_context_requires_a_password(monkeypatch) -> None:
     with pytest.raises(ValueError, match="password"):
         with repositories.repository_operation_context(record, None):
             pytest.fail("passwordless SMB mount")
+
+
+@pytest.mark.parametrize("created, expected", [(True, ["connect", "disconnect"]), (False, ["connect"])])
+def test_windows_smb_repository_context_authenticates_before_yield_and_only_disconnects_owned_session(
+    monkeypatch, created: bool, expected: list[str]
+) -> None:
+    from backer.serverless import repositories
+
+    monkeypatch.setattr(repositories.sys, "platform", "win32")
+    order: list[str] = []
+
+    class Manager:
+        serverless_session_created = created
+
+        def connect_serverless(self, *_args, **_kwargs):
+            order.append("connect")
+            return True
+
+        def disconnect_serverless(self, *_args):
+            order.append("disconnect")
+
+    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    record = RepositoryConfig(name="NAS", type="smb", server="nas", share="share", username="user")
+    with repositories.repository_operation_context(record, "secret") as operation_record:
+        assert order == ["connect"]
+        assert operation_record is record
+    assert order == expected
+
+
+def test_smb_mount_context_fails_when_unmount_fails_and_removes_credentials(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    mount_point = tmp_path / "mount"
+    credentials = tmp_path / "credentials"
+    monkeypatch.setattr(mounts.tempfile, "mkdtemp", lambda **_: str(mount_point))
+    monkeypatch.setattr(
+        mounts.tempfile, "mkstemp", lambda **_: (os.open(credentials, os.O_CREAT | os.O_WRONLY), str(credentials))
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return type("Result", (), {"returncode": 0 if command[0] == "mount" else 1, "stderr": "busy"})()
+
+    monkeypatch.setattr(mounts.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="unmount"):
+        with mounts.smb_mount_context("nas", "share", "user", "secret", cifs_check=lambda: True):
+            pass
+    assert calls[-1][0] == "umount"
+    assert not credentials.exists()
 
 
 def test_system_run_refuses_interactive_only_smb_repository(monkeypatch, tmp_path: Path) -> None:

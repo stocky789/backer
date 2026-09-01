@@ -71,8 +71,29 @@ def repository_operation_context(
     record: RepositoryConfig, storage: dict[str, str] | str | None
 ) -> Generator[RepositoryConfig, None, None]:
     """Yield the filesystem path Kopia must use for this operation."""
-    if getattr(record, "type", None) != "smb" or sys.platform == "win32":
+    if getattr(record, "type", None) != "smb":
         yield record
+        return
+    if sys.platform == "win32":
+        if not all((record.server, record.share, record.username)) or (
+            not record.use_existing_session and not isinstance(storage, str)
+        ):
+            raise ValueError("SMB server, share, username and password are required")
+        from backer.core.mounts import SMBConnectionManager
+
+        manager = SMBConnectionManager()
+        connected = (
+            manager.connect_existing_serverless(record.server, record.share, record.path or "")
+            if record.use_existing_session
+            else manager.connect_serverless(record.server, record.share, record.username, storage, domain=record.domain)
+        )
+        if not connected:
+            raise ValueError(f"Could not connect to SMB repository '{record.name}'")
+        try:
+            yield record
+        finally:
+            if getattr(manager, "serverless_session_created", False):
+                manager.disconnect_serverless(record.server, record.share)
         return
     if not all((record.server, record.share, record.username)) or not isinstance(storage, str) or not storage:
         raise ValueError("SMB server, share, username and password are required")
@@ -117,104 +138,76 @@ def add_repository(
     if record.type == "s3":
         parsed = parse_s3_config({**record.model_dump(exclude_none=True), **(storage or {})})
         record = record.model_copy(update={**parsed.public_config, "path": None})
-    smb_manager = None
-    smb_session_created = False
-    if record.type == "smb" and sys.platform == "win32":
-        if not all((record.server, record.share, record.username)) or (
-            not record.use_existing_session and not isinstance(storage, str)
-        ):
-            raise ValueError("SMB server, share, username and password are required")
-        from backer.core.mounts import SMBConnectionManager
-
-        smb_manager = SMBConnectionManager()
-        connected = (
-            smb_manager.connect_existing_serverless(record.server, record.share, record.path or "")
-            if record.use_existing_session
-            else smb_manager.connect_serverless(
-                record.server, record.share, record.username, storage, domain=record.domain
-            )
-        )
-        if not connected:
-            raise ValueError(f"Could not connect to SMB repository '{record.name}'")
-        smb_session_created = not record.use_existing_session and getattr(
-            smb_manager, "serverless_session_created", True
-        )
+    with repository_operation_context(record, storage) as operation_record:
+        status, unique_id, message = probe(operation_record, passphrase, storage)
+        if attach and status != "present":
+            raise ValueError(message or f"Repository is {status}; nothing was created")
+        if init:
+            if status == "present":
+                if not adopt:
+                    raise ValueError("Repository already exists; use --attach or --adopt")
+            elif adopt:
+                raise ValueError(message or "Repository is absent; adoption requires an existing repository")
+            elif status != "absent":
+                raise ValueError(message or f"Repository is {status}; refusing to create")
+            elif status == "absent":
+                created, error = create(operation_record, passphrase, storage)
+                if not created:
+                    raise ValueError(error or "Repository creation failed")
+                status, unique_id, message = probe(operation_record, passphrase, storage)
+                if status != "present":
+                    raise ValueError(message or "Created repository could not be verified")
+                owner_set, owner_error = set_maintenance_owner(operation_record, passphrase, config.agent_id, storage)
+                if not owner_set:
+                    raise ValueError(owner_error or "Could not set repository maintenance owner")
+    repo_id = record.id or uuid4().hex[:12]
+    if repo_id in config.repositories:
+        raise ValueError(f"Repository id '{repo_id}' already exists")
+    passphrase_ref = f"backer/repo/{repo_id}/passphrase"
+    storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
+    references = [passphrase_ref, storage_ref]
     try:
-        with repository_operation_context(record, storage) as operation_record:
-            status, unique_id, message = probe(operation_record, passphrase, storage)
-            if attach and status != "present":
-                raise ValueError(message or f"Repository is {status}; nothing was created")
-            if init:
-                if status == "present":
-                    if not adopt:
-                        raise ValueError("Repository already exists; use --attach or --adopt")
-                elif adopt:
-                    raise ValueError(message or "Repository is absent; adoption requires an existing repository")
-                elif status != "absent":
-                    raise ValueError(message or f"Repository is {status}; refusing to create")
-                elif status == "absent":
-                    created, error = create(operation_record, passphrase, storage)
-                    if not created:
-                        raise ValueError(error or "Repository creation failed")
-                    status, unique_id, message = probe(operation_record, passphrase, storage)
-                    if status != "present":
-                        raise ValueError(message or "Created repository could not be verified")
-                    owner_set, owner_error = set_maintenance_owner(
-                        operation_record, passphrase, config.agent_id, storage
-                    )
-                    if not owner_set:
-                        raise ValueError(owner_error or "Could not set repository maintenance owner")
-        repo_id = record.id or uuid4().hex[:12]
-        if repo_id in config.repositories:
-            raise ValueError(f"Repository id '{repo_id}' already exists")
-        passphrase_ref = f"backer/repo/{repo_id}/passphrase"
-        storage_ref = f"backer/repo/{repo_id}/storage" if storage else None
-        references = [passphrase_ref, storage_ref]
-        try:
-            backend = keystore.put(passphrase_ref, passphrase)
-            if storage_ref:
-                import json
+        backend = keystore.put(passphrase_ref, passphrase)
+        if storage_ref:
+            import json
 
-                keystore.put(
-                    storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False
-                )
-            saved = record.model_copy(
-                update={
-                    "id": repo_id,
-                    "name": name,
-                    "unique_id": unique_id,
-                    "added_at": datetime.now(UTC).isoformat(),
-                    "last_check_status": "present",
-                    "last_check_at": datetime.now(UTC).isoformat(),
-                    "passphrase_ref": passphrase_ref,
-                    "storage_password_ref": storage_ref,
-                }
+            keystore.put(
+                storage_ref, json.dumps(storage) if isinstance(storage, dict) else storage, machine_scope=False
             )
-            config.repositories[repo_id] = saved
+        saved = record.model_copy(
+            update={
+                "id": repo_id,
+                "name": name,
+                "unique_id": unique_id,
+                "added_at": datetime.now(UTC).isoformat(),
+                "last_check_status": "present",
+                "last_check_at": datetime.now(UTC).isoformat(),
+                "passphrase_ref": passphrase_ref,
+                "storage_password_ref": storage_ref,
+            }
+        )
+        config.repositories[repo_id] = saved
+        config.save(config_path)
+    except Exception as error:
+        # These refs are fresh, call-scoped names. Compensate every write
+        # boundary without touching existing config or repository data.
+        config.repositories.pop(repo_id, None)
+        cleanup_errors = []
+        for reference in references:
+            if reference:
+                for machine_scope in (False, True):
+                    try:
+                        keystore.delete(reference, machine_scope=machine_scope)
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(str(cleanup_error))
+        try:
             config.save(config_path)
-        except Exception as error:
-            # These refs are fresh, call-scoped names. Compensate every write
-            # boundary without touching existing config or repository data.
-            config.repositories.pop(repo_id, None)
-            cleanup_errors = []
-            for reference in references:
-                if reference:
-                    for machine_scope in (False, True):
-                        try:
-                            keystore.delete(reference, machine_scope=machine_scope)
-                        except Exception as cleanup_error:
-                            cleanup_errors.append(str(cleanup_error))
-            try:
-                config.save(config_path)
-            except Exception as cleanup_error:
-                cleanup_errors.append(str(cleanup_error))
-            if cleanup_errors:
-                raise RuntimeError(f"{error}; cleanup also failed: {'; '.join(cleanup_errors)}") from error
-            raise
-        return repo_id, backend
-    finally:
-        if smb_manager and smb_session_created:
-            smb_manager.disconnect_serverless(record.server or "", record.share or "")
+        except Exception as cleanup_error:
+            cleanup_errors.append(str(cleanup_error))
+        if cleanup_errors:
+            raise RuntimeError(f"{error}; cleanup also failed: {'; '.join(cleanup_errors)}") from error
+        raise
+    return repo_id, backend
 
 
 def rescope_secrets_for_system(config: BackerConfig) -> None:
