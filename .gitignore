@@ -56,7 +56,6 @@ htmlcov/
 
 # Agent log files
 backer-agent-*.log
-/.backer-bump-version.lock
 
 # ----- Documentation & notes -----
 # NOTE: do not ignore "claude.md" here. Git matches it case-insensitively on
@@ -65,6 +64,7 @@ backer-agent-*.log
 # GEMINI.md and .cursor/rules/. Name personal scratch files something that
 # cannot collide, e.g. notes-local.md, and ignore that instead.
 notes-local.md
+/serverless-backups.md
 
 # ----- Agent & editor tooling -----
 # Local code-index caches and per-machine assistant state. The shared rule

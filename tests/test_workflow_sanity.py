@@ -527,16 +527,41 @@ def test_every_needed_job_is_checked() -> None:
 
 
 def test_cli_choices_match_ci_jobs() -> None:
-    from backer.agent.gui.support import workflow_cells
+    from backer.agent.gui.support import PROVEN_SERVERLESS_CELLS
     from backer.cli import main
+
+    jobs = yaml.safe_load((ROOT / ".gitea/workflows/release-validation.yml").read_text(encoding="utf-8"))["jobs"]
+    release = jobs["release-artifacts-ready"]
+    gate = next(step for step in release["steps"] if step.get("name") == "Check release jobs")
+    mandatory = set(re.search(r"for job in ([A-Z0-9_ ]+); do", gate["run"]).group(1).split())
+    result_jobs = {
+        name: match.group(1)
+        for name, value in gate["env"].items()
+        if (match := re.search(r"needs\.([\w-]+)\.result", value))
+    }
+    job_types = {
+        "serverless-local": "local",
+        "serverless-smb-linux": "smb",
+        "serverless-smb-windows": "smb",
+        "s3-contract": "s3",
+    }
+    assert set(job_types) <= set(release["needs"])
+    assert set(job_types) <= {result_jobs[result] for result in mandatory}
+    platforms = {"ubuntu-latest": "linux", "windows-latest": "win32"}
+    cells = {
+        (platforms[os], job_types[name])
+        for name in job_types
+        for os in jobs[name].get("strategy", {}).get("matrix", {}).get("os", [jobs[name]["runs-on"]])
+    }
 
     context = click.Context(main)
     repo = main.get_command(context, "repo")
     commands = (repo.get_command(context, "add"), main.get_command(context, "init"))
-    expected = {kind for _, kind in workflow_cells(ROOT / ".gitea/workflows/release-validation.yml")}
+    expected = {kind for _, kind in cells}
     for command in commands:
         repository_option = next(option for option in command.params if option.name == "repository_type")
         assert set(repository_option.type.choices) == expected
+    assert PROVEN_SERVERLESS_CELLS == cells
 
 
 def test_changelog_follows_the_documented_format() -> None:
