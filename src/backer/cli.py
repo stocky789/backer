@@ -142,6 +142,7 @@ class InitStep:
     required: bool | str
     serializer: Callable[[Any], list[str]]
     wizard_group: int | None = None
+    render_applicable: Callable[[dict[str, Any]], bool] | None = None
 
 
 def _always(_: dict[str, Any]) -> bool:
@@ -260,6 +261,7 @@ INIT_STEPS = (
         "passphrase",
         _value("--passphrase-file"),
         3,
+        _always,
     ),
     InitStep(
         "generate_passphrase",
@@ -395,7 +397,10 @@ def _render_init_command(values: dict[str, Any]) -> str:
     if rendered.get("_generated_passphrase") and rendered.get("passphrase_out"):
         rendered.update(generate_passphrase=False, passphrase_file=rendered["passphrase_out"], passphrase_out=None)
     arguments = [
-        part for step in INIT_STEPS if step.applicable(rendered) for part in step.serializer(rendered[step.key])
+        part
+        for step in INIT_STEPS
+        if (step.render_applicable or step.applicable)(rendered)
+        for part in step.serializer(rendered[step.key])
     ]
     return "backer init " + " ".join(shlex.quote(argument) for argument in arguments)
 

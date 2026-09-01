@@ -40,6 +40,21 @@ def _step(group: int, key: str):
     return next(step for step in wizard_steps(group) if step.key == key)
 
 
+def _ask_step(step, **kwargs: Any) -> Any:
+    """Prompt until the InitStep that owns this field accepts the answer."""
+    while True:
+        value = Prompt.ask(step.prompt, **kwargs)
+        if step.validator(value):
+            return value
+        console.print(f"[red]{step.prompt} is not valid.[/red]")
+
+
+def _accepted(step, value: Any) -> Any:
+    if not step.validator(value):
+        raise ValueError(f"{step.prompt} is not valid")
+    return value
+
+
 def valid_folder_name(name: str) -> bool:
     return bool(name) and len(name) <= 255 and name[0] != "." and name not in {".", ".."} and not any(
         separator in name for separator in ("/", "\\")
@@ -187,11 +202,14 @@ def smb_create_directory(server: str, share: str, path: str, name: str, username
         raise ValueError("Could not create folder")
 
 
-def _ask_path(label: str) -> str:
-    value = Prompt.ask(label, default="").strip()
-    if value:
-        return value
-    return str(browse_directory(Path.cwd(), local_entries, Prompt.ask))
+def _ask_path(step) -> str:
+    while True:
+        value = Prompt.ask(step.prompt, default="").strip()
+        if not value:
+            value = str(browse_directory(Path.cwd(), local_entries, Prompt.ask))
+        if step.validator(value):
+            return value
+        console.print(f"[red]{step.prompt} is not valid.[/red]")
 
 
 def _passphrase(values: dict[str, Any]) -> None:
@@ -202,6 +220,7 @@ def _passphrase(values: dict[str, Any]) -> None:
     export = Prompt.ask(_step(3, "passphrase_out").prompt).strip()
     if not export:
         raise WizardAbortError()
+    _accepted(_step(3, "passphrase_out"), Path(export))
     console.print(f"[bold]Repository passphrase[/bold]\n{phrase}")
     console.print(f"This will write your passphrase to {export} in plain text after Create.")
     Prompt.ask("Press Enter after saving it", default="")
@@ -228,39 +247,42 @@ def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
     result = dict(values)
     first = wizard_steps(1)[0]
     console.print(f"[bold]Step 1 of 5[/bold]  {first.prompt}")
-    selected = Prompt.ask(first.prompt, choices=("1", "2", "3"), default="1")
-    result["repository_type"] = {"1": "local", "2": "smb", "3": "s3"}[selected]
+    selected = _ask_step(first, choices=("local", "smb", "s3"), default="local")
+    result["repository_type"] = selected
     console.print("[bold]Step 2 of 5[/bold]  Repository")
     if result["repository_type"] == "local":
-        result["path"] = _ask_path(_step(2, "path").prompt)
+        result["path"] = _ask_path(_step(2, "path"))
     elif result["repository_type"] == "smb":
-        result["host"] = Prompt.ask(_step(2, "host").prompt)
-        result["username"] = Prompt.ask(_step(2, "username").prompt)
+        result["host"] = _ask_step(_step(2, "host"))
+        result["username"] = _ask_step(_step(2, "username"))
         password = Prompt.ask("Password", password=True)
-        result["share"] = choose_smb_share(result["host"], result["username"], password)
+        result["share"] = _accepted(
+            _step(2, "share"), choose_smb_share(result["host"], result["username"], password)
+        )
         result["path"] = browse_smb_directory(result["host"], result["share"], result["username"], password)
-        result["password_stdin"] = True
+        result["password_stdin"] = _accepted(_step(2, "password_stdin"), True)
         result["_storage_password"] = password
     else:
         keys = {"bucket", "prefix", "endpoint", "region", "access_key_id"}
         fields = [step for step in wizard_steps(2) if step.key in keys]
         for step in fields:
-            result[step.key] = Prompt.ask(step.prompt, default="" if step.key == "prefix" else None)
+            result[step.key] = _ask_step(step, default="" if step.key == "prefix" else None)
         secret = Prompt.ask(_step(2, "secret_key_stdin").prompt, password=True)
-        result["secret_key_stdin"] = True
+        result["secret_key_stdin"] = _accepted(_step(2, "secret_key_stdin"), True)
         result["_storage_password"] = json.dumps(
             {"access_key_id": result["access_key_id"], "secret_access_key": secret}
         )
     console.print("[bold]Step 3 of 5[/bold]  Encryption")
     _passphrase(result)
     console.print("[bold]Step 4 of 5[/bold]  What to back up")
-    result["source"] = (_ask_path(_step(4, "source").prompt),)
-    excludes = Prompt.ask(_step(4, "exclude").prompt, default="")
+    result["source"] = (_ask_path(_step(4, "source")),)
+    excludes = _ask_step(_step(4, "exclude"), default="")
     result["exclude"] = tuple(item.strip() for item in excludes.split(",") if item.strip())
     console.print("[bold]Step 5 of 5[/bold]  Schedule")
     schedule = Prompt.ask(_step(5, "schedule").prompt, choices=("1", "2", "3", "4"), default="1")
     schedules = {"1": "0 2 * * *", "2": "0 * * * *", "3": None, "4": Prompt.ask("Cron")}
     result["schedule"], result["no_schedule"] = schedules[schedule], schedule == "3"
+    _accepted(_step(5, "schedule") if result["schedule"] else _step(5, "no_schedule"), result["schedule"] or True)
     result["repo_name"] = Prompt.ask("Repository name", default=result["repo_name"])
     result["job_name"] = Prompt.ask("Job name", default=result["job_name"])
     if not Confirm.ask("Create this?", default=True):

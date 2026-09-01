@@ -66,6 +66,49 @@ def test_wizard_replay_uses_the_saved_passphrase_file(monkeypatch: pytest.Monkey
     assert calls == ["repo", "job"]
 
 
+def test_wizard_replay_renders_passphrase_file_while_interactive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from backer.cli import _render_init_command, main
+
+    monkeypatch.setattr("backer.cli._interactive", lambda: True)
+    values = {
+        "repository_type": "local", "path": str(tmp_path), "source": (str(tmp_path),), "exclude": (),
+        "no_schedule": True, "schedule": None, "repo_name": "repository", "job_name": "backup",
+        "generate_passphrase": True, "passphrase_file": None, "passphrase_out": tmp_path / "recovery.txt",
+        "print_passphrase": False, "_generated_passphrase": "six-safe-words-for-this-test-only",
+    }
+    values.update(
+        host=None, share=None, username=None, password_stdin=False, password_file=None, password_env=False,
+        bucket=None, prefix=None, endpoint=None, region=None, access_key_id=None, secret_key_stdin=False,
+        secret_key_file=None, secret_key_env=False, passphrase_stdin=False, keep_last=None, keep_daily=None,
+        keep_weekly=None, keep_monthly=None, keep_yearly=None, update_password=False, update_passphrase=False,
+        install=False,
+    )
+
+    command = _render_init_command(values)
+    assert "--passphrase-file" in command
+    (tmp_path / "recovery.txt").write_text("six-safe-words-for-this-test-only\n", encoding="utf-8")
+    monkeypatch.setattr("backer.cli._interactive", lambda: False)
+    calls: list[str] = []
+    monkeypatch.setattr("backer.cli.repo_add", lambda **_kwargs: calls.append("repo"))
+    monkeypatch.setattr("backer.cli.job_create", lambda **_kwargs: calls.append("job"))
+
+    result = CliRunner().invoke(main, shlex.split(command.removeprefix("backer ")))
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["repo", "job"]
+
+
+def test_wizard_reprompts_when_shared_validator_rejects_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backer.client.serverless_wizard import _ask_step, wizard_steps
+
+    answers = iter(("not-a-type", "local"))
+    monkeypatch.setattr("backer.client.serverless_wizard.Prompt.ask", lambda *_args, **_kwargs: next(answers))
+
+    assert _ask_step(wizard_steps(1)[0]) == "local"
+
+
 def test_aborting_passphrase_export_writes_no_recovery_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from backer.client.serverless_wizard import WizardAbortError, _passphrase
 
