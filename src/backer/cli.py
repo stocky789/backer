@@ -876,6 +876,10 @@ def restore(
         click.echo("Restore completed")
         return
     if from_path:
+        if passphrase_stdin and password_stdin:
+            raise click.UsageError(
+                "--passphrase-stdin and --password-stdin cannot share stdin; use a file or environment for one secret"
+            )
         passphrase_sources = (passphrase_stdin, passphrase_file, os.environ.get("BACKER_REPOSITORY_PASSWORD"))
         if sum(bool(value) for value in passphrase_sources) != 1:
             raise click.UsageError(
@@ -912,10 +916,16 @@ def restore(
             manager = SMBConnectionManager()
             if not manager.connect_serverless(parts[0], parts[1], username, storage_password, domain=domain):
                 raise click.ClickException("Could not connect to the SMB repository; nothing was changed")
-            def cleanup() -> None:
-                manager.disconnect_serverless(parts[0], parts[1])
+            if manager.serverless_session_created:
+                def cleanup() -> None:
+                    manager.disconnect_serverless(parts[0], parts[1])
         backend = KopiaBackend({"repository_password": passphrase})
-        probe_status, _ = backend.repository_probe(from_path)
+        try:
+            probe_status, _ = backend.repository_probe(from_path)
+        except BaseException:
+            if cleanup:
+                cleanup()
+            raise
         if probe_status != "present":
             if cleanup:
                 cleanup()
@@ -923,7 +933,12 @@ def restore(
             raise click.ClickException(
                 _redact_error(RuntimeError(message), passphrase) + "; nothing was created"
             )
-        rows = backend.list_snapshots(BackupDestination(from_path))
+        try:
+            rows = backend.list_snapshots(BackupDestination(from_path))
+        except BaseException:
+            if cleanup:
+                cleanup()
+            raise
         try:
             selected, selected_row = _select_restore_snapshot(rows, snapshot, before, latest, computer)
         except click.ClickException:
@@ -934,11 +949,16 @@ def restore(
         destination = _restore_target(destination, into, Path(original_path) if original_path else None)
         empty_config = type("RestoreConfig", (), {"repositories": {}})()
         repository_paths = () if from_path.startswith(("\\\\", "//", "s3://")) else (Path(from_path),)
-        _restore_prepare_destination(
-            destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
-        )
-        if into == "REPLACE" and not dry_run:
-            _confirm_replace(destination, selected)
+        try:
+            _restore_prepare_destination(
+                destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
+            )
+            if into == "REPLACE" and not dry_run:
+                _confirm_replace(destination, selected)
+        except BaseException:
+            if cleanup:
+                cleanup()
+            raise
         if dry_run:
             click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
             if cleanup:
@@ -968,43 +988,11 @@ def restore(
         click.echo("Restore completed")
         click.echo("To keep using this repository: backer repo add NAME --attach, then backer job create")
         return
-    repository_password = os.environ.get("BACKER_REPOSITORY_PASSWORD")
-    if not source or not destination or not repository_password:
-        raise click.UsageError("SOURCE and DESTINATION are required")
-    from backer.backends.kopia import KopiaBackend
-
-    console.print(f"[bold]Restoring[/bold] {source} → {destination}")
-
-    try:
-        be = KopiaBackend({"repository_password": repository_password})
-        src = BackupDestination(path=source)
-        empty_config = type("RestoreConfig", (), {"repositories": {}})()
-        repository_paths = () if source.startswith(("\\\\", "//", "s3://")) else (Path(source),)
-        _restore_prepare_destination(
-            destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
+    if source:
+        raise click.UsageError(
+            "Positional restore was removed; use restore --from PATH with an immutable snapshot selector"
         )
-        if dry_run:
-            click.echo(f"Dry run: would restore from {source} to {destination}. Nothing was written")
-            return
-        if into == "REPLACE":
-            _confirm_replace(destination, snapshot or "latest")
-        if into == "MERGE":
-            destination.mkdir(parents=True, exist_ok=True)
-        moved = _replace_destination(destination) if into == "REPLACE" else None
-
-        with console.status("Restoring..."):
-            _restore_execute(
-                be, src.path, destination, snapshot or "latest", include=include, original_source_path=None,
-                progress=progress, passphrase=repository_password,
-            )
-
-        console.print("[green]✓ Restore completed[/green]")
-        if moved:
-            click.echo(f"What was in that folder was moved to {moved}")
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {_redact_error(e, repository_password)}")
-        raise SystemExit(1)
+    raise click.UsageError("Choose --job NAME or --from PATH")
 
 
 # ============ Server commands ============

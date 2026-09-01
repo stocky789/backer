@@ -108,6 +108,26 @@ def test_serverless_smb_system_reclaims_1219_without_cmdkey(monkeypatch) -> None
     assert not any(command[0] == "cmdkey" for command in calls)
 
 
+def test_serverless_smb_reuses_same_user_without_deleting(monkeypatch) -> None:
+    from backer.core.mounts import SMBConnectionManager
+
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object):
+        calls.append(command)
+        if command[0:3] == ["net", "use", "\\\\nas\\share"] and "*" in command:
+            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "System error 1219"})()
+        if command == ["net", "use"]:
+            return type("Result", (), {"returncode": 0, "stdout": "OK \\\\nas\\share", "stderr": ""})()
+        return type("Result", (), {"returncode": 0, "stdout": "User name: backup", "stderr": ""})()
+
+    monkeypatch.setattr("backer.core.mounts.subprocess.run", run)
+    manager = SMBConnectionManager()
+    assert manager.connect_serverless("nas", "share", "backup", "secret")
+    assert not manager.serverless_session_created
+    assert ["net", "use", "\\\\nas\\share", "/delete", "/y"] not in calls
+
+
 def test_rescope_repository_secrets_to_machine(monkeypatch) -> None:
     from backer.serverless.repositories import rescope_secrets_for_system
 

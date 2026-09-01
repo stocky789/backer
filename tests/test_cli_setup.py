@@ -57,10 +57,9 @@ def test_direct_commands_pass_repository_password_to_kopia(tmp_path, monkeypatch
     monkeypatch.setattr("backer.backends.kopia.KopiaBackend", KopiaBackend)
     runner = CliRunner()
     backup = runner.invoke(main, ["backup", str(tmp_path), "repo"], env={"BACKER_REPOSITORY_PASSWORD": "from-env"})
-    restore = runner.invoke(
-        main, ["restore", "repo", str(tmp_path)], env={"BACKER_REPOSITORY_PASSWORD": "from-restore-env"}
-    )
+    restore = runner.invoke(main, ["restore", "repo", str(tmp_path)])
 
     assert backup.exit_code == 0
-    assert restore.exit_code == 0
-    assert passwords == ["from-env", "from-restore-env"]
+    assert restore.exit_code == 2
+    assert "Positional restore was removed" in restore.output
+    assert passwords == ["from-env"]
