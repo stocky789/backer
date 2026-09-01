@@ -15,6 +15,7 @@ from pathlib import Path
 from secrets import choice
 from tempfile import TemporaryDirectory
 from typing import Any
+from uuid import uuid4
 
 import click
 from rich.console import Console
@@ -1590,9 +1591,6 @@ def repo_add(
             if not _interactive() and not (passphrase_out or print_passphrase):
                 _missing_flags("repo add " + name, ["--passphrase-out FILE or --print-passphrase"])
             passphrase = generated_passphrase or _generated_passphrase()
-            if passphrase_out:
-                passphrase_out.parent.mkdir(parents=True, exist_ok=True)
-                passphrase_out.write_text(passphrase + "\n", encoding="utf-8")
             if print_passphrase and generated_passphrase is None:
                 console.print(passphrase)
         else:
@@ -1656,6 +1654,7 @@ def repo_add(
                 ],
             )
         record = RepositoryConfig(
+            id=uuid4().hex[:12],
             name=name,
             type=repository_type,
             path=path,
@@ -1669,6 +1668,8 @@ def repo_add(
             region=region,
             path_style=path_style or None,
         )
+        if passphrase_out:
+            _write_recovery_export(passphrase_out, name, record.id, _repository_destination(record), passphrase)
         repo_id, backend = add_repository(
             config,
             config_path,
