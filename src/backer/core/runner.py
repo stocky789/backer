@@ -178,6 +178,27 @@ def run_backup(
             job, job.get("destination_path", ""), backend_name, result, started_at, finished_at, snapshot_id, client_id
         )
         return report
+    except KeyboardInterrupt:
+        finished_at = datetime.now()
+        _progress(on_progress, run_id=run_id, status="failed", message="Backup interrupted")
+        report = {
+            "run_id": run_id,
+            "job_name": job_name,
+            "client_id": client_id,
+            "success": False,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "bytes_transferred": 0,
+            "files_transferred": 0,
+            "errors": ["Backup interrupted"],
+            "output": "",
+        }
+        try:
+            if on_result:
+                on_result(report)
+        except Exception as report_err:
+            print(f"[BACKUP] Failed to report interruption: {report_err}")
+        raise
     except Exception as e:
         finished_at = datetime.now()
         error_msg = str(e)
@@ -258,6 +279,21 @@ def run_restore(
         )
         source = BackupDestination(path=source_path)
         destination = Path(job["destination_path"])
+
+        def progress_callback(
+            bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0
+        ) -> None:
+            event = {
+                "run_id": run_id,
+                "status": "running",
+                "current_file": current_file[:200] if current_file else None,
+                "bytes_processed": bytes_done,
+                "files_processed": files_done,
+            }
+            if total_bytes > 0:
+                event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))
+            _progress(on_progress, **event)
+
         clean_restore = job.get("clean_restore", False)
         restore_snapshot = job.get("snapshot")
         staged_destination: Path | None = None
@@ -336,6 +372,7 @@ def run_restore(
                 destination=destination,
                 snapshot=restore_snapshot,
                 dry_run=dry_run,
+                progress_callback=progress_callback,
                 original_source_path=original_source_path,
                 include_path=job.get("source_subfolder") or None,
             )
@@ -416,6 +453,27 @@ def run_restore(
             except Exception as meta_err:
                 print(f"[RESTORE] Warning - failed to write restore metadata: {meta_err}")
         return report
+    except KeyboardInterrupt:
+        finished_at = datetime.now()
+        _progress(on_progress, run_id=run_id, status="failed", message="Restore interrupted")
+        report = {
+            "run_id": run_id,
+            "job_name": f"restore:{job_name}",
+            "client_id": client_id,
+            "success": False,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "bytes_transferred": 0,
+            "files_transferred": 0,
+            "errors": ["Restore interrupted"],
+            "output": "",
+        }
+        try:
+            if on_result:
+                on_result(report)
+        except Exception:
+            pass
+        raise
     except Exception as e:
         finished_at = datetime.now()
         _progress(on_progress, run_id=run_id, status="failed", progress_percent=0, message=str(e)[:200])

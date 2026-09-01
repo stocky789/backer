@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from backer.backends.base import BackendResult, OperationType
 from backer.client.agent import BackerAgent
 from backer.core import runner
@@ -57,6 +59,43 @@ def test_proxy_restore_passes_both_agent_credentials(tmp_path: Path, monkeypatch
     )
 
     assert options == [{"client_id": "agent", "client_secret": "secret", "location": "proxy://repo"}]
+
+
+def test_restore_passes_progress_callback_without_inspecting_backend_signature(tmp_path: Path, monkeypatch):
+    """Restore frames must reach the caller even though support is learned at runtime."""
+    received = []
+
+    class Backend(_Backend):
+        def restore(self, **kwargs):
+            received.append(kwargs["progress_callback"])
+            return super().restore(**kwargs)
+
+    monkeypatch.setattr(runner, "get_backend", lambda *_: Backend())
+
+    runner.run_restore({"job_name": "job", "source_path": "proxy://repo", "destination_path": str(tmp_path)})
+
+    assert len(received) == 1
+
+
+def test_backup_reports_interruption_once_before_reraising(tmp_path: Path, monkeypatch):
+    """An interrupted Kopia process must create one failed result, not silently disappear or retry."""
+    reports = []
+
+    class Backend(_Backend):
+        def backup(self, **kwargs):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "get_backend", lambda *_: Backend())
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_backup(
+            {"job_name": "job", "source_path": str(tmp_path), "destination_path": str(tmp_path / "repo")},
+            on_result=reports.append,
+        )
+
+    assert len(reports) == 1
+    assert reports[0]["success"] is False
+    assert reports[0]["errors"] == ["Backup interrupted"]
 
 
 def test_one_backend_instance_per_run_and_agent_forwards_credentials(tmp_path: Path, monkeypatch):

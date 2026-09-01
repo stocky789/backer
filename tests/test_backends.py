@@ -1,6 +1,8 @@
 """Tests for backup backends."""
 
+import os
 import signal
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -219,13 +221,38 @@ class TestKopiaBackend:
             def send_signal(self, value: int) -> None:
                 sent.append(value)
 
-        monkeypatch.setattr("backer.backends.kopia.os.name", "posix")
         monkeypatch.setattr("backer.backends.kopia.subprocess.Popen", lambda *_args, **_kwargs: Process())
 
         with pytest.raises(KeyboardInterrupt):
             _run_kopia_with_progress(["kopia"], {}, lambda _: None, None, 60)
 
-        assert sent == [signal.SIGINT]
+        assert sent == [signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT]
+
+    def test_progress_runner_cleans_up_after_timeout_before_reraising(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wait timeout must signal and drain Kopia before the backend reports its normal timeout result."""
+        sent: list[int] = []
+        waits: list[int | None] = []
+
+        class Process:
+            stdout = StringIO("")
+            stderr = StringIO("")
+
+            def wait(self, timeout: int | None = None) -> int:
+                waits.append(timeout)
+                if len(waits) == 1:
+                    raise subprocess.TimeoutExpired(["kopia"], timeout)
+                return 0
+
+            def send_signal(self, value: int) -> None:
+                sent.append(value)
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.Popen", lambda *_args, **_kwargs: Process())
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_kopia_with_progress(["kopia"], {}, lambda _: None, None, 1)
+
+        assert sent == [signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT]
+        assert waits == [1, 30]
 
     def test_connect_requires_repository_password_before_kopia_runs(self) -> None:
         success, message = KopiaBackend()._connect_repo("/backup/repo")

@@ -146,6 +146,9 @@ def _run_local_job(
         if not report["success"]:
             raise RuntimeError("; ".join(report.get("errors") or ["Backup failed"]))
         return report
+    except KeyboardInterrupt:
+        report = {**report, "success": False, "errors": ["Backup interrupted"]}
+        raise
     except Exception as error:
         text = str(error)
         for secret in secrets:

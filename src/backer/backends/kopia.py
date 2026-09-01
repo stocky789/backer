@@ -137,7 +137,7 @@ def _run_kopia_with_progress(
     stderr_reader.start()
     try:
         returncode = process.wait(timeout=timeout)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, subprocess.TimeoutExpired):
         _stop_kopia_process(process)
         raise
     finally:
