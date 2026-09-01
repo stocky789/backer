@@ -40,3 +40,9 @@ Crash-recovery staging cleanup fix:
 - Each verified update staging file is durably recorded in the lock journal before its descriptor closes. Recovery validates and deletes only those recorded, unchanged identities after restoring all originals.
 - `tests/test_bump_version.py`: crash on the second target replacement, recover on the next invocation, assert all originals return and no `.backer-version-*` files remain.
 - `29 passed, 1 skipped` — `python scripts/check_changelog.py` passed — `ruff check scripts/bump_version.py tests/test_bump_version.py` and `git diff --check` passed.
+
+Crash-boundary staging fix:
+
+- Update staging names, byte lengths, and SHA-256 values are journaled before their files are created or populated. Recovery verifies that exact content before deleting a recorded path; legacy identity records remain supported.
+- Added injected crashes before and during journal-record writes: normal recovery restores originals with no temp, while a corrupted record fails closed before any update temp exists.
+- `31 passed, 1 skipped` — `python scripts/check_changelog.py`, `ruff check scripts/bump_version.py tests/test_bump_version.py`, and `git diff --check` passed.

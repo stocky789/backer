@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -273,7 +274,9 @@ def _identity(state):
 @dataclass(frozen=True)
 class Staged(os.PathLike):
     path: Path
-    identity: tuple
+    identity: tuple | None
+    size: int | None = None
+    sha256: str | None = None
 
     def __fspath__(self):
         return os.fspath(self.path)
@@ -284,7 +287,15 @@ def cleanup_staged(staged):
     try:
         fd = open_file(staged.path, write=os.name == "nt", delete=os.name == "nt")
         try:
-            if _identity(os.fstat(fd)) != staged.identity:
+            state = os.fstat(fd)
+            if staged.identity is not None:
+                matches = _identity(state) == staged.identity
+            else:
+                matches = (
+                    state.st_size == staged.size
+                    and hashlib.sha256(_read_all(fd, state.st_size)).hexdigest() == staged.sha256
+                )
+            if not matches:
                 return
             if os.name == "nt":
                 import msvcrt
@@ -381,10 +392,31 @@ class ReleaseLock:
         os.fsync(self.fd)
 
 
-def stage(target, data, mode, atime_ns, mtime_ns, record=None):
+def reserve_stage(target, data):
+    return Staged(
+        target.parent / f".backer-version-{secrets.token_hex(16)}",
+        None,
+        len(data),
+        hashlib.sha256(data).hexdigest(),
+    )
+
+
+def _open_staged(path):
+    return os.open(
+        path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+        0o600,
+    )
+
+
+def stage(target, data, mode, atime_ns, mtime_ns, reserved=None):
     _validate_parent(target.parent)
-    fd, name = tempfile.mkstemp(prefix=".backer-version-", dir=target.parent)
-    path = Path(name)
+    if reserved is None:
+        fd, name = tempfile.mkstemp(prefix=".backer-version-", dir=target.parent)
+        path = Path(name)
+    else:
+        path = reserved.path
+        fd = _open_staged(path)
     safe = False
     staged = None
     try:
@@ -398,8 +430,6 @@ def stage(target, data, mode, atime_ns, mtime_ns, record=None):
         _set_times(fd, atime_ns, mtime_ns)
         os.fsync(fd)
         staged = Staged(path, _identity(os.fstat(fd)))
-        if record is not None:
-            record(staged)
     except BaseException:
         staged = Staged(path, _identity(os.fstat(fd))) if safe else None
         os.close(fd)
@@ -443,16 +473,29 @@ def validate(journal):
         if staged is not None:
             if (
                 not isinstance(staged, dict)
-                or set(staged) != {"name", "identity"}
-                or not isinstance(staged["name"], str)
+                or not isinstance(staged.get("name"), str)
                 or not staged["name"].startswith(".backer-version-")
                 or Path(staged["name"]).name != staged["name"]
-                or not isinstance(staged["identity"], list)
-                or len(staged["identity"]) != 6
-                or not all(_metadata(value, MAX_TIME_NS) for value in staged["identity"])
             ):
                 raise TransactionError("invalid recovery journal")
-            staged = Staged(ROOT / rel.parent / staged["name"], tuple(staged["identity"]))
+            path = ROOT / rel.parent / staged["name"]
+            if set(staged) == {"name", "identity"}:
+                if (
+                    not isinstance(staged["identity"], list)
+                    or len(staged["identity"]) != 6
+                    or not all(_metadata(value, MAX_TIME_NS) for value in staged["identity"])
+                ):
+                    raise TransactionError("invalid recovery journal")
+                staged = Staged(path, tuple(staged["identity"]))
+            elif (
+                set(staged) == {"name", "size", "sha256"}
+                and _metadata(staged["size"], MAX_JOURNAL)
+                and isinstance(staged["sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", staged["sha256"])
+            ):
+                staged = Staged(path, None, staged["size"], staged["sha256"])
+            else:
+                raise TransactionError("invalid recovery journal")
         checked.append((ROOT / rel, data, entry["mode"], entry["atime_ns"], entry["mtime_ns"], staged))
     return checked
 
@@ -535,12 +578,11 @@ def write_all(updates, originals, lock):
     staged, replaced = [], False
     try:
         for index, (target, state) in enumerate(metadata):
-            def record(source, *, entry=entries[index]):
-                entry["staged"] = {"name": source.path.name, "identity": list(source.identity)}
-                lock.save(journal)
-
+            source = reserve_stage(target, updates[target])
+            entries[index]["staged"] = {"name": source.path.name, "size": source.size, "sha256": source.sha256}
+            lock.save(journal)
             staged.append(
-                (stage(target, updates[target], state.st_mode, state.st_atime_ns, state.st_mtime_ns, record), target)
+                (stage(target, updates[target], state.st_mode, state.st_atime_ns, state.st_mtime_ns, source), target)
             )
         for source, target in staged:
             replaced = True

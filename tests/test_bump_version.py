@@ -188,6 +188,58 @@ def test_crash_recovers_on_next_invocation(tmp_path, monkeypatch):
     assert not temps(tmp_path)
 
 
+def test_crash_before_staging_record_leaves_no_update_temp(tmp_path, monkeypatch):
+    setup(tmp_path)
+    m = load()
+    before = {p: p.read_bytes() for p in paths(tmp_path)}
+    real = m.ReleaseLock.save
+    calls = 0
+
+    def crash(lock, value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            assert not temps(tmp_path)
+            raise KeyboardInterrupt
+        real(lock, value)
+
+    monkeypatch.setattr(m.ReleaseLock, "save", crash)
+    with pytest.raises(KeyboardInterrupt):
+        run(m, tmp_path, "0.9.0")
+    monkeypatch.undo()
+    assert run(load(), tmp_path, "bad") == 2
+    assert {p: p.read_bytes() for p in paths(tmp_path)} == before
+    assert not temps(tmp_path)
+
+
+def test_crash_during_staging_record_fails_closed_without_update_temp(tmp_path, monkeypatch):
+    setup(tmp_path)
+    m = load()
+    before = {p: p.read_bytes() for p in paths(tmp_path)}
+    real = m.ReleaseLock.save
+    calls = 0
+
+    def crash(lock, value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            assert not temps(tmp_path)
+            os.lseek(lock.fd, 0, os.SEEK_SET)
+            os.ftruncate(lock.fd, 0)
+            m.write_all_fd(lock.fd, b"1{")
+            os.fsync(lock.fd)
+            raise KeyboardInterrupt
+        real(lock, value)
+
+    monkeypatch.setattr(m.ReleaseLock, "save", crash)
+    with pytest.raises(KeyboardInterrupt):
+        run(m, tmp_path, "0.9.0")
+    monkeypatch.undo()
+    assert run(load(), tmp_path, "bad") == 1
+    assert {p: p.read_bytes() for p in paths(tmp_path)} == before
+    assert not temps(tmp_path)
+
+
 def test_recovery_preserves_original_bytes_mode_and_mtime(tmp_path):
     setup(tmp_path)
     m = load()
