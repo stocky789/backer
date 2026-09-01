@@ -89,8 +89,8 @@ ifndef VERSION
 	$(error VERSION is required. Usage: make release VERSION=0.1.0)
 endif
 	@echo "Creating release v$(VERSION)..."
-	@sed -i 's/version = ".*"/version = "$(VERSION)"/' pyproject.toml
-	git add pyproject.toml
+	@python scripts/bump_version.py $(VERSION)
+	git add pyproject.toml src/backer/_version.py installer/backer-agent.iss android/app/build.gradle.kts CHANGELOG.md
 	git commit -m "Release v$(VERSION)"
 	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"
 	@echo ""

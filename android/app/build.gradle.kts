@@ -15,8 +15,8 @@ android {
         applicationId = "com.backer.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 800
-        versionName = "0.8.0"
+        versionCode = 900
+        versionName = "0.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

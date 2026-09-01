@@ -18,6 +18,32 @@ Minor Features are additions and adjustments that fit into the existing workflow
 Bug Fixes are corrections to behaviour that was already meant to work.
 The release workflow publishes the top section verbatim as the release notes.
 
+## 0.9.0
+
+### Major Features
+
+- Serverless backups run directly from Linux and Windows clients to local directories, SMB shares, and S3-compatible storage.
+- Operators can recover repositories orphaned by 0.8.0: set the existing repository passphrase, verify from a fresh config, rotate it, then verify again. A lost passphrase cannot be recovered.
+
+### Minor Features
+
+- Desktop and CLI backup, restore, verification, retention, and repository flows share one serverless configuration model.
+- Serverless jobs store their own metadata, credentials, Kopia config, cache, and logs outside the repository.
+
+### Bug Fixes
+
+- Retention now deletes only expired snapshots for the configured source, reports dry runs without an unsupported flag, and keeps yearly policies.
+- Repository verification now reads and rehashes snapshot content through Kopia's supported command.
+- Concurrent jobs no longer share or disconnect each other's Kopia configuration.
+- Backup never creates a repository from an unreachable path or a wrong passphrase.
+- Existing repository records can now store their known encryption passphrase.
+- Snapshot file lookup now uses supported Kopia arguments and restores reject same-named source paths from another location.
+- Sidecar writes are atomic, failed runs are recorded, and discovery merges root and per-job metadata.
+- Clean restores preserve the original destination when no files were restored.
+- Retention policy writes no longer arm a later deletion after a dry-run preview.
+- The CLI saves agent credentials with its supported call and passes the original source to Kopia restores.
+- Agent configuration uses one canonical path across the GUI, interactive client, and service.
+
 ## 0.8.0
 
 ### Major Features

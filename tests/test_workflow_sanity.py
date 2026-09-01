@@ -49,6 +49,13 @@ def test_release_version_files_match() -> None:
     assert int(android_code_match.group(1)) == expected_android_version_code(project_version)
 
 
+def test_make_release_uses_the_atomic_version_bump_script() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "python scripts/bump_version.py $(VERSION)" in makefile
+    assert "sed -i 's/version" not in makefile
+
+
 def test_android_release_proguard_handles_optional_archive_dependencies() -> None:
     proguard_rules = (ROOT / "android" / "app" / "proguard-rules.pro").read_text(encoding="utf-8")
 

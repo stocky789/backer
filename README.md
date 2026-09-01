@@ -52,7 +52,7 @@ before first start to choose it yourself.
 - **Unraid**: Experimental. Do not treat it as release-ready yet.
 
 ### Mobile
-- **Android agent**: Experimental. The project contains an Android client, but local validation currently requires Android SDK setup.
+- **Android agent**: Experimental and server-relay-only. It has no serverless mode in v1.
 
 ## Installation
 
@@ -130,14 +130,23 @@ backer restore /backup /destination
 - Agent-based backups for Windows and Linux
 - Proxmox VE hypervisor backup (VMs and LXC containers)
 - Encrypted, compressed, deduplicated Kopia snapshots
-- Storage repositories on SMB, NFS, local, and S3-compatible storage
+- Kopia repositories on local directories, SMB shares, and S3-compatible storage
 - Repository-level encryption passwords and S3-compatible provider credentials
 - Cron scheduling with retention policies
 - Web dashboard with backup history
 
 ## Storage Repositories
 
-Backer creates Kopia snapshots in SMB, NFS, local, and S3-compatible repositories.
+Serverless v1 supports these tested client-to-repository combinations:
+
+| Repository | Serverless Linux | Serverless Windows | Server-managed mode only |
+| --- | --- | --- | --- |
+| Local directory | Supported | Supported | |
+| SMB/CIFS | Supported | Supported | |
+| S3-compatible | Supported | Supported | |
+| NFS and other repository types | | | Supported, with no serverless CI coverage |
+
+Kopia supports concurrent-writer repositories. Assign one designated maintenance owner per repository for retention and verification. Backer provides no cross-machine lease.
 
 ### SMB/CIFS (Windows Shares)
 - Network shares accessible via SMB protocol
@@ -145,12 +154,12 @@ Backer creates Kopia snapshots in SMB, NFS, local, and S3-compatible repositorie
 - Auto-discovery of available shares
 - Connection pooling to avoid Windows Error 1219
 
-### NFS (Linux/Unix)
+### NFS (Linux/Unix, server-managed mode only)
 - NFS exports from Linux/Unix NAS devices
 - Auto-discovery of available exports
 - Requires mount permissions (root or passwordless sudo)
 
-### Local Directory (Docker/Server-Side)
+### Local directory (server-managed, via the proxy relay)
 Store backups directly on the Backer server filesystem using local paths.
 
 #### Why Local Directory?
@@ -191,6 +200,10 @@ The agents will automatically stream data to the server, which writes it to the 
 If using a reverse proxy (Cloudflare, nginx, etc.), enter its external address in **Settings** → **Public URL** (or in the setup wizard on first start).
 
 Agents will use this URL to connect and stream backup data.
+
+### Local directory (serverless, on this client)
+
+Store backups directly on the client filesystem. Kopia writes to this directory without proxying data through the Backer server. Keep repository maintenance on one designated machine when multiple clients write to the same repository.
 
 ## Windows Agent - SMB/Network Share Requirements
 
