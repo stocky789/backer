@@ -60,6 +60,42 @@ def _restore_include_path(value: str | None) -> str | None:
     return value
 
 
+def _select_restore_snapshot(
+    rows: list[dict[str, Any]], snapshot: str | None, before: str | None, latest: bool, computer: str | None
+) -> tuple[str, dict[str, Any]]:
+    """Select only a listed immutable snapshot; never infer one from a basename."""
+    if sum(bool(value) for value in (snapshot, before, latest)) != 1:
+        raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
+    candidates = [item for item in rows if not computer or item.get("hostname") == computer]
+    if before:
+        candidates = [item for item in candidates if (item.get("timestamp") or "") <= before]
+    if not candidates:
+        raise click.ClickException("No matching immutable snapshot was found")
+    selected = snapshot or max(candidates, key=lambda item: item.get("timestamp") or "")["full_id"]
+    selected_row = next((item for item in candidates if selected in (item.get("id"), item.get("full_id"))), None)
+    if selected_row is None:
+        raise click.ClickException("The requested snapshot was not found")
+    return selected, selected_row
+
+
+def _restore_execute(
+    backend, source_path: str, destination: Path, selected: str, *, include: str | None,
+    original_source_path: str | None, progress: bool | None, passphrase: str
+):
+    """The one local restore execution path; callers only supply already-safe inputs."""
+    try:
+        with _local_progress(progress) as render:
+            result = backend.restore(
+                source=BackupDestination(source_path), destination=destination, snapshot=selected, include_path=include,
+                original_source_path=original_source_path, progress_callback=render,
+            )
+    except KeyboardInterrupt as error:
+        raise click.exceptions.Exit(130) from error
+    if not result.success:
+        raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
+    return result
+
+
 def _stale_cutoff(cron: str, now) -> object:
     """Return the age boundary after two complete schedule intervals."""
     from croniter import croniter
@@ -751,7 +787,12 @@ def backup(
 @click.option("--job")
 @click.option("--from", "from_path")
 @click.option("--passphrase-stdin", is_flag=True, help="Read a recovery repository passphrase from stdin")
-@click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]), default="NEW", show_default=True)
+@click.option("--passphrase-file", type=click.Path(path_type=Path))
+@click.option("--username")
+@click.option("--domain")
+@click.option("--password-stdin", is_flag=True)
+@click.option("--password-file", type=click.Path(path_type=Path))
+@click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]), default=None)
 @click.option("--destination", type=click.Path(path_type=Path))
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
 @click.option("--before")
@@ -769,6 +810,11 @@ def restore(
     job: str | None,
     from_path: str | None,
     passphrase_stdin: bool,
+    passphrase_file: Path | None,
+    username: str | None,
+    domain: str | None,
+    password_stdin: bool,
+    password_file: Path | None,
     into: str | None,
     destination: Path | None,
     before: str | None,
@@ -786,16 +832,11 @@ def restore(
     DESTINATION is where to restore files.
     """
     destination = destination or legacy_destination
+    into = into or ("MERGE" if source and not (job or from_path) else "NEW")
     include = _restore_include_path(include)
+    if into == "REPLACE" and not yes_replace:
+        raise click.UsageError("--yes-replace is required with --into REPLACE")
     if job:
-        if into == "REPLACE" and not yes_replace:
-            raise click.UsageError("--yes-replace is required with --into REPLACE")
-        if not into or not destination:
-            _missing_flags(
-                "restore", [flag for flag, value in (("--into", into), ("--destination", destination)) if not value]
-            )
-        if sum(bool(value) for value in (snapshot, before, latest)) != 1:
-            raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
         from backer.core.config import load_config
         from backer.core.paths import get_config_dir
 
@@ -806,102 +847,126 @@ def restore(
         record = config.repositories.get(configured.repository)
         if not record:
             raise click.ClickException(f"Job '{job}' names an unknown repository")
-        _restore_destination_allowed(destination, config)
+        destination = _restore_target(destination, into, Path(configured.source.path))
+        _restore_prepare_destination(destination, into, config=config, dry_run=dry_run)
         backend, passphrase, _ = _repository_backend(record)
         source_path = _repository_destination(record)
         snapshots = backend.list_snapshots(BackupDestination(source_path))
-        candidates = [item for item in snapshots if not computer or item.get("hostname") == computer]
-        if before:
-            candidates = [item for item in candidates if (item.get("timestamp") or "") <= before]
-        if not candidates:
-            raise click.ClickException("No matching immutable snapshot was found")
-        selected = snapshot if snapshot else max(candidates, key=lambda item: item.get("timestamp") or "")["full_id"]
-        if snapshot and not any(snapshot in (item.get("id"), item.get("full_id")) for item in candidates):
-            raise click.ClickException("The requested snapshot was not found for this job")
+        selected, _ = _select_restore_snapshot(snapshots, snapshot, before, latest, computer)
         if into == "REPLACE" and not dry_run:
-            if not _interactive():
-                raise click.UsageError("REPLACE requires an interactive typed confirmation")
-            count = sum(1 for item in destination.rglob("*") if item.is_file()) if destination.exists() else 0
-            stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-            click.echo(
-                f"{destination} holds {count} files. They will move to "
-                f"{destination.name}.replaced-{stamp} before snapshot {selected} is restored"
-            )
-            if click.prompt("Type REPLACE to continue", default="", show_default=False) != "REPLACE":
-                raise click.ClickException("Stopped. Nothing was changed")
+            _confirm_replace(destination, selected)
         if dry_run:
             click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
             return
+        if into in {"NEW", "MERGE"}:
+            destination.mkdir(parents=True, exist_ok=into == "MERGE")
         moved = _replace_destination(destination) if into == "REPLACE" else None
-        if into == "NEW" and not dry_run:
-            destination.mkdir(parents=True, exist_ok=True)
-        try:
-            with _local_progress(progress) as render:
-                result = backend.restore(
-                    BackupDestination(source_path), destination, snapshot=selected, progress_callback=render,
-                    original_source_path=configured.source.path, include_path=include,
-                )
-        except KeyboardInterrupt as error:
-            raise click.exceptions.Exit(130) from error
-        if not result.success:
-            raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
+        _restore_execute(
+            backend, source_path, destination, selected, include=include, original_source_path=configured.source.path,
+            progress=progress, passphrase=passphrase,
+        )
         if moved:
             click.echo(f"What was in that folder was moved to {moved}")
             if clean_up_replaced:
                 import shutil
-
-                shutil.rmtree(moved)
+                try:
+                    shutil.rmtree(moved)
+                except OSError as error:
+                    click.echo(f"Warning: restored files are safe, but {moved} could not be removed: {error}")
         click.echo("Restore completed")
         return
     if from_path:
-        if not passphrase_stdin:
-            raise click.UsageError("--from requires --passphrase-stdin; it never reads the local keystore")
-        if not destination:
-            _missing_flags("restore --from PATH", ["--destination"])
-        if sum(bool(value) for value in (snapshot, before, latest)) != 1:
-            raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
-        passphrase = sys.stdin.read().rstrip("\r\n")
+        passphrase_sources = (passphrase_stdin, passphrase_file, os.environ.get("BACKER_REPOSITORY_PASSWORD"))
+        if sum(bool(value) for value in passphrase_sources) != 1:
+            raise click.UsageError(
+                "--from requires exactly one repository passphrase source; it never reads the local keystore"
+            )
+        raw_passphrase = (
+            sys.stdin.read()
+            if passphrase_stdin
+            else passphrase_file.read_text()
+            if passphrase_file
+            else os.environ.get("BACKER_REPOSITORY_PASSWORD", "")
+        )
+        passphrase = raw_passphrase.rstrip("\r\n")
         if not passphrase:
             raise click.UsageError("A repository passphrase is required")
         from backer.backends.kopia import KopiaBackend
 
+        cleanup = None
+        if from_path.startswith("\\\\") or from_path.startswith("//"):
+            parts = from_path.replace("/", "\\").lstrip("\\").split("\\")
+            if len(parts) < 2:
+                raise click.UsageError("--from SMB path must name a server and share")
+            raw_storage_password = (
+                sys.stdin.read()
+                if password_stdin
+                else password_file.read_text()
+                if password_file
+                else os.environ.get("BACKER_SMB_PASSWORD", "")
+            )
+            storage_password = raw_storage_password.rstrip("\r\n")
+            if not username or not storage_password:
+                raise click.UsageError("SMB --from requires --username and a file-server password source")
+            from backer.core.mounts import SMBConnectionManager
+            manager = SMBConnectionManager()
+            if not manager.connect_serverless(parts[0], parts[1], username, storage_password, domain=domain):
+                raise click.ClickException("Could not connect to the SMB repository; nothing was changed")
+            def cleanup() -> None:
+                manager.disconnect_serverless(parts[0], parts[1])
         backend = KopiaBackend({"repository_password": passphrase})
         probe_status, _ = backend.repository_probe(from_path)
         if probe_status != "present":
+            if cleanup:
+                cleanup()
+            message = backend.last_repository_error or f"Repository is {probe_status}"
             raise click.ClickException(
-                backend.last_repository_error or f"Repository is {probe_status}; nothing was created"
+                _redact_error(RuntimeError(message), passphrase) + "; nothing was created"
             )
         rows = backend.list_snapshots(BackupDestination(from_path))
-        if computer:
-            rows = [item for item in rows if item.get("hostname") == computer]
-        if before:
-            rows = [item for item in rows if (item.get("timestamp") or "") <= before]
-        if not rows:
-            raise click.ClickException("No matching immutable snapshot was found")
-        selected = snapshot or max(rows, key=lambda item: item.get("timestamp") or "")["full_id"]
-        if snapshot and not any(snapshot in (item.get("id"), item.get("full_id")) for item in rows):
-            raise click.ClickException("The requested snapshot was not found")
+        try:
+            selected, selected_row = _select_restore_snapshot(rows, snapshot, before, latest, computer)
+        except click.ClickException:
+            if cleanup:
+                cleanup()
+            raise
+        original_path = selected_row.get("paths", [None])[0]
+        destination = _restore_target(destination, into, Path(original_path) if original_path else None)
+        empty_config = type("RestoreConfig", (), {"repositories": {}})()
+        repository_paths = () if from_path.startswith(("\\\\", "//", "s3://")) else (Path(from_path),)
+        _restore_prepare_destination(
+            destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
+        )
+        if into == "REPLACE" and not dry_run:
+            _confirm_replace(destination, selected)
         if dry_run:
             click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
+            if cleanup:
+                cleanup()
             return
         if not dry_run:
             location = destination.parent if destination.parent.exists() else Path.cwd()
             free = __import__("shutil").disk_usage(location).free
             required = next((item.get("size", 0) for item in rows if item.get("full_id") == selected), 0)
             if required and free < required:
+                if cleanup:
+                    cleanup()
                 raise click.ClickException("The destination does not have enough free space; nothing was changed")
-            destination.mkdir(parents=True, exist_ok=True)
+            if into in {"NEW", "MERGE"}:
+                destination.mkdir(parents=True, exist_ok=into == "MERGE")
+            moved = _replace_destination(destination) if into == "REPLACE" else None
         try:
-            with _local_progress(progress) as render:
-                result = backend.restore(
-                    BackupDestination(from_path), destination, snapshot=selected, include_path=include,
-                    progress_callback=render,
-                )
-        except KeyboardInterrupt as error:
-            raise click.exceptions.Exit(130) from error
-        if not result.success:
-            raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
+            _restore_execute(
+                backend, from_path, destination, selected, include=include, original_source_path=original_path,
+                progress=progress, passphrase=passphrase,
+            )
+        finally:
+            if cleanup:
+                cleanup()
+        if moved:
+            click.echo(f"What was in that folder was moved to {moved}")
         click.echo("Restore completed")
+        click.echo("To keep using this repository: backer repo add NAME --attach, then backer job create")
         return
     repository_password = os.environ.get("BACKER_REPOSITORY_PASSWORD")
     if not source or not destination or not repository_password:
@@ -913,17 +978,29 @@ def restore(
     try:
         be = KopiaBackend({"repository_password": repository_password})
         src = BackupDestination(path=source)
+        empty_config = type("RestoreConfig", (), {"repositories": {}})()
+        repository_paths = () if source.startswith(("\\\\", "//", "s3://")) else (Path(source),)
+        _restore_prepare_destination(
+            destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
+        )
+        if dry_run:
+            click.echo(f"Dry run: would restore from {source} to {destination}. Nothing was written")
+            return
+        if into == "REPLACE":
+            _confirm_replace(destination, snapshot or "latest")
+        if into == "MERGE":
+            destination.mkdir(parents=True, exist_ok=True)
+        moved = _replace_destination(destination) if into == "REPLACE" else None
 
         with console.status("Restoring..."):
-            result = be.restore(source=src, destination=destination, snapshot=snapshot, dry_run=dry_run)
+            _restore_execute(
+                be, src.path, destination, snapshot or "latest", include=include, original_source_path=None,
+                progress=progress, passphrase=repository_password,
+            )
 
-        if result.success:
-            console.print("[green]✓ Restore completed[/green]")
-        else:
-            console.print("[red]✗ Restore failed[/red]")
-            for error in result.errors:
-                console.print(f"  [red]{error}[/red]")
-            raise SystemExit(1)
+        console.print("[green]✓ Restore completed[/green]")
+        if moved:
+            click.echo(f"What was in that folder was moved to {moved}")
 
     except Exception as e:
         console.print(f"[red]Error:[/red] {_redact_error(e, repository_password)}")
@@ -1611,14 +1688,11 @@ def _repository_destination(record) -> str:
     return _destination(record)
 
 
-def _restore_destination_allowed(destination: Path, config) -> None:
+def _restore_destination_allowed(destination: Path, config, repository_paths: tuple[Path, ...] = ()) -> None:
     resolved = destination.expanduser().resolve()
-    system_roots = {
-        Path(os.environ.get("WINDIR", "C:/Windows")).resolve(),
-        Path("/").resolve(),
-        Path("/home").resolve(),
-        Path("/usr").resolve(),
-    }
+    system_roots = ({Path(os.environ.get("WINDIR", "C:/Windows")).resolve(),
+                     Path(os.environ.get("ProgramFiles", "C:/Program Files")).resolve()}
+                    if os.name == "nt" else {Path("/").resolve(), Path("/home").resolve(), Path("/usr").resolve()})
     if resolved == Path.home().resolve():
         raise click.ClickException(
             f"Backer will not restore over {Path.home().resolve()}. Choose a folder inside it instead."
@@ -1628,9 +1702,63 @@ def _restore_destination_allowed(destination: Path, config) -> None:
             denied = Path(record.path).expanduser().resolve()
             if resolved == denied or denied in resolved.parents or resolved in denied.parents:
                 raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
+    for denied in repository_paths:
+        denied = denied.expanduser().resolve()
+        if resolved == denied or denied in resolved.parents or resolved in denied.parents:
+            raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
     for denied in system_roots:
         if resolved == denied or denied in resolved.parents or resolved in denied.parents:
             raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
+
+
+def _restore_target(destination: Path | None, into: str, original_source: Path | None = None) -> Path:
+    """Choose NEW's unique sibling without ever reusing a real directory."""
+    if destination is not None:
+        return destination.expanduser()
+    if into != "NEW" or original_source is None:
+        raise click.UsageError("--destination is required unless --into NEW restores a known job")
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    candidate = original_source.with_name(f"{original_source.name} (restored {stamp})")
+    suffix = 2
+    while candidate.exists():
+        candidate = original_source.with_name(f"{original_source.name} (restored {stamp})-{suffix}")
+        suffix += 1
+    return candidate
+
+
+def _restore_prepare_destination(
+    destination: Path, into: str, *, config, dry_run: bool = False, repository_paths: tuple[Path, ...] = ()
+) -> Path | None:
+    """Perform every non-destructive destination refusal before a restore starts."""
+    destination = destination.expanduser()
+    _restore_destination_allowed(destination, config, repository_paths)
+    if into == "NEW":
+        if destination.exists():
+            raise click.ClickException("A NEW restore destination must not exist; nothing was changed")
+        return None
+    if into == "MERGE":
+        return None
+    if into != "REPLACE":
+        raise click.UsageError("--into must be NEW, MERGE, or REPLACE")
+    if not destination.exists():
+        raise click.ClickException("REPLACE requires an existing destination; nothing was changed")
+    if destination.is_symlink() or not destination.is_dir():
+        raise click.ClickException("Restore destination must be a non-symlink directory")
+    return destination
+
+
+def _confirm_replace(destination: Path, selected: str) -> None:
+    """REPLACE stays interactive even when callers supplied convenience flags."""
+    if not _interactive():
+        raise click.UsageError("REPLACE requires an interactive typed confirmation")
+    count = sum(1 for item in destination.rglob("*") if item.is_file())
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    click.echo(
+        f"{destination} holds {count} files. They will move to {destination.name}.replaced-{stamp} "
+        f"before snapshot {selected} is restored"
+    )
+    if click.prompt("Type REPLACE to continue", default="", show_default=False) != "REPLACE":
+        raise click.ClickException("Stopped. Nothing was changed")
 
 
 def _replace_destination(destination: Path) -> Path | None:

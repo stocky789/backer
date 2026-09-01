@@ -299,6 +299,47 @@ def test_restore_include_refuses_traversal():
         _restore_include_path("../outside")
 
 
+def test_restore_new_target_is_unique_and_never_an_existing_path(tmp_path):
+    from backer.cli import _restore_target
+
+    original = tmp_path / "Documents"
+    original.mkdir()
+    target = _restore_target(None, "NEW", original)
+    assert target.parent == tmp_path
+    assert not target.exists()
+    target.mkdir()
+    assert _restore_target(None, "NEW", original) != target
+
+
+def test_restore_refuses_existing_new_target_before_any_backend_work(tmp_path):
+    from backer.cli import _restore_prepare_destination
+
+    target = tmp_path / "already-here"
+    target.mkdir()
+    with pytest.raises(click.ClickException, match="must not exist"):
+        _restore_prepare_destination(target, "NEW", config=type("Config", (), {"repositories": {}})())
+
+
+def test_restore_dry_merge_never_creates_its_target(tmp_path):
+    from backer.cli import _restore_prepare_destination
+
+    target = tmp_path / "would-be-created"
+    _restore_prepare_destination(target, "MERGE", config=type("Config", (), {"repositories": {}})(), dry_run=True)
+    assert not target.exists()
+
+
+def test_restore_refuses_repository_containment_in_both_directions(tmp_path):
+    from backer.cli import _restore_prepare_destination
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    config = type("Config", (), {"repositories": {}})()
+    with pytest.raises(click.ClickException, match="will not restore"):
+        _restore_prepare_destination(repository / "restore", "NEW", config=config, repository_paths=(repository,))
+    with pytest.raises(click.ClickException, match="will not restore"):
+        _restore_prepare_destination(tmp_path, "NEW", config=config, repository_paths=(repository,))
+
+
 def test_status_message_maps_known_kopia_failure():
     from backer.core.messages import explain_failure
 
