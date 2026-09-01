@@ -1,7 +1,7 @@
 """Short, actionable explanations for errors captured from backup tools."""
 
 
-_FAILURES = {
+FAILURE_MESSAGES = {
     "invalid repository password": (
         "The repository passphrase was rejected. Check it, then run backer repo recover NAME "
         "--passphrase-stdin if this is an older repository."
@@ -25,7 +25,7 @@ _FAILURES = {
 def explain_failure(detail: str) -> str:
     """Return the known remedy, retaining unknown engine output for diagnosis."""
     lowered = detail.lower()
-    for needle, message in _FAILURES.items():
+    for needle, message in FAILURE_MESSAGES.items():
         if needle in lowered:
             return message
-    return "Backer could not finish this backup. The details below are the full diagnostic output."
+    return "Backer could not finish this backup. The details below are the full output from the backup engine."

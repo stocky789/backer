@@ -9,8 +9,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from secrets import choice
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import click
@@ -58,6 +60,62 @@ def _restore_include_path(value: str | None) -> str | None:
     if candidate.is_absolute() or any(part == ".." for part in candidate.parts) or candidate.drive:
         raise click.UsageError("--include must be a relative path inside the snapshot")
     return value
+
+
+def _restore_test_files(source: Path, count: int = 12) -> list[Path]:
+    """Return a bounded, deterministic sample of the smallest readable source files."""
+    files = [
+        item.relative_to(source)
+        for item in source.rglob("*")
+        if item.is_file() and not item.is_symlink()
+    ]
+    return sorted(files, key=lambda item: ((source / item).stat().st_size, item.as_posix()))[:count]
+
+
+def _sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _run_restore_test(backend, destination: BackupDestination, snapshot: dict[str, Any]) -> int:
+    """Restore only a small snapshot sample, compare still-present source files, then clean up."""
+    source = Path(snapshot["paths"][0])
+    if not source.is_dir():
+        raise click.ClickException("Restore test needs the original source folder on this computer")
+    files = _restore_test_files(source)
+    if not files:
+        raise click.ClickException("Restore test found no regular source files to compare")
+    snapshot_id = snapshot.get("full_id") or snapshot.get("id")
+    if not snapshot_id:
+        raise click.ClickException("Restore test cannot identify the newest immutable snapshot")
+    compared = 0
+    with TemporaryDirectory(prefix="backer-restore-test-") as temporary:
+        target = Path(temporary)
+        for relative in files:
+            original = source / relative
+            if not original.is_file():
+                continue
+            result = backend.restore(
+                destination,
+                target,
+                snapshot=snapshot_id,
+                include_path=relative.as_posix(),
+            )
+            if not result.success:
+                raise click.ClickException(result.output or "; ".join(result.errors) or "Restore test failed")
+            restored = target / relative
+            if not restored.is_file():
+                matches = list(target.rglob(relative.name))
+                restored = matches[0] if len(matches) == 1 else restored
+            if not restored.is_file() or _sha256(restored) != _sha256(original):
+                raise click.ClickException(f"Restore test did not match {relative.as_posix()}")
+            compared += 1
+    if not compared:
+        raise click.ClickException("Restore test could not compare a source file that still exists")
+    return compared
 
 
 def _select_restore_snapshot(
@@ -3160,19 +3218,50 @@ def verify(
             raise click.ClickException(
                 _redact_error(RuntimeError(preview.output or "; ".join(preview.errors)), passphrase)
             )
-        if not _interactive() or not click.confirm("Commit this index recovery", default=False):
-            click.echo(preview.output)
+        click.echo(_redact_error(RuntimeError(preview.output), passphrase))
+        if not _interactive():
+            raise click.UsageError(
+                "Index recovery preview completed; --repair-index requires an interactive confirmation"
+            )
+        if not click.confirm("Commit this index recovery", default=False):
+            click.echo("Index recovery was not committed")
             return
         result = backend.repair_index(destination, commit=True)
     else:
         result = backend.check(destination, verify_files_percent=verify_files_percent)
     if not result.success:
-        raise click.ClickException(_redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase))
-    click.echo("Repository check passed")
+        detail = _redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase)
+        if any("timeout" in error.lower() for error in result.errors):
+            raise click.ClickException(
+                f"The check ran out of time after {timeout or 3600} seconds. "
+                "This does not mean the repository is damaged. "
+                f"Run it again with --timeout {(timeout or 3600) * 2}.\n{detail}"
+            )
+        from backer.core.messages import explain_failure
+
+        raise click.ClickException(
+            "The backup engine reported errors in this repository. Existing snapshots may not restore completely.\n"
+            f"{explain_failure(detail)}\n{detail}\n"
+            f"Do not run backer prune. Check the file server, then run: backer verify {job} --repair-index"
+        )
+    click.echo("Repository check passed: snapshot manifests are indexed and reachable")
     if verify_files_percent is None:
-        click.echo("File contents were not downloaded or restored")
+        click.echo(
+            "File contents were not downloaded or restored. "
+            "Use --verify-files-percent N to download and hash a sample."
+        )
+    else:
+        click.echo(f"Checked {verify_files_percent:g}% of file contents. This downloads and hashes file data.")
     if restore_test:
-        click.echo("Restore testing is not available for this snapshot selection")
+        snapshots = backend.list_snapshots(destination)
+        if not snapshots:
+            raise click.ClickException("Restore test needs a reachable repository with a snapshot")
+        newest = max(snapshots, key=lambda item: item.get("timestamp") or "")
+        count = _run_restore_test(backend, destination, newest)
+        click.echo(
+            f"Backer restored {count} files from the newest snapshot and they match files on this computer. "
+            "This tests the repository, not every file in it."
+        )
 
 
 @main.command("status")

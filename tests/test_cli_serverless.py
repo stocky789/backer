@@ -346,6 +346,44 @@ def test_status_message_maps_known_kopia_failure():
     assert "passphrase" in explain_failure("invalid repository password").lower()
 
 
+def test_verify_repair_refuses_to_commit_without_a_tty(monkeypatch, tmp_path):
+    """Removing the non-TTY guard could mutate an index from unattended automation."""
+    from datetime import datetime
+
+    from backer.backends.base import BackendResult, OperationType
+
+    class Backend:
+        def repair_index(self, *_args, **kwargs):
+            assert kwargs["commit"] is False
+            return BackendResult(True, OperationType.CHECK, datetime.now(), datetime.now(), output="preview")
+
+    config = type(
+        "Config",
+        (),
+        {"jobs": {"job": type("Job", (), {"repository": "repo"})()}, "repositories": {"repo": object()}},
+    )()
+    monkeypatch.setattr("backer.core.config.load_config", lambda _path: config)
+    monkeypatch.setattr("backer.cli._repository_backend", lambda *_args, **_kwargs: (Backend(), "secret", None))
+    monkeypatch.setattr("backer.cli._repository_destination", lambda _record: "repo")
+    result = CliRunner().invoke(main, ["verify", "job", "--repair-index"])
+    assert result.exit_code == 2
+    assert "preview" in result.output
+    assert "interactive" in result.output.lower()
+
+
+def test_restore_test_selects_smallest_existing_files(tmp_path):
+    """Changing the sort would turn a bounded health check into a large restore."""
+    from pathlib import Path
+
+    from backer.cli import _restore_test_files
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "large.bin").write_bytes(b"x" * 10)
+    (source / "small.txt").write_bytes(b"x")
+    assert _restore_test_files(source, 1) == [Path("small.txt")]
+
+
 def test_legacy_recovery_literal_has_one_dedicated_home():
     from backer.core.recovery import LEGACY_FIXED_PASSPHRASE
 
