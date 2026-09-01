@@ -81,6 +81,57 @@ def test_unattended_setup_rejects_interactive_only_smb_repositories():
     assert "interactive-only" in unattended_blocker(config)
 
 
+def test_home_run_summary_prefers_the_newest_repository_record_and_keeps_size():
+    from datetime import UTC, datetime, timedelta
+
+    from backer.agent.gui.views import run_summary
+    from backer.core.job import JobRun, JobStatus
+
+    local = JobRun(
+        job_name="photos",
+        run_id="local",
+        status=JobStatus.SUCCESS,
+        started_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    repository = {
+        "status": "failed",
+        "started_at": datetime.now(UTC).isoformat(),
+        "bytes_transferred": 2048,
+    }
+
+    assert run_summary(local, repository) == ("Failed", "2.0 KiB")
+
+
+def test_settings_save_keeps_registered_credentials_when_only_url_changes(monkeypatch):
+    from backer.agent.gui import views
+    from backer.agent.gui.views import SettingsView
+    from backer.core.config import BackerConfig, ClientConfig
+
+    saved = []
+    app = type(
+        "App",
+        (),
+        {
+            "config": BackerConfig(
+                server=ClientConfig(server_url="http://old", client_id="id", client_secret="secret")
+            ),
+            "set_status": lambda _self, message, **_kwargs: saved.append(message),
+            "apply_theme": lambda *_args: None,
+        },
+    )()
+    instance = object.__new__(SettingsView)
+    instance.app = app
+    instance.server = type("Value", (), {"get": lambda _self: "http://new"})()
+    instance.mode = type("Value", (), {"get": lambda _self: "system"})()
+    monkeypatch.setattr(views, "save_config", lambda config: saved.append(config.server.server_url))
+
+    instance._save()
+
+    assert app.config.server.server_url == "http://new"
+    assert app.config.server.client_id == "id"
+    assert app.config.server.client_secret == "secret"
+
+
 def test_recovery_record_contains_the_details_needed_on_a_new_machine():
     from backer.agent.gui.wizard import recovery_record
 
