@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import multiprocessing
+import os
 import stat
 import sys
 from pathlib import Path
@@ -34,6 +37,14 @@ def write_release_files(root: Path, changelog: str = "## 0.9.0\n") -> None:
     )
 
 
+def release_file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        path: path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and path.name != ".backer-release.lock"
+    }
+
+
 def test_bump_version_updates_every_release_version_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     write_release_files(tmp_path)
     bump_version = load_bump_version()
@@ -53,27 +64,27 @@ def test_bump_version_rejects_invalid_versions_without_writing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, version: str
 ) -> None:
     write_release_files(tmp_path)
-    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    before = release_file_bytes(tmp_path)
     bump_version = load_bump_version()
     monkeypatch.setattr(bump_version, "ROOT", tmp_path)
     monkeypatch.setattr(sys, "argv", ["bump_version.py", version])
 
     assert bump_version.main() == 2
-    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert release_file_bytes(tmp_path) == before
 
 
 def test_bump_version_requires_changelog_heading_without_writing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_release_files(tmp_path, "## 0.8.0\n")
-    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    before = release_file_bytes(tmp_path)
     bump_version = load_bump_version()
     monkeypatch.setattr(bump_version, "ROOT", tmp_path)
     monkeypatch.setattr(sys, "argv", ["bump_version.py", "0.9.0"])
 
     assert bump_version.main() == 2
     assert "## 0.9.0" in capsys.readouterr().err
-    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert release_file_bytes(tmp_path) == before
 
 
 def release_paths(root: Path) -> list[Path]:
@@ -87,6 +98,45 @@ def release_paths(root: Path) -> list[Path]:
 
 def transaction_artifacts(root: Path) -> list[Path]:
     return list(root.glob(".backer-bump-version*"))
+
+
+def interrupt_after_first_target(monkeypatch: pytest.MonkeyPatch, root: Path):
+    bump_version = load_bump_version()
+    monkeypatch.setattr(bump_version, "ROOT", root)
+    paths = release_paths(root)
+    real_replace = bump_version.os.replace
+    target_replaces = 0
+
+    def interrupt_second_target_replace(source: Path | str, destination: Path | str) -> None:
+        nonlocal target_replaces
+        if Path(destination) in paths:
+            target_replaces += 1
+            if target_replaces == 2:
+                raise KeyboardInterrupt
+        real_replace(source, destination)
+
+    monkeypatch.setattr(bump_version.os, "replace", interrupt_second_target_replace)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "0.9.0"])
+    with pytest.raises(KeyboardInterrupt):
+        bump_version.main()
+    monkeypatch.undo()
+    return load_bump_version()
+
+
+def hold_lock(root: str, ready, release) -> None:
+    bump_version = load_bump_version()
+    bump_version.ROOT = Path(root)
+    with bump_version.ReleaseLock():
+        ready.set()
+        release.wait(10)
+
+
+def crash_with_lock(root: str, ready) -> None:
+    bump_version = load_bump_version()
+    bump_version.ROOT = Path(root)
+    with bump_version.ReleaseLock():
+        ready.set()
+        os._exit(0)
 
 
 def test_bump_version_preserves_crlf_bytes_and_unchanged_text(
@@ -254,3 +304,132 @@ def test_bump_version_recovers_an_interrupted_transaction_before_validation(
     assert bump_version.main() == 2
     assert {path: path.read_bytes() for path in paths} == before
     assert not transaction_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "partial",
+        "duplicate",
+        "wrong-order",
+        "unknown-target",
+        "bad-name",
+        "absolute-name",
+        "bad-size",
+        "bad-hash",
+        "bad-mode",
+    ],
+)
+def test_bump_version_rejects_hostile_journal_without_mutating_targets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutation: str
+) -> None:
+    write_release_files(tmp_path)
+    bump_version = interrupt_after_first_target(monkeypatch, tmp_path)
+    journal_path = tmp_path / bump_version.JOURNAL
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    entries = journal["entries"]
+    if mutation == "partial":
+        journal["entries"] = entries[:3]
+    elif mutation == "duplicate":
+        entries[1] = entries[0]
+    elif mutation == "wrong-order":
+        entries[0], entries[1] = entries[1], entries[0]
+    elif mutation == "unknown-target":
+        entries[0]["target"] = "outside.txt"
+    elif mutation == "bad-name":
+        entries[0]["backup"] = "../../outside"
+    elif mutation == "absolute-name":
+        entries[0]["staged"] = str(tmp_path / "outside")
+    elif mutation == "bad-mode":
+        entries[0]["backup_mode"] = 0o777
+    elif mutation == "bad-size":
+        entries[0]["staged_size"] = 0
+    else:
+        entries[0]["backup_sha256"] = "0" * 64
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    before = {path: path.read_bytes() for path in release_paths(tmp_path)}
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "invalid"])
+
+    assert bump_version.main() == 1
+    assert {path: path.read_bytes() for path in release_paths(tmp_path)} == before
+    assert journal_path.exists()
+    assert transaction_artifacts(tmp_path)
+
+
+def test_bump_version_rejects_corrupt_journal_without_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_release_files(tmp_path)
+    bump_version = interrupt_after_first_target(monkeypatch, tmp_path)
+    journal_path = tmp_path / bump_version.JOURNAL
+    journal_path.write_text("{broken", encoding="utf-8")
+    before = {path: path.read_bytes() for path in release_paths(tmp_path)}
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "invalid"])
+
+    assert bump_version.main() == 1
+    assert {path: path.read_bytes() for path in release_paths(tmp_path)} == before
+    assert journal_path.exists()
+
+
+def test_bump_version_rejects_symlinked_journal_artifact_without_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_release_files(tmp_path)
+    bump_version = interrupt_after_first_target(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    backup = tmp_path / bump_version.TRANSACTION_DIR / "0.original"
+    backup.unlink()
+    try:
+        backup.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    before = {path: path.read_bytes() for path in release_paths(tmp_path)}
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "invalid"])
+
+    assert bump_version.main() == 1
+    assert outside.read_bytes() == b"outside"
+    assert {path: path.read_bytes() for path in release_paths(tmp_path)} == before
+
+
+def test_bump_version_busy_lock_does_not_delete_another_process_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_release_files(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    ready, release = context.Event(), context.Event()
+    process = context.Process(target=hold_lock, args=(str(tmp_path), ready, release))
+    process.start()
+    assert ready.wait(10)
+    staging = tmp_path / ".backer-bump-version"
+    staging.mkdir()
+    marker = staging / "marker"
+    marker.write_text("keep", encoding="utf-8")
+    bump_version = load_bump_version()
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "0.9.0"])
+
+    assert bump_version.main() == 1
+    assert marker.exists()
+    release.set()
+    process.join(10)
+    assert process.exitcode == 0
+
+
+def test_bump_version_recovers_after_a_lock_holder_crashes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    write_release_files(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    process = context.Process(target=crash_with_lock, args=(str(tmp_path), ready))
+    process.start()
+    assert ready.wait(10)
+    process.join(10)
+    assert process.exitcode == 0
+    bump_version = load_bump_version()
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "0.9.0"])
+
+    assert bump_version.main() == 0
