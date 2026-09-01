@@ -133,13 +133,17 @@ class SettingsView(ttk.Frame):
 
     def _save(self):
         url = self.server.get().strip()
-        self.app.config.server = ClientConfig(server_url=url) if url else None
+        if url:
+            current = self.app.config.server or ClientConfig()
+            self.app.config.server = current.model_copy(update={"server_url": url})
+        else:
+            self.app.config.server = None
         save_config(self.app.config)
         self.app.set_status("Settings saved")
         self.app.apply_theme(self.mode.get())
 
     def _unattended(self):
-        from backer.client.windows_service import create_background_scheduled_task
+        from backer.client.windows_service import create_local_scheduled_task
 
-        ok, message = create_background_scheduled_task(self.server.get().strip() or None)
+        ok, message = create_local_scheduled_task()
         self.app.set_status(message, error=not ok)

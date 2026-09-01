@@ -15,6 +15,7 @@ from tkinter import messagebox, ttk
 from backer.agent.gui import theme
 from backer.agent.gui.views import HomeView, SettingsView, SimpleView, load_config, save_config
 from backer.agent.gui.wizard import RepositoryWizard
+from backer.core.messages import explain_failure
 from backer.core.paths import get_data_dir
 from backer.serverless.runs import run_local_job
 
@@ -142,6 +143,7 @@ class BackerAgentApp:
     def set_status(self, message, *, error=False):
         self.status_var.set(("Failed" if error else "OK") + " · " + message)
         if error:
+            self.progress_log.append(explain_failure(message))
             self.progress_log.append(message)
             logging.getLogger(__name__).error(message)
 
@@ -248,8 +250,11 @@ class RunView(ttk.Frame):
         def progress(**frame):
             self.app.progress_frame = frame
 
+        generation = self.app.generation("run")
+
         def worker():
-            self.app.root.after(0, lambda: self.done(run_local_job(self.app.config, name, on_progress=progress)))
+            report = run_local_job(self.app.config, name, on_progress=progress)
+            self.app.root.after(0, lambda: self.done(report) if self.app.current(generation) else None)
 
         threading.Thread(target=worker, daemon=True).start()
         self.app.root.after(200, self.tick)
@@ -283,7 +288,7 @@ class RunView(ttk.Frame):
         self.app.set_status(self.label.get(), error=not bool(report and report.get("success")))
 
     def stop(self):
-        self.app.set_status("Stop requested; Kopia will be terminated safely", error=True)
+        self.app.set_status("Stop requested; the current backup will finish cleanup safely", error=True)
 
 
 class RestoreView(SimpleView):

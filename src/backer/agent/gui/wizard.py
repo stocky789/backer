@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -12,6 +11,19 @@ from croniter import croniter
 from backer.core import keystore
 from backer.core.config import JobConfig, RepositoryConfig, ScheduleConfig, SourceConfig
 from backer.core.smb_browse import SMBBrowser
+
+
+def connection_conflict_message(server: str) -> str:
+    """Name the existing Windows SMB connection; never hide it behind error 1219."""
+    from backer.core.mounts import SMBConnectionManager
+
+    conflict = SMBConnectionManager()._find_existing_connection(server)
+    if conflict:
+        share, username = conflict
+        return (
+            f"Windows is already connected to {share} as {username or 'another account'}. Close it or use that account."
+        )
+    return "Windows already has a connection to this server with different credentials."
 
 
 class RepositoryWizard(ttk.Frame):
@@ -133,9 +145,9 @@ class RepositoryWizard(ttk.Frame):
 
     def _passphrase(self):
         ttk.Label(self.body, text="Repository passphrase", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
-        value = self.values.get("passphrase") or "-".join(
-            secrets.choice(("amber", "birch", "cedar", "drift", "ember", "field")) for _ in range(6)
-        )
+        from backer.cli import _generated_passphrase
+
+        value = self.values.get("passphrase") or _generated_passphrase()
         self.values["passphrase"] = value
         ttk.Label(self.body, text=value, style="Mono.TLabel").pack(anchor=tk.W, pady=8)
         ttk.Button(
@@ -143,7 +155,7 @@ class RepositoryWizard(ttk.Frame):
             text="Copy",
             command=lambda: (self.app.root.clipboard_clear(), self.app.root.clipboard_append(value)),
         ).pack(anchor=tk.W)
-        position = secrets.randbelow(6) + 1
+        position = 1
         self.confirm = tk.StringVar()
         self.saved = tk.BooleanVar()
         ttk.Label(self.body, text=f"Enter word {position} to confirm it.").pack(anchor=tk.W, pady=(14, 0))

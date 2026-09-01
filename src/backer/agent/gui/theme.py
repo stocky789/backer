@@ -9,7 +9,10 @@ def _rgb(value: str) -> tuple[int, int, int]:
     value = value.lstrip("#")
     if len(value) != 6:
         return (245, 245, 245)
-    return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4))
+    try:
+        return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4))
+    except ValueError:
+        return (245, 245, 245)
 
 
 def _luminance(value: str) -> float:
