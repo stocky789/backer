@@ -255,7 +255,7 @@ def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
     elif result["repository_type"] == "smb":
         result["host"] = _ask_step(_step(2, "host"))
         result["username"] = _ask_step(_step(2, "username"))
-        password = Prompt.ask("Password", password=True)
+        password = _ask_step(_step(2, "password_stdin"), password=True)
         result["share"] = _accepted(
             _step(2, "share"), choose_smb_share(result["host"], result["username"], password)
         )
@@ -267,7 +267,7 @@ def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
         fields = [step for step in wizard_steps(2) if step.key in keys]
         for step in fields:
             result[step.key] = _ask_step(step, default="" if step.key == "prefix" else None)
-        secret = Prompt.ask(_step(2, "secret_key_stdin").prompt, password=True)
+        secret = _ask_step(_step(2, "secret_key_stdin"), password=True)
         result["secret_key_stdin"] = _accepted(_step(2, "secret_key_stdin"), True)
         result["_storage_password"] = json.dumps(
             {"access_key_id": result["access_key_id"], "secret_access_key": secret}
@@ -280,11 +280,11 @@ def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
     result["exclude"] = tuple(item.strip() for item in excludes.split(",") if item.strip())
     console.print("[bold]Step 5 of 5[/bold]  Schedule")
     schedule = Prompt.ask(_step(5, "schedule").prompt, choices=("1", "2", "3", "4"), default="1")
-    schedules = {"1": "0 2 * * *", "2": "0 * * * *", "3": None, "4": Prompt.ask("Cron")}
+    schedules = {"1": "0 2 * * *", "2": "0 * * * *", "3": None, "4": _ask_step(_step(5, "schedule"))}
     result["schedule"], result["no_schedule"] = schedules[schedule], schedule == "3"
     _accepted(_step(5, "schedule") if result["schedule"] else _step(5, "no_schedule"), result["schedule"] or True)
-    result["repo_name"] = Prompt.ask("Repository name", default=result["repo_name"])
-    result["job_name"] = Prompt.ask("Job name", default=result["job_name"])
+    result["repo_name"] = _ask_step(_step(5, "repo_name"), default=result["repo_name"])
+    result["job_name"] = _ask_step(_step(5, "job_name"), default=result["job_name"])
     if not Confirm.ask("Create this?", default=True):
         raise WizardAbortError()
     return result

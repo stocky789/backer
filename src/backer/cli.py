@@ -157,6 +157,12 @@ def _not_interactive(_: dict[str, Any]) -> bool:
     return not _interactive()
 
 
+def _valid_schedule(value: Any) -> bool:
+    from croniter import croniter
+
+    return isinstance(value, str) and bool(value) and croniter.is_valid(value)
+
+
 def _value(flag: str) -> Callable[[Any], list[str]]:
     return lambda value: [flag, str(value)] if value is not None and value != "" else []
 
@@ -322,7 +328,7 @@ INIT_STEPS = (
         _repeated("--exclude"),
         4,
     ),
-    InitStep("schedule", "--schedule", "Schedule", bool, _always, "schedule", _value("--schedule"), 5),
+    InitStep("schedule", "--schedule", "Schedule", _valid_schedule, _always, "schedule", _value("--schedule"), 5),
     InitStep("no_schedule", "--no-schedule", "No schedule", bool, _always, "schedule", _switch("--no-schedule"), 5),
     InitStep(
         "keep_last",
@@ -369,8 +375,8 @@ INIT_STEPS = (
         False,
         _value("--keep-yearly"),
     ),
-    InitStep("repo_name", "--repo-name", "Repository name", bool, _always, True, _value("--repo-name")),
-    InitStep("job_name", "--job-name", "Job name", bool, _always, True, _value("--job-name")),
+    InitStep("repo_name", "--repo-name", "Repository name", bool, _always, True, _value("--repo-name"), 5),
+    InitStep("job_name", "--job-name", "Job name", bool, _always, True, _value("--job-name"), 5),
     InitStep("install", "--install", "Install schedule", bool, _always, False, _switch("--install")),
 )
 

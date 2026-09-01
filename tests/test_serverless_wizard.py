@@ -109,6 +109,27 @@ def test_wizard_reprompts_when_shared_validator_rejects_value(monkeypatch: pytes
     assert _ask_step(wizard_steps(1)[0]) == "local"
 
 
+@pytest.mark.parametrize(
+    ("group", "key", "answers", "expected"),
+    [
+        (5, "repo_name", ("", "repository"), "repository"),
+        (5, "job_name", ("", "backup"), "backup"),
+        (5, "schedule", ("not cron", "0 2 * * *"), "0 2 * * *"),
+        (2, "password_stdin", ("", "file-server-secret"), "file-server-secret"),
+        (2, "secret_key_stdin", ("", "s3-secret"), "s3-secret"),
+    ],
+)
+def test_wizard_reprompts_each_shared_validator(
+    monkeypatch: pytest.MonkeyPatch, group: int, key: str, answers: tuple[str, str], expected: str
+) -> None:
+    from backer.client.serverless_wizard import _ask_step, _step
+
+    responses = iter(answers)
+    monkeypatch.setattr("backer.client.serverless_wizard.Prompt.ask", lambda *_args, **_kwargs: next(responses))
+
+    assert _ask_step(_step(group, key), password="secret" in key) == expected
+
+
 def test_aborting_passphrase_export_writes_no_recovery_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from backer.client.serverless_wizard import WizardAbortError, _passphrase
 
