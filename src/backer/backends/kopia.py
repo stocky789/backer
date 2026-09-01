@@ -677,7 +677,7 @@ class KopiaBackend(BackendBase):
             recovery = ""
             if getattr(error, "backer_hard_stopped", False):
                 recovery = (
-                    " Kopia was hard-stopped; run 'backer repo unlock NAME' before retrying. "
+                    " The backup process was hard-stopped; run 'backer repo unlock NAME' before retrying. "
                     f"Isolated config: {self._repo_env(destination.path)['KOPIA_CONFIG_PATH']}"
                 )
             return BackendResult(
@@ -905,13 +905,19 @@ class KopiaBackend(BackendBase):
                 metadata={"snapshot": snapshot_id},
             )
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
+            recovery = ""
+            if getattr(error, "backer_hard_stopped", False):
+                recovery = (
+                    " The restore process was hard-stopped; run 'backer repo unlock NAME' before retrying. "
+                    f"Isolated config: {self._repo_env(source.path)['KOPIA_CONFIG_PATH']}"
+                )
             return BackendResult(
                 success=False,
                 operation=OperationType.RESTORE,
                 started_at=started_at,
                 finished_at=datetime.now(),
-                errors=["Restore operation timed out"],
+                errors=["Restore operation timed out" + recovery],
                 return_code=-1,
             )
         except OSError as e:

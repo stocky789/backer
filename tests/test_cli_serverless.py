@@ -83,7 +83,7 @@ def test_noninteractive_first_run_creates_runs_and_lists_one_snapshot(monkeypatc
         record = record.model_copy(update={"id": "repo", "passphrase_ref": "pass"})
         config.repositories["repo"] = record
         config.save(path)
-        assert passphrase == "phrase"
+        assert passphrase == "ultra-secret"
         return "repo", "test"
 
     class Backend:
@@ -101,7 +101,7 @@ def test_noninteractive_first_run_creates_runs_and_lists_one_snapshot(monkeypatc
             "--config", str(config_path), "repo", "add", "repo", "--init", "--type", "local", "--path",
             str(tmp_path), "--passphrase-stdin", "--headless", "--yes",
         ],
-        input="phrase\n",
+        input="ultra-secret\n",
     )
     assert result.exit_code == 0, result.output
     result = runner.invoke(
@@ -119,6 +119,75 @@ def test_noninteractive_first_run_creates_runs_and_lists_one_snapshot(monkeypatc
     assert [item["id"] for item in __import__("json").loads(result.output)] == ["snapshot"]
 
 
+def test_noninteractive_first_run_uses_real_config_keystore_and_kopia_boundary(monkeypatch, tmp_path):
+    from io import StringIO
+    from subprocess import CompletedProcess
+
+    config_path = tmp_path / "config.yaml"
+    source = tmp_path / "source"
+    repository = tmp_path / "repository"
+    source.mkdir()
+    repository.mkdir()
+    commands = []
+    created = False
+
+    def run(command, **_kwargs):
+        nonlocal created
+        commands.append(command)
+        if command[1:3] == ["repository", "connect"] and not created:
+            return CompletedProcess(command, 1, "", "repository not initialized in the provided storage")
+        if command[1:3] == ["repository", "create"]:
+            created = True
+        if command[1:3] == ["repository", "status"]:
+            return CompletedProcess(command, 0, '{"uniqueIDHex":"unique"}', "")
+        if command[1:3] == ["snapshot", "list"]:
+            payload = [{"id": "snapshot-id", "startTime": "2026-09-01", "source": {"path": str(source)}}]
+            return CompletedProcess(command, 0, __import__("json").dumps(payload), "")
+        return CompletedProcess(command, 0, "", "")
+
+    class Process:
+        stdout = StringIO('{"id":"snapshot-id"}\n')
+        stderr = StringIO("")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def send_signal(self, _signal):
+            pass
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr("backer.backends.kopia.KopiaBackend._get_binary", lambda _self, **_kwargs: Path("kopia"))
+    monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+    monkeypatch.setattr("backer.backends.kopia.subprocess.Popen", lambda *_args, **_kwargs: Process())
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config_path), "repo", "add", "repo", "--init", "--type", "local", "--path",
+            str(repository), "--passphrase-stdin", "--headless", "--yes",
+        ],
+        input="ultra-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config_path), "job", "create", "backup", "--repo", "repo", "--source",
+            str(source), "--no-schedule",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(main, ["--config", str(config_path), "job", "run", "backup", "--no-progress"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(main, ["--config", str(config_path), "snapshots", "--repo", "repo", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [item["id"] for item in __import__("json").loads(result.output)] == ["snapshot-id"]
+    assert "ultra-secret" not in config_path.read_text(encoding="utf-8")
+    assert all("ultra-secret" not in argument for command in commands for argument in command)
+
+
 def test_job_run_sigint_exits_130(monkeypatch, tmp_path):
     from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
 
@@ -133,6 +202,24 @@ def test_job_run_sigint_exits_130(monkeypatch, tmp_path):
     )
 
     result = CliRunner().invoke(main, ["--config", str(config_path), "job", "run", "backup", "--no-progress"])
+
+    assert result.exit_code == 130
+
+
+def test_job_run_all_sigint_exits_130(monkeypatch, tmp_path):
+    from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
+
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="repo", type="local", path=str(tmp_path))},
+        jobs={"backup": JobConfig(repository="repo", source=SourceConfig(path=str(tmp_path)))},
+    )
+    config_path = tmp_path / "config.yaml"
+    config.save(config_path)
+    monkeypatch.setattr(
+        "backer.serverless.runs.run_local_job", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    result = CliRunner().invoke(main, ["--config", str(config_path), "job", "run", "--all", "--no-progress"])
 
     assert result.exit_code == 130
 

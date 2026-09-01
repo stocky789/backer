@@ -111,6 +111,14 @@ def _redact_error(error: BaseException, *secrets: str | None) -> str:
     return text
 
 
+def _local_job_call(call: Callable[[], Any]) -> Any:
+    """Keep every local job mode on the same Ctrl-C exit contract."""
+    try:
+        return call()
+    except KeyboardInterrupt as error:
+        raise click.exceptions.Exit(130) from error
+
+
 def _restore_include_path(value: str | None) -> str | None:
     """Accept only a relative snapshot subtree; it must never escape the snapshot."""
     if value is None:
@@ -3510,7 +3518,7 @@ def job_run(
 
         for item in names:
             with _local_progress(progress) as render:
-                report = run_local_job(local_config, item, on_progress=render)
+                report = _local_job_call(lambda: run_local_job(local_config, item, on_progress=render))
             if not report or not report["success"]:
                 raise click.ClickException("; ".join((report or {}).get("errors") or ["Backup failed"]))
         return
@@ -3522,12 +3530,12 @@ def job_run(
         try:
             system_run = os.environ.get("BACKER_RUN_AS_SYSTEM") == "1"
             if due:
-                reports = run_due_jobs(local_config, run_as_system=system_run)
+                reports = _local_job_call(lambda: run_due_jobs(local_config, run_as_system=system_run))
             else:
                 with _local_progress(progress) as render:
-                    reports = run_local_job(local_config, name, run_as_system=system_run, on_progress=render)
-        except KeyboardInterrupt:
-            ctx.exit(130)
+                    reports = _local_job_call(
+                        lambda: run_local_job(local_config, name, run_as_system=system_run, on_progress=render)
+                    )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
         if reports is None:

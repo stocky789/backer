@@ -703,6 +703,24 @@ class TestKopiaBackend:
         assert "KOPIA_CONFIG_PATH" not in result.errors[0]
         assert "repository.config" in result.errors[0]
 
+    def test_hard_killed_restore_names_local_unlock_and_isolated_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        backend = KopiaBackend({"repository_password": "test-password"})
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _path: (True, ""))
+        error = subprocess.TimeoutExpired(["kopia"], 1)
+        error.backer_hard_stopped = True
+        monkeypatch.setattr(
+            "backer.backends.kopia._run_kopia_with_progress", lambda *_args: (_ for _ in ()).throw(error)
+        )
+
+        result = backend.restore(BackupDestination("repository"), tmp_path, snapshot="snapshot")
+
+        assert not result.success
+        assert "backer repo unlock NAME" in result.errors[0]
+        assert "repository.config" in result.errors[0]
+
     def test_backup_does_not_auto_init_into_a_nonempty_existing_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
