@@ -8,8 +8,10 @@ from pathlib import Path
 
 import yaml
 
-# Phase 7 changes this only in the same commit that makes each matching CI cell mandatory.
-PROVEN_SERVERLESS_CELLS: frozenset[tuple[str, str]] = frozenset()
+# Changed only with the matching mandatory CI cells in release-validation.yml.
+PROVEN_SERVERLESS_CELLS: frozenset[tuple[str, str]] = frozenset(
+    (platform, kind) for platform in ("linux", "win32") for kind in ("local", "smb", "s3")
+)
 
 _JOB_TYPES = {
     "serverless-local": "local",
@@ -52,17 +54,13 @@ def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
         job = jobs.get(job_name, {})
         if job_name == "s3-contract":
             test_steps = [
-                step
-                for step in job.get("steps", [])
-                if isinstance(step, dict) and _S3_E2E in str(step.get("run"))
+                step for step in job.get("steps", []) if isinstance(step, dict) and _S3_E2E in str(step.get("run"))
             ]
             if not test_steps or "BACKER_TEST_S3_BUCKET" not in test_steps[-1].get("env", {}):
                 return frozenset()
         matrix = job.get("strategy", {}).get("matrix", {}).get("os")
         systems = matrix if isinstance(matrix, list) else [job.get("runs-on")]
-        if job_name in {"serverless-local", "s3-contract"} and {
-            "ubuntu-latest", "windows-latest"
-        } - set(systems):
+        if job_name in {"serverless-local", "s3-contract"} and {"ubuntu-latest", "windows-latest"} - set(systems):
             return frozenset()
         for system in systems:
             if system == "windows-latest":

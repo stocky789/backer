@@ -75,8 +75,12 @@ jobs:
         run: python -m pytest -q tests/test_protocol_contract.py tests/test_tools.py
 
   s3-contract:
-    name: Restic S3 Contract
-    runs-on: ubuntu-latest
+    name: Kopia S3 Contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -89,7 +93,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Start S3-compatible test service
+      - name: Start pinned MinIO container
+        if: matrix.os == 'ubuntu-latest'
         run: |
           docker run -d --name backer-minio -p 9000:9000 \
             -e MINIO_ROOT_USER=backer-access \
@@ -101,17 +106,149 @@ jobs:
           done
           exit 1
 
+      - name: Start pinned MinIO service
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $release = 'RELEASE.2025-09-07T16-13-09Z'
+          $base = "https://dl.min.io/server/minio/release/windows-amd64/minio.$release"
+          $checksumUrl = 'https://dl.min.io/server/minio/release/windows-amd64/minio.RELEASE.2025-09-07T16-13-09Z.sha256sum'
+          Invoke-WebRequest -Uri $base -OutFile minio.exe
+          Invoke-WebRequest -Uri $checksumUrl -OutFile minio.sha256sum
+          $expected = ([regex]::Match((Get-Content minio.sha256sum -Raw), '[a-fA-F0-9]{64}')).Value.ToLowerInvariant()
+          $actual = (Get-FileHash minio.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if (!$expected -or $actual -ne $expected) { throw 'MinIO publisher checksum mismatch' }
+          New-Item -ItemType Directory -Force C:\minio-data | Out-Null
+          $env:MINIO_ROOT_USER = 'backer-access'
+          $env:MINIO_ROOT_PASSWORD = 'backer-secret-key'
+          Start-Process -FilePath "$PWD\minio.exe" -ArgumentList 'server', '--address', ':9000', 'C:\minio-data' -WindowStyle Hidden
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            try { Invoke-WebRequest http://127.0.0.1:9000/minio/health/live -UseBasicParsing | Out-Null; exit 0 } catch { Start-Sleep -Seconds 1 }
+          }
+          throw 'MinIO did not become healthy'
+
       - name: Install package and verified backup tools
         run: |
           python -m pip install -e ".[dev]"
           backer setup --quiet
 
-      - name: Run Restic S3 end-to-end contract
+      - name: Run Kopia S3 end-to-end contract
         env:
           BACKER_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          BACKER_TEST_S3_BUCKET: backer-test
           BACKER_TEST_S3_ACCESS_KEY: backer-access
           BACKER_TEST_S3_SECRET_KEY: backer-secret-key
-        run: python -m pytest -q tests/test_s3.py -k minio_end_to_end
+        run: python -m pytest -q tests/test_s3.py::test_s3_minio_end_to_end
+
+      - name: Run serverless S3 end-to-end contract
+        env:
+          BACKER_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          BACKER_TEST_S3_BUCKET: backer-test
+          BACKER_TEST_S3_ACCESS_KEY: backer-access
+          BACKER_TEST_S3_SECRET_KEY: backer-secret-key
+        run: python -m pytest -q tests/test_serverless_e2e.py -k s3
+
+  serverless-local:
+    name: Serverless Local (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package and verified backup tools
+        run: |
+          python -m pip install -e ".[dev]"
+          backer setup --quiet
+
+      - name: Run local serverless end-to-end contract
+        run: python -m pytest -q tests/test_serverless_e2e.py -k local
+
+      - name: Run GUI serverless contract
+        if: matrix.os == 'ubuntu-latest'
+        run: xvfb-run -a python -m pytest -q tests/test_gui_serverless.py
+
+  serverless-smb-linux:
+    name: Serverless SMB (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Start pinned Samba service
+        run: |
+          mkdir -p "$RUNNER_TEMP/backer-share"
+          docker run -d --name backer-samba --privileged -p 445:445 -v "$RUNNER_TEMP/backer-share:/share" dperson/samba@sha256:e1d2a7366690749a7be06f72bdbf6a5a7d15726fc84e4e4f41e967214516edfd -u "backer;backer-secret" -s "Backups;/share;yes;no;no;backer"
+          for attempt in $(seq 1 30); do
+            timeout 1 bash -c '</dev/tcp/127.0.0.1/445' && exit 0
+            sleep 1
+          done
+          exit 1
+
+      - name: Install package, backup tools, and CIFS client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cifs-utils
+          python -m pip install -e ".[dev]"
+          backer setup --quiet
+
+      - name: Run SMB serverless end-to-end contract
+        env:
+          BACKER_TEST_SMB_SERVER: 127.0.0.1
+          BACKER_TEST_SMB_SHARE: Backups
+          BACKER_TEST_SMB_USERNAME: backer
+          BACKER_TEST_SMB_PASSWORD: backer-secret
+          BACKER_TEST_SMB_REPOSITORY_PATH: ${{ runner.temp }}/backer-share
+        run: python -m pytest -q tests/test_serverless_e2e.py -k smb_linux
+
+  serverless-smb-windows:
+    name: Serverless SMB (windows-latest)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Create isolated SMB share and users
+        shell: pwsh
+        run: |
+          $password = ConvertTo-SecureString 'backer-secret' -AsPlainText -Force
+          New-Item -ItemType Directory -Force C:\backer-share | Out-Null
+          New-LocalUser -Name backer-ci -Password $password -PasswordNeverExpires | Out-Null
+          New-LocalUser -Name backer-ci-other -Password $password -PasswordNeverExpires | Out-Null
+          New-SmbShare -Name Backups -Path C:\backer-share -FullAccess 'backer-ci', 'backer-ci-other' | Out-Null
+          icacls C:\backer-share /grant 'backer-ci:(OI)(CI)M' 'backer-ci-other:(OI)(CI)M' /t /c | Out-Null
+
+      - name: Install package and verified backup tools
+        run: |
+          python -m pip install -e ".[dev]"
+          backer setup --quiet
+
+      - name: Run SMB serverless end-to-end contract
+        env:
+          BACKER_TEST_SMB_SERVER: localhost
+          BACKER_TEST_SMB_SHARE: Backups
+          BACKER_TEST_SMB_USERNAME: backer-ci
+          BACKER_TEST_SMB_PASSWORD: backer-secret
+          BACKER_TEST_SMB_OTHER_USERNAME: backer-ci-other
+          BACKER_TEST_SMB_REPOSITORY_PATH: C:\backer-share
+        run: python -m pytest -q tests/test_serverless_e2e.py -k smb_windows
 
   verify-version:
     name: Verify Version Matches Tag
@@ -316,6 +453,9 @@ jobs:
       - python-ci
       - protocol-contract
       - s3-contract
+      - serverless-local
+      - serverless-smb-linux
+      - serverless-smb-windows
       - docker-build
       - android-release
       - windows-agent-package
@@ -325,15 +465,19 @@ jobs:
       - name: Check release jobs
         shell: bash
         env:
+          VERIFY_VERSION_RESULT: ${{ needs.verify-version.result }}
           PYTHON_CI_RESULT: ${{ needs.python-ci.result }}
           PROTOCOL_CONTRACT_RESULT: ${{ needs.protocol-contract.result }}
           S3_CONTRACT_RESULT: ${{ needs.s3-contract.result }}
+          SERVERLESS_LOCAL_RESULT: ${{ needs.serverless-local.result }}
+          SERVERLESS_SMB_LINUX_RESULT: ${{ needs.serverless-smb-linux.result }}
+          SERVERLESS_SMB_WINDOWS_RESULT: ${{ needs.serverless-smb-windows.result }}
           DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
           ANDROID_RELEASE_RESULT: ${{ needs.android-release.result }}
           WINDOWS_AGENT_PACKAGE_RESULT: ${{ needs.windows-agent-package.result }}
         run: |
           set -euo pipefail
-          for job in PYTHON_CI_RESULT PROTOCOL_CONTRACT_RESULT S3_CONTRACT_RESULT DOCKER_BUILD_RESULT; do
+          for job in VERIFY_VERSION_RESULT PYTHON_CI_RESULT PROTOCOL_CONTRACT_RESULT S3_CONTRACT_RESULT SERVERLESS_LOCAL_RESULT SERVERLESS_SMB_LINUX_RESULT SERVERLESS_SMB_WINDOWS_RESULT DOCKER_BUILD_RESULT; do
             result="${!job}"
             if [ "$result" != "success" ]; then
               echo "$job finished with $result"

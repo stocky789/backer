@@ -13,6 +13,7 @@ try:
 except ImportError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
 
+import click
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -443,6 +444,93 @@ def test_release_workflow_checks_all_release_versions_and_manual_tag_ref() -> No
     assert "android/app/build.gradle.kts" in release_workflow
     assert "versionCode" in release_workflow
     assert "minio/minio:RELEASE.2025-09-07T16-13-09Z server /data" in release_workflow
+
+
+def test_serverless_release_cells_are_named_and_pinned() -> None:
+    workflow = (ROOT / ".gitea" / "workflows" / "release-validation.yml").read_text(encoding="utf-8")
+
+    assert "name: Kopia S3 Contract (${{ matrix.os }})" in workflow
+    assert "Run Kopia S3 end-to-end contract" in workflow
+    assert "os: [ubuntu-latest, windows-latest]" in workflow
+    assert "BACKER_TEST_S3_BUCKET: backer-test" in workflow
+    assert "minio.RELEASE.2025-09-07T16-13-09Z.sha256sum" in workflow
+    assert "minio.RELEASE.2025-09-07T16-13-09Z" in workflow
+    assert "$env:MINIO_ROOT_USER = 'backer-access'" in workflow
+    assert "$env:MINIO_ROOT_PASSWORD = 'backer-secret-key'" in workflow
+    assert "dperson/samba@sha256:e1d2a7366690749a7be06f72bdbf6a5a7d15726fc84e4e4f41e967214516edfd" in workflow
+    assert "serverless-local:" in workflow
+    assert "serverless-smb-linux:" in workflow
+    assert "serverless-smb-windows:" in workflow
+
+
+def test_serverless_validation_jobs_have_the_required_gates() -> None:
+    workflow = yaml.safe_load((ROOT / ".gitea" / "workflows" / "release-validation.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    local, linux_smb, windows_smb, s3 = (
+        jobs[name] for name in ("serverless-local", "serverless-smb-linux", "serverless-smb-windows", "s3-contract")
+    )
+    assert local["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
+    gui = next(step for step in local["steps"] if "xvfb-run" in step.get("run", ""))
+    assert gui["if"] == "matrix.os == 'ubuntu-latest'"
+    assert "cifs-utils" in "\n".join(step.get("run", "") for step in linux_smb["steps"])
+    assert "445" in "\n".join(step.get("run", "") for step in linux_smb["steps"])
+    linux_test = next(step for step in linux_smb["steps"] if "test_serverless_e2e.py" in step.get("run", ""))
+    assert set(linux_test["env"]) >= {
+        "BACKER_TEST_SMB_SERVER",
+        "BACKER_TEST_SMB_SHARE",
+        "BACKER_TEST_SMB_USERNAME",
+        "BACKER_TEST_SMB_PASSWORD",
+    }
+    windows_setup = "\n".join(step.get("run", "") for step in windows_smb["steps"])
+    assert all(command in windows_setup for command in ("New-SmbShare", "New-LocalUser", "icacls"))
+    assert "Get-FileHash minio.exe -Algorithm SHA256" in "\n".join(step.get("run", "") for step in s3["steps"])
+    s3_serverless = next(step for step in s3["steps"] if "test_serverless_e2e.py -k s3" in step.get("run", ""))
+    assert set(s3_serverless["env"]) == {
+        "BACKER_TEST_S3_ENDPOINT",
+        "BACKER_TEST_S3_BUCKET",
+        "BACKER_TEST_S3_ACCESS_KEY",
+        "BACKER_TEST_S3_SECRET_KEY",
+    }
+    validation_jobs = (local, linux_smb, windows_smb, s3)
+    assert not any("upload-artifact" in step.get("uses", "") for job in validation_jobs for step in job["steps"])
+
+
+def test_every_needed_job_is_checked() -> None:
+    workflow = yaml.safe_load((ROOT / ".gitea" / "workflows" / "release-validation.yml").read_text(encoding="utf-8"))
+    release = workflow["jobs"]["release-artifacts-ready"]
+    script = next(step["run"] for step in release["steps"] if step.get("name") == "Check release jobs")
+    checked = set(re.findall(r"\b[A-Z][A-Z0-9_]+_RESULT\b", script))
+    result_jobs = {
+        variable: match.group(1)
+        for variable, value in next(step["env"] for step in release["steps"] if "env" in step).items()
+        if (match := re.search(r"needs\.([\w-]+)\.result", value))
+    }
+
+    assert set(release["needs"]) <= {result_jobs[name] for name in checked}
+    mandatory = re.search(r"for job in ([A-Z0-9_ ]+); do", script)
+    optional = re.search(r"for optional_job in ([A-Z0-9_ ]+); do", script)
+    assert mandatory and optional
+    required_results = {
+        "VERIFY_VERSION_RESULT",
+        "SERVERLESS_LOCAL_RESULT",
+        "SERVERLESS_SMB_LINUX_RESULT",
+        "SERVERLESS_SMB_WINDOWS_RESULT",
+    }
+    assert required_results <= set(mandatory.group(1).split())
+    assert not required_results & set(optional.group(1).split())
+
+
+def test_cli_choices_match_ci_jobs() -> None:
+    from backer.agent.gui.support import workflow_cells
+    from backer.cli import main
+
+    context = click.Context(main)
+    repo = main.get_command(context, "repo")
+    commands = (repo.get_command(context, "add"), main.get_command(context, "init"))
+    expected = {kind for _, kind in workflow_cells(ROOT / ".gitea/workflows/release-validation.yml")}
+    for command in commands:
+        repository_option = next(option for option in command.params if option.name == "repository_type")
+        assert set(repository_option.type.choices) == expected
 
 
 def test_changelog_follows_the_documented_format() -> None:

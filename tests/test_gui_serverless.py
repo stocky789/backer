@@ -1577,8 +1577,8 @@ def test_support_map_only_advertises_the_six_ci_cells():
     from backer.agent.gui.support import PROVEN_SERVERLESS_CELLS, supported_repository_types, workflow_cells
 
     assert PROVEN_SERVERLESS_CELLS == workflow_cells(Path(".gitea/workflows/release-validation.yml"))
-    assert supported_repository_types("win32") == ()
-    assert supported_repository_types("linux") == ()
+    assert supported_repository_types("win32") == ("local", "smb", "s3")
+    assert supported_repository_types("linux") == ("local", "smb", "s3")
     assert supported_repository_types("darwin") == ()
 
 
