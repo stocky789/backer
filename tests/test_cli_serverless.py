@@ -119,11 +119,27 @@ def test_noninteractive_first_run_creates_runs_and_lists_one_snapshot(monkeypatc
     assert [item["id"] for item in __import__("json").loads(result.output)] == ["snapshot"]
 
 
-def test_noninteractive_first_run_uses_real_config_keystore_and_kopia_boundary(monkeypatch, tmp_path):
+def test_noninteractive_first_run_uses_real_config_keystore_and_kopia_boundary(monkeypatch, request, tmp_path):
     from io import StringIO
     from subprocess import CompletedProcess
 
+    from backer.core import keystore
+    from backer.core.config import BackerConfig
+
     config_path = tmp_path / "config.yaml"
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("ProgramData", str(tmp_path / "programdata"))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("backer.core.keystore._secret_tool_available", lambda: False)
+
+    def clean_test_secrets() -> None:
+        if config_path.exists():
+            for record in BackerConfig.load(config_path).repositories.values():
+                for reference in (record.passphrase_ref, record.storage_password_ref):
+                    if reference:
+                        keystore.delete(reference, machine_scope=record.scope == "machine")
+
+    request.addfinalizer(clean_test_secrets)
     source = tmp_path / "source"
     repository = tmp_path / "repository"
     source.mkdir()
@@ -186,6 +202,11 @@ def test_noninteractive_first_run_uses_real_config_keystore_and_kopia_boundary(m
     assert [item["id"] for item in __import__("json").loads(result.output)] == ["snapshot-id"]
     assert "ultra-secret" not in config_path.read_text(encoding="utf-8")
     assert all("ultra-secret" not in argument for command in commands for argument in command)
+    assert keystore._file_dir(False).is_relative_to(tmp_path)
+    record = next(iter(BackerConfig.load(config_path).repositories.values()))
+    assert keystore.get(record.passphrase_ref or "") == "ultra-secret"
+    clean_test_secrets()
+    assert not keystore._file_dir(False).exists() or not any(keystore._file_dir(False).iterdir())
 
 
 def test_job_run_sigint_exits_130(monkeypatch, tmp_path):
