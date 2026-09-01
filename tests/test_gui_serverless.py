@@ -15,8 +15,11 @@ def test_gui_tests_actually_ran():
     import tkinter as tk
 
     root = tk.Tk()
-    root.withdraw()
-    root.update()
+    try:
+        root.withdraw()
+        root.update()
+    finally:
+        root.destroy()
 
 
 def test_no_colour_literals_and_tokens_meet_contrast():
