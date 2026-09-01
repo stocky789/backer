@@ -261,6 +261,7 @@ def write_journal(entries: list[dict[str, object]]) -> None:
     descriptor, name = tempfile.mkstemp(prefix=f"{JOURNAL}.", suffix=".tmp", dir=ROOT)
     temporary = Path(name)
     try:
+        regular_lstat(temporary)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or is_reparse(metadata):
             raise TransactionError("journal temporary is not a regular file")

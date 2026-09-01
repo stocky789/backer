@@ -437,6 +437,27 @@ def test_bump_version_rejects_a_symlinked_lock_without_mutation(
     assert outside.read_bytes() == b"outside"
 
 
+def test_bump_version_rejects_a_symlinked_journal_temp_before_outside_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_release_files(tmp_path)
+    bump_version = load_bump_version()
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    outside = tmp_path / "outside-temp"
+    outside.write_bytes(b"outside")
+    temporary = tmp_path / "journal-temp"
+    try:
+        temporary.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    descriptor = os.open(outside, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+    monkeypatch.setattr(bump_version.tempfile, "mkstemp", lambda **_kwargs: (descriptor, str(temporary)))
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "0.9.0"])
+
+    assert bump_version.main() == 1
+    assert outside.read_bytes() == b"outside"
+
+
 def test_bump_version_rejects_windows_reparse_point_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
