@@ -77,17 +77,37 @@ def test_show_leaves_one_child_and_constructs_no_toplevel():
 
 
 def test_share_listing_does_not_block_the_event_loop():
-    source = _source("wizard.py")
-    assert "threading.Thread(target=worker, daemon=True).start()" in source
-    assert "self._marshal(generation, done)" in source
-    assert "generation != self._generation" in source
+    import threading
+    import time
+
+    from backer.agent.gui.wizard import RepositoryWizard
+
+    painted = []
+    instance = object.__new__(RepositoryWizard)
+    instance._generation = 2
+    instance.cancel = type("Cancel", (), {"is_set": lambda _self: False})()
+    instance.primary = type("Combo", (), {"configure": lambda _self, **_kwargs: painted.append("paint")})()
+    instance.listing = type("Value", (), {"set": lambda _self, _value: None})()
+
+    worker = threading.Thread(target=lambda: (time.sleep(3), instance._apply_share_listing(1, True, [])), daemon=True)
+    worker.start()
+    serviced = 0
+    deadline = time.monotonic() + 3.2
+    while worker.is_alive() and time.monotonic() < deadline:
+        serviced += 1
+        time.sleep(0.1)
+    worker.join()
+
+    assert serviced >= 25 and painted == []
 
 
 def test_passphrase_step_requires_confirmation():
-    source = _source("wizard.py")
-    assert "_generated_passphrase" in source
-    assert "I have saved this somewhere other than this computer" in source
-    assert "self.primary.configure(state=tk.DISABLED)" in source
+    from backer.agent.gui.wizard import confirmation_word, valid_supplied_passphrase
+
+    phrase = "safe usable recovery phrase"
+    assert not valid_supplied_passphrase(phrase, "wrong")
+    assert valid_supplied_passphrase(phrase, phrase)
+    assert confirmation_word(phrase, 3) == "recovery"
 
 
 def test_passphrase_generation_uses_a_separate_reveal_and_confirmation_frame():
@@ -1203,10 +1223,20 @@ def test_run_progress_retains_kopia_counts_and_reverts_after_stale_frame(monkeyp
 
 
 def test_support_map_only_advertises_the_six_ci_cells():
-    from backer.agent.gui.views import supported_repository_types
+    from backer.agent.gui.views import PROVEN_SERVERLESS_CELLS, supported_repository_types
 
-    assert supported_repository_types("win32") == ("local", "smb", "s3")
-    assert supported_repository_types("linux") == ("local", "smb", "s3")
+    workflow = Path(".gitea/workflows/release-validation.yml").read_text(encoding="utf-8")
+    mandatory = {
+        ("linux", "local") if "SERVERLESS_LOCAL_RESULT" in workflow else None,
+        ("linux", "smb") if "SERVERLESS_SMB_LINUX_RESULT" in workflow else None,
+        ("win32", "smb") if "SERVERLESS_SMB_WINDOWS_RESULT" in workflow else None,
+    } - {None}
+    if "Kopia S3 Contract (${{ matrix.os }})" in workflow and "S3_CONTRACT_RESULT" in workflow:
+        mandatory |= {("linux", "s3"), ("win32", "s3")}
+
+    assert PROVEN_SERVERLESS_CELLS == mandatory
+    assert supported_repository_types("win32") == ()
+    assert supported_repository_types("linux") == ()
     assert supported_repository_types("darwin") == ()
 
 
@@ -1217,26 +1247,69 @@ def test_linux_close_states_scheduled_runs_continue(monkeypatch):
     app = object.__new__(gui_app.BackerAgentApp)
     app.running = False
     app.tray_icon = None
+    app._linux_close_notice = False
     app.set_status = lambda value, **_kwargs: seen.append(value)
     app.on_exit = lambda: seen.append("exit")
     monkeypatch.setattr(gui_app.sys, "platform", "linux")
 
     app.on_window_close()
 
-    assert seen == ["Scheduled backups continue from the systemd timer after this window closes", "exit"]
+    assert seen == ["Scheduled backups continue from the systemd timer. Close again or use Exit to quit."]
+    app.on_window_close()
+    assert seen[-1] == "exit"
 
 
-def test_failure_notification_open_runs_the_named_job():
+def test_failure_notification_opens_persisted_details_without_starting_a_backup():
     from backer.agent.gui.app import BackerAgentApp
 
     opened = []
     app = object.__new__(BackerAgentApp)
-    app._notification_run = "Photos"
-    app.root = type("Root", (), {"after": lambda _self, _delay, callback: callback(), "deiconify": lambda _self: None,
-                                  "lift": lambda _self: None})()
-    app.backup_job = lambda name: opened.append(name)
+    app._notification_run = ("Photos", "failed-run")
+    app._notification_state = {"attention": {"Photos": "failed-run"}}
+    app._show = lambda name: opened.append(("view", name))
+    app.views = {"run": type("Run", (), {"show_history": lambda _self, name, run_id: opened.append((name, run_id))})()}
+    app._save_notification_state = lambda: opened.append(("saved",))
     app._refresh_tray_menu = lambda: None
 
-    app._show_window()
+    app.show_failed_run()
 
-    assert opened == ["Photos"] and app._notification_run is None
+    assert opened == [("view", "run"), ("Photos", "failed-run"), ("saved",)]
+    assert app._notification_run is None and app._notification_state["attention"] == {}
+
+
+def test_tray_thread_queues_intent_until_the_tk_poller_runs():
+    import queue
+    import threading
+
+    from backer.agent.gui.app import BackerAgentApp
+
+    seen = []
+    app = object.__new__(BackerAgentApp)
+    app._tray_intents = queue.SimpleQueue()
+    app.alive = False
+    app.root = type("Root", (), {"after": lambda *_args: (_ for _ in ()).throw(AssertionError("off-thread Tk"))})()
+    app.backup_job = lambda name: seen.append(name)
+
+    thread = threading.Thread(target=lambda: app._queue_tray_intent("backup", "Photos"))
+    thread.start()
+    thread.join()
+    assert seen == []
+    app._poll_tray_intents()
+    assert seen == ["Photos"]
+
+
+def test_persisted_run_input_needed_uses_the_shared_catalogue(tmp_path):
+    from datetime import UTC, datetime
+
+    from backer.core.job import JobRun, JobStatus
+    from backer.core.messages import failure_needs_input
+    from backer.serverless.store import append_run, read_runs
+
+    assert failure_needs_input("System error 1326")
+    append_run(
+        tmp_path,
+        JobRun(
+            "Photos", "failed", JobStatus.FAILED, datetime.now(UTC), error_message="System error 1326", needs_input=True
+        ),
+    )
+    assert read_runs(tmp_path, "Photos", 1)[0].needs_input

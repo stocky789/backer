@@ -27,13 +27,15 @@ from backer.core.paths import get_config_dir, get_data_dir, get_machine_config_d
 from backer.core.repo_metadata import RepositoryMetadata
 from backer.serverless.store import read_runs
 
-# These are the six mandatory Phase 7 CI cells, not a capability guess.
-SUPPORTED_REPOSITORY_TYPES = {"win32": ("local", "smb", "s3"), "linux": ("local", "smb", "s3")}
+# Phase 7 changes this manifest only alongside the mandatory workflow result loop.
+# Until an end-to-end cell is mandatory, the GUI must not construct its control.
+PROVEN_SERVERLESS_CELLS: frozenset[tuple[str, str]] = frozenset()
 
 
 def supported_repository_types(platform: str | None = None) -> tuple[str, ...]:
     platform = platform or sys.platform
-    return SUPPORTED_REPOSITORY_TYPES.get("linux" if platform.startswith("linux") else platform, ())
+    platform = "linux" if platform.startswith("linux") else platform
+    return tuple(kind for kind in ("local", "smb", "s3") if (platform, kind) in PROVEN_SERVERLESS_CELLS)
 
 
 class ModeApplyResult(NamedTuple):
@@ -475,8 +477,10 @@ class HomeView(ttk.Frame):
         self.tree.bind("<Double-1>", lambda _event: self.app.backup_selected())
         buttons = ttk.Frame(self)
         buttons.pack(fill=tk.X, pady=(10, 0))
-        self.add = ttk.Button(buttons, text="Add repository", command=lambda: app._show("repository"))
-        self.add.pack(side=tk.LEFT)
+        self.add = None
+        if supported_repository_types():
+            self.add = ttk.Button(buttons, text="Add repository", command=lambda: app._show("repository"))
+            self.add.pack(side=tk.LEFT)
         self.backup = ttk.Button(buttons, text="Back up now", command=app.backup_selected, state=tk.DISABLED)
         self.backup.pack(side=tk.LEFT, padx=6)
         self.restore = ttk.Button(buttons, text="Restore", command=app.restore_selected, state=tk.DISABLED)
@@ -488,7 +492,8 @@ class HomeView(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._selection)
         self.empty = ttk.Frame(self)
         ttk.Label(self.empty, text="No local backup jobs yet.", style="Muted.TLabel").pack()
-        ttk.Button(self.empty, text="Add repository", command=lambda: app._show("repository")).pack(pady=(8, 0))
+        if supported_repository_types():
+            ttk.Button(self.empty, text="Add repository", command=lambda: app._show("repository")).pack(pady=(8, 0))
         self.primary = self.add
 
     def _selection(self, _event=None):

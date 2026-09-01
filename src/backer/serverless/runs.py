@@ -12,6 +12,7 @@ from typing import Any
 from backer.core import keystore
 from backer.core.config import BackerConfig
 from backer.core.job import JobRun, JobStatus
+from backer.core.messages import failure_needs_input
 from backer.core.paths import get_data_dir
 from backer.core.runner import run_backup
 from backer.serverless.repositories import probe
@@ -198,10 +199,12 @@ def _run_local_job(
     finally:
         finished = datetime.now(UTC)
         error_message = "; ".join(report.get("errors") or []) or None
+        report["needs_input"] = bool(error_message and failure_needs_input(error_message))
         append_run(data_dir, JobRun(name, run_id, JobStatus.SUCCESS if report.get("success") else (
             JobStatus.CANCELLED if report.get("cancelled") else JobStatus.FAILED),
                                    started, finished, error_message=error_message, client_id=config.agent_id,
-                                   repository_id=repository_id, error_stage=None if report.get("success") else stage))
+                                   repository_id=repository_id, error_stage=None if report.get("success") else stage,
+                                   needs_input=report["needs_input"]))
         _write_log(data_dir, run_id, report.get("output") or error_message or "", secrets)
         (data_dir / "progress" / f"{run_id}.json").unlink(missing_ok=True)
         if smb_manager and smb_session_created:

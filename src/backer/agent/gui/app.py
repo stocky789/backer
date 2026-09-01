@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -79,7 +80,9 @@ class BackerAgentApp:
         self.run_cancel = threading.Event()
         self.progress_log = deque(maxlen=500)
         self.tray_icon = None
+        self._tray_intents: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._notification_run = None
+        self._linux_close_notice = False
         self._notification_state = self._read_notification_state()
         self.container = ttk.Frame(self.root)
         self.container.pack(fill=tk.BOTH, expand=True)
@@ -93,6 +96,7 @@ class BackerAgentApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
         self._show("welcome" if not self.config.repositories and not self.config.server else "home")
         self.root.after(0, self._replay_pending_notifications)
+        self.root.after(100, self._poll_tray_intents)
 
     def _setup_menu(self):
         menu = tk.Menu(self.root)
@@ -100,7 +104,8 @@ class BackerAgentApp:
         hub = tk.Menu(menu, tearoff=0)
         menu.add_cascade(label="Backer", menu=hub)
         hub.add_command(label="Home", command=lambda: self._show("home"))
-        hub.add_command(label="Add repository", command=lambda: self._show("repository"))
+        if supported_repository_types():
+            hub.add_command(label="Add repository", command=lambda: self._show("repository"))
         hub.add_command(label="Settings", command=lambda: self._show("settings"))
         hub.add_separator()
         hub.add_command(label="Exit", command=self.on_exit)
@@ -138,6 +143,8 @@ class BackerAgentApp:
 
     def _build(self, name):
         if name == "welcome":
+            if not supported_repository_types():
+                return SimpleView(self, "Choose how Backer runs", "Join a server in Settings to get started.")
             return SimpleView(
                 self,
                 "Choose how Backer runs",
@@ -227,8 +234,9 @@ class BackerAgentApp:
             title, body = "Backer", f"{name} completed its first backup."
         else:
             self._notification_state.setdefault("failure_day", {})[name] = today
-            self._notification_state.setdefault("attention", {})[name] = report.get("run_id") or "latest"
-            self._notification_run = name
+            run_id = report.get("run_id") or "latest"
+            self._notification_state.setdefault("attention", {})[name] = run_id
+            self._notification_run = (name, run_id)
             title, body = "Backer", f"{name} backup did not run. Open Backer for details."
         self._save_notification_state()
         self._refresh_tray_menu()
@@ -245,7 +253,7 @@ class BackerAgentApp:
             run = rows[0]
             self._record_run_notification(name, {
                 "success": run.status.value == "success", "run_id": run.run_id,
-                "needs_input": bool(run.error_message and "needs" in run.error_message.lower()),
+                "needs_input": run.needs_input,
             })
 
     def record_run_result(self, name, report):
@@ -256,6 +264,18 @@ class BackerAgentApp:
             return
         self._show("run")
         self.views["run"].start(name)
+
+    def show_failed_run(self):
+        """Open the stored failure details; notifications never trigger a backup."""
+        if not self._notification_run:
+            return
+        name, run_id = self._notification_run
+        self._show("run")
+        self.views["run"].show_history(name, run_id)
+        self._notification_state.setdefault("attention", {}).pop(name, None)
+        self._notification_run = None
+        self._save_notification_state()
+        self._refresh_tray_menu()
 
     def backup_selected(self):
         home = self.views.get("home")
@@ -314,6 +334,35 @@ class BackerAgentApp:
         except Exception:
             self.tray_icon = None
 
+    def _queue_tray_intent(self, intent, value=None):
+        """Safe from the pystray worker thread: it never touches Tk."""
+        self._tray_intents.put((intent, value))
+
+    def _poll_tray_intents(self):
+        while True:
+            try:
+                intent, value = self._tray_intents.get_nowait()
+            except queue.Empty:
+                break
+            if intent == "backup" and value:
+                self.backup_job(value)
+            elif intent == "pause" and value:
+                self.pause_backups(value)
+            elif intent == "resume":
+                self.resume_backups()
+            elif intent == "logs":
+                self._open_logs()
+            elif intent == "settings":
+                self._show("settings")
+            elif intent == "failure":
+                self.show_failed_run()
+            elif intent == "exit":
+                self.on_exit()
+            elif intent == "show":
+                self._show_window()
+        if self.alive:
+            self.root.after(100, self._poll_tray_intents)
+
     def _refresh_tray_menu(self):
         paused = scheduling_paused(self.config, datetime.now(UTC))
         self.pause_var.set("Paused" if paused else "")
@@ -324,16 +373,16 @@ class BackerAgentApp:
             f"Paused until {until.astimezone().strftime('%H:%M')}" if paused and until else "Backups active"
         )
         jobs = tuple(
-            pystray.MenuItem(name, lambda _icon, _item, job=name: self.root.after(0, lambda: self.backup_job(job)))
+            pystray.MenuItem(name, lambda _icon, _item, job=name: self._queue_tray_intent("backup", job))
             for name in self.config.jobs
         )
         pause = pystray.Menu(
-            pystray.MenuItem("For 1 hour", lambda *_: self.root.after(0, lambda: self.pause_backups("hour"))),
-            pystray.MenuItem("Until tomorrow", lambda *_: self.root.after(0, lambda: self.pause_backups("tomorrow"))),
+            pystray.MenuItem("For 1 hour", lambda *_: self._queue_tray_intent("pause", "hour")),
+            pystray.MenuItem("Until tomorrow", lambda *_: self._queue_tray_intent("pause", "tomorrow")),
             pystray.MenuItem(
-                "Until turned back on", lambda *_: self.root.after(0, lambda: self.pause_backups("forever"))
+                "Until turned back on", lambda *_: self._queue_tray_intent("pause", "forever")
             ),
-            pystray.MenuItem("Resume backups", lambda *_: self.root.after(0, self.resume_backups)),
+            pystray.MenuItem("Resume backups", lambda *_: self._queue_tray_intent("resume")),
         )
         items = [
             pystray.MenuItem(pause_label, None, enabled=False),
@@ -341,10 +390,10 @@ class BackerAgentApp:
             pystray.MenuItem("Pause backups", pause),
         ]
         if self._notification_run:
-            items.append(pystray.MenuItem("Open failed run", lambda *_: self._show_window()))
-        items.extend((pystray.MenuItem("View logs", lambda *_: self.root.after(0, self._open_logs)),
-                      pystray.MenuItem("Settings", lambda *_: self.root.after(0, lambda: self._show("settings"))),
-                      pystray.MenuItem("Exit", self.on_exit)))
+            items.append(pystray.MenuItem("Open failed run", lambda *_: self._queue_tray_intent("failure")))
+        items.extend((pystray.MenuItem("View logs", lambda *_: self._queue_tray_intent("logs")),
+                      pystray.MenuItem("Settings", lambda *_: self._queue_tray_intent("settings")),
+                      pystray.MenuItem("Exit", lambda *_: self._queue_tray_intent("exit"))))
         self.tray_icon.menu = pystray.Menu(*items)
         count = len(self._notification_state.get("attention", {}))
         self.tray_icon.title = (
@@ -394,10 +443,6 @@ class BackerAgentApp:
         def show():
             self.root.deiconify()
             self.root.lift()
-            if self._notification_run:
-                self.backup_job(self._notification_run)
-                self._notification_run = None
-                self._refresh_tray_menu()
         self.root.after(0, show)
 
     def on_window_close(self):
@@ -407,7 +452,12 @@ class BackerAgentApp:
             self.root.withdraw()
         else:
             if sys.platform.startswith("linux"):
-                self.set_status("Scheduled backups continue from the systemd timer after this window closes")
+                if not self._linux_close_notice:
+                    self._linux_close_notice = True
+                    self.set_status(
+                        "Scheduled backups continue from the systemd timer. Close again or use Exit to quit."
+                    )
+                    return
             self.on_exit()
 
     def on_exit(self, *_):
@@ -486,6 +536,24 @@ class RunView(ttk.Frame):
 
         threading.Thread(target=worker, daemon=True).start()
         self.app.root.after(200, self.tick)
+
+    def show_history(self, name, run_id):
+        """Render an already-failed persisted run without starting engine work."""
+        from backer.serverless.store import read_runs
+
+        self.job_name = name
+        run = next((item for item in read_runs(get_data_dir(), name, 50) if item.run_id == run_id), None)
+        self.primary.configure(state=tk.DISABLED)
+        self.bar.stop()
+        self.label.set("Failed" if run else "Failed run details unavailable")
+        detail = run.error_message if run else "The run record is no longer available."
+        log = get_data_dir() / "logs" / f"{run_id}.log"
+        if log.is_file():
+            detail = f"{detail}\n\n{log.read_text(encoding='utf-8')}"
+        self.details.configure(state=tk.NORMAL)
+        self.details.delete("1.0", tk.END)
+        self.details.insert(tk.END, detail)
+        self.details.configure(state=tk.DISABLED)
 
     def tick(self):
         frame = self.app.progress_frame

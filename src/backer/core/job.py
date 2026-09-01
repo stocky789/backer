@@ -28,6 +28,7 @@ class JobRun:
     client_id: str | None = None
     repository_id: str | None = None
     error_stage: str | None = None
+    needs_input: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         def utc(value: datetime | None) -> str | None:
@@ -43,6 +44,7 @@ class JobRun:
             "client_id": self.client_id,
             "repository_id": self.repository_id,
             "error_stage": self.error_stage,
+            "needs_input": self.needs_input,
             "result": {
                 "success": self.result.success,
                 "bytes_transferred": self.result.bytes_transferred,
@@ -58,4 +60,5 @@ class JobRun:
                    started_at=datetime.fromisoformat(data["started_at"]),
                    finished_at=datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None,
                    error_message=data.get("error_message"), client_id=data.get("client_id"),
-                   repository_id=data.get("repository_id"), error_stage=data.get("error_stage"))
+                   repository_id=data.get("repository_id"), error_stage=data.get("error_stage"),
+                   needs_input=bool(data.get("needs_input", False)))

@@ -21,6 +21,16 @@ FAILURE_MESSAGES = {
     "enospc": "The destination has no free space. Free space before trying again.",
 }
 
+# These failures cannot complete safely without a person changing credentials,
+# choosing a connection, or providing the repository recovery key.
+INPUT_NEEDED_FAILURES = frozenset({"invalid repository password", "error 1219", "error 1326", "mount error(13)"})
+
+
+def failure_needs_input(detail: str) -> bool:
+    """Classify only catalogue-backed failures; unknown engine text remains diagnostic."""
+    lowered = detail.lower()
+    return any(needle in lowered for needle in INPUT_NEEDED_FAILURES)
+
 
 def explain_failure(detail: str) -> str:
     """Return the known remedy, retaining unknown engine output for diagnosis."""
