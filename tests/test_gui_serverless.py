@@ -1668,17 +1668,70 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
         "serverless-local": {
             "runs-on": "ubuntu-latest",
             "strategy": {"matrix": {"os": ["ubuntu-latest", "windows-latest"]}},
+            "steps": [
+                {"run": "python -m pytest -q tests/test_serverless_e2e.py -k local"},
+                {
+                    "if": "matrix.os == 'ubuntu-latest'",
+                    "run": "xvfb-run -a python -m pytest -q tests/test_gui_serverless.py",
+                },
+            ],
         },
-        "serverless-smb-linux": {"runs-on": "ubuntu-latest"},
-        "serverless-smb-windows": {"runs-on": "windows-latest"},
+        "serverless-smb-linux": {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+                {
+                    "run": "sudo -E python -m pytest -q tests/test_serverless_e2e.py -k smb_linux",
+                    "env": {
+                        "BACKER_TEST_SMB_SERVER": "x",
+                        "BACKER_TEST_SMB_SHARE": "x",
+                        "BACKER_TEST_SMB_USERNAME": "x",
+                        "BACKER_TEST_SMB_PASSWORD": "x",
+                    },
+                }
+            ],
+        },
+        "serverless-smb-windows": {
+            "runs-on": "windows-latest",
+            "steps": [
+                {
+                    "run": "python -m pytest -q tests/test_serverless_e2e.py -k smb_windows",
+                    "env": {
+                        "BACKER_TEST_SMB_SERVER": "x",
+                        "BACKER_TEST_SMB_SHARE": "x",
+                        "BACKER_TEST_SMB_USERNAME": "x",
+                        "BACKER_TEST_SMB_PASSWORD": "x",
+                    },
+                }
+            ],
+        },
         "s3-contract": {
             "runs-on": "ubuntu-latest",
             "strategy": {"matrix": {"os": ["ubuntu-latest", "windows-latest"]}},
             "steps": [
                 {
-                    "run": "pytest -q tests/test_s3.py::test_s3_minio_end_to_end",
-                    "env": {"BACKER_TEST_S3_BUCKET": "test"},
-                }
+                    "run": "python -m pytest -q tests/test_s3.py::test_s3_minio_end_to_end",
+                    "env": {
+                        name: "test"
+                        for name in (
+                            "BACKER_TEST_S3_ENDPOINT",
+                            "BACKER_TEST_S3_BUCKET",
+                            "BACKER_TEST_S3_ACCESS_KEY",
+                            "BACKER_TEST_S3_SECRET_KEY",
+                        )
+                    },
+                },
+                {
+                    "run": "python -m pytest -q tests/test_serverless_e2e.py -k s3",
+                    "env": {
+                        name: "test"
+                        for name in (
+                            "BACKER_TEST_S3_ENDPOINT",
+                            "BACKER_TEST_S3_BUCKET",
+                            "BACKER_TEST_S3_ACCESS_KEY",
+                            "BACKER_TEST_S3_SECRET_KEY",
+                        )
+                    },
+                },
             ],
         },
     }
@@ -1717,8 +1770,37 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
     assert_empty(lambda value: value["s3-contract"]["strategy"]["matrix"].update(os=["ubuntu-latest"]))
     for job_name in ("serverless-local", "serverless-smb-linux", "serverless-smb-windows", "s3-contract"):
         assert_empty(lambda value, job_name=job_name: value.pop(job_name))
-    assert_empty(lambda value: value["s3-contract"]["steps"][0].update(run="pytest -q tests/test_s3.py"))
+    assert_empty(lambda value: value["s3-contract"]["steps"][0].update(run="python -m pytest -q tests/test_s3.py"))
     assert_empty(lambda value: value["s3-contract"]["steps"][0]["env"].clear())
+    assert_empty(lambda value: value["serverless-local"]["steps"][0].update(run="pytest -q"))
+    assert_empty(
+        lambda value: value["serverless-local"]["steps"][0].update(
+            run="python -m pytest -q tests/test_serverless_e2e.py -k smb_linux"
+        )
+    )
+    assert_empty(lambda value: value["serverless-local"]["steps"].pop(1))
+    assert_empty(lambda value: value["serverless-local"]["steps"][1].pop("if"))
+    assert_empty(lambda value: value["serverless-smb-linux"].update(**{"runs-on": "windows-latest"}))
+    assert_empty(
+        lambda value: value["serverless-smb-linux"]["steps"][0].update(
+            run="sudo -E python -m pytest -q tests/test_serverless_e2e.py -k local"
+        )
+    )
+    assert_empty(lambda value: value["serverless-smb-linux"]["steps"][0]["env"].pop("BACKER_TEST_SMB_PASSWORD"))
+    assert_empty(lambda value: value["serverless-smb-windows"].update(**{"runs-on": "ubuntu-latest"}))
+    assert_empty(
+        lambda value: value["serverless-smb-windows"]["steps"][0].update(
+            run="python -m pytest -q tests/test_serverless_e2e.py -k local"
+        )
+    )
+    assert_empty(lambda value: value["serverless-smb-windows"]["steps"][0]["env"].pop("BACKER_TEST_SMB_USERNAME"))
+    assert_empty(lambda value: value["s3-contract"]["steps"].pop(0))
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][1].update(
+            run="python -m pytest -q tests/test_serverless_e2e.py -k local"
+        )
+    )
+    assert_empty(lambda value: value["s3-contract"]["steps"][1]["env"].pop("BACKER_TEST_S3_SECRET_KEY"))
 
 
 def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):

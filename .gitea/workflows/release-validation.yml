@@ -192,6 +192,7 @@ jobs:
       - name: Start pinned Samba service
         run: |
           mkdir -p "$RUNNER_TEMP/backer-share"
+          chmod 0777 "$RUNNER_TEMP/backer-share"
           docker run -d --name backer-samba --privileged -p 445:445 -v "$RUNNER_TEMP/backer-share:/share" dperson/samba@sha256:e1d2a7366690749a7be06f72bdbf6a5a7d15726fc84e4e4f41e967214516edfd -u "backer;backer-secret" -s "Backups;/share;yes;no;no;backer"
           for attempt in $(seq 1 30); do
             timeout 1 bash -c '</dev/tcp/127.0.0.1/445' && exit 0
@@ -213,7 +214,7 @@ jobs:
           BACKER_TEST_SMB_USERNAME: backer
           BACKER_TEST_SMB_PASSWORD: backer-secret
           BACKER_TEST_SMB_REPOSITORY_PATH: ${{ runner.temp }}/backer-share
-        run: python -m pytest -q tests/test_serverless_e2e.py -k smb_linux
+        run: sudo -E python -m pytest -q tests/test_serverless_e2e.py -k smb_linux
 
   serverless-smb-windows:
     name: Serverless SMB (windows-latest)
@@ -228,7 +229,7 @@ jobs:
       - name: Create isolated SMB share and users
         shell: pwsh
         run: |
-          $password = ConvertTo-SecureString 'backer-secret' -AsPlainText -Force
+          $password = ConvertTo-SecureString 'BackerCi9!Smb' -AsPlainText -Force
           New-Item -ItemType Directory -Force C:\backer-share | Out-Null
           New-LocalUser -Name backer-ci -Password $password -PasswordNeverExpires | Out-Null
           New-LocalUser -Name backer-ci-other -Password $password -PasswordNeverExpires | Out-Null
@@ -245,7 +246,7 @@ jobs:
           BACKER_TEST_SMB_SERVER: localhost
           BACKER_TEST_SMB_SHARE: Backups
           BACKER_TEST_SMB_USERNAME: backer-ci
-          BACKER_TEST_SMB_PASSWORD: backer-secret
+          BACKER_TEST_SMB_PASSWORD: BackerCi9!Smb
           BACKER_TEST_SMB_OTHER_USERNAME: backer-ci-other
           BACKER_TEST_SMB_REPOSITORY_PATH: C:\backer-share
         run: python -m pytest -q tests/test_serverless_e2e.py -k smb_windows

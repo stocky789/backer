@@ -493,6 +493,12 @@ def test_serverless_validation_jobs_have_the_required_gates() -> None:
     }
     validation_jobs = (local, linux_smb, windows_smb, s3)
     assert not any("upload-artifact" in step.get("uses", "") for job in validation_jobs for step in job["steps"])
+    linux_setup = "\n".join(step.get("run", "") for step in linux_smb["steps"])
+    assert 'chmod 0777 "$RUNNER_TEMP/backer-share"' in linux_setup
+    assert linux_test["run"] == "sudo -E python -m pytest -q tests/test_serverless_e2e.py -k smb_linux"
+    assert "$password = ConvertTo-SecureString 'BackerCi9!Smb' -AsPlainText -Force" in windows_setup
+    windows_test = next(step for step in windows_smb["steps"] if "test_serverless_e2e.py" in step.get("run", ""))
+    assert windows_test["env"]["BACKER_TEST_SMB_PASSWORD"] == "BackerCi9!Smb"
 
 
 def test_every_needed_job_is_checked() -> None:

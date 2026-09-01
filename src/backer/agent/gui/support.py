@@ -21,7 +21,24 @@ _JOB_TYPES = {
 }
 
 _SERVERLESS_JOBS = frozenset(_JOB_TYPES)
-_S3_E2E = "tests/test_s3.py::test_s3_minio_end_to_end"
+_S3_ENV = frozenset(
+    ("BACKER_TEST_S3_ENDPOINT", "BACKER_TEST_S3_BUCKET", "BACKER_TEST_S3_ACCESS_KEY", "BACKER_TEST_S3_SECRET_KEY")
+)
+_SMB_ENV = frozenset(
+    ("BACKER_TEST_SMB_SERVER", "BACKER_TEST_SMB_SHARE", "BACKER_TEST_SMB_USERNAME", "BACKER_TEST_SMB_PASSWORD")
+)
+
+
+def _has_test_step(
+    job: dict, command: str, *, environment: frozenset[str] = frozenset(), condition: str | None = None
+) -> bool:
+    return any(
+        isinstance(step, dict)
+        and str(step.get("run", "")).strip() == command
+        and environment <= set(step.get("env", {}))
+        and (condition is None or step.get("if") == condition)
+        for step in job.get("steps", [])
+    )
 
 
 def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
@@ -53,11 +70,35 @@ def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
     for job_name in _SERVERLESS_JOBS:
         job = jobs.get(job_name, {})
         if job_name == "s3-contract":
-            test_steps = [
-                step for step in job.get("steps", []) if isinstance(step, dict) and _S3_E2E in str(step.get("run"))
-            ]
-            if not test_steps or "BACKER_TEST_S3_BUCKET" not in test_steps[-1].get("env", {}):
+            if not (
+                _has_test_step(
+                    job, "python -m pytest -q tests/test_s3.py::test_s3_minio_end_to_end", environment=_S3_ENV
+                )
+                and _has_test_step(job, "python -m pytest -q tests/test_serverless_e2e.py -k s3", environment=_S3_ENV)
+            ):
                 return frozenset()
+        elif job_name == "serverless-local":
+            if not (
+                _has_test_step(job, "python -m pytest -q tests/test_serverless_e2e.py -k local")
+                and _has_test_step(
+                    job,
+                    "xvfb-run -a python -m pytest -q tests/test_gui_serverless.py",
+                    condition="matrix.os == 'ubuntu-latest'",
+                )
+            ):
+                return frozenset()
+        elif job_name == "serverless-smb-linux":
+            if job.get("runs-on") != "ubuntu-latest" or not _has_test_step(
+                job, "sudo -E python -m pytest -q tests/test_serverless_e2e.py -k smb_linux", environment=_SMB_ENV
+            ):
+                return frozenset()
+        elif job_name == "serverless-smb-windows" and (
+            job.get("runs-on") != "windows-latest"
+            or not _has_test_step(
+                job, "python -m pytest -q tests/test_serverless_e2e.py -k smb_windows", environment=_SMB_ENV
+            )
+        ):
+            return frozenset()
         matrix = job.get("strategy", {}).get("matrix", {}).get("os")
         systems = matrix if isinstance(matrix, list) else [job.get("runs-on")]
         if job_name in {"serverless-local", "s3-contract"} and {"ubuntu-latest", "windows-latest"} - set(systems):
