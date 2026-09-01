@@ -633,10 +633,24 @@ class RestoreView(ttk.Frame):
         self.app._show("home")
 
 
+def _scheduled_test_command(argv=None):
+    """Dispatch the only non-GUI command accepted by the frozen desktop binary."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        return None
+    if len(arguments) != 2 or arguments[0] != "scheduled-test":
+        raise SystemExit(2)
+    from backer.serverless.scheduled_test import run
+
+    return run(arguments[1])
+
+
 def main():
+    if (exit_code := _scheduled_test_command()) is not None:
+        return exit_code
     logging.basicConfig(level=logging.INFO)
     BackerAgentApp().run()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

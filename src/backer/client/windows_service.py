@@ -313,10 +313,13 @@ def create_local_scheduled_test_task(token: str) -> tuple[bool, str]:
         return False, "Windows scheduled task only available on Windows"
     if not is_admin():
         return False, "Administrator privileges required. Run as Administrator."
-    command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
+    # The GUI executable owns the explicit scheduled-test dispatch when frozen.
+    command = sys.executable if getattr(sys, "frozen", False) else get_python_path()
     if not re.fullmatch(r"[0-9a-f]{12}", token):
         return False, "Invalid scheduled test token"
-    arguments = "scheduled-test" if getattr(sys, "frozen", False) else f"-m backer.serverless.scheduled_test {token}"
+    arguments = (
+        f"scheduled-test {token}" if getattr(sys, "frozen", False) else f"-m backer.serverless.scheduled_test {token}"
+    )
     task_name = f"BackerLocalTest-{token}"
     action = subprocess.list2cmdline([command, *arguments.split()])
     result = subprocess.run(
@@ -347,6 +350,15 @@ def remove_local_scheduled_test_task(token: str) -> tuple[bool, str]:
     stopped = subprocess.run(
         ["schtasks", "/end", "/tn", task], capture_output=True, text=True, creationflags=get_subprocess_flags()
     )
+    try:
+        state = _windows_task_state(task)
+    except OSError as error:
+        return False, f"Could not verify scheduled test task stopped: {error}"
+    if not state.get("exists"):
+        return True, "Scheduled test task was already stopped"
+    if state.get("exists") and state.get("running"):
+        detail = stopped.stderr.strip() or "schtasks could not stop the task"
+        return False, f"Scheduled test task is still running; isolated credentials were retained: {detail}"
     deleted = subprocess.run(
         ["schtasks", "/delete", "/tn", task, "/f"],
         capture_output=True,
@@ -355,7 +367,7 @@ def remove_local_scheduled_test_task(token: str) -> tuple[bool, str]:
     )
     if deleted.returncode:
         return False, deleted.stderr.strip() or "Could not remove scheduled test task"
-    return True, "Scheduled test task stopped and removed" if stopped.returncode == 0 else "Scheduled test task removed"
+    return True, "Scheduled test task stopped and removed"
 
 
 def remove_local_scheduled_task() -> bool:
@@ -368,6 +380,121 @@ def remove_local_scheduled_task() -> bool:
         creationflags=get_subprocess_flags(),
     )
     return result.returncode == 0
+
+
+def _windows_task_state(task_name: str) -> dict[str, object]:
+    """Read the full task definition and its current state without changing it."""
+    definition = subprocess.run(
+        ["schtasks", "/query", "/tn", task_name, "/xml"],
+        capture_output=True,
+        text=True,
+        creationflags=get_subprocess_flags(),
+    )
+    if definition.returncode:
+        detail = (definition.stderr or definition.stdout).lower()
+        if "cannot find" in detail or "does not exist" in detail:
+            return {"exists": False}
+        raise OSError(definition.stderr.strip() or "Could not read local scheduled task")
+    status = subprocess.run(
+        ["schtasks", "/query", "/tn", task_name, "/fo", "list", "/v"],
+        capture_output=True,
+        text=True,
+        creationflags=get_subprocess_flags(),
+    )
+    if status.returncode:
+        raise OSError(status.stderr.strip() or "Could not read local scheduled task state")
+    return {
+        "exists": True,
+        "definition": definition.stdout,
+        "enabled": "<enabled>true</enabled>" in definition.stdout.lower(),
+        "running": "status: running" in status.stdout.lower(),
+    }
+
+
+def snapshot_local_scheduler() -> dict[str, object]:
+    """Capture the actual platform scheduler before a settings transaction mutates it."""
+    if is_windows():
+        return {"platform": "windows", "task": _windows_task_state("BackerLocalSchedule")}
+    directory = Path.home() / ".config" / "systemd" / "user"
+    units = {}
+    for suffix in ("service", "timer"):
+        path = directory / f"backer-local.{suffix}"
+        units[suffix] = path.read_bytes() if path.exists() else None
+    state = {}
+    for unit in ("backer-local.timer", "backer-local.service"):
+        enabled = subprocess.run(["systemctl", "--user", "is-enabled", unit], capture_output=True, text=True)
+        active = subprocess.run(["systemctl", "--user", "is-active", unit], capture_output=True, text=True)
+        state[unit] = {"enabled": enabled.returncode == 0, "running": active.returncode == 0}
+    return {"platform": "linux", "directory": directory, "units": units, "state": state}
+
+
+def restore_local_scheduler(snapshot: dict[str, object]) -> tuple[bool, str]:
+    """Restore exactly the scheduler state captured by :func:`snapshot_local_scheduler`."""
+    if snapshot.get("platform") == "windows":
+        task = snapshot["task"]
+        if not isinstance(task, dict):
+            return False, "Invalid local scheduled task snapshot"
+        current = _windows_task_state("BackerLocalSchedule")
+        if not task.get("exists"):
+            if current.get("exists"):
+                removed = subprocess.run(
+                    ["schtasks", "/delete", "/tn", "BackerLocalSchedule", "/f"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=get_subprocess_flags(),
+                )
+                if removed.returncode:
+                    return False, removed.stderr.strip() or "Could not remove local scheduled task"
+            return True, "Local scheduled task restored"
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".xml", delete=False) as handle:
+            handle.write(str(task["definition"]))
+            xml_path = handle.name
+        try:
+            restored = subprocess.run(
+                ["schtasks", "/create", "/tn", "BackerLocalSchedule", "/xml", xml_path, "/f"],
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+        finally:
+            Path(xml_path).unlink(missing_ok=True)
+        if restored.returncode:
+            return False, restored.stderr.strip() or "Could not restore local scheduled task"
+        command = ["schtasks", "/run", "/tn", "BackerLocalSchedule"] if task.get("running") else [
+            "schtasks", "/end", "/tn", "BackerLocalSchedule"
+        ]
+        changed = subprocess.run(command, capture_output=True, text=True, creationflags=get_subprocess_flags())
+        if changed.returncode and task.get("running"):
+            return False, changed.stderr.strip() or "Could not restore local scheduled task state"
+        restored_state = _windows_task_state("BackerLocalSchedule")
+        if bool(restored_state.get("running")) != bool(task.get("running")):
+            return False, "Could not restore local scheduled task running state"
+        return True, "Local scheduled task restored"
+
+    directory = snapshot.get("directory")
+    units = snapshot.get("units")
+    state = snapshot.get("state")
+    if not isinstance(directory, Path) or not isinstance(units, dict) or not isinstance(state, dict):
+        return False, "Invalid local systemd snapshot"
+    directory.mkdir(parents=True, exist_ok=True)
+    for suffix in ("service", "timer"):
+        path = directory / f"backer-local.{suffix}"
+        content = units.get(suffix)
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(content)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    for unit, wanted in state.items():
+        if not isinstance(wanted, dict):
+            return False, "Invalid local systemd state snapshot"
+        enabled = "enable" if wanted.get("enabled") else "disable"
+        active = "start" if wanted.get("running") else "stop"
+        enabled_result = subprocess.run(["systemctl", "--user", enabled, unit], capture_output=True, text=True)
+        active_result = subprocess.run(["systemctl", "--user", active, unit], capture_output=True, text=True)
+        if enabled_result.returncode or (active_result.returncode and wanted.get("running")):
+            return False, f"Could not restore {unit}"
+    return True, "Local systemd timer restored"
 
 
 def _create_background_task_simple(server_url: str | None = None) -> tuple[bool, str]:
@@ -810,14 +937,22 @@ def create_local_systemd_timer(*, headless: bool = False) -> tuple[bool, str]:
     return True, f"Local backup timer created at: {timer}"
 
 
-def remove_local_systemd_timer(*, headless: bool = False) -> None:
+def remove_local_systemd_timer(*, headless: bool = False) -> tuple[bool, str]:
     """Remove only units created by :func:`create_local_systemd_timer`."""
     directory = Path("/etc/systemd/system") if headless else Path.home() / ".config" / "systemd" / "user"
     systemctl = ["systemctl"] if headless else ["systemctl", "--user"]
-    subprocess.run([*systemctl, "disable", "--now", "backer-local.timer"], capture_output=True)
-    for suffix in ("service", "timer"):
-        (directory / f"backer-local.{suffix}").unlink(missing_ok=True)
-    subprocess.run([*systemctl, "daemon-reload"], capture_output=True)
+    disabled = subprocess.run([*systemctl, "disable", "--now", "backer-local.timer"], capture_output=True, text=True)
+    if disabled.returncode:
+        return False, disabled.stderr.strip() or "Could not disable local backup timer"
+    try:
+        for suffix in ("service", "timer"):
+            (directory / f"backer-local.{suffix}").unlink(missing_ok=True)
+    except OSError as error:
+        return False, f"Could not remove local backup timer files: {error}"
+    reload = subprocess.run([*systemctl, "daemon-reload"], capture_output=True, text=True)
+    if reload.returncode:
+        return False, reload.stderr.strip() or "Could not reload systemd"
+    return True, "Local backup timer removed"
 
 
 def create_local_systemd_test_service(token: str) -> tuple[bool, str]:
@@ -843,12 +978,16 @@ def remove_local_systemd_test_service(token: str) -> tuple[bool, str]:
     if not re.fullmatch(r"[0-9a-f]{12}", token):
         return False, "Invalid scheduled test token"
     service = Path("/etc/systemd/system") / f"backer-local-test-{token}.service"
-    stopped = subprocess.run(["systemctl", "stop", service.name], capture_output=True)
+    if not service.exists():
+        return True, "Scheduled test service was already stopped"
+    stopped = subprocess.run(["systemctl", "stop", service.name], capture_output=True, text=True)
+    state = subprocess.run(
+        ["systemctl", "show", service.name, "-p", "ActiveState", "--value"], capture_output=True, text=True
+    )
+    active = state.stdout.strip().lower()
+    if stopped.returncode or state.returncode or active not in {"inactive", "failed"}:
+        detail = stopped.stderr.strip() or state.stderr.strip() or active or "unknown state"
+        return False, f"Scheduled test service is still active; isolated credentials were retained: {detail}"
     service.unlink(missing_ok=True)
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
-    message = (
-        "Root scheduled test service stopped and removed"
-        if stopped.returncode == 0
-        else "Root scheduled test service removed"
-    )
-    return True, message
+    return True, "Root scheduled test service stopped and removed"

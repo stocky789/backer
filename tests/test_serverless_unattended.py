@@ -128,6 +128,43 @@ def test_serverless_smb_reuses_same_user_without_deleting(monkeypatch) -> None:
     assert ["net", "use", "\\\\nas\\share", "/delete", "/y"] not in calls
 
 
+def test_windows_scheduled_test_cleanup_retains_task_when_stop_cannot_be_verified(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    monkeypatch.setattr(windows_service, "is_windows", lambda: True)
+    monkeypatch.setattr(windows_service, "_windows_task_state", lambda _task: {"exists": True, "running": True})
+    calls = []
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command) or type("Result", (), {"returncode": 1, "stderr": "denied"})(),
+    )
+
+    ok, message = windows_service.remove_local_scheduled_test_task("0123456789ab")
+
+    assert not ok and "credentials were retained" in message
+    assert not any("/delete" in command for command in calls)
+
+
+def test_linux_scheduled_test_cleanup_retains_service_when_stop_fails(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    monkeypatch.setattr(windows_service, "is_windows", lambda: False)
+    monkeypatch.setattr(windows_service.Path, "exists", lambda _self: True)
+    monkeypatch.setattr(windows_service.Path, "unlink", lambda *_args, **_kwargs: pytest.fail("must retain service"))
+    responses = iter(
+        [
+            type("Result", (), {"returncode": 1, "stderr": "denied", "stdout": ""})(),
+            type("Result", (), {"returncode": 0, "stderr": "", "stdout": "active\n"})(),
+        ]
+    )
+    monkeypatch.setattr(windows_service.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+
+    ok, message = windows_service.remove_local_systemd_test_service("0123456789ab")
+
+    assert not ok and "credentials were retained" in message
+
+
 def test_rescope_repository_secrets_to_machine(monkeypatch) -> None:
     from backer.serverless.repositories import rescope_secrets_for_system
 

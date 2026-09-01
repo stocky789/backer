@@ -16,6 +16,7 @@ import tkinter as tk
 import urllib.request
 from pathlib import Path
 from tkinter import filedialog, ttk
+from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -25,6 +26,20 @@ from backer.core.config import load_config as _load_config
 from backer.core.paths import get_config_dir, get_data_dir, get_machine_config_dir
 from backer.core.repo_metadata import RepositoryMetadata
 from backer.serverless.store import read_runs
+
+
+class ModeApplyResult(NamedTuple):
+    ok: bool
+    config: BackerConfig
+    message: str
+
+
+def _restore_config_file(path: Path, content: bytes | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
 
 
 def load_config() -> BackerConfig:
@@ -72,6 +87,90 @@ def settings_update(
             "server_agent_mode": server_agent_mode,
         }
     )
+
+
+def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> ModeApplyResult:
+    """Apply local scheduling with full rollback of files, secrets, and real scheduler state."""
+    rollback_errors: list[str] = []
+    try:
+        from backer.client.windows_service import (
+            create_local_scheduled_task,
+            create_local_systemd_timer,
+            remove_local_scheduled_task,
+            remove_local_systemd_timer,
+            restore_local_scheduler,
+            snapshot_local_scheduler,
+        )
+
+        user_path = get_config_dir() / "config.yaml"
+        machine_path = get_machine_config_dir() / "config.yaml"
+        snapshots = {path: path.read_bytes() if path.exists() else None for path in (user_path, machine_path)}
+        refs = {
+            ref
+            for record in previous.repositories.values()
+            for ref in (record.passphrase_ref, record.storage_password_ref)
+            if ref
+        }
+        machine_secrets = {ref: keystore.get(ref, machine_scope=True) for ref in refs}
+        scheduler = snapshot_local_scheduler()
+
+        if desired.local_scheduled_mode:
+            if blocker := unattended_blocker(desired):
+                raise ValueError(blocker)
+            from backer.serverless.repositories import rescope_secrets_for_system
+
+            rescope_secrets_for_system(desired)
+            desired.save(machine_path)
+            ok, message = create_local_scheduled_task() if sys.platform == "win32" else create_local_systemd_timer()
+            if not ok:
+                raise OSError(message)
+        else:
+            if sys.platform == "win32":
+                task = scheduler.get("task", {})
+                if isinstance(task, dict) and task.get("exists") and not remove_local_scheduled_task():
+                    raise OSError("Could not remove the local scheduled task")
+            else:
+                units = scheduler.get("units", {})
+                if isinstance(units, dict) and any(units.values()):
+                    ok, message = remove_local_systemd_timer()
+                    if not ok:
+                        raise OSError(message)
+        desired.save(machine_path)
+        desired.save(user_path)
+        committed = BackerConfig.load(user_path)
+        machine = BackerConfig.load(machine_path)
+        if (
+            committed.local_scheduled_mode != desired.local_scheduled_mode
+            or committed.server_agent_mode != desired.server_agent_mode
+            or machine.local_scheduled_mode != desired.local_scheduled_mode
+        ):
+            raise OSError("Settings readback did not match the requested modes")
+        return ModeApplyResult(True, desired, "Scheduled modes saved")
+    except Exception as error:
+        # Every rollback is attempted so the caller gets one stable failure result.
+        for reference, value in locals().get("machine_secrets", {}).items():
+            try:
+                keystore.delete(reference, machine_scope=True)
+                if value is not None:
+                    keystore.put(reference, value, machine_scope=True)
+            except Exception as rollback_error:
+                rollback_errors.append(f"secret {reference}: {rollback_error}")
+        for path, content in locals().get("snapshots", {}).items():
+            try:
+                _restore_config_file(path, content)
+            except Exception as rollback_error:
+                rollback_errors.append(f"config {path.name}: {rollback_error}")
+        if "scheduler" in locals():
+            try:
+                ok, message = restore_local_scheduler(scheduler)
+                if not ok:
+                    rollback_errors.append(f"scheduler: {message}")
+            except Exception as rollback_error:
+                rollback_errors.append(f"scheduler: {rollback_error}")
+        detail = str(error)
+        if rollback_errors:
+            detail += "; rollback failed: " + "; ".join(rollback_errors)
+        return ModeApplyResult(False, previous, detail)
 
 
 def wait_for_scheduled_attempt(
@@ -173,6 +272,42 @@ def remove_scheduled_test(directory: Path, refs: list[str]) -> list[str]:
         pass
     except OSError as error:
         errors.append(str(error))
+    return errors
+
+
+def retry_scheduled_test_cleanup() -> list[str]:
+    """Safely reap interrupted privileged test contexts before the next test starts."""
+    root = get_machine_config_dir() / "scheduled-tests"
+    if not root.exists():
+        return []
+    errors = []
+    for directory in root.iterdir():
+        token = directory.name
+        valid_token = len(token) == 12 and all(character in "0123456789abcdef" for character in token)
+        if not directory.is_dir() or not valid_token:
+            continue
+        try:
+            config = BackerConfig.load(directory / "config.yaml")
+            refs = [
+                ref
+                for repository in config.repositories.values()
+                for ref in (repository.passphrase_ref, repository.storage_password_ref)
+                if ref and ref.startswith(f"backer/scheduled-test/{token}/")
+            ]
+            if sys.platform == "win32":
+                from backer.client.windows_service import remove_local_scheduled_test_task
+
+                stopped, message = remove_local_scheduled_test_task(token)
+            else:
+                from backer.client.windows_service import remove_local_systemd_test_service
+
+                stopped, message = remove_local_systemd_test_service(token)
+            if not stopped:
+                errors.append(f"{token}: {message}")
+                continue
+            errors.extend(f"{token}: {error}" for error in remove_scheduled_test(directory, refs))
+        except Exception as error:
+            errors.append(f"{token}: {error}")
     return errors
 
 
@@ -486,97 +621,7 @@ class SettingsView(ttk.Frame):
         self.app.set_status("Save settings to apply scheduled modes")
 
     def _apply_modes(self, previous: BackerConfig, desired: BackerConfig):
-
-        def apply():
-            user_path = get_config_dir() / "config.yaml"
-            machine_path = get_machine_config_dir() / "config.yaml"
-            snapshots = {path: path.read_bytes() if path.exists() else None for path in (user_path, machine_path)}
-            refs = {
-                ref
-                for record in previous.repositories.values()
-                for ref in (record.passphrase_ref, record.storage_password_ref)
-                if ref
-            }
-            machine_secrets = {ref: keystore.get(ref, machine_scope=True) for ref in refs}
-            changed_task = False
-
-            def restore_file(path, content):
-                if content is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(content)
-
-            def restore_task():
-                if sys.platform == "win32":
-                    from backer.client.windows_service import create_local_scheduled_task, remove_local_scheduled_task
-                else:
-                    from backer.client.windows_service import create_local_systemd_timer, remove_local_systemd_timer
-                if previous.local_scheduled_mode:
-                    return create_local_scheduled_task() if sys.platform == "win32" else create_local_systemd_timer()
-                remove_local_scheduled_task() if sys.platform == "win32" else remove_local_systemd_timer()
-                return True, ""
-
-            try:
-                if desired.local_scheduled_mode:
-                    if blocker := unattended_blocker(desired):
-                        raise ValueError(blocker)
-                    from backer.serverless.repositories import rescope_secrets_for_system
-
-                    rescope_secrets_for_system(desired)
-                    desired.save(machine_path)
-                    if sys.platform == "win32":
-                        from backer.client.windows_service import create_local_scheduled_task
-
-                        ok, message = create_local_scheduled_task()
-                    else:
-                        from backer.client.windows_service import create_local_systemd_timer
-
-                        ok, message = create_local_systemd_timer()
-                    changed_task = True
-                    if not ok:
-                        raise OSError(message)
-                elif previous.local_scheduled_mode:
-                    if sys.platform == "win32":
-                        from backer.client.windows_service import remove_local_scheduled_task
-
-                        if not remove_local_scheduled_task():
-                            raise OSError("Could not remove the local scheduled task")
-                    else:
-                        from backer.client.windows_service import remove_local_systemd_timer
-
-                        remove_local_systemd_timer()
-                    changed_task = True
-                desired.save(machine_path)
-                desired.save(user_path)
-                committed = BackerConfig.load(user_path)
-                if (
-                    committed.local_scheduled_mode != desired.local_scheduled_mode
-                    or committed.server_agent_mode != desired.server_agent_mode
-                ):
-                    raise OSError("Settings readback did not match the requested modes")
-                machine = BackerConfig.load(machine_path)
-                if machine.local_scheduled_mode != desired.local_scheduled_mode:
-                    raise OSError("Machine settings readback did not match local mode")
-                return True, desired, "Scheduled modes saved"
-            except Exception as error:
-                for reference, value in machine_secrets.items():
-                    keystore.delete(reference, machine_scope=True)
-                    if value is not None:
-                        keystore.put(reference, value, machine_scope=True)
-                for path, content in snapshots.items():
-                    restore_file(path, content)
-                if changed_task:
-                    restore_task()
-                return False, previous, str(error)
-
-        def guarded_apply():
-            try:
-                return apply()
-            except Exception as error:
-                return False, previous, str(error)
-
-        self._worker("apply-modes", guarded_apply, self._modes_applied)
+        self._worker("apply-modes", lambda: apply_scheduled_modes(previous, desired), self._modes_applied)
 
     def _modes_applied(self, result):
         ok, config, message = result
@@ -837,6 +882,8 @@ class SettingsView(ttk.Frame):
         def run():
             if blocker := unattended_blocker(self.app.config):
                 return False, blocker
+            if cleanup_errors := retry_scheduled_test_cleanup():
+                return False, "Scheduled-test cleanup needs attention: " + "; ".join(cleanup_errors)
             token = uuid4().hex[:12]
             directory, refs = prepare_scheduled_test(self.app.config, name, token)
             data_dir = directory / "data"
@@ -874,9 +921,11 @@ class SettingsView(ttk.Frame):
                 )
             finally:
                 stopped, cleanup_message = cleanup()
+                if not stopped:
+                    raise RuntimeError(cleanup_message + "; retry scheduled-test cleanup before removing credentials")
                 cleanup_errors = remove_scheduled_test(directory, refs)
-                if not stopped or cleanup_errors:
-                    raise RuntimeError(cleanup_message + ("; " + "; ".join(cleanup_errors) if cleanup_errors else ""))
+                if cleanup_errors:
+                    raise RuntimeError(cleanup_message + "; " + "; ".join(cleanup_errors))
 
         self._worker("scheduled-test", run)
 

@@ -36,6 +36,7 @@ a = Analysis(
         'backer.agent.gui',
         'backer.agent.gui.app',
         'backer.agent.service',
+        'backer.serverless.scheduled_test',
         'backer.backends',
         'backer.backends.kopia',
         'backer.backends.proxy',

@@ -215,6 +215,95 @@ def test_scheduled_test_context_keeps_adversarial_job_name_out_of_privileged_com
     assert list(saved.jobs) == [name]
     assert refs == ["backer/scheduled-test/0123456789ab/passphrase_ref"]
 
+
+def test_frozen_scheduled_test_uses_gui_entrypoint_token_and_packages_dispatch(monkeypatch):
+    from backer.agent.gui import app
+    from backer.client import windows_service
+    from backer.serverless import scheduled_test
+
+    calls = []
+    monkeypatch.setattr(windows_service, "is_windows", lambda: True)
+    monkeypatch.setattr(windows_service, "is_admin", lambda: True)
+    monkeypatch.setattr(windows_service.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(windows_service.sys, "executable", r"C:\\Program Files\\Backer\\backer-agent.exe")
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command) or type("Result", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    assert windows_service.create_local_scheduled_test_task("0123456789ab") == (True, "BackerLocalTest-0123456789ab")
+    create = next(command for command in calls if command[:2] == ["schtasks", "/create"])
+    action = create[create.index("/tr") + 1]
+    assert r"backer-agent.exe" in action
+    assert "scheduled-test 0123456789ab" in action
+    assert "BackerLocalTest" not in action and "&" not in action
+    dispatched = []
+    monkeypatch.setattr(scheduled_test, "run", lambda token: dispatched.append(token) or 7)
+    assert app._scheduled_test_command(["scheduled-test", "0123456789ab"]) == 7
+    assert dispatched == ["0123456789ab"]
+    spec = Path("backer-agent.spec").read_text(encoding="utf-8")
+    assert "backer.serverless.scheduled_test" in spec
+
+
+def test_mode_apply_returns_one_shape_when_scheduler_snapshot_fails(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    previous = BackerConfig()
+    monkeypatch.setattr(views, "get_config_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path / "machine")
+    def fail_snapshot():
+        raise OSError("read")
+
+    monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", fail_snapshot)
+
+    result = views.apply_scheduled_modes(previous, previous)
+
+    assert isinstance(result, views.ModeApplyResult)
+    assert result == (False, previous, "read")
+
+
+def test_mode_apply_restores_real_scheduler_snapshot_after_mutation_failure(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    previous = BackerConfig()
+    desired = previous.model_copy(update={"local_scheduled_mode": True})
+    restored = []
+    monkeypatch.setattr(views, "get_config_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path / "machine")
+    monkeypatch.setattr(views.sys, "platform", "win32")
+    monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", lambda: {"actual": "task xml"})
+    monkeypatch.setattr("backer.client.windows_service.create_local_scheduled_task", lambda: (False, "create failed"))
+    def restore(snapshot):
+        restored.append(snapshot)
+        return True, ""
+
+    monkeypatch.setattr("backer.client.windows_service.restore_local_scheduler", restore)
+
+    result = views.apply_scheduled_modes(previous, desired)
+
+    assert result == (False, previous, "create failed")
+    assert restored == [{"actual": "task xml"}]
+
+
+def test_retry_scheduled_test_cleanup_keeps_context_when_stop_is_not_verified(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    directory = tmp_path / "scheduled-tests" / "0123456789ab"
+    directory.mkdir(parents=True)
+    BackerConfig().save(directory / "config.yaml")
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(views.sys, "platform", "win32")
+    monkeypatch.setattr(
+        "backer.client.windows_service.remove_local_scheduled_test_task", lambda _token: (False, "still running")
+    )
+
+    assert views.retry_scheduled_test_cleanup() == ["0123456789ab: still running"]
+    assert directory.exists()
+
 def test_repository_details_disclose_type_and_keystore_state_without_secret():
     from backer.agent.gui.views import repository_details
     from backer.core.config import BackerConfig, RepositoryConfig
