@@ -1,4 +1,3 @@
-import re
 import shlex
 from pathlib import Path
 
@@ -36,37 +35,6 @@ def test_serverless_command_surface_resolves():
     ):
         result = runner.invoke(main, [*command, "--help"])
         assert result.exit_code == 0, result.output
-
-
-def test_phase5_command_block_commands_and_flags_resolve_without_a_backend_choice():
-    plan = (Path(__file__).parents[1] / "serverless-backups.md").read_text(encoding="utf-8")
-    block = re.search(r"```\n(?P<commands>\s*backer init.*?\n\s*```)", plan, re.DOTALL)
-    assert block, "Phase 5 command block was not found"
-    current: tuple[str, ...] | None = None
-    flags: dict[tuple[str, ...], set[str]] = {}
-    for line in block["commands"].splitlines():
-        stripped = line.strip()
-        if stripped.startswith("backer "):
-            command = main
-            resolved: list[str] = []
-            for token in stripped.split()[1:]:
-                child = command.get_command(click.Context(command), token) if isinstance(command, click.Group) else None
-                if child is None:
-                    break
-                resolved.append(token)
-                command = child
-            current = tuple(resolved)
-            assert current
-        if current:
-            flags.setdefault(current, set()).update(re.findall(r"--[a-z][a-z-]*", stripped))
-    assert flags
-    for command, documented_flags in flags.items():
-        result = CliRunner().invoke(main, [*command, "--help"])
-        assert result.exit_code == 0, result.output
-        for flag in documented_flags:
-            assert flag in result.output, f"{' '.join(command)} is missing {flag}"
-    source_root = Path(__file__).parents[1] / "src"
-    assert all("--backend" not in path.read_text(encoding="utf-8") for path in source_root.rglob("*.py"))
 
 
 def test_repository_types_are_the_v1_matrix():

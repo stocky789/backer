@@ -78,7 +78,7 @@ Repository = "https://git.stockhome.com.au/stocky789/backer"
 packages = ["src/backer"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["/.chunkhound", "/docs", "/serverless-backups.md"]
+exclude = ["/.chunkhound", "/.superpowers", "/docs", "/serverless-backups.md"]
 
 [tool.ruff]
 line-length = 120

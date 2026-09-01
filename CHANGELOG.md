@@ -32,6 +32,7 @@ The release workflow publishes the top section verbatim as the release notes.
 
 ### Bug Fixes
 
+- Source distributions exclude local agent workspace artifacts.
 - Serverless repository creation now pins Kopia maintenance to the creating agent, and Linux SMB operations mount shares instead of invoking Windows networking commands.
 - Retention now deletes only expired snapshots for the configured source, reports dry runs without an unsupported flag, and keeps yearly policies.
 - Repository verification now reads and rehashes snapshot content through Kopia's supported command.

@@ -23,6 +23,11 @@ def read_pyproject() -> dict:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
+def test_sdist_excludes_local_workspace_artifacts() -> None:
+    excludes = set(read_pyproject()["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"])
+    assert {"/.chunkhound", "/.superpowers", "/docs", "/serverless-backups.md"} <= excludes
+
+
 def expected_android_version_code(version: str) -> int:
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
     assert match is not None
