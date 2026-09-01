@@ -1683,9 +1683,10 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
                     "run": (
                         'mkdir -p "$RUNNER_TEMP/backer-share"\n'
                         'chmod 0777 "$RUNNER_TEMP/backer-share"\n'
-                        "docker run -d -p 445:445 "
+                        'docker run -d --name backer-samba --privileged -p 445:445 '
+                        '-v "$RUNNER_TEMP/backer-share:/share" '
                         "dperson/samba@sha256:e1d2a7366690749a7be06f72bdbf6a5a7d15726fc84e4e4f41e967214516edfd\n"
-                        "timeout 1 bash -c '</dev/tcp/127.0.0.1/445>'"
+                        "timeout 1 bash -c '</dev/tcp/127.0.0.1/445'"
                     )
                 },
                 {"run": "sudo apt-get install -y cifs-utils"},
@@ -1709,8 +1710,8 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
                         "$password = ConvertTo-SecureString 'BackerCi9!Smb' -AsPlainText -Force\n"
                         "New-LocalUser -Name backer-ci -Password $password\n"
                         "New-LocalUser -Name backer-ci-other -Password $password\n"
-                        "New-SmbShare -Name Backups -Path C:\\backer-share\n"
-                        "icacls C:\\backer-share /grant backer-ci"
+                        "New-SmbShare -Name Backups -Path C:\\backer-share -FullAccess 'backer-ci', 'backer-ci-other'\n"
+                        "icacls C:\\backer-share /grant 'backer-ci:(OI)(CI)M' 'backer-ci-other:(OI)(CI)M' /t /c"
                     )
                 },
                 {
@@ -1732,11 +1733,23 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
             "steps": [
                 {
                     "if": "matrix.os == 'ubuntu-latest'",
-                    "run": "docker run minio/minio:RELEASE.2025-09-07T16-13-09Z\ncurl http://127.0.0.1:9000/minio/health/live",
+                    "run": (
+                        "docker run -d --name backer-minio -p 9000:9000 "
+                        "minio/minio:RELEASE.2025-09-07T16-13-09Z server /data\n"
+                        "curl --fail --silent http://127.0.0.1:9000/minio/health/live"
+                    ),
                 },
                 {
                     "if": "matrix.os == 'windows-latest'",
-                    "run": "Invoke-WebRequest -Uri $base\nGet-FileHash minio.exe -Algorithm SHA256\nInvoke-WebRequest http://127.0.0.1:9000/minio/health/live",
+                    "run": (
+                        "Invoke-WebRequest -Uri $base -OutFile minio.exe\n"
+                        "Invoke-WebRequest -Uri $checksumUrl -OutFile minio.sha256sum\n"
+                        "$actual = (Get-FileHash minio.exe -Algorithm SHA256).Hash.ToLowerInvariant()\n"
+                        "if (!$expected -or $actual -ne $expected) { throw 'checksum mismatch' }\n"
+                        "Start-Process -FilePath \"$PWD\\minio.exe\" -ArgumentList 'server', '--address', "
+                        "':9000', 'C:\\minio-data' -WindowStyle Hidden\n"
+                        "Invoke-WebRequest http://127.0.0.1:9000/minio/health/live"
+                    ),
                 },
                 {
                     "run": "python -m pytest -q tests/test_s3.py::test_s3_minio_end_to_end",
@@ -1848,6 +1861,52 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
     assert_empty(lambda value: value["serverless-smb-windows"]["steps"].pop(0))
     assert_empty(lambda value: value["s3-contract"]["steps"].pop(0))
     assert_empty(lambda value: value["s3-contract"]["steps"].pop(1))
+    assert_empty(
+        lambda value: value["serverless-smb-linux"]["steps"][0].update(
+            run=value["serverless-smb-linux"]["steps"][0]["run"].replace(
+                ' -v "$RUNNER_TEMP/backer-share:/share"', ""
+            )
+        )
+    )
+    assert_empty(
+        lambda value: value["serverless-smb-windows"]["steps"][0].update(
+            run=value["serverless-smb-windows"]["steps"][0]["run"].replace(
+                " -FullAccess 'backer-ci', 'backer-ci-other'", ""
+            )
+        )
+    )
+    assert_empty(
+        lambda value: value["serverless-smb-windows"]["steps"][0].update(
+            run=value["serverless-smb-windows"]["steps"][0]["run"].replace(" /grant", "")
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][0].update(
+            run=value["s3-contract"]["steps"][0]["run"].replace("docker run", "echo docker run")
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][0].update(
+            run=value["s3-contract"]["steps"][0]["run"].replace("curl --fail --silent", "echo curl --fail --silent")
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][1].update(
+            run=value["s3-contract"]["steps"][1]["run"].replace("Start-Process", "echo Start-Process")
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][1].update(
+            run=value["s3-contract"]["steps"][1]["run"].replace(
+                "$actual -ne $expected", "$actual -eq $expected"
+            )
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][1].update(
+            run=value["s3-contract"]["steps"][1]["run"].replace("Invoke-WebRequest http", "echo Invoke-WebRequest http")
+        )
+    )
 
 
 def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):

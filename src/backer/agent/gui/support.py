@@ -49,13 +49,38 @@ def _has_test_step(
     )
 
 
-def _has_run_step(job: dict, *fragments: str, condition: str | None = None) -> bool:
-    return any(
-        isinstance(step, dict)
-        and all(fragment in str(step.get("run", "")) for fragment in fragments)
-        and (condition is None or step.get("if") == condition)
-        for step in job.get("steps", [])
-    )
+def _run_lines(job: dict, *, condition: str | None = None) -> tuple[str, ...]:
+    """Return executable, normalized command lines from matching workflow steps."""
+    lines: list[str] = []
+    continued = ""
+    for step in job.get("steps", []):
+        if not isinstance(step, dict) or (condition is not None and step.get("if") != condition):
+            continue
+        for raw_line in str(step.get("run", "")).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(("echo ", "Write-Output ")):
+                continue
+            line = f"{continued} {line}".strip() if continued else line
+            if line.endswith("\\"):
+                continued = line[:-1].rstrip()
+            else:
+                lines.append(line)
+                continued = ""
+    return tuple(lines)
+
+
+def _has_command(job: dict, command: str, *arguments: str, condition: str | None = None) -> bool:
+    command_tokens = tuple(command.split())
+    for line in _run_lines(job, condition=condition):
+        tokens = tuple(line.split())
+        if any(tokens[index : index + len(command_tokens)] == command_tokens for index in range(len(tokens))):
+            if all(argument in tokens for argument in arguments):
+                return True
+    return False
+
+
+def _has_line(job: dict, pattern: str, *, condition: str | None = None) -> bool:
+    return any(re.fullmatch(pattern, line) for line in _run_lines(job, condition=condition))
 
 
 def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
@@ -92,17 +117,73 @@ def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
                     job, "python -m pytest -q tests/test_s3.py::test_s3_minio_end_to_end", environment=_S3_ENV
                 )
                 and _has_test_step(job, "python -m pytest -q tests/test_serverless_e2e.py -k s3", environment=_S3_ENV)
-                and _has_run_step(
+                and _has_command(
                     job,
+                    "docker run",
+                    "-d",
+                    "--name",
+                    "backer-minio",
+                    "-p",
+                    "9000:9000",
                     "minio/minio:RELEASE.2025-09-07T16-13-09Z",
-                    "/minio/health/live",
+                    "server",
+                    "/data",
                     condition="matrix.os == 'ubuntu-latest'",
                 )
-                and _has_run_step(
+                and _has_command(
                     job,
-                    "Invoke-WebRequest -Uri $base",
-                    "Get-FileHash minio.exe -Algorithm SHA256",
-                    "/minio/health/live",
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "http://127.0.0.1:9000/minio/health/live",
+                    condition="matrix.os == 'ubuntu-latest'",
+                )
+                and _has_command(
+                    job,
+                    "Invoke-WebRequest",
+                    "-Uri",
+                    "$base",
+                    "-OutFile",
+                    "minio.exe",
+                    condition="matrix.os == 'windows-latest'",
+                )
+                and _has_command(
+                    job,
+                    "Invoke-WebRequest",
+                    "-Uri",
+                    "$checksumUrl",
+                    "-OutFile",
+                    "minio.sha256sum",
+                    condition="matrix.os == 'windows-latest'",
+                )
+                and _has_line(
+                    job,
+                    r"\$actual = \(Get-FileHash minio\.exe -Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\)",
+                    condition="matrix.os == 'windows-latest'",
+                )
+                and _has_line(
+                    job,
+                    r"if \(!\$expected -or \$actual -ne \$expected\) \{ throw .+ \}",
+                    condition="matrix.os == 'windows-latest'",
+                )
+                and _has_command(
+                    job,
+                    "Start-Process",
+                    "-FilePath",
+                    '"$PWD\\minio.exe"',
+                    "-ArgumentList",
+                    "'server',",
+                    "'--address',",
+                    "':9000',",
+                    "'C:\\minio-data'",
+                    "-WindowStyle",
+                    "Hidden",
+                    condition="matrix.os == 'windows-latest'",
+                )
+                and _has_command(
+                    job,
+                    "Invoke-WebRequest",
+                    "http://127.0.0.1:9000/minio/health/live",
                     condition="matrix.os == 'windows-latest'",
                 )
             ):
@@ -125,14 +206,22 @@ def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
                     "sudo -E python -m pytest -q tests/test_serverless_e2e.py -k smb_linux",
                     environment=_LINUX_SMB_ENV,
                 )
-                and _has_run_step(
+                and _has_command(
                     job,
+                    "docker run",
+                    "-d",
+                    "--name",
+                    "backer-samba",
+                    "--privileged",
+                    "-p",
+                    "445:445",
+                    "-v",
+                    '"$RUNNER_TEMP/backer-share:/share"',
                     "dperson/samba@sha256:e1d2a7366690749a7be06f72bdbf6a5a7d15726fc84e4e4f41e967214516edfd",
-                    "-p 445:445",
-                    'chmod 0777 "$RUNNER_TEMP/backer-share"',
-                    "/dev/tcp/127.0.0.1/445",
                 )
-                and _has_run_step(job, "sudo apt-get install -y cifs-utils")
+                and _has_command(job, "chmod", "0777", '"$RUNNER_TEMP/backer-share"')
+                and _has_command(job, "timeout", "1", "bash", "-c", "'</dev/tcp/127.0.0.1/445'")
+                and _has_command(job, "sudo apt-get", "install", "-y", "cifs-utils")
             ):
                 return frozenset()
         elif job_name == "serverless-smb-windows":
@@ -144,13 +233,30 @@ def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
                     environment=_WINDOWS_SMB_ENV,
                     values={"BACKER_TEST_SMB_PASSWORD": "BackerCi9!Smb"},
                 )
-                and _has_run_step(
+                and _has_line(
                     job,
-                    "$password = ConvertTo-SecureString 'BackerCi9!Smb' -AsPlainText -Force",
-                    "New-LocalUser -Name backer-ci",
-                    "New-LocalUser -Name backer-ci-other",
-                    "New-SmbShare -Name Backups -Path C:\\backer-share",
-                    "icacls C:\\backer-share",
+                    r"\$password = ConvertTo-SecureString 'BackerCi9!Smb' -AsPlainText -Force",
+                )
+                and _has_command(job, "New-LocalUser", "-Name", "backer-ci", "-Password", "$password")
+                and _has_command(job, "New-LocalUser", "-Name", "backer-ci-other", "-Password", "$password")
+                and _has_command(
+                    job,
+                    "New-SmbShare",
+                    "-Name",
+                    "Backups",
+                    "-Path",
+                    "C:\\backer-share",
+                    "-FullAccess",
+                    "'backer-ci',",
+                    "'backer-ci-other'",
+                )
+                and _has_command(
+                    job,
+                    "icacls",
+                    "C:\\backer-share",
+                    "/grant",
+                    "'backer-ci:(OI)(CI)M'",
+                    "'backer-ci-other:(OI)(CI)M'",
                 )
             ):
                 return frozenset()
