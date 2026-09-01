@@ -81,6 +81,139 @@ def test_unattended_setup_rejects_interactive_only_smb_repositories():
     assert "interactive-only" in unattended_blocker(config)
 
 
+def test_recovery_record_contains_the_details_needed_on_a_new_machine():
+    from backer.agent.gui.wizard import recovery_record
+
+    record = recovery_record(
+        "Office NAS", r"\\nas\backups\office", "six-safe-words-for-this-test-only", "2026-09-01T00:00:00Z"
+    )
+
+    assert "Repository: Office NAS" in record
+    assert r"Location: \\nas\backups\office" in record
+    assert "Created (UTC): 2026-09-01T00:00:00Z" in record
+    assert "Passphrase: six-safe-words-for-this-test-only" in record
+    assert r'kopia repository connect filesystem --path "\\nas\backups\office"' in record
+
+
+def test_user_supplied_passphrase_requires_a_matching_masked_confirmation():
+    from backer.agent.gui.wizard import valid_supplied_passphrase
+
+    assert valid_supplied_passphrase("careful words", "careful words")
+    assert not valid_supplied_passphrase("careful words", "different words")
+    assert not valid_supplied_passphrase("", "")
+
+
+def test_share_listing_routes_1219_to_the_same_named_action_panel():
+    from backer.agent.gui.wizard import RepositoryWizard
+
+    seen = []
+    instance = object.__new__(RepositoryWizard)
+    instance._generation = 4
+    instance.cancel = type("Cancel", (), {"is_set": lambda _self: False})()
+    instance.values = {"server": "nas"}
+    instance._show_1219 = lambda server, error: seen.append((server, error))
+
+    instance._apply_share_listing(4, False, "system error 1219")
+
+    assert seen == [("nas", "system error 1219")]
+
+
+def test_out_of_order_attach_probe_cannot_enable_the_newer_candidate():
+    from backer.agent.gui.wizard import RepositoryWizard
+
+    calls = []
+    candidate = type("Candidate", (), {"get": lambda _self: "wrong-passphrase"})()
+    instance = object.__new__(RepositoryWizard)
+    instance._generation = 7
+    instance._passphrase_probe_token = 2
+    instance.cancel = type("Cancel", (), {"is_set": lambda _self: False})()
+    instance._attach_candidate = candidate
+    instance.primary = type("Button", (), {"configure": lambda _self, **kwargs: calls.append(kwargs)})()
+
+    instance._apply_attach_probe(7, 1, "right-passphrase", "present", "")
+
+    assert calls == []
+
+
+def test_save_recovery_record_writes_complete_record_and_copy_acknowledges_clipboard(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+    from backer.core.config import RepositoryConfig
+
+    target = tmp_path / "recovery.txt"
+    events = []
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance._record = lambda: RepositoryConfig(name="Office", type="local", path="E:/Backups")
+    instance.app = type(
+        "App",
+        (),
+        {
+            "root": type(
+                "Root",
+                (),
+                {
+                    "clipboard_clear": lambda _self: events.append("clear"),
+                    "clipboard_append": lambda _self, value: events.append(value),
+                },
+            )(),
+            "set_status": lambda _self, value, **_kwargs: events.append(value),
+        },
+    )()
+    monkeypatch.setattr(wizard.filedialog, "asksaveasfilename", lambda **_kwargs: str(target))
+
+    assert instance._save_recovery_record("six-safe-words") == target
+    instance._copy_passphrase("six-safe-words")
+
+    content = target.read_text(encoding="utf-8")
+    assert "Repository: Office" in content and "Location: E:/Backups" in content
+    assert "Passphrase: six-safe-words" in content and "kopia repository connect filesystem" in content
+    assert any("clipboard is not durable" in event.lower() for event in events if isinstance(event, str))
+
+
+def test_user_supplied_passphrase_route_is_masked_and_enters_the_same_confirmation_flow(monkeypatch):
+    from backer.agent.gui import wizard
+
+    buttons, entry_options, values = {}, [], iter(("user supplied phrase", "user supplied phrase"))
+
+    class Variable:
+        def __init__(self):
+            self.value = next(values)
+
+        def get(self):
+            return self.value
+
+    class Widget:
+        def __init__(self, *_args, **kwargs):
+            entry_options.append(kwargs)
+
+        def pack(self, **_kwargs):
+            pass
+
+    class Button(Widget):
+        def __init__(self, _parent, *, text, command, **kwargs):
+            super().__init__(_parent, **kwargs)
+            buttons[text] = command
+
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance.body = object()
+    instance.step = 4
+    instance.values = {}
+    instance._clear = lambda: None
+    instance._render = lambda: entry_options.append({"rendered": True})
+    instance.app = type("App", (), {"set_status": lambda *_args, **_kwargs: None})()
+    monkeypatch.setattr(wizard.tk, "StringVar", Variable)
+    monkeypatch.setattr(wizard.ttk, "Label", Widget)
+    monkeypatch.setattr(wizard.ttk, "Entry", Widget)
+    monkeypatch.setattr(wizard.ttk, "Frame", Widget)
+    monkeypatch.setattr(wizard.ttk, "Button", Button)
+
+    instance._supplied_passphrase()
+    buttons["Continue"]()
+
+    assert instance.values["passphrase"] == "user supplied phrase"
+    assert sum(options.get("show") == "*" for options in entry_options) == 2
+    assert {"rendered": True} in entry_options
+
+
 def test_1219_actions_keep_selected_target_and_only_disconnect_the_named_conflict(monkeypatch):
     from backer.agent.gui import wizard
 

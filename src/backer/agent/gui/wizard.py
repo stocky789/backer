@@ -7,6 +7,7 @@ import secrets
 import subprocess
 import threading
 import tkinter as tk
+from datetime import UTC, datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 
@@ -16,6 +17,29 @@ from backer.core import keystore
 from backer.core.config import JobConfig, RepositoryConfig, ScheduleConfig, SourceConfig
 from backer.core.paths import get_config_dir
 from backer.core.smb_browse import SMBBrowser
+
+
+def recovery_record(
+    name: str, location: str, passphrase: str, created_at: str | None = None, connect_command: str | None = None
+) -> str:
+    """Build the explicitly requested plaintext record needed to reconnect elsewhere."""
+    created_at = created_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return "\n".join(
+        (
+            "Backer recovery record",
+            f"Repository: {name}",
+            f"Location: {location}",
+            f"Created (UTC): {created_at}",
+            f"Passphrase: {passphrase}",
+            connect_command or f'kopia repository connect filesystem --path "{location}"',
+            "",
+        )
+    )
+
+
+def valid_supplied_passphrase(candidate: str, confirmation: str) -> bool:
+    """Keep the user-supplied route as strict as the generated confirmation route."""
+    return bool(candidate) and candidate == confirmation
 
 
 def connection_conflict_message(server: str, conflict=None) -> str:
@@ -272,13 +296,7 @@ class RepositoryWizard(ttk.Frame):
             )
 
             def done():
-                if generation != self._generation or self.cancel.is_set():
-                    return
-                if ok:
-                    self.primary.configure(values=[item.name for item in result])
-                    self.listing.set("Choose a share")
-                else:
-                    self.listing.set(str(result))
+                self._apply_share_listing(generation, ok, result)
 
             self.app.root.after(0, done)
 
@@ -293,6 +311,15 @@ class RepositoryWizard(ttk.Frame):
             self._probe_selected_location()
 
         self._buttons(next_step)
+
+    def _apply_share_listing(self, generation, ok, result):
+        if generation != self._generation or self.cancel.is_set():
+            return
+        if ok:
+            self.primary.configure(values=[item.name for item in result])
+            self.listing.set("Choose a share")
+        else:
+            self._show_1219(self.values["server"], str(result))
 
     def _load_folder(self, path):
         share = self.share.get()
@@ -464,6 +491,7 @@ class RepositoryWizard(ttk.Frame):
 
         if self.values.get("attach"):
             candidate = tk.StringVar()
+            self._attach_candidate = candidate
             status = tk.StringVar(value="Enter the existing repository passphrase to verify this location.")
             ttk.Label(self.body, textvariable=status, style="Muted.TLabel").pack(anchor=tk.W, pady=8)
             entry = ttk.Entry(self.body, textvariable=candidate, show="*")
@@ -496,18 +524,7 @@ class RepositoryWizard(ttk.Frame):
                         result, message = "unavailable", str(error)
 
                     def done():
-                        if (
-                            generation != self._generation
-                            or self.cancel.is_set()
-                            or token != self._passphrase_probe_token
-                            or candidate.get() != passphrase
-                        ):
-                            return
-                        if result == "present":
-                            status.set("Repository verified")
-                            self.primary.configure(state=tk.NORMAL)
-                        else:
-                            status.set(message or "Passphrase was not accepted")
+                        self._apply_attach_probe(generation, token, passphrase, result, message, status)
 
                     try:
                         self.app.root.after(0, done)
@@ -547,6 +564,7 @@ class RepositoryWizard(ttk.Frame):
         ttk.Button(reveal, text="Copy (clipboard is not storage)", command=lambda: self._copy_passphrase(value)).pack(
             anchor=tk.W, pady=8
         )
+        ttk.Button(reveal, text="Use my own passphrase", command=self._supplied_passphrase).pack(anchor=tk.W)
         ttk.Button(reveal, text="Save recovery record", command=lambda: self._save_recovery_record(value)).pack(
             anchor=tk.W
         )
@@ -582,6 +600,21 @@ class RepositoryWizard(ttk.Frame):
         self.primary.configure(state=tk.DISABLED)
         self._show_passphrase_frame(reveal)
 
+    def _apply_attach_probe(self, generation, token, passphrase, result, message, status=None):
+        if (
+            generation != self._generation
+            or self.cancel.is_set()
+            or token != self._passphrase_probe_token
+            or self._attach_candidate.get() != passphrase
+        ):
+            return
+        if result == "present":
+            if status:
+                status.set("Repository verified")
+            self.primary.configure(state=tk.NORMAL)
+        elif status:
+            status.set(message or "Passphrase was not accepted")
+
     def _show_passphrase_frame(self, frame):
         for candidate in self.passphrase_frames:
             candidate.pack_forget()
@@ -590,13 +623,44 @@ class RepositoryWizard(ttk.Frame):
     def _copy_passphrase(self, value):
         self.app.root.clipboard_clear()
         self.app.root.clipboard_append(value)
+        self.app.set_status("Copied. The clipboard is not durable storage; save or print the recovery record.")
+
+    def _supplied_passphrase(self):
+        self._clear()
+        ttk.Label(self.body, text="Use your own passphrase", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
+        ttk.Label(
+            self.body,
+            text="Use a passphrase you can save outside this computer. You will confirm it by position next.",
+            style="Muted.TLabel",
+            wraplength=640,
+        ).pack(anchor=tk.W, pady=(8, 12))
+        candidate = tk.StringVar()
+        repeat = tk.StringVar()
+        ttk.Label(self.body, text="Passphrase").pack(anchor=tk.W)
+        ttk.Entry(self.body, textvariable=candidate, show="*").pack(fill=tk.X)
+        ttk.Label(self.body, text="Repeat passphrase").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Entry(self.body, textvariable=repeat, show="*").pack(fill=tk.X)
+
+        def continue_with_supplied():
+            if not valid_supplied_passphrase(candidate.get(), repeat.get()):
+                self.app.set_status("Enter the same non-empty passphrase twice", error=True)
+                return
+            self.values["passphrase"] = candidate.get()
+            self._render()
+
+        self._buttons(continue_with_supplied, back=False)
 
     def _save_recovery_record(self, value):
         target = filedialog.asksaveasfilename(title="Save recovery record", defaultextension=".txt")
         if not target:
             return None
         path = Path(target)
-        path.write_text(value + "\n", encoding="utf-8")
+        record = self._record()
+        location = self._recovery_location(record)
+        content = recovery_record(
+            record.name, location, value, connect_command=self._recovery_command(record, location)
+        )
+        path.write_text(content, encoding="utf-8")
         if os.name != "nt":
             path.chmod(0o600)
         self.app.set_status("Recovery record saved; keep it off this computer")
@@ -610,6 +674,23 @@ class RepositoryWizard(ttk.Frame):
             os.startfile(str(path), "print")
         else:
             subprocess.run(["lpr", str(path)], check=False)
+
+    @staticmethod
+    def _recovery_location(record):
+        if record.type == "s3":
+            return f"s3://{record.bucket}/{record.prefix or ''}".rstrip("/")
+        if record.type == "smb":
+            return "\\\\" + "\\".join(part for part in (record.server, record.share, record.path) if part)
+        return record.path or ""
+
+    @staticmethod
+    def _recovery_command(record, location):
+        if record.type != "s3":
+            return f'kopia repository connect filesystem --path "{location}"'
+        return (
+            f'kopia repository connect s3 --bucket "{record.bucket}" --prefix "{record.prefix or ""}" '
+            f'--endpoint "{record.endpoint}" --region "{record.region}"'
+        )
 
     def _job(self):
         ttk.Label(self.body, text="Source and schedule", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
