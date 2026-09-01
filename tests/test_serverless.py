@@ -99,7 +99,7 @@ def test_repo_attach_refuses_absent_without_create(monkeypatch, tmp_path: Path) 
 
     result = CliRunner().invoke(
         main,
-        ["repo", "add", "Home", "--attach", "--path", str(tmp_path / "repo"), "--passphrase-stdin"],
+        ["repo", "add", "Home", "--attach", "--path", str(tmp_path / "repo"), "--passphrase-stdin", "--headless"],
         input="secret\n",
     )
 
@@ -119,7 +119,7 @@ def test_repo_init_stores_only_verified_passphrase(monkeypatch, tmp_path: Path) 
 
     result = CliRunner().invoke(
         main,
-        ["repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin"],
+        ["repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin", "--headless"],
         input="secret\n",
     )
 
