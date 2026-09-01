@@ -456,9 +456,33 @@ def test_smb_attach_reuses_a_verified_windows_connection_without_tearing_it_down
         name="NAS", type="smb", server="nas", share="backups", username="backup", use_existing_session=True
     )
 
-    add_repository(
-        BackerConfig(), tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=True, init=False,
+    config = BackerConfig()
+    repository_id, _ = add_repository(
+        config, tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=True, init=False,
         storage=None, headless=True,
     )
 
     assert order == ["reuse", "probe"]
+    assert config.repositories[repository_id].storage_password_ref is None
+
+
+def test_system_run_refuses_interactive_only_smb_repository(monkeypatch, tmp_path: Path) -> None:
+    from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
+    from backer.serverless import runs
+
+    config = BackerConfig(
+        repositories={
+            "repo": RepositoryConfig(
+                name="NAS", type="smb", server="nas", share="backups", username="backup",
+                passphrase_ref="pass", use_existing_session=True,
+            )
+        },
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path=str(tmp_path)))},
+    )
+    monkeypatch.setattr(runs.keystore, "get", lambda reference, **_kwargs: "repo-pass" if reference == "pass" else None)
+    monkeypatch.setattr(runs, "get_data_dir", lambda: tmp_path)
+
+    result = runs._run_local_job(config, "nightly", run_as_system=True)
+
+    assert not result["success"]
+    assert "interactive-only" in result["errors"][0]

@@ -23,6 +23,14 @@ def save_config(config: BackerConfig) -> None:
     config.save(get_config_dir() / "config.yaml")
 
 
+def unattended_blocker(config: BackerConfig) -> str | None:
+    """Keep SYSTEM setup fail-closed when an SMB repository only has an interactive session."""
+    for repository in config.repositories.values():
+        if repository.type == "smb" and repository.use_existing_session and not repository.storage_password_ref:
+            return f"Repository '{repository.name}' is interactive-only; add a machine-scoped SMB credential first"
+    return None
+
+
 class HomeView(ttk.Frame):
     primary = None
 
@@ -156,6 +164,9 @@ class SettingsView(ttk.Frame):
         self.app.apply_theme(self.mode.get())
 
     def _unattended(self):
+        if blocker := unattended_blocker(self.app.config):
+            self.app.set_status(blocker, error=True)
+            return
         if sys.platform == "win32":
             from backer.client.windows_service import create_local_scheduled_task
 

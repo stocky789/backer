@@ -65,6 +65,113 @@ def test_1219_actions_use_the_named_connection_without_silent_teardown():
     assert "confirm_remove_repository(connection)" in source
 
 
+def test_unattended_setup_rejects_interactive_only_smb_repositories():
+    from backer.agent.gui.views import unattended_blocker
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config = BackerConfig(
+        repositories={
+            "nas": RepositoryConfig(
+                name="NAS", type="smb", server="nas", share="backups", username="backup",
+                use_existing_session=True,
+            )
+        }
+    )
+
+    assert "interactive-only" in unattended_blocker(config)
+
+
+def test_1219_actions_keep_selected_target_and_only_disconnect_the_named_conflict(monkeypatch):
+    from backer.agent.gui import wizard
+
+    buttons = {}
+    calls = []
+
+    class Frame:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def pack(self, **_kwargs):
+            pass
+
+    class Button(Frame):
+        def __init__(self, _parent, *, text, command, **_kwargs):
+            buttons[text] = command
+
+    class Manager:
+        def _find_existing_connection(self, _server):
+            return (r"\\nas\media", "other-user")
+
+        def connect_existing_serverless(self, *args):
+            calls.append(("reuse", args))
+            return False
+
+        def disconnect_existing_connection(self, connection):
+            calls.append(("disconnect", connection))
+            return True
+
+    class Thread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    class Root:
+        def after(self, _delay, callback):
+            callback()
+
+    class Tree:
+        def selection(self):
+            return ("selected",)
+
+        def set(self, _item, _column):
+            return "Backer"
+
+    class Share:
+        def get(self):
+            return "backups"
+
+    class Listing:
+        def set(self, value):
+            calls.append(("listing", value))
+
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance.body = object()
+    instance.share = Share()
+    instance.tree = Tree()
+    instance.listing = Listing()
+    instance.values = {"path": "Backer"}
+    instance._generation = 1
+    instance.cancel = type("Cancel", (), {"is_set": lambda _self: False})()
+    instance.app = type(
+        "App",
+        (),
+        {
+            "root": Root(),
+            "confirm_remove_repository": lambda _self, _connection: True,
+            "set_status": lambda *_args, **_kwargs: None,
+        },
+    )()
+    instance._probe_selected_location = lambda: calls.append(("probe", None))
+    instance._go = lambda step: calls.append(("go", step))
+
+    monkeypatch.setattr(wizard.ttk, "Frame", Frame)
+    monkeypatch.setattr(wizard.ttk, "Button", Button)
+    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    monkeypatch.setattr(wizard.threading, "Thread", Thread)
+
+    instance._show_1219("nas", "error 1219")
+    buttons["Use existing connection"]()
+    buttons["Cancel"]()
+    buttons[r"Disconnect \\nas\media"]()
+
+    assert ("reuse", ("nas", "backups", "Backer")) in calls
+    assert ("disconnect", r"\\nas\media") in calls
+    assert ("go", 2) in calls
+    assert instance.values == {"path": "Backer"}
+
+
 def test_no_percentage_without_a_frame():
     source = _source("app.py")
     assert 'self.bar.configure(mode="indeterminate")' in source

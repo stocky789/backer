@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import secrets
+import subprocess
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, ttk
 
 from croniter import croniter
@@ -15,11 +18,11 @@ from backer.core.paths import get_config_dir
 from backer.core.smb_browse import SMBBrowser
 
 
-def connection_conflict_message(server: str) -> str:
+def connection_conflict_message(server: str, conflict=None) -> str:
     """Name the existing Windows SMB connection; never hide it behind error 1219."""
     from backer.core.mounts import SMBConnectionManager
 
-    conflict = SMBConnectionManager()._find_existing_connection(server)
+    conflict = conflict or SMBConnectionManager()._find_existing_connection(server)
     if conflict:
         share, username = conflict
         return (
@@ -57,6 +60,7 @@ class RepositoryWizard(ttk.Frame):
         self.step = 1
         self.cancel = threading.Event()
         self._generation = 0
+        self._passphrase_probe_token = 0
         self.values = {
             "type": "local",
             "path": "",
@@ -136,13 +140,15 @@ class RepositoryWizard(ttk.Frame):
             else self.values.get("storage_password")
         )
         generation = self._generation
+        passphrase = self.values.get("passphrase") or "backer-location-probe"
 
         def worker():
             from backer.serverless.repositories import probe
 
-            status, _unique_id, message = probe(
-                record, self.values.get("passphrase") or "backer-location-probe", storage
-            )
+            try:
+                status, _unique_id, message = probe(record, passphrase, storage)
+            except Exception as error:
+                status, message = "unavailable", str(error)
 
             def done():
                 if generation != self._generation or self.cancel.is_set():
@@ -379,28 +385,42 @@ class RepositoryWizard(ttk.Frame):
         manager = SMBConnectionManager()
         conflict = manager._find_existing_connection(server)
         connection = conflict[0] if conflict else f"\\\\{server}"
-        self.listing.set(connection_conflict_message(server))
+        self.listing.set(connection_conflict_message(server, conflict))
         actions = ttk.Frame(self.body)
         actions.pack(anchor=tk.W, pady=4)
 
         def use_existing():
-            share = connection.rsplit("\\", 1)[-1]
+            selected_share = self.share.get().strip() or self.values.get("share", "")
+            selected_path = self.values.get("path", "")
+            selected = self.tree.selection()
+            if selected:
+                selected_path = self.tree.set(selected[0], "path")
+            if not selected_share:
+                self.listing.set("Choose the backup share and folder before reusing an existing Windows connection.")
+                return
             generation = self._generation
-            path = self.values.get("path", "")
 
             def worker():
-                ok = manager.connect_existing_serverless(server, share, path)
+                ok = manager.connect_existing_serverless(server, selected_share, selected_path)
 
                 def done():
                     if generation != self._generation or self.cancel.is_set():
                         return
                     if ok:
-                        self.values.update(share=share, storage_password=None, use_existing_session=True)
-                        self.app.set_status(f"Reused and tested {connection} without changing its credentials")
+                        self.values.update(
+                            share=selected_share,
+                            path=selected_path,
+                            storage_password=None,
+                            use_existing_session=True,
+                        )
+                        self.app.set_status(
+                            f"Reused the sign-in on {connection} and tested \\\\{server}\\{selected_share}"
+                        )
                         self._probe_selected_location()
                     else:
                         self.listing.set(
-                            f"Backer could not write a temporary probe in {connection}. Nothing was disconnected."
+                            f"Backer could not write a temporary probe in \\\\{server}\\{selected_share}. "
+                            "Nothing was disconnected."
                         )
 
                 try:
@@ -452,6 +472,8 @@ class RepositoryWizard(ttk.Frame):
 
             def validate_existing(*_):
                 self.values["passphrase"] = candidate.get()
+                self._passphrase_probe_token += 1
+                token = self._passphrase_probe_token
                 self.primary.configure(state=tk.DISABLED)
                 if not candidate.get():
                     status.set("Enter the existing repository passphrase to verify this location.")
@@ -468,10 +490,18 @@ class RepositoryWizard(ttk.Frame):
                 def worker():
                     from backer.serverless.repositories import probe
 
-                    result, _unique_id, message = probe(record, passphrase, storage)
+                    try:
+                        result, _unique_id, message = probe(record, passphrase, storage)
+                    except Exception as error:
+                        result, message = "unavailable", str(error)
 
                     def done():
-                        if generation != self._generation or self.cancel.is_set():
+                        if (
+                            generation != self._generation
+                            or self.cancel.is_set()
+                            or token != self._passphrase_probe_token
+                            or candidate.get() != passphrase
+                        ):
                             return
                         if result == "present":
                             status.set("Repository verified")
@@ -495,17 +525,34 @@ class RepositoryWizard(ttk.Frame):
         self.passphrase_frames = (ttk.Frame(self.body), ttk.Frame(self.body))
         reveal, confirm = self.passphrase_frames
         ttk.Label(reveal, text="Recovery copy", font=("Segoe UI", 12, "bold")).pack(anchor=tk.W)
+        ttk.Label(
+            reveal,
+            text=(
+                "This passphrase is the only recovery key for this repository. "
+                "If it is lost, the backups cannot be restored."
+            ),
+            style="Danger.TLabel",
+            wraplength=640,
+        ).pack(anchor=tk.W, pady=(8, 0))
         ttk.Label(reveal, text=value, style="Mono.TLabel").pack(anchor=tk.W, pady=8)
         ttk.Label(
             reveal,
             text=(
-                "Copy this phrase to a recovery record. "
+                "Save or print a recovery record somewhere off this computer. "
                 f"Backer stores it using {keystore.backend_name()} on this computer."
             ),
             style="Muted.TLabel",
             wraplength=640,
         ).pack(anchor=tk.W)
-        ttk.Button(reveal, text="Copy", command=lambda: self._copy_passphrase(value)).pack(anchor=tk.W, pady=8)
+        ttk.Button(reveal, text="Copy (clipboard is not storage)", command=lambda: self._copy_passphrase(value)).pack(
+            anchor=tk.W, pady=8
+        )
+        ttk.Button(reveal, text="Save recovery record", command=lambda: self._save_recovery_record(value)).pack(
+            anchor=tk.W
+        )
+        ttk.Button(
+            reveal, text="Save and print recovery record", command=lambda: self._print_recovery_record(value)
+        ).pack(anchor=tk.W, pady=(4, 8))
         ttk.Button(reveal, text="I saved the recovery copy", command=lambda: self._show_passphrase_frame(confirm)).pack(
             anchor=tk.W
         )
@@ -543,6 +590,26 @@ class RepositoryWizard(ttk.Frame):
     def _copy_passphrase(self, value):
         self.app.root.clipboard_clear()
         self.app.root.clipboard_append(value)
+
+    def _save_recovery_record(self, value):
+        target = filedialog.asksaveasfilename(title="Save recovery record", defaultextension=".txt")
+        if not target:
+            return None
+        path = Path(target)
+        path.write_text(value + "\n", encoding="utf-8")
+        if os.name != "nt":
+            path.chmod(0o600)
+        self.app.set_status("Recovery record saved; keep it off this computer")
+        return path
+
+    def _print_recovery_record(self, value):
+        path = self._save_recovery_record(value)
+        if not path:
+            return
+        if os.name == "nt":
+            os.startfile(str(path), "print")
+        else:
+            subprocess.run(["lpr", str(path)], check=False)
 
     def _job(self):
         ttk.Label(self.body, text="Source and schedule", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)

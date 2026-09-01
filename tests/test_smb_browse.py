@@ -142,7 +142,7 @@ def test_existing_connection_probe_reuses_without_credentials_and_removes_its_pr
 
     commands: list[list[str]] = []
     manager = SMBConnectionManager()
-    monkeypatch.setattr(manager, "_find_existing_connection", lambda _server: (r"\\nas\backup", "existing-user"))
+    monkeypatch.setattr(manager, "_find_existing_connection", lambda _server: (r"\\nas\media", "existing-user"))
     monkeypatch.setattr(mounts, "Path", lambda *_values: tmp_path)
     monkeypatch.setattr(
         mounts.subprocess,

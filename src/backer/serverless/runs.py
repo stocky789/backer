@@ -92,6 +92,10 @@ def _run_local_job(
         if smb_password:
             secrets.append(smb_password)
         if repository.type == "smb":
+            if run_as_system and repository.use_existing_session and not smb_password:
+                raise ValueError(
+                    f"Repository '{repository.name}' is interactive-only; add a machine-scoped SMB credential first"
+                )
             if not repository.server or not repository.share or not repository.username or (
                 not repository.use_existing_session and not smb_password
             ):
