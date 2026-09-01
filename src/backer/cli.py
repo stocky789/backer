@@ -4,6 +4,8 @@ import json
 import os
 import shlex
 import sys
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -748,7 +750,8 @@ def backup(
 @click.argument("legacy_destination", required=False, type=click.Path(path_type=Path))
 @click.option("--job")
 @click.option("--from", "from_path")
-@click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]))
+@click.option("--passphrase-stdin", is_flag=True, help="Read a recovery repository passphrase from stdin")
+@click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]), default="NEW", show_default=True)
 @click.option("--destination", type=click.Path(path_type=Path))
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
 @click.option("--before")
@@ -764,6 +767,7 @@ def restore(
     snapshot: str | None,
     job: str | None,
     from_path: str | None,
+    passphrase_stdin: bool,
     into: str | None,
     destination: Path | None,
     before: str | None,
@@ -812,6 +816,11 @@ def restore(
         selected = snapshot if snapshot else max(candidates, key=lambda item: item.get("timestamp") or "")["full_id"]
         if snapshot and not any(snapshot in (item.get("id"), item.get("full_id")) for item in candidates):
             raise click.ClickException("The requested snapshot was not found for this job")
+        if into == "REPLACE" and not dry_run:
+            if not _interactive():
+                raise click.UsageError("REPLACE requires an interactive typed confirmation")
+            if click.prompt("Type REPLACE to continue", default="", show_default=False) != "REPLACE":
+                raise click.ClickException("Stopped. Nothing was changed")
         moved = _replace_destination(destination) if into == "REPLACE" and not dry_run else None
         if into == "NEW" and not dry_run:
             destination.mkdir(parents=True, exist_ok=True)
@@ -830,9 +839,45 @@ def restore(
         click.echo("Restore completed")
         return
     if from_path:
-        raise click.ClickException(
-            "--from requires a configured repository; add it with backer repo add NAME --attach first"
-        )
+        if not passphrase_stdin:
+            raise click.UsageError("--from requires --passphrase-stdin; it never reads the local keystore")
+        if not destination:
+            _missing_flags("restore --from PATH", ["--destination"])
+        if sum(bool(value) for value in (snapshot, before, latest)) != 1:
+            raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
+        passphrase = sys.stdin.read().rstrip("\r\n")
+        if not passphrase:
+            raise click.UsageError("A repository passphrase is required")
+        from backer.backends.kopia import KopiaBackend
+
+        backend = KopiaBackend({"repository_password": passphrase})
+        probe_status, _ = backend.repository_probe(from_path)
+        if probe_status != "present":
+            raise click.ClickException(
+                backend.last_repository_error or f"Repository is {probe_status}; nothing was created"
+            )
+        rows = backend.list_snapshots(BackupDestination(from_path))
+        if computer:
+            rows = [item for item in rows if item.get("hostname") == computer]
+        if before:
+            rows = [item for item in rows if (item.get("timestamp") or "") <= before]
+        if not rows:
+            raise click.ClickException("No matching immutable snapshot was found")
+        selected = snapshot or max(rows, key=lambda item: item.get("timestamp") or "")["full_id"]
+        if snapshot and not any(snapshot in (item.get("id"), item.get("full_id")) for item in rows):
+            raise click.ClickException("The requested snapshot was not found")
+        if not dry_run:
+            location = destination.parent if destination.parent.exists() else Path.cwd()
+            free = __import__("shutil").disk_usage(location).free
+            required = next((item.get("size", 0) for item in rows if item.get("full_id") == selected), 0)
+            if required and free < required:
+                raise click.ClickException("The destination does not have enough free space; nothing was changed")
+            destination.mkdir(parents=True, exist_ok=True)
+        result = backend.restore(BackupDestination(from_path), destination, snapshot=selected, include_path=include)
+        if not result.success:
+            raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
+        click.echo("Restore completed")
+        return
     repository_password = os.environ.get("BACKER_REPOSITORY_PASSWORD")
     if not source or not destination or not repository_password:
         raise click.UsageError("SOURCE and DESTINATION are required")
@@ -1554,7 +1599,7 @@ def _restore_destination_allowed(destination: Path, config) -> None:
         if record.type == "local" and record.path:
             forbidden.add(Path(record.path).expanduser().resolve())
     for denied in forbidden:
-        if resolved == denied or denied in resolved.parents:
+        if resolved == denied or denied in resolved.parents or resolved in denied.parents:
             raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
 
 
@@ -1575,18 +1620,62 @@ def _replace_destination(destination: Path) -> Path | None:
     return moved
 
 
-def _local_progress(enabled: bool | None):
-    """Render local Kopia frames without inventing a percentage for first runs."""
-    show_live = sys.stdout.isatty() if enabled is None else enabled
+class _LocalProgress:
+    """Render only real Kopia frames; first backups intentionally stay indeterminate."""
 
-    def render(**event: Any) -> None:
+    def __init__(self, enabled: bool | None) -> None:
+        self.live_mode = sys.stdout.isatty() if enabled is None else enabled
+        self.progress = None
+        self.live = None
+        self.task = None
+        self.last_frame = time.monotonic()
+        self.stall_timer: threading.Timer | None = None
+
+    def __enter__(self):
+        if self.live_mode:
+            from rich.live import Live
+            from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+
+            self.progress = Progress(
+                SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn()
+            )
+            self.task = self.progress.add_task("Waiting for Kopia progress", total=None)
+            self.live = Live(self.progress, console=console, refresh_per_second=4)
+            self.live.__enter__()
+            self.stall_timer = threading.Timer(45, self._stalled)
+            self.stall_timer.daemon = True
+            self.stall_timer.start()
+        return self.callback
+
+    def _stalled(self) -> None:
+        if self.live and time.monotonic() - self.last_frame >= 45:
+            self.progress.update(self.task, description="no progress for 45s")
+
+    def callback(self, **event: Any) -> None:
         if "bytes_processed" not in event:
             return
         done, total = event["bytes_processed"], event.get("total_bytes", 0)
-        prefix = "" if show_live else datetime.now().strftime("%H:%M:%S ")
-        click.echo(f"{prefix}{done}/{total} bytes" if total else f"{prefix}{done} bytes")
+        self.last_frame = time.monotonic()
+        if not self.live_mode:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            click.echo(f"{stamp} {done}/{total} bytes" if total else f"{stamp} {done} bytes")
+            return
+        if total:
+            self.progress.update(
+                self.task, completed=min(done, total), total=total, description=f"{done}/{total} bytes"
+            )
+        else:
+            self.progress.update(self.task, total=None, description=f"{done} bytes")
 
-    return render
+    def __exit__(self, *_args) -> None:
+        if self.stall_timer:
+            self.stall_timer.cancel()
+        if self.live:
+            self.live.__exit__(*_args)
+
+
+def _local_progress(enabled: bool | None) -> _LocalProgress:
+    return _LocalProgress(enabled)
 
 
 def _resolve_job_repository(config, requested: str | None, name: str | None = None) -> str:
@@ -3050,7 +3139,8 @@ def job_run(
         from backer.serverless.runs import run_local_job
 
         for item in names:
-            report = run_local_job(local_config, item, on_progress=_local_progress(progress))
+            with _local_progress(progress) as render:
+                report = run_local_job(local_config, item, on_progress=render)
             if not report or not report["success"]:
                 raise click.ClickException("Backup failed")
         return
@@ -3061,11 +3151,11 @@ def job_run(
 
         try:
             system_run = os.environ.get("BACKER_RUN_AS_SYSTEM") == "1"
-            reports = (
-                run_due_jobs(local_config, run_as_system=system_run)
-                if due
-                else run_local_job(local_config, name, run_as_system=system_run, on_progress=_local_progress(progress))
-            )
+            if due:
+                reports = run_due_jobs(local_config, run_as_system=system_run)
+            else:
+                with _local_progress(progress) as render:
+                    reports = run_local_job(local_config, name, run_as_system=system_run, on_progress=render)
         except ValueError as error:
             raise click.ClickException(str(error)) from error
         if reports is None:

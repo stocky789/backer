@@ -305,6 +305,12 @@ def test_status_message_maps_known_kopia_failure():
     assert "passphrase" in explain_failure("invalid repository password").lower()
 
 
+def test_legacy_recovery_literal_has_one_dedicated_home():
+    from backer.core.recovery import LEGACY_FIXED_PASSPHRASE
+
+    assert LEGACY_FIXED_PASSPHRASE == "backer-default-password"
+
+
 @pytest.mark.parametrize(
     ("arguments", "repository_expectation"),
     [
