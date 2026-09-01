@@ -195,6 +195,26 @@ def test_scheduled_attempt_ignores_another_job_test_token():
     )
 
 
+def test_scheduled_test_context_keeps_adversarial_job_name_out_of_privileged_command(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.agent.gui.views import prepare_scheduled_test
+    from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
+
+    name = 'odd " & % $() name'
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="E:/repo", passphrase_ref="pass")},
+        jobs={name: JobConfig(repository="repo", source=SourceConfig(path="C:/source"))},
+    )
+    monkeypatch.setattr(views.keystore, "get", lambda *_args, **_kwargs: "secret")
+    monkeypatch.setattr(views.keystore, "put", lambda *_args, **_kwargs: "test")
+    monkeypatch.setattr("backer.serverless.scheduled_test.test_directory", lambda _token: tmp_path / "0123456789ab")
+
+    directory, refs = prepare_scheduled_test(config, name, "0123456789ab")
+
+    saved = BackerConfig.load(directory / "config.yaml")
+    assert list(saved.jobs) == [name]
+    assert refs == ["backer/scheduled-test/0123456789ab/passphrase_ref"]
+
 def test_repository_details_disclose_type_and_keystore_state_without_secret():
     from backer.agent.gui.views import repository_details
     from backer.core.config import BackerConfig, RepositoryConfig

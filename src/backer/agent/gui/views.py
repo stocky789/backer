@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from backer.core import keystore
-from backer.core.config import BackerConfig, ClientConfig
+from backer.core.config import BackerConfig, ClientConfig, ScheduleConfig
 from backer.core.config import load_config as _load_config
 from backer.core.paths import get_config_dir, get_data_dir, get_machine_config_dir
 from backer.core.repo_metadata import RepositoryMetadata
@@ -108,6 +109,71 @@ def repository_details(config: BackerConfig, repository_id: str) -> str:
         location = record.path or "location unavailable"
     state = "passphrase stored" if record.passphrase_ref else "passphrase unavailable"
     return f"{record.name} · {record.type} · {location} · {state}"
+
+
+def prepare_scheduled_test(config: BackerConfig, job_name: str, token: str) -> tuple[Path, list[str]]:
+    """Build a one-job machine-only config; task commands never receive user-controlled names."""
+    from backer.serverless.scheduled_test import test_directory
+
+    job = config.jobs.get(job_name)
+    if not job or not (record := config.repositories.get(job.repository)):
+        raise ValueError("Selected job is not configured")
+    directory = test_directory(token)
+    if directory.exists():
+        raise ValueError("Scheduled test context already exists")
+    clone = config.model_copy(deep=True)
+    clone.jobs = {job_name: job.model_copy(update={"schedule": ScheduleConfig(cron="* * * * *")})}
+    clone.repositories = {job.repository: record}
+    refs = []
+    try:
+        copied = {}
+        for field in ("passphrase_ref", "storage_password_ref"):
+            reference = getattr(record, field)
+            if not reference:
+                continue
+            value = keystore.get(reference) or keystore.get(reference, machine_scope=True)
+            if value is None:
+                raise ValueError(f"Repository '{record.name}' secret cannot be read")
+            temporary = f"backer/scheduled-test/{token}/{field}"
+            keystore.put(temporary, value, machine_scope=True)
+            refs.append(temporary)
+            copied[field] = temporary
+        clone.repositories[job.repository] = record.model_copy(update={**copied, "scope": "machine"})
+        directory.mkdir(parents=True)
+        clone.save(directory / "config.yaml")
+        return directory, refs
+    except Exception as error:
+        cleanup_errors = []
+        for reference in refs:
+            try:
+                keystore.delete(reference, machine_scope=True)
+            except Exception as cleanup_error:
+                cleanup_errors.append(str(cleanup_error))
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            cleanup_errors.append(str(cleanup_error))
+        if cleanup_errors:
+            raise RuntimeError(f"{error}; cleanup failed: {'; '.join(cleanup_errors)}") from error
+        raise
+
+
+def remove_scheduled_test(directory: Path, refs: list[str]) -> list[str]:
+    errors = []
+    for reference in refs:
+        try:
+            keystore.delete(reference, machine_scope=True)
+        except Exception as error:
+            errors.append(str(error))
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        errors.append(str(error))
+    return errors
 
 
 def _run_started(run) -> str:
@@ -504,7 +570,13 @@ class SettingsView(ttk.Frame):
                     restore_task()
                 return False, previous, str(error)
 
-        self._worker("apply-modes", apply, lambda result: self._modes_applied(result))
+        def guarded_apply():
+            try:
+                return apply()
+            except Exception as error:
+                return False, previous, str(error)
+
+        self._worker("apply-modes", guarded_apply, self._modes_applied)
 
     def _modes_applied(self, result):
         ok, config, message = result
@@ -765,13 +837,9 @@ class SettingsView(ttk.Frame):
         def run():
             if blocker := unattended_blocker(self.app.config):
                 return False, blocker
-            from backer.serverless.repositories import rescope_secrets_for_system
-
-            config = self.app.config.model_copy(deep=True)
-            rescope_secrets_for_system(config)
-            config.save(get_machine_config_dir() / "config.yaml")
             token = uuid4().hex[:12]
-            data_dir = get_machine_config_dir() if sys.platform == "win32" else Path("/var/lib/backer")
+            directory, refs = prepare_scheduled_test(self.app.config, name, token)
+            data_dir = directory / "data"
             before = read_runs(data_dir, name, 1)
             previous = before[0].run_id if before else None
             if sys.platform == "win32":
@@ -780,10 +848,10 @@ class SettingsView(ttk.Frame):
                     remove_local_scheduled_test_task,
                 )
 
-                launch, message = create_local_scheduled_test_task(name, token)
+                launch, message = create_local_scheduled_test_task(token)
 
                 def cleanup():
-                    remove_local_scheduled_test_task(token)
+                    return remove_local_scheduled_test_task(token)
 
             else:
                 from backer.client.windows_service import (
@@ -791,12 +859,13 @@ class SettingsView(ttk.Frame):
                     remove_local_systemd_test_service,
                 )
 
-                launch, message = create_local_systemd_test_service(name, token)
+                launch, message = create_local_systemd_test_service(token)
 
                 def cleanup():
-                    remove_local_systemd_test_service(token)
+                    return remove_local_systemd_test_service(token)
             if not launch:
-                return False, message
+                cleanup_errors = remove_scheduled_test(directory, refs)
+                return False, message + ("; cleanup: " + "; ".join(cleanup_errors) if cleanup_errors else "")
             try:
                 return wait_for_scheduled_attempt(
                     previous,
@@ -804,7 +873,10 @@ class SettingsView(ttk.Frame):
                     token=token,
                 )
             finally:
-                cleanup()
+                stopped, cleanup_message = cleanup()
+                cleanup_errors = remove_scheduled_test(directory, refs)
+                if not stopped or cleanup_errors:
+                    raise RuntimeError(cleanup_message + ("; " + "; ".join(cleanup_errors) if cleanup_errors else ""))
 
         self._worker("scheduled-test", run)
 

@@ -22,3 +22,10 @@
 - Mode application now stages user and machine config, snapshots machine secrets and both durable files, verifies both readbacks, compensates files/secrets/task on any failed boundary, then updates Tk variables only from the committed result.
 - Settings recovery uses the wizard's exact-path plaintext acknowledgement and off-machine warning before worker-owned writing; reveal reads the retained user secret before the machine fallback.
 - Focused settings/scheduling/repository checks: `12 passed, 33 deselected`; ruff clean.
+
+## Fix round 3
+
+- Temporary privileged tasks/services now invoke only the fixed `backer.serverless.scheduled_test` entrypoint with a validated 12-hex token. The selected job is held in a unique one-job config context, so names containing shell metacharacters never reach `schtasks`, systemd, or a shell.
+- The context has private machine-scope secret refs, a private data directory, token-matched attempt polling, and cleanup that stops before deleting the temporary platform definition and reports cleanup errors.
+- Mode callbacks now have a fixed `(ok, config, message)` result shape even if snapshot setup fails.
+- Focused checks: `13 passed, 33 deselected`; `34 passed`; ruff clean.

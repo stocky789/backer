@@ -9,6 +9,7 @@ Supports multiple installation methods:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -306,26 +307,18 @@ def create_local_scheduled_task() -> tuple[bool, str]:
     return True, f"Local backup task '{task_name}' created."
 
 
-def create_local_scheduled_test_task(job_name: str, token: str) -> tuple[bool, str]:
+def create_local_scheduled_test_task(token: str) -> tuple[bool, str]:
     """Run one configured local job once as SYSTEM without changing the due scheduler."""
     if not is_windows():
         return False, "Windows scheduled task only available on Windows"
     if not is_admin():
         return False, "Administrator privileges required. Run as Administrator."
-    if not job_name or any(char in job_name for char in "\r\n\x00"):
-        return False, "Invalid local job name"
-    data_dir = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
     command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
-    arguments = (
-        f'job run "{job_name}" --no-progress'
-        if getattr(sys, "frozen", False)
-        else f'-m backer job run "{job_name}" --no-progress'
-    )
+    if not re.fullmatch(r"[0-9a-f]{12}", token):
+        return False, "Invalid scheduled test token"
+    arguments = "scheduled-test" if getattr(sys, "frozen", False) else f"-m backer.serverless.scheduled_test {token}"
     task_name = f"BackerLocalTest-{token}"
-    action = (
-        f'cmd.exe /d /c "set BACKER_DATA_DIR={data_dir}&& set BACKER_CONFIG_DIR={data_dir}'
-        f'&& set BACKER_RUN_AS_SYSTEM=1&& set BACKER_ATTEMPT_TOKEN={token}&& "{command}" {arguments}"'
-    )
+    action = subprocess.list2cmdline([command, *arguments.split()])
     result = subprocess.run(
         [
             "schtasks", "/create", "/tn", task_name, "/tr", action, "/sc", "once", "/st", "00:00", "/ru", "SYSTEM",
@@ -346,14 +339,23 @@ def create_local_scheduled_test_task(job_name: str, token: str) -> tuple[bool, s
     return True, task_name
 
 
-def remove_local_scheduled_test_task(token: str) -> None:
+def remove_local_scheduled_test_task(token: str) -> tuple[bool, str]:
     """Remove only the short-lived selected-job SYSTEM test task."""
-    if is_windows():
-        subprocess.run(
-            ["schtasks", "/delete", "/tn", f"BackerLocalTest-{token}", "/f"],
-            capture_output=True,
-            creationflags=get_subprocess_flags(),
-        )
+    if not is_windows() or not re.fullmatch(r"[0-9a-f]{12}", token):
+        return False, "Invalid scheduled test token"
+    task = f"BackerLocalTest-{token}"
+    stopped = subprocess.run(
+        ["schtasks", "/end", "/tn", task], capture_output=True, text=True, creationflags=get_subprocess_flags()
+    )
+    deleted = subprocess.run(
+        ["schtasks", "/delete", "/tn", task, "/f"],
+        capture_output=True,
+        text=True,
+        creationflags=get_subprocess_flags(),
+    )
+    if deleted.returncode:
+        return False, deleted.stderr.strip() or "Could not remove scheduled test task"
+    return True, "Scheduled test task stopped and removed" if stopped.returncode == 0 else "Scheduled test task removed"
 
 
 def remove_local_scheduled_task() -> bool:
@@ -818,17 +820,14 @@ def remove_local_systemd_timer(*, headless: bool = False) -> None:
     subprocess.run([*systemctl, "daemon-reload"], capture_output=True)
 
 
-def create_local_systemd_test_service(job_name: str, token: str) -> tuple[bool, str]:
+def create_local_systemd_test_service(token: str) -> tuple[bool, str]:
     """Start one selected job through a short-lived root systemd service."""
-    if is_windows() or not job_name or any(char in job_name for char in "\r\n\x00"):
+    if is_windows() or not re.fullmatch(r"[0-9a-f]{12}", token):
         return False, "Invalid scheduled test request"
     service = Path("/etc/systemd/system") / f"backer-local-test-{token}.service"
     service.write_text(
         "[Service]\nType=oneshot\n"
-        "Environment=BACKER_CONFIG_DIR=/etc/backer\nEnvironment=BACKER_DATA_DIR=/var/lib/backer\n"
-        "Environment=BACKER_RUN_AS_SYSTEM=1\n"
-        f"Environment=BACKER_ATTEMPT_TOKEN={token}\n"
-        f'ExecStart={get_python_path()} -m backer job run "{job_name}" --no-progress\n',
+        f"ExecStart={get_python_path()} -m backer.serverless.scheduled_test {token}\n",
         encoding="utf-8",
     )
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
@@ -840,7 +839,16 @@ def create_local_systemd_test_service(job_name: str, token: str) -> tuple[bool, 
     return True, service.stem
 
 
-def remove_local_systemd_test_service(token: str) -> None:
+def remove_local_systemd_test_service(token: str) -> tuple[bool, str]:
+    if not re.fullmatch(r"[0-9a-f]{12}", token):
+        return False, "Invalid scheduled test token"
     service = Path("/etc/systemd/system") / f"backer-local-test-{token}.service"
+    stopped = subprocess.run(["systemctl", "stop", service.name], capture_output=True)
     service.unlink(missing_ok=True)
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    message = (
+        "Root scheduled test service stopped and removed"
+        if stopped.returncode == 0
+        else "Root scheduled test service removed"
+    )
+    return True, message
