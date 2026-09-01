@@ -157,6 +157,15 @@ class TestRepositoryMetadata:
         assert replaced[0][0].parent == path.parent
         assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == "2"
 
+    def test_all_repository_sidecar_records_use_schema_v2(self, temp_repo):
+        repo_meta = RepositoryMetadata(temp_repo)
+        repo_meta.initialize()
+        repo_meta.save_job_run("nightly", "run", {"status": "success"})
+        repo_meta.save_snapshot("f0a62d5b3dc5a02eb2674791653ebb78", {"job_name": "nightly"})
+
+        for path in (temp_repo / BACKER_METADATA_DIR).rglob("*.json"):
+            assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == "2"
+
     def test_list_agents(self, temp_repo):
         """Test listing all agents."""
         repo_meta = RepositoryMetadata(temp_repo)

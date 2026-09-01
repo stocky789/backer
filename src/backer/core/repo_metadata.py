@@ -318,6 +318,7 @@ class RepositoryMetadata:
         self._ensure_dirs()
 
         metadata = {
+            "schema_version": "2",
             "version": METADATA_VERSION,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
@@ -346,6 +347,7 @@ class RepositoryMetadata:
         """Update repository metadata fields."""
         metadata = self.get_metadata() or {}
         metadata.update(kwargs)
+        metadata["schema_version"] = "2"
         metadata["updated_at"] = datetime.now().isoformat()
         return self._write_json(self.metadata_dir / "metadata.json", metadata)
 
@@ -493,6 +495,7 @@ class RepositoryMetadata:
 
         run_data["run_id"] = run_id
         run_data["job_name"] = job_name
+        run_data["schema_version"] = "2"
         run_data["recorded_at"] = datetime.now().isoformat()
 
         return self._write_json(run_path, run_data)
@@ -547,6 +550,7 @@ class RepositoryMetadata:
         snapshot_path = self.metadata_dir / "snapshots" / f"{short_id}.json"
 
         snapshot_data["snapshot_id"] = snapshot_id
+        snapshot_data["schema_version"] = "2"
         snapshot_data["recorded_at"] = datetime.now().isoformat()
 
         return self._write_json(snapshot_path, snapshot_data)
