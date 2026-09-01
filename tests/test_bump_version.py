@@ -47,6 +47,10 @@ def paths(root):
     ]
 
 
+def temps(root):
+    return list(root.rglob(".backer-version-*"))
+
+
 def run(m, root, arg):
     m.ROOT = root
     sys.argv = ["bump_version.py", arg]
@@ -114,6 +118,26 @@ def test_changed_target_between_transform_and_journal_fails_closed(tmp_path, mon
     assert {path: path.read_bytes() for path in paths(tmp_path)} == before
 
 
+def test_changed_target_metadata_between_transform_and_journal_fails_closed(tmp_path, monkeypatch):
+    setup(tmp_path)
+    m = load()
+    real = m.read_file
+    calls = 0
+
+    def changed(path):
+        nonlocal calls
+        calls += 1
+        if calls == 5:
+            replacement = tmp_path / "same-bytes"
+            replacement.write_bytes(path.read_bytes())
+            os.replace(replacement, path)
+        return real(path)
+
+    monkeypatch.setattr(m, "read_file", changed)
+    assert run(m, tmp_path, "0.9.0") == 1
+    assert (tmp_path / m.LOCK).read_bytes() == b"0"
+
+
 @pytest.mark.parametrize("at", range(4))
 def test_failure_at_each_replace_restores_all(tmp_path, monkeypatch, at):
     setup(tmp_path)
@@ -133,6 +157,7 @@ def test_failure_at_each_replace_restores_all(tmp_path, monkeypatch, at):
     monkeypatch.setattr(m.os, "replace", fail)
     assert run(m, tmp_path, "0.9.0") == 1
     assert {p: p.read_bytes() for p in paths(tmp_path)} == before
+    assert not temps(tmp_path)
 
 
 def test_crash_recovers_on_next_invocation(tmp_path, monkeypatch):
@@ -191,6 +216,7 @@ def test_recovery_failure_retains_journal(tmp_path, monkeypatch):
     monkeypatch.setattr(m.os, "replace", fail)
     assert run(m, tmp_path, "0.9.0") == 1
     assert lock.read_bytes().startswith(b"1")
+    assert not temps(tmp_path)
 
 
 @pytest.mark.parametrize("payload", [b"1{", b"1[]"])
@@ -256,6 +282,30 @@ def test_staging_descriptor_outside_repository_is_not_written(tmp_path, monkeypa
     assert outside.read_bytes() == b"outside"
 
 
+def test_stage_failure_cleans_its_verified_temp(tmp_path, monkeypatch):
+    setup(tmp_path)
+    m = load()
+    monkeypatch.setattr(m, "write_all_fd", lambda *_: (_ for _ in ()).throw(OSError("write failed")))
+    with pytest.raises(OSError):
+        m.stage(tmp_path / "pyproject.toml", b"new", 0o644, 1, 1)
+    assert not temps(tmp_path)
+
+
+def test_substituted_staging_path_is_retained(tmp_path):
+    setup(tmp_path)
+    m = load()
+    staged = m.stage(tmp_path / "pyproject.toml", b"new", 0o644, 1, 1)
+    os.unlink(staged.path)
+    staged.path.write_bytes(b"attacker")
+    m.cleanup_staged(staged)
+    assert staged.path.read_bytes() == b"attacker"
+
+
+def test_persistent_lock_is_gitignored():
+    result = subprocess.run(["git", "check-ignore", "-q", ".backer-bump-version.lock"], cwd=ROOT, check=False)
+    assert result.returncode == 0
+
+
 def test_live_lock_is_busy_until_owner_exits(tmp_path):
     setup(tmp_path)
     m = load()
@@ -270,7 +320,7 @@ def test_crashed_process_releases_lock(tmp_path):
     setup(tmp_path)
     code = """import importlib.util, pathlib, sys, time
 spec = importlib.util.spec_from_file_location('bump', sys.argv[1])
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
 m.ROOT = pathlib.Path(sys.argv[2])
 with m.ReleaseLock():
  print('ready', flush=True); time.sleep(30)

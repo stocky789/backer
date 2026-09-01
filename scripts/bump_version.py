@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,8 +29,9 @@ MAX_JOURNAL = 8 * 1024 * 1024
 MAX_TIME_NS = (1 << 63) - 1
 REPARSE_POINT, FILE_ATTRIBUTE_DIRECTORY = 0x400, 0x10
 FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY = 0x80, 0x1
+FILE_DISPOSITION_INFO = 4
 FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS = 0x00200000, 0x02000000
-GENERIC_READ, GENERIC_WRITE, OPEN_EXISTING, OPEN_ALWAYS = 0x80000000, 0x40000000, 3, 4
+GENERIC_READ, GENERIC_WRITE, DELETE, OPEN_EXISTING, OPEN_ALWAYS = 0x80000000, 0x40000000, 0x10000, 3, 4
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
@@ -97,6 +99,10 @@ class _FileBasicInfo(ctypes.Structure):
         ("ChangeTime", ctypes.c_longlong),
         ("FileAttributes", wintypes.DWORD),
     ]
+
+
+class _FileDispositionInfo(ctypes.Structure):
+    _fields_ = [("DeleteFile", wintypes.BOOL)]
 
 
 def _win_final(kernel, handle):
@@ -168,10 +174,10 @@ def _fd_from_handle(handle, flags):
         raise
 
 
-def open_file(path, write=False):
+def open_file(path, write=False, delete=False):
     if os.name == "nt":
         fd = _fd_from_handle(
-            _win_open(path, GENERIC_READ | (GENERIC_WRITE if write else 0)),
+            _win_open(path, GENERIC_READ | (GENERIC_WRITE if write else 0) | (DELETE if delete else 0)),
             os.O_BINARY | (os.O_RDWR if write else os.O_RDONLY),
         )
     else:
@@ -257,6 +263,55 @@ def _set_mode(fd, mode):
         raise OSError(ctypes.get_last_error(), "SetFileInformationByHandle")
 
 
+def _identity(state):
+    return tuple(
+        getattr(state, field, None)
+        for field in ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    )
+
+
+@dataclass(frozen=True)
+class Staged(os.PathLike):
+    path: Path
+    identity: tuple
+
+    def __fspath__(self):
+        return os.fspath(self.path)
+
+
+def cleanup_staged(staged):
+    """Delete only the same safe staging file; retain anything substituted."""
+    try:
+        fd = open_file(staged.path, write=os.name == "nt", delete=os.name == "nt")
+        try:
+            if _identity(os.fstat(fd)) != staged.identity:
+                return
+            if os.name == "nt":
+                import msvcrt
+
+                disposition = _FileDispositionInfo(True)
+                if not _win_api().SetFileInformationByHandle(
+                    msvcrt.get_osfhandle(fd),
+                    FILE_DISPOSITION_INFO,
+                    ctypes.byref(disposition),
+                    ctypes.sizeof(disposition),
+                ):
+                    return
+                return
+            parent_fd = os.open(staged.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                _check_fd_path(parent_fd, staged.path.parent)
+                current = os.stat(staged.path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if regular(current) and _identity(current) == staged.identity:
+                    os.unlink(staged.path.name, dir_fd=parent_fd)
+            finally:
+                os.close(parent_fd)
+        finally:
+            os.close(fd)
+    except (OSError, TransactionError):
+        return
+
+
 class ReleaseLock:
     def __enter__(self):
         self.path = ROOT / LOCK
@@ -330,18 +385,26 @@ def stage(target, data, mode, atime_ns, mtime_ns):
     _validate_parent(target.parent)
     fd, name = tempfile.mkstemp(prefix=".backer-version-", dir=target.parent)
     path = Path(name)
+    safe = False
     try:
         if not regular(os.fstat(fd)):
             raise TransactionError("bad staging descriptor")
         _check_fd_path(fd, target.parent, parent=True)
+        safe = True
         write_all_fd(fd, data)
         os.fsync(fd)
         _set_mode(fd, mode)
         _set_times(fd, atime_ns, mtime_ns)
         os.fsync(fd)
-        return path
-    finally:
+    except BaseException:
+        staged = Staged(path, _identity(os.fstat(fd))) if safe else None
         os.close(fd)
+        if staged is not None:
+            cleanup_staged(staged)
+        raise
+    staged = Staged(path, _identity(os.fstat(fd)))
+    os.close(fd)
+    return staged
 
 
 def _metadata(value, upper):
@@ -384,10 +447,15 @@ def _replace(staged, target):
 
 def recover(lock, journal):
     staged = []
-    for target, data, mode, atime_ns, mtime_ns in validate(journal):
-        staged.append((stage(target, data, mode, atime_ns, mtime_ns), target))
-    for source, target in staged:
-        _replace(source, target)
+    try:
+        for target, data, mode, atime_ns, mtime_ns in validate(journal):
+            staged.append((stage(target, data, mode, atime_ns, mtime_ns), target))
+        for source, target in staged:
+            _replace(source, target)
+    except BaseException:
+        for source, _ in staged:
+            cleanup_staged(source)
+        raise
     lock.clear()
 
 
@@ -426,8 +494,8 @@ def write_all(updates, originals, lock):
     for rel in TARGETS:
         target = ROOT / rel
         data, state = originals[target]
-        current, _ = read_file(target)
-        if current != data:
+        current, current_state = read_file(target)
+        if current != data or _identity(current_state) != _identity(state):
             raise TransactionError(f"{rel} changed while preparing release")
         entries.append(
             {
@@ -450,6 +518,8 @@ def write_all(updates, originals, lock):
             replaced = True
             _replace(source, target)
     except Exception:
+        for source, _ in staged:
+            cleanup_staged(source)
         if replaced:
             recover(lock, journal)
         else:
