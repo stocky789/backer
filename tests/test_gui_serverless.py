@@ -383,6 +383,39 @@ def test_mode_apply_reports_trigger_restored_on_retry_after_race(monkeypatch, tm
 
     assert result == (False, previous, "timer could not be restored; trigger restored on retry")
 
+
+def test_mode_apply_rolls_back_config_when_final_freeze_check_detects_reactivation(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.client.windows_service import SchedulerFreezeResult
+    from backer.core.config import BackerConfig
+
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    previous = BackerConfig()
+    previous.save(user / "config.yaml")
+    previous.save(machine / "config.yaml")
+    desired = previous.model_copy(update={"local_scheduled_mode": True})
+    before = (user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()
+    scheduler = {"platform": "windows", "task": {"exists": True}}
+    monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+    monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", lambda: scheduler)
+    monkeypatch.setattr(
+        "backer.client.windows_service.prepare_local_scheduler_mutation",
+        lambda _snapshot: SchedulerFreezeResult(True, False, "frozen"),
+    )
+    monkeypatch.setattr(
+        "backer.client.windows_service.verify_local_scheduler_frozen",
+        lambda _snapshot: SchedulerFreezeResult(False, False, "trigger reactivated"),
+    )
+    monkeypatch.setattr(
+        "backer.client.windows_service.create_local_scheduled_task", lambda: pytest.fail("must not mutate scheduler")
+    )
+
+    result = views.apply_scheduled_modes(previous, desired)
+
+    assert result == (False, previous, "trigger reactivated")
+    assert ((user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()) == before
+
 def test_repository_details_disclose_type_and_keystore_state_without_secret():
     from backer.agent.gui.views import repository_details
     from backer.core.config import BackerConfig, RepositoryConfig

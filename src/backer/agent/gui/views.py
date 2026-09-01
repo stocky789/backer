@@ -102,6 +102,7 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
             restore_local_scheduler,
             restore_local_scheduler_trigger,
             snapshot_local_scheduler,
+            verify_local_scheduler_frozen,
         )
 
         user_path = get_config_dir() / "config.yaml"
@@ -115,34 +116,62 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
         }
         machine_secrets = {ref: keystore.get(ref, machine_scope=True) for ref in refs}
         scheduler = snapshot_local_scheduler()
-        freeze = prepare_local_scheduler_mutation(scheduler)
-        if not freeze.ready:
+        mutation_started = False
+
+        def refuse(freeze):
             detail = freeze.message
             if freeze.restore_failed:
                 restored, message = restore_local_scheduler_trigger(scheduler)
-                if restored:
-                    detail += "; trigger restored on retry"
-                else:
-                    detail += "; rollback failed: scheduler: " + message
+                detail += "; trigger restored on retry" if restored else "; rollback failed: scheduler: " + message
+            if mutation_started:
+                errors = []
+                for reference, value in machine_secrets.items():
+                    try:
+                        keystore.delete(reference, machine_scope=True)
+                        if value is not None:
+                            keystore.put(reference, value, machine_scope=True)
+                    except Exception as error:
+                        errors.append(f"secret {reference}: {error}")
+                for path, content in snapshots.items():
+                    try:
+                        _restore_config_file(path, content)
+                    except Exception as error:
+                        errors.append(f"config {path.name}: {error}")
+                if errors:
+                    detail += "; rollback failed: " + "; ".join(errors)
             return ModeApplyResult(False, previous, detail)
+
+        freeze = prepare_local_scheduler_mutation(scheduler)
+        if not freeze.ready:
+            return refuse(freeze)
 
         if desired.local_scheduled_mode:
             if blocker := unattended_blocker(desired):
                 raise ValueError(blocker)
             from backer.serverless.repositories import rescope_secrets_for_system
 
+            mutation_started = True
             rescope_secrets_for_system(desired)
             desired.save(machine_path)
+            freeze = verify_local_scheduler_frozen(scheduler)
+            if not freeze.ready:
+                return refuse(freeze)
             ok, message = create_local_scheduled_task() if sys.platform == "win32" else create_local_systemd_timer()
             if not ok:
                 raise OSError(message)
         else:
             if sys.platform == "win32":
                 task = scheduler.get("task", {})
+                freeze = verify_local_scheduler_frozen(scheduler)
+                if not freeze.ready:
+                    return refuse(freeze)
                 if isinstance(task, dict) and task.get("exists") and not remove_local_scheduled_task():
                     raise OSError("Could not remove the local scheduled task")
             else:
                 units = scheduler.get("units", {})
+                freeze = verify_local_scheduler_frozen(scheduler)
+                if not freeze.ready:
+                    return refuse(freeze)
                 if isinstance(units, dict) and any(units.values()):
                     ok, message = remove_local_systemd_timer()
                     if not ok:

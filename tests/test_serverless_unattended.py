@@ -193,11 +193,12 @@ def test_linux_scheduler_freeze_refuses_a_run_that_starts_between_snapshot_and_m
     from backer.client import windows_service
 
     calls = []
+    results = iter([0, 3, 0, 0, 0])
     monkeypatch.setattr(
         windows_service.subprocess,
         "run",
         lambda command, **_kwargs: calls.append(command)
-        or type("Result", (), {"returncode": 0 if "is-active" in command else 0, "stderr": "", "stdout": ""})(),
+        or type("Result", (), {"returncode": next(results), "stderr": "", "stdout": ""})(),
     )
 
     freeze = windows_service.prepare_local_scheduler_mutation(
@@ -221,7 +222,7 @@ def test_linux_scheduler_freeze_marks_failed_trigger_restore_for_transaction_rol
     from backer.client import windows_service
 
     calls = []
-    results = iter([0, 0, 1])
+    results = iter([0, 3, 0, 1])
     monkeypatch.setattr(
         windows_service.subprocess,
         "run",
@@ -239,6 +240,95 @@ def test_linux_scheduler_freeze_marks_failed_trigger_restore_for_transaction_rol
 
     assert not freeze.ready and freeze.restore_failed and "restore" in freeze.message
     assert calls[-1] == ["systemctl", "--user", "start", "backer-local.timer"]
+
+
+def test_windows_scheduler_freeze_refuses_a_successful_noop_disable(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    calls = []
+    states = iter([{"exists": True, "enabled": True, "running": False}, {"exists": True, "enabled": True}])
+    monkeypatch.setattr(windows_service, "_windows_task_state", lambda _task: next(states))
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command) or type("Result", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    freeze = windows_service.prepare_local_scheduler_mutation(
+        {"platform": "windows", "task": {"exists": True, "enabled": True, "running": False}}
+    )
+
+    assert not freeze.ready and not freeze.restore_failed and "disabled" in freeze.message
+    assert not any("/delete" in command or "/run" in command for command in calls)
+
+
+def test_linux_scheduler_freeze_refuses_a_successful_noop_stop(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    calls = []
+    results = iter([0, 0, 0, 0])
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command)
+        or type("Result", (), {"returncode": next(results), "stderr": "", "stdout": ""})(),
+    )
+
+    freeze = windows_service.prepare_local_scheduler_mutation(
+        {
+            "platform": "linux",
+            "units": {"service": b"unit", "timer": b"unit"},
+            "state": {"backer-local.service": {"running": False}, "backer-local.timer": {"running": True}},
+        }
+    )
+
+    assert not freeze.ready and not freeze.restore_failed and "inactive" in freeze.message
+    assert not any("disable" in command or "daemon-reload" in command for command in calls)
+
+
+def test_windows_scheduler_freeze_refuses_trigger_reactivation_before_mutation(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    states = iter(
+        [
+            {"exists": True, "enabled": False, "running": False},
+            {"exists": True, "enabled": True, "running": False},
+            {"exists": True, "enabled": True},
+        ]
+    )
+    monkeypatch.setattr(windows_service, "_windows_task_state", lambda _task: next(states))
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda _command, **_kwargs: type("Result", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    freeze = windows_service.prepare_local_scheduler_mutation(
+        {"platform": "windows", "task": {"exists": True, "enabled": True, "running": False}}
+    )
+
+    assert not freeze.ready and "changed" in freeze.message
+
+
+def test_linux_scheduler_freeze_refuses_timer_reactivation_before_mutation(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    results = iter([0, 3, 3, 0, 0, 0])
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda _command, **_kwargs: type("Result", (), {"returncode": next(results), "stderr": ""})(),
+    )
+
+    freeze = windows_service.prepare_local_scheduler_mutation(
+        {
+            "platform": "linux",
+            "units": {"service": b"unit", "timer": b"unit"},
+            "state": {"backer-local.service": {"running": False}, "backer-local.timer": {"running": True}},
+        }
+    )
+
+    assert not freeze.ready and "changed" in freeze.message
 
 
 def test_linux_scheduled_test_cleanup_retains_service_when_stop_fails(monkeypatch) -> None:
