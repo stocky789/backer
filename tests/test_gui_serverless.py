@@ -1,5 +1,6 @@
 """Desktop acceptance guardrails; Tk is deliberately required, never skipped."""
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1332,6 +1333,163 @@ def test_restore_stop_becomes_enabled_when_operation_starts(monkeypatch):
     )
 
 
+def test_restore_replace_requires_the_typed_word(monkeypatch):
+    from backer.agent.gui import app as gui_app
+
+    app = object.__new__(gui_app.BackerAgentApp)
+    app.root = object()
+    monkeypatch.setattr(gui_app.simpledialog, "askstring", lambda *_args, **_kwargs: "replace")
+
+    assert not app.confirm_restore_overwrite("C:/restore")
+
+    monkeypatch.setattr(gui_app.simpledialog, "askstring", lambda *_args, **_kwargs: "REPLACE")
+    assert app.confirm_restore_overwrite("C:/restore")
+
+
+def test_restore_rejects_an_escaping_folder_before_starting_a_worker(monkeypatch):
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui.app import RestoreView
+
+    prepared = []
+
+    class Thread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    class Value:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+    instance = object.__new__(RestoreView)
+    instance.app = type(
+        "App",
+        (),
+        {
+            "running": False,
+            "config": type("Config", (), {})(),
+            "generation": lambda *_args: ("restore", 1),
+            "marshal": lambda _self, _generation, callback: callback(),
+            "set_status": lambda *_args, **_kwargs: None,
+        },
+    )()
+    instance.job_name = "job"
+    instance.snapshots = type("Snapshots", (), {"selection": lambda _self: ("snapshot",)})()
+    instance.target, instance.mode, instance.include = Value("C:/restore"), Value("MERGE"), Value("../outside")
+    instance.primary = type("Button", (), {"configure": lambda *_args, **_kwargs: None})()
+    instance.progress = type("Progress", (), {"start": lambda *_args: None})()
+    instance.status = type("Status", (), {"set": lambda *_args: None})()
+    instance.app.config.jobs = {
+        "job": type("Job", (), {"repository": "repo", "source": type("Source", (), {"path": "C:/source"})()})()
+    }
+    instance._prepared = lambda *_args: prepared.append(_args)
+    monkeypatch.setattr(gui_app.threading, "Thread", Thread)
+
+    instance.restore()
+
+    assert prepared[-1][-1] == "--include must be a relative path inside the snapshot"
+
+
+def test_replace_restore_keeps_original_and_reports_its_exact_path(monkeypatch):
+    import threading
+
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui.app import RestoreView
+
+    reports, payloads = [], []
+
+    class Thread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    class Root:
+        def after(self, *_args):
+            pass
+
+    @contextmanager
+    def operation(_repository, _storage):
+        yield type("Operation", (), {"path": "repository"})()
+
+    instance = object.__new__(RestoreView)
+    instance.app = type(
+        "App",
+        (),
+        {
+            "running": False,
+            "run_cancel": threading.Event(),
+            "root": Root(),
+            "config": type("Config", (), {"repositories": {"repo": type("Repo", (), {"type": "local"})()}})(),
+            "confirm_restore_overwrite": lambda _self, _target: True,
+            "marshal": lambda _self, _generation, callback: callback(),
+        },
+    )()
+    instance.job_name = "job"
+    instance.status = type("Status", (), {"set": lambda *_args: None, "get": lambda _self: ""})()
+    instance.primary = type("Button", (), {"configure": lambda *_args, **_kwargs: None})()
+    instance.progress = type("Progress", (), {"stop": lambda *_args: None})()
+    instance.restore_frame, instance.restore_at = None, 0
+    instance._done = reports.append
+    monkeypatch.setattr(gui_app.threading, "Thread", Thread)
+    monkeypatch.setattr("backer.cli._repository_backend", lambda _repository: (object(), "passphrase", None))
+    monkeypatch.setattr("backer.cli._repository_destination", lambda operation_record: operation_record.path)
+    monkeypatch.setattr("backer.serverless.repositories.repository_operation_context", operation)
+    monkeypatch.setattr(
+        "backer.core.runner.run_restore",
+        lambda payload, **_kwargs: payloads.append(payload)
+        or {"success": True, "replaced_destination": "C:/restore/.replaced-123"},
+    )
+
+    instance._prepared(("restore", 1), "C:/restore", "REPLACE", "folder", "snapshot", "repo", "C:/source", None)
+
+    assert payloads == [
+        {
+            "job_name": "job",
+            "source_path": "repository",
+            "destination_path": "C:/restore",
+            "snapshot": "snapshot",
+            "source_subfolder": "folder",
+            "original_source_path": "C:/source",
+            "clean_restore": True,
+            "preserve_replaced": True,
+            "repository_options": {
+                "repository_password": "passphrase",
+                "process_owner": instance.app.process_owner,
+                "cancel_event": instance.app.run_cancel,
+            },
+        }
+    ]
+    assert reports == [{"success": True, "replaced_destination": "C:/restore/.replaced-123"}]
+
+
+def test_restore_completion_names_the_retained_original():
+    from backer.agent.gui.app import RestoreView
+
+    status = []
+    instance = object.__new__(RestoreView)
+    instance.app = type(
+        "App", (), {"running": True, "set_status": lambda _self, *args, **kwargs: status.append((args, kwargs))}
+    )()
+    instance.progress = type("Progress", (), {"stop": lambda *_args: None})()
+    instance.status = type(
+        "Status", (), {"set": lambda _self, value: status.append(((value,), {})), "get": lambda _self: ""}
+    )()
+    instance.primary = type("Button", (), {"configure": lambda *_args, **_kwargs: None})()
+    instance.copy_error = type("Button", (), {"configure": lambda *_args, **_kwargs: None})()
+    instance.open_log = type("Button", (), {"configure": lambda *_args, **_kwargs: None})()
+
+    instance._done({"success": True, "replaced_destination": "C:/restore/.replaced-123"})
+
+    assert any("C:/restore/.replaced-123" in args[0] for args, _kwargs in status)
+
+
 def test_1219_panel_names_the_conflicting_connection(monkeypatch):
     from backer.agent.gui.wizard import connection_conflict_message
 
@@ -1345,7 +1503,7 @@ def test_1219_panel_names_the_conflicting_connection(monkeypatch):
 
 def test_messagebox_sites_are_the_five_irreversible_actions():
     source = _source("app.py")
-    assert source.count("messagebox.") == 5
+    assert source.count("messagebox.") + source.count("simpledialog.") == 5
     for name in ("restore_overwrite", "remove_job", "remove_repository", "quit_during_run", "reveal_passphrase"):
         assert f"confirm_{name}" in source
 

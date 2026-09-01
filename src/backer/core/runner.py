@@ -326,6 +326,7 @@ def run_restore(
             _progress(on_progress, **event)
 
         clean_restore = job.get("clean_restore", False)
+        preserve_replaced = job.get("preserve_replaced", False)
         restore_snapshot = job.get("snapshot")
         staged_destination: Path | None = None
 
@@ -390,7 +391,9 @@ def run_restore(
                     if destination.is_symlink() or not destination.is_dir():
                         raise RuntimeError("Clean restore destination must be a non-symlink directory")
                     destination_mode = destination.stat().st_mode & 0o7777
-                    staged_destination = Path(tempfile.mkdtemp(prefix=".backer-restore-", dir=destination.parent))
+                    staged_destination = Path(tempfile.mkdtemp(
+                        prefix=".replaced-" if preserve_replaced else ".backer-restore-", dir=destination.parent
+                    ))
                     staged_destination.rmdir()
                     destination.replace(staged_destination)
                     try:
@@ -465,7 +468,7 @@ def run_restore(
                     "Clean restore rollback failed; original destination remains at "
                     f"{staged_destination}: {rollback_err}"
                 )
-        elif staged_destination:
+        elif staged_destination and not preserve_replaced:
             try:
                 shutil.rmtree(staged_destination)
             except Exception as cleanup_err:
@@ -490,6 +493,8 @@ def run_restore(
             "errors": result.errors,
             "output": output[:5000],
         }
+        if staged_destination and preserve_replaced and result.success:
+            report["replaced_destination"] = str(staged_destination)
         try:
             if on_result:
                 on_result(report)

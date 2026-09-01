@@ -110,6 +110,38 @@ def test_clean_restore_cancellation_rolls_back_the_staged_original(tmp_path: Pat
     assert not (destination / "partial.txt").exists()
 
 
+def test_preserved_clean_restore_keeps_the_replaced_destination(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "restore"
+    destination.mkdir()
+    (destination / "original.txt").write_text("keep", encoding="utf-8")
+
+    class Backend(_Backend):
+        def list_snapshots(self, _source):
+            return [{"id": "snapshot"}]
+
+        def restore(self, **kwargs):
+            (kwargs["destination"] / "restored.txt").write_text("new", encoding="utf-8")
+            return BackendResult(True, OperationType.RESTORE, datetime.now(), datetime.now())
+
+    monkeypatch.setattr(runner, "get_backend", lambda *_: Backend())
+
+    report = runner.run_restore(
+        {
+            "job_name": "job",
+            "source_path": str(tmp_path / "repo"),
+            "destination_path": str(destination),
+            "snapshot": "snapshot",
+            "clean_restore": True,
+            "preserve_replaced": True,
+        }
+    )
+
+    retained = Path(report["replaced_destination"])
+    assert report["success"] and retained.name.startswith(".replaced-")
+    assert (retained / "original.txt").read_text(encoding="utf-8") == "keep"
+    assert (destination / "restored.txt").read_text(encoding="utf-8") == "new"
+
+
 def test_backup_reports_interruption_once_before_reraising(tmp_path: Path, monkeypatch):
     """An interrupted Kopia process must create one failed result, not silently disappear or retry."""
     reports = []

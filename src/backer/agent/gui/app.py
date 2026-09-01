@@ -15,7 +15,7 @@ import tkinter as tk
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from backer.agent.gui import theme
 from backer.agent.gui.views import (
@@ -300,8 +300,13 @@ class BackerAgentApp:
             home.refresh()
             self.set_status("Job removed")
 
-    def confirm_restore_overwrite(self):
-        return messagebox.askyesno("Restore over files", "Existing files may be replaced. Continue?", parent=self.root)
+    def confirm_restore_overwrite(self, destination):
+        return simpledialog.askstring(
+            "Replace destination",
+            f"Existing files will be retained in a .replaced-* folder beside {destination}.\n\n"
+            "Type REPLACE to continue.",
+            parent=self.root,
+        ) == "REPLACE"
 
     def confirm_remove_job(self):
         return messagebox.askyesno("Remove job", "Remove this backup job?", parent=self.root)
@@ -801,9 +806,11 @@ class RestoreView(ttk.Frame):
 
         def worker():
             target = raw_target
+            safe_include = include
             try:
-                from backer.cli import _restore_prepare_destination, _restore_target
+                from backer.cli import _restore_include_path, _restore_prepare_destination, _restore_target
 
+                safe_include = _restore_include_path(include)
                 target = str(_restore_target(Path(raw_target) if raw_target else None, mode, Path(original_path)))
                 _restore_prepare_destination(Path(target), mode, config=self.app.config)
                 error = None
@@ -812,7 +819,7 @@ class RestoreView(ttk.Frame):
             self.app.marshal(
                 generation,
                 lambda: self._prepared(
-                    generation, target, mode, include, snapshot, repository_name, original_path, error
+                    generation, target, mode, safe_include, snapshot, repository_name, original_path, error
                 ),
             )
 
@@ -825,7 +832,7 @@ class RestoreView(ttk.Frame):
             self.app.set_status(error, error=True)
             self.primary.configure(state=tk.NORMAL)
             return
-        if mode == "REPLACE" and not self.app.confirm_restore_overwrite():
+        if mode == "REPLACE" and not self.app.confirm_restore_overwrite(target):
             self.progress.stop()
             self.status.set("Restore cancelled; destination unchanged")
             self.primary.configure(state=tk.NORMAL)
@@ -874,6 +881,7 @@ class RestoreView(ttk.Frame):
                             "source_subfolder": include,
                             "original_source_path": original_path,
                             "clean_restore": mode == "REPLACE",
+                            "preserve_replaced": mode == "REPLACE",
                             "repository_options": options,
                         }, on_progress=progress
                     )
@@ -911,7 +919,8 @@ class RestoreView(ttk.Frame):
         self.progress.stop()
         ok = bool(report.get("success"))
         self.status.set(
-            "Restore completed" if ok else (
+            f"Restore completed; original retained at {report['replaced_destination']}"
+            if ok and report.get("replaced_destination") else "Restore completed" if ok else (
                 "Restore cancelled"
                 if report.get("cancelled")
                 else "; ".join(report.get("errors") or ["Restore failed"])
