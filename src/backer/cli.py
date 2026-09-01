@@ -483,24 +483,6 @@ INIT_STEPS = (
         _switch("--print-passphrase"),
         3,
     ),
-    InitStep(
-        "update_password",
-        "--update-password",
-        "Update storage password",
-        bool,
-        _always,
-        False,
-        _switch("--update-password"),
-    ),
-    InitStep(
-        "update_passphrase",
-        "--update-passphrase",
-        "Update repository passphrase",
-        bool,
-        _always,
-        False,
-        _switch("--update-passphrase"),
-    ),
     InitStep("source", "--source", "Folder to back up", bool, _always, True, _repeated("--source"), 4),
     InitStep(
         "exclude",
@@ -626,8 +608,6 @@ def _render_init_command(values: dict[str, Any]) -> str:
 @click.option("--generate-passphrase", is_flag=True)
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.option("--print-passphrase", is_flag=True)
-@click.option("--update-password", is_flag=True)
-@click.option("--update-passphrase", is_flag=True)
 @click.option("--install", is_flag=True)
 @click.pass_context
 def init(
@@ -662,8 +642,6 @@ def init(
     generate_passphrase: bool,
     passphrase_out: Path | None,
     print_passphrase: bool,
-    update_password: bool,
-    update_passphrase: bool,
     install: bool,
 ) -> None:
     """Start serverless setup; `setup` downloads Kopia and `agent setup` enrolls a server agent."""
@@ -700,8 +678,6 @@ def init(
         "generate_passphrase": generate_passphrase,
         "passphrase_out": passphrase_out,
         "print_passphrase": print_passphrase,
-        "update_password": update_password,
-        "update_passphrase": update_passphrase,
         "install": install,
     }
     if _interactive():
@@ -744,8 +720,6 @@ def init(
     generate_passphrase = values["generate_passphrase"]
     passphrase_out = values["passphrase_out"]
     print_passphrase = values["print_passphrase"]
-    update_password = values["update_password"]
-    update_passphrase = values["update_passphrase"]
     install = values["install"]
     ctx.invoke(
         repo_add,
@@ -774,8 +748,6 @@ def init(
         generate_passphrase=generate_passphrase,
         passphrase_out=passphrase_out,
         print_passphrase=print_passphrase,
-        update_password=update_password,
-        update_passphrase=update_passphrase,
         headless=True,
         yes=True,
         storage_password=values.get("_storage_password"),
@@ -1563,8 +1535,6 @@ def _read_storage(stream: bool, file: Path | None) -> str | None:
 @click.option("--generate-passphrase", is_flag=True)
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.option("--print-passphrase", is_flag=True)
-@click.option("--update-password", is_flag=True)
-@click.option("--update-passphrase", is_flag=True)
 @click.option("--headless", is_flag=True, help="Allow the protected local-file secret fallback")
 @click.option("--yes", is_flag=True)
 @click.pass_context
@@ -1595,8 +1565,6 @@ def repo_add(
     generate_passphrase: bool,
     passphrase_out: Path | None,
     print_passphrase: bool,
-    update_password: bool,
-    update_passphrase: bool,
     headless: bool,
     yes: bool,
     storage_password: str | None = None,

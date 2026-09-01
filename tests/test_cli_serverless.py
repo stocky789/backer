@@ -325,6 +325,17 @@ def test_every_init_step_has_a_flag():
         assert callable(step.validator)
 
 
+def test_init_and_repo_add_do_not_advertise_silent_credential_update_flags():
+    for command in (("init", "--help"), ("repo", "add", "--help")):
+        result = CliRunner().invoke(main, list(command))
+
+        assert result.exit_code == 0, result.output
+        assert "--update-password" not in result.output
+        assert "--update-passphrase" not in result.output
+    assert "update_password" not in {step.key for step in INIT_STEPS}
+    assert "update_passphrase" not in {step.key for step in INIT_STEPS}
+
+
 def test_init_step_table_covers_every_noninteractive_input():
     keys = {step.key for step in INIT_STEPS}
     assert {
@@ -349,8 +360,6 @@ def test_init_step_table_covers_every_noninteractive_input():
         "generate_passphrase",
         "passphrase_out",
         "print_passphrase",
-        "update_password",
-        "update_passphrase",
         "source",
         "exclude",
         "schedule",

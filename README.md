@@ -150,6 +150,14 @@ Serverless v1 supports these tested client-to-repository combinations:
 
 Kopia supports concurrent-writer repositories. Assign one designated maintenance owner per repository for retention and verification. Backer provides no cross-machine lease.
 
+### Recover a pre-0.8 repository
+
+If Backer 0.8 lost this computer's stored passphrase, first supply the known old passphrase: `backer repo recover NAME --passphrase-stdin`. This stores it only after Backer proves the existing repository opens.
+
+Before rotating anything, use a fresh temporary Kopia config to connect to the same repository with that old passphrase, then run `kopia repository status`. For a legacy fixed-password repository, the old passphrase is `backer-default-password`.
+
+Only after that status succeeds, run `kopia repository change-password --new-password` while connected. Use another fresh Kopia config to connect with the new passphrase and run `kopia repository status`; a connection with the old passphrase must fail. Save the new passphrase securely. A genuinely lost passphrase is unrecoverable.
+
 ### SMB/CIFS (Windows Shares)
 - Network shares accessible via SMB protocol
 - Supports authentication with username/password/domain

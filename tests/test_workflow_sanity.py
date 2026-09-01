@@ -28,6 +28,23 @@ def test_sdist_excludes_local_workspace_artifacts() -> None:
     assert {"/.chunkhound", "/.superpowers", "/docs", "/serverless-backups.md"} <= excludes
 
 
+def test_readme_documents_legacy_repository_recovery() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for text in (
+        "backer-default-password",
+        "backer repo recover NAME --passphrase-stdin",
+        "fresh temporary Kopia config",
+        "kopia repository status",
+        "kopia repository change-password --new-password",
+        "unrecoverable",
+    ):
+        assert text in readme
+    assert readme.index("kopia repository status") < readme.index("kopia repository change-password --new-password")
+    assert readme.count("kopia repository status") == 2
+    assert "Operators can recover repositories orphaned by 0.8.0" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
 def expected_android_version_code(version: str) -> int:
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
     assert match is not None

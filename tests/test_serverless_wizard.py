@@ -38,7 +38,7 @@ def test_wizard_replay_uses_the_saved_passphrase_file(monkeypatch: pytest.Monkey
         "keep_last": None, "keep_daily": None, "keep_weekly": None, "keep_monthly": None, "keep_yearly": None,
         "repo_name": "repository", "job_name": "backup", "passphrase_stdin": False, "passphrase_file": None,
         "generate_passphrase": True, "passphrase_out": tmp_path / "recovery.txt", "print_passphrase": False,
-        "update_password": False, "update_passphrase": False, "install": False,
+        "install": False,
         "_generated_passphrase": "six-safe-words-for-this-test-only",
     }
     values.update(
@@ -82,8 +82,7 @@ def test_wizard_replay_renders_passphrase_file_while_interactive(
         host=None, share=None, username=None, password_stdin=False, password_file=None, password_env=False,
         bucket=None, prefix=None, endpoint=None, region=None, access_key_id=None, secret_key_stdin=False,
         secret_key_file=None, secret_key_env=False, passphrase_stdin=False, keep_last=None, keep_daily=None,
-        keep_weekly=None, keep_monthly=None, keep_yearly=None, update_password=False, update_passphrase=False,
-        install=False,
+        keep_weekly=None, keep_monthly=None, keep_yearly=None, install=False,
     )
 
     command = _render_init_command(values)
@@ -218,8 +217,7 @@ def test_init_uses_wizard_values_then_shared_commands(monkeypatch: pytest.Monkey
         "secret_key_env": False, "source": (str(tmp_path),), "exclude": (), "schedule": None, "no_schedule": True,
         "keep_last": None, "keep_daily": None, "keep_weekly": None, "keep_monthly": None, "keep_yearly": None,
         "repo_name": "r1", "job_name": "j1", "passphrase_stdin": False, "passphrase_file": None,
-        "generate_passphrase": True, "passphrase_out": None, "print_passphrase": True, "update_password": False,
-        "update_passphrase": False, "install": False,
+        "generate_passphrase": True, "passphrase_out": None, "print_passphrase": True, "install": False,
     }
     calls: list[str] = []
     monkeypatch.setattr("backer.cli._interactive", lambda: True)
@@ -245,8 +243,8 @@ def test_init_passes_wizard_only_secret_to_the_shared_repository_command(
         "secret_key_env": False, "source": (str(tmp_path),), "exclude": (), "schedule": None, "no_schedule": True,
         "keep_last": None, "keep_daily": None, "keep_weekly": None, "keep_monthly": None, "keep_yearly": None,
         "repo_name": "r1", "job_name": "j1", "passphrase_stdin": False, "passphrase_file": None,
-        "generate_passphrase": True, "passphrase_out": None, "print_passphrase": True, "update_password": False,
-        "update_passphrase": False, "install": False, "_storage_password": "secret",
+        "generate_passphrase": True, "passphrase_out": None, "print_passphrase": True, "install": False,
+        "_storage_password": "secret",
         "_generated_passphrase": "six-safe-words-for-this-test-only",
     }
     received: dict[str, object] = {}
