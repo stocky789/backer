@@ -379,6 +379,22 @@ def test_prune_checks_confirmation_before_any_delete(monkeypatch):
     assert calls == []
 
 
+def test_prune_preview_discloses_that_it_saved_the_source_policy(monkeypatch):
+    monkeypatch.setattr("backer.serverless.retention.prune_job", lambda *_args, **_kwargs: (2, "preview"))
+
+    result = CliRunner().invoke(main, ["prune", "job"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.lower().count("policy was saved") == 1
+    assert "remains saved" in result.output.lower()
+    assert "no snapshots were deleted" in result.output.lower()
+
+    result = CliRunner().invoke(main, ["prune", "job", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert __import__("json").loads(result.output)["policy_saved"] is True
+
+
 def test_prune_refuses_delete_when_second_preview_changes(monkeypatch):
     calls = []
 

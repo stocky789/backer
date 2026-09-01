@@ -42,7 +42,7 @@ The release workflow publishes the top section verbatim as the release notes.
 - Snapshot file lookup now uses supported Kopia arguments and restores reject same-named source paths from another location.
 - Sidecar writes are atomic, failed runs are recorded, and discovery merges root and per-job metadata.
 - Clean restores preserve the original destination when no files were restored.
-- Retention previews no longer persist policy; SMB retention loads credentials before mounting, and applied deletion counts are accurate.
+- Server-managed retention previews remain non-mutating; serverless previews save the scoped policy before confirmation, SMB retention loads credentials before mounting, and applied deletion counts are accurate.
 - The CLI saves agent credentials with its supported call and passes the original source to Kopia restores.
 - Agent configuration uses one canonical path across the GUI, interactive client, and service.
 

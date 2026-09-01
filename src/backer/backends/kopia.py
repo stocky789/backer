@@ -1119,7 +1119,7 @@ class KopiaBackend(BackendBase):
         dry_run: bool = False,
         source_path: str | None = None,
     ) -> BackendResult:
-        """Preview or explicitly apply one source's configured policy."""
+        """Preview or apply one source's configured policy."""
         started_at = datetime.now()
 
         # FAIL CLOSED: never expire snapshots under a retention policy nobody
@@ -1184,7 +1184,11 @@ class KopiaBackend(BackendBase):
                         return_code=-1,
                     )
 
-            if not dry_run:
+            # Kopia has no ad-hoc retention flags on `snapshot expire`: a
+            # serverless preview therefore saves its per-source policy first,
+            # then asks Kopia what that stored policy would remove. Apply
+            # deliberately does not rewrite it after the CLI confirmation.
+            if dry_run:
                 policy_cmd = [str(binary), "policy", "set", target if target is not None else "--global"]
                 if keep_last:
                     policy_cmd.extend(["--keep-latest", str(keep_last)])
@@ -1229,11 +1233,6 @@ class KopiaBackend(BackendBase):
             )
 
             output = expire_result.stdout + expire_result.stderr
-            if dry_run:
-                output += (
-                    "\nDry run: this reports against the retention policy currently persisted in kopia, "
-                    "not the policy proposed in this request - kopia cannot preview a policy without saving it first."
-                )
             return_code = expire_result.returncode
 
             errors = []

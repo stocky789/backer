@@ -3281,7 +3281,14 @@ def prune(name: str, list_only: bool, apply: bool, yes_remove: int | None, as_js
         except ValueError as error:
             raise click.ClickException(str(error)) from error
     message = f"{count} snapshot(s) {'deleted' if apply else 'would be deleted'}"
-    click.echo(json.dumps({"count": count, "applied": apply}) if as_json else message)
+    if as_json:
+        click.echo(json.dumps({"count": count, "applied": apply, "policy_saved": True}))
+    else:
+        click.echo(message)
+        click.echo(
+            "Retention policy was saved for this source and remains saved if you stop; "
+            "no snapshots were deleted during the preview."
+        )
 
 
 @main.command("snapshots")
