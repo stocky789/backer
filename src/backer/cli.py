@@ -40,10 +40,20 @@ def _missing_flags(command: str, flags: list[str]) -> None:
     raise click.UsageError(f"Missing {rendered}. Re-run: backer {command} {rendered}")
 
 
+def _eff_wordlist_path() -> Path:
+    """Find the bundled EFF list in a wheel or PyInstaller extraction directory."""
+    frozen = getattr(sys, "_MEIPASS", None)
+    if frozen:
+        candidate = Path(frozen) / "backer" / "assets" / "eff_large_wordlist.txt"
+        if candidate.is_file():
+            return candidate
+    return Path(str(files("backer").joinpath("assets/eff_large_wordlist.txt")))
+
+
 def _generated_passphrase() -> str:
     words = tuple(
         line.split("\t", 1)[1]
-        for line in files("backer").joinpath("assets/eff_large_wordlist.txt").read_text(encoding="utf-8").splitlines()
+        for line in _eff_wordlist_path().read_text(encoding="utf-8").splitlines()
         if "\t" in line
     )
     return "-".join(choice(words) for _ in range(6))
@@ -1694,8 +1704,11 @@ def repo_add(
 @click.option("--job", "jobs", multiple=True, help="Sidecar job name to import (repeatable)")
 @click.option("--all", "all_jobs", is_flag=True, help="Import every discovered sidecar job")
 @click.option("--source", "sources", multiple=True, help="NAME=local source path")
+@click.option("--json", "as_json", is_flag=True)
 @click.pass_context
-def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: bool, sources: tuple[str, ...]) -> None:
+def repo_adopt(
+    ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: bool, sources: tuple[str, ...], as_json: bool
+) -> None:
     """Copy existing repository sidecar jobs into this machine's config."""
     import json
 
@@ -1767,8 +1780,11 @@ def repo_adopt(ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: b
     finally:
         if smb_manager and smb_created:
             smb_manager.disconnect_serverless(record.server or "", record.share or "")
-    for job_name in adopted:
-        console.print(f"Adopted {job_name}")
+    if as_json:
+        click.echo(json.dumps(adopted))
+    else:
+        for job_name in adopted:
+            console.print(f"Adopted {job_name}")
 
 
 def _local_config(ctx: click.Context):
@@ -3270,7 +3286,9 @@ def prune(name: str, list_only: bool, apply: bool, yes_remove: int | None, as_js
 @click.option("--limit", type=click.IntRange(min=1))
 @click.option("--all", "all_snapshots", is_flag=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.pass_context
 def snapshots(
+    ctx: click.Context,
     job: str | None,
     repo: str | None,
     host: str | None,
@@ -3282,11 +3300,9 @@ def snapshots(
     """List snapshots from one local repository."""
     if not job and not repo:
         raise click.UsageError("JOB or --repo NAME is required")
-    from backer.core.config import load_config
-    from backer.core.paths import get_config_dir
     from backer.serverless.repositories import probe
 
-    config = load_config(get_config_dir() / "config.yaml")
+    _, config = _local_config(ctx)
     repository_id = _resolve_job_repository(config, repo, job)
     record = config.repositories[repository_id]
     backend, passphrase, storage = _repository_backend(record)
@@ -3496,7 +3512,7 @@ def job_run(
             with _local_progress(progress) as render:
                 report = run_local_job(local_config, item, on_progress=render)
             if not report or not report["success"]:
-                raise click.ClickException("Backup failed")
+                raise click.ClickException("; ".join((report or {}).get("errors") or ["Backup failed"]))
         return
     if due or (name and name in local_config.jobs):
         if name:
@@ -3510,6 +3526,8 @@ def job_run(
             else:
                 with _local_progress(progress) as render:
                     reports = run_local_job(local_config, name, run_as_system=system_run, on_progress=render)
+        except KeyboardInterrupt:
+            ctx.exit(130)
         except ValueError as error:
             raise click.ClickException(str(error)) from error
         if reports is None:
@@ -3521,7 +3539,7 @@ def job_run(
             console.print("No jobs due")
         for report in reports if due else [reports]:
             if not report["success"]:
-                raise click.ClickException("Backup failed")
+                raise click.ClickException("; ".join(report.get("errors") or ["Backup failed"]))
         return
     if not name:
         raise click.UsageError("NAME, --all, or --due is required")

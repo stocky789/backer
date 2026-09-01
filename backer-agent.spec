@@ -28,6 +28,7 @@ a = Analysis(
         ('assets/backer.ico', '.'),
         # Include assets folder for other resources
         ('assets', 'assets') if os.path.exists('assets') else ('README.md', '.'),
+        ('src/backer/assets/eff_large_wordlist.txt', 'backer/assets'),
     ],
     hiddenimports=[
         'backer',

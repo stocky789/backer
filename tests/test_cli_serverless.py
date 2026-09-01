@@ -1,3 +1,4 @@
+import re
 import shlex
 from pathlib import Path
 
@@ -37,10 +38,103 @@ def test_serverless_command_surface_resolves():
         assert result.exit_code == 0, result.output
 
 
+def test_phase5_command_block_commands_and_flags_resolve_without_a_backend_choice():
+    plan = (Path(__file__).parents[1] / "serverless-backups.md").read_text(encoding="utf-8")
+    block = re.search(r"```\n(?P<commands>\s*backer init.*?\n\s*```)", plan, re.DOTALL)
+    assert block, "Phase 5 command block was not found"
+    current: tuple[str, ...] | None = None
+    flags: dict[tuple[str, ...], set[str]] = {}
+    for line in block["commands"].splitlines():
+        stripped = line.strip()
+        if stripped.startswith("backer "):
+            command = main
+            resolved: list[str] = []
+            for token in stripped.split()[1:]:
+                child = command.get_command(click.Context(command), token) if isinstance(command, click.Group) else None
+                if child is None:
+                    break
+                resolved.append(token)
+                command = child
+            current = tuple(resolved)
+            assert current
+        if current:
+            flags.setdefault(current, set()).update(re.findall(r"--[a-z][a-z-]*", stripped))
+    assert flags
+    for command, documented_flags in flags.items():
+        result = CliRunner().invoke(main, [*command, "--help"])
+        assert result.exit_code == 0, result.output
+        for flag in documented_flags:
+            assert flag in result.output, f"{' '.join(command)} is missing {flag}"
+    source_root = Path(__file__).parents[1] / "src"
+    assert all("--backend" not in path.read_text(encoding="utf-8") for path in source_root.rglob("*.py"))
+
+
 def test_repository_types_are_the_v1_matrix():
     result = CliRunner().invoke(main, ["repo", "add", "--help"])
     assert "[local|smb|s3]" in result.output
     assert "--backend" not in result.output
+
+
+def test_noninteractive_first_run_creates_runs_and_lists_one_snapshot(monkeypatch, tmp_path):
+    from backer.backends.base import BackupDestination
+    config_path = tmp_path / "config.yaml"
+
+    def add_repository(config, path, name, record, passphrase, **_kwargs):
+        record = record.model_copy(update={"id": "repo", "passphrase_ref": "pass"})
+        config.repositories["repo"] = record
+        config.save(path)
+        assert passphrase == "phrase"
+        return "repo", "test"
+
+    class Backend:
+        def list_snapshots(self, destination):
+            assert isinstance(destination, BackupDestination)
+            return [{"id": "snapshot", "full_id": "snapshot", "timestamp": "2026-09-01", "paths": [str(tmp_path)]}]
+
+    monkeypatch.setattr("backer.serverless.repositories.add_repository", add_repository)
+    monkeypatch.setattr("backer.serverless.runs.run_local_job", lambda *_args, **_kwargs: {"success": True})
+    monkeypatch.setattr("backer.cli._repository_backend", lambda *_args: (Backend(), "phrase", None))
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config_path), "repo", "add", "repo", "--init", "--type", "local", "--path",
+            str(tmp_path), "--passphrase-stdin", "--headless", "--yes",
+        ],
+        input="phrase\n",
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config_path), "job", "create", "backup", "--repo", "repo", "--source",
+            str(tmp_path), "--no-schedule",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(main, ["--config", str(config_path), "job", "run", "backup", "--no-progress"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(main, ["--config", str(config_path), "snapshots", "--repo", "repo", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [item["id"] for item in __import__("json").loads(result.output)] == ["snapshot"]
+
+
+def test_job_run_sigint_exits_130(monkeypatch, tmp_path):
+    from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
+
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="repo", type="local", path=str(tmp_path))},
+        jobs={"backup": JobConfig(repository="repo", source=SourceConfig(path=str(tmp_path)))},
+    )
+    config_path = tmp_path / "config.yaml"
+    config.save(config_path)
+    monkeypatch.setattr(
+        "backer.serverless.runs.run_local_job", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    result = CliRunner().invoke(main, ["--config", str(config_path), "job", "run", "backup", "--no-progress"])
+
+    assert result.exit_code == 130
 
 
 def test_init_no_tty_names_all_missing_flags():
@@ -95,6 +189,23 @@ def test_generated_passphrase_uses_six_eff_words_and_recovery_record_is_private(
     assert _load_recovery_passphrase(export) == phrase
     if __import__("os").name != "nt":
         assert export.stat().st_mode & 0o077 == 0
+
+
+def test_eff_wordlist_resolves_from_a_frozen_bundle(monkeypatch, tmp_path):
+    from backer.cli import _eff_wordlist_path
+
+    bundled = tmp_path / "backer" / "assets"
+    bundled.mkdir(parents=True)
+    (bundled / "eff_large_wordlist.txt").write_text("11111\tabacus\n", encoding="utf-8")
+    monkeypatch.setattr("sys._MEIPASS", str(tmp_path), raising=False)
+
+    assert _eff_wordlist_path() == bundled / "eff_large_wordlist.txt"
+
+
+def test_agent_spec_packages_eff_wordlist():
+    spec = (Path(__file__).parents[1] / "backer-agent.spec").read_text(encoding="utf-8")
+    assert "src/backer/assets/eff_large_wordlist.txt" in spec
+    assert "backer/assets" in spec
 
 
 def test_s3_recovery_restore_is_memory_only(monkeypatch, tmp_path):

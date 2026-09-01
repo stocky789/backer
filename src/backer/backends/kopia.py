@@ -97,8 +97,9 @@ def _stop_kopia_process(process: subprocess.Popen[str]) -> bool:
         try:
             process.kill()
             process.wait(timeout=5)
+            setattr(process, "_backer_hard_stopped", True)
             logger.warning(
-                "Kopia was hard-stopped; run 'kopia repository unlock' and check its repository config before retrying"
+                "Kopia was hard-stopped; Backer will name the repository recovery command to the caller"
             )
             return True
         except (OSError, subprocess.TimeoutExpired):
@@ -150,8 +151,10 @@ def _run_kopia_with_progress(
     stderr_reader.start()
     try:
         returncode = process.wait(timeout=timeout)
-    except (KeyboardInterrupt, subprocess.TimeoutExpired):
+    except (KeyboardInterrupt, subprocess.TimeoutExpired) as error:
         stopped = _stop_kopia_process(process)
+        if getattr(process, "_backer_hard_stopped", False):
+            setattr(error, "backer_hard_stopped", True)
         raise
     finally:
         if not stopped:
@@ -670,13 +673,19 @@ class KopiaBackend(BackendBase):
                 metadata={"snapshot_id": snapshot_id, **stats},
             )
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
+            recovery = ""
+            if getattr(error, "backer_hard_stopped", False):
+                recovery = (
+                    " Kopia was hard-stopped; run 'backer repo unlock NAME' before retrying. "
+                    f"Isolated config: {self._repo_env(destination.path)['KOPIA_CONFIG_PATH']}"
+                )
             return BackendResult(
                 success=False,
                 operation=OperationType.BACKUP,
                 started_at=started_at,
                 finished_at=datetime.now(),
-                errors=["Backup operation timed out"],
+                errors=["Backup operation timed out" + recovery],
                 return_code=-1,
             )
         except OSError as e:
