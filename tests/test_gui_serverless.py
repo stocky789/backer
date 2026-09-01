@@ -309,6 +309,7 @@ def test_retry_scheduled_test_cleanup_keeps_context_when_stop_is_not_verified(mo
 
 def test_mode_apply_leaves_durable_config_unchanged_when_scheduler_is_active(monkeypatch, tmp_path):
     from backer.agent.gui import views
+    from backer.client.windows_service import SchedulerFreezeResult
     from backer.core.config import BackerConfig
 
     user, machine = tmp_path / "user", tmp_path / "machine"
@@ -322,7 +323,9 @@ def test_mode_apply_leaves_durable_config_unchanged_when_scheduler_is_active(mon
     monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", lambda: {"platform": "windows"})
     monkeypatch.setattr(
         "backer.client.windows_service.prepare_local_scheduler_mutation",
-        lambda _snapshot: (False, "Local scheduled backup is running; retry after it finishes"),
+        lambda _snapshot: SchedulerFreezeResult(
+            False, False, "Local scheduled backup is running; retry after it finishes"
+        ),
     )
     monkeypatch.setattr(
         "backer.client.windows_service.create_local_scheduled_task", lambda: pytest.fail("must not mutate task")
@@ -332,6 +335,53 @@ def test_mode_apply_leaves_durable_config_unchanged_when_scheduler_is_active(mon
 
     assert result == (False, previous, "Local scheduled backup is running; retry after it finishes")
     assert ((user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()) == before
+
+
+def test_mode_apply_reports_trigger_rollback_failure_after_race(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.client.windows_service import SchedulerFreezeResult
+    from backer.core.config import BackerConfig
+
+    previous = BackerConfig()
+    scheduler = {"platform": "windows", "task": {"exists": True, "enabled": True, "running": False}}
+    attempts = []
+    monkeypatch.setattr(views, "get_config_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path / "machine")
+    monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", lambda: scheduler)
+    monkeypatch.setattr(
+        "backer.client.windows_service.prepare_local_scheduler_mutation",
+        lambda _snapshot: SchedulerFreezeResult(False, True, "task could not be re-enabled"),
+    )
+    monkeypatch.setattr(
+        "backer.client.windows_service.restore_local_scheduler_trigger",
+        lambda snapshot: attempts.append(snapshot) or (False, "enable denied"),
+    )
+
+    result = views.apply_scheduled_modes(previous, previous)
+
+    assert result == (False, previous, "task could not be re-enabled; rollback failed: scheduler: enable denied")
+    assert attempts == [scheduler]
+
+
+def test_mode_apply_reports_trigger_restored_on_retry_after_race(monkeypatch, tmp_path):
+    from backer.agent.gui import views
+    from backer.client.windows_service import SchedulerFreezeResult
+    from backer.core.config import BackerConfig
+
+    previous = BackerConfig()
+    scheduler = {"platform": "linux"}
+    monkeypatch.setattr(views, "get_config_dir", lambda: tmp_path / "user")
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path / "machine")
+    monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", lambda: scheduler)
+    monkeypatch.setattr(
+        "backer.client.windows_service.prepare_local_scheduler_mutation",
+        lambda _snapshot: SchedulerFreezeResult(False, True, "timer could not be restored"),
+    )
+    monkeypatch.setattr("backer.client.windows_service.restore_local_scheduler_trigger", lambda _snapshot: (True, ""))
+
+    result = views.apply_scheduled_modes(previous, previous)
+
+    assert result == (False, previous, "timer could not be restored; trigger restored on retry")
 
 def test_repository_details_disclose_type_and_keystore_state_without_secret():
     from backer.agent.gui.views import repository_details

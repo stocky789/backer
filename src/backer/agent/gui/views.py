@@ -100,6 +100,7 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
             remove_local_scheduled_task,
             remove_local_systemd_timer,
             restore_local_scheduler,
+            restore_local_scheduler_trigger,
             snapshot_local_scheduler,
         )
 
@@ -114,9 +115,16 @@ def apply_scheduled_modes(previous: BackerConfig, desired: BackerConfig) -> Mode
         }
         machine_secrets = {ref: keystore.get(ref, machine_scope=True) for ref in refs}
         scheduler = snapshot_local_scheduler()
-        ready, message = prepare_local_scheduler_mutation(scheduler)
-        if not ready:
-            return ModeApplyResult(False, previous, message)
+        freeze = prepare_local_scheduler_mutation(scheduler)
+        if not freeze.ready:
+            detail = freeze.message
+            if freeze.restore_failed:
+                restored, message = restore_local_scheduler_trigger(scheduler)
+                if restored:
+                    detail += "; trigger restored on retry"
+                else:
+                    detail += "; rollback failed: scheduler: " + message
+            return ModeApplyResult(False, previous, detail)
 
         if desired.local_scheduled_mode:
             if blocker := unattended_blocker(desired):
