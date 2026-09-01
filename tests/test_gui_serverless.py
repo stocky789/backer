@@ -1068,6 +1068,70 @@ def test_poller_isolates_bad_callbacks_and_tray_actions():
     assert scheduled == [(100, app._poll_tray_intents)]
 
 
+def test_tray_pause_and_resume_restore_state_after_partial_save_failure(monkeypatch, tmp_path):
+    import queue
+    from datetime import UTC, datetime, timedelta
+
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+
+    class Root:
+        def after(self, *_args):
+            pass
+
+    for intent, initial in (
+        ("pause", BackerConfig()),
+        (
+            "resume",
+            BackerConfig(
+                local_scheduled_paused=True,
+                local_scheduled_pause_until=datetime.now(UTC) + timedelta(hours=1),
+            ),
+        ),
+    ):
+        initial.save(user / "config.yaml")
+        initial.save(machine / "config.yaml")
+
+        def partial_save(desired):
+            BackerConfig.load(machine / "config.yaml").model_copy(
+                update={
+                    "local_scheduled_paused": desired.local_scheduled_paused,
+                    "local_scheduled_pause_until": desired.local_scheduled_pause_until,
+                }
+            ).save(machine / "config.yaml")
+            raise OSError("user write failed")
+
+        monkeypatch.setattr(gui_app, "save_schedule_pause", partial_save)
+        app = object.__new__(gui_app.BackerAgentApp)
+        app.root, app.alive, app.config = Root(), True, initial.model_copy(deep=True)
+        app._ui_callbacks, app._tray_intents = queue.SimpleQueue(), queue.SimpleQueue()
+        status, refresh, later = [], [], []
+        app.set_status = lambda message, **kwargs: status.append((message, kwargs))
+        app._refresh_tray_menu = lambda: refresh.append(
+            (app.config.local_scheduled_paused, app.config.local_scheduled_pause_until)
+        )
+        app.backup_job = lambda name: later.append(name)
+        if intent == "pause":
+            app._queue_tray_intent("pause", "hour")
+        else:
+            app._queue_tray_intent("resume")
+        app._queue_tray_intent("backup", "Photos")
+        app._poll_tray_intents()
+
+        assert (app.config.local_scheduled_paused, app.config.local_scheduled_pause_until) == (
+            initial.local_scheduled_paused,
+            initial.local_scheduled_pause_until,
+        )
+        persisted = BackerConfig.load(machine / "config.yaml")
+        assert (persisted.local_scheduled_paused, persisted.local_scheduled_pause_until) == refresh[-1]
+        assert status[-1][1]["error"] and "not changed" in status[-1][0] and later == ["Photos"]
+
+
 def test_cancel_running_never_waits_for_kopia_reap():
     import threading
     import time

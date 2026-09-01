@@ -23,8 +23,12 @@ from backer.agent.gui.views import (
     SettingsView,
     SimpleView,
     load_config,
+    restore_schedule_pause,
     save_config,
     save_schedule_pause,
+    schedule_pause_matches,
+    schedule_pause_snapshot,
+    schedule_pause_snapshot_matches,
     supported_repository_types,
 )
 from backer.agent.gui.wizard import RepositoryWizard
@@ -423,20 +427,35 @@ class BackerAgentApp:
         now = datetime.now().astimezone()
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         until = {"hour": now + timedelta(hours=1), "tomorrow": tomorrow, "forever": None}[mode]
-        self.config = self.config.model_copy(
-            update={"local_scheduled_paused": True, "local_scheduled_pause_until": until}
-        )
-        save_schedule_pause(self.config)
-        self.set_status("Paused · scheduled backups are paused")
-        self._refresh_tray_menu()
+        self._change_schedule_pause(True, until, "Paused · scheduled backups are paused")
 
     def resume_backups(self):
-        self.config = self.config.model_copy(
-            update={"local_scheduled_paused": False, "local_scheduled_pause_until": None}
-        )
-        save_schedule_pause(self.config)
-        self.set_status("Scheduled backups resumed")
+        self._change_schedule_pause(False, None, "Scheduled backups resumed")
+
+    def _change_schedule_pause(self, paused, until, success):
+        previous = self.config.model_copy(deep=True)
+        snapshot = schedule_pause_snapshot()
+        desired = previous.model_copy(update={"local_scheduled_paused": paused, "local_scheduled_pause_until": until})
+        try:
+            save_schedule_pause(desired)
+            if not schedule_pause_matches(desired):
+                raise OSError("Pause state readback did not match the requested change")
+        except Exception as error:
+            self.config = previous
+            rollback_error = ""
+            try:
+                restore_schedule_pause(snapshot)
+                if not schedule_pause_snapshot_matches(snapshot):
+                    raise OSError("Pause state rollback did not match its previous value")
+            except Exception as rollback:
+                rollback_error = f"; rollback failed: {rollback}"
+            self.set_status(f"Scheduled backup state was not changed: {error}{rollback_error}", error=True)
+            self._refresh_tray_menu()
+            return False
+        self.config = desired
+        self.set_status(success)
         self._refresh_tray_menu()
+        return True
 
     def _open_logs(self):
         directory = get_data_dir() / "logs"

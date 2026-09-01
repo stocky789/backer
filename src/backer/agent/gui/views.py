@@ -67,6 +67,57 @@ def save_schedule_pause(config: BackerConfig) -> None:
     save_config(config)
 
 
+def schedule_pause_snapshot():
+    """Capture just the durable pause state before a tray change."""
+    snapshot = {}
+    for path in (get_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml"):
+        if path.is_file():
+            config = BackerConfig.load(path)
+            snapshot[path] = (True, config.local_scheduled_paused, config.local_scheduled_pause_until)
+        else:
+            snapshot[path] = (False, False, None)
+    return snapshot
+
+
+def schedule_pause_matches(config: BackerConfig) -> bool:
+    """Verify every existing durable pause copy before advertising it."""
+    paths = (get_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml")
+    return all(
+        not path.is_file()
+        or (
+            (stored := BackerConfig.load(path)).local_scheduled_paused == config.local_scheduled_paused
+            and stored.local_scheduled_pause_until == config.local_scheduled_pause_until
+        )
+        for path in paths
+    )
+
+
+def restore_schedule_pause(snapshot) -> None:
+    """Restore only pause fields, preserving unrelated durable configuration."""
+    for path, (existed, paused, until) in snapshot.items():
+        if not path.is_file():
+            if existed:
+                raise OSError(f"Pause configuration disappeared: {path}")
+            continue
+        current = BackerConfig.load(path).model_copy(
+            update={"local_scheduled_paused": paused, "local_scheduled_pause_until": until}
+        )
+        current.save(path)
+
+
+def schedule_pause_snapshot_matches(snapshot) -> bool:
+    """Return whether durable pause fields still match their pre-change snapshot."""
+    for path, (existed, paused, until) in snapshot.items():
+        if not path.is_file():
+            if existed:
+                return False
+            continue
+        stored = BackerConfig.load(path)
+        if stored.local_scheduled_paused != paused or stored.local_scheduled_pause_until != until:
+            return False
+    return True
+
+
 def unattended_blocker(config: BackerConfig) -> str | None:
     """Keep SYSTEM setup fail-closed when an SMB repository only has an interactive session."""
     for repository in config.repositories.values():
