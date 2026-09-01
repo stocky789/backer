@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -20,26 +21,40 @@ from backer.core.smb_browse import SMBBrowser
 
 
 def recovery_record(
-    name: str, location: str, passphrase: str, created_at: str | None = None, connect_command: str | None = None
+    name: str,
+    location: str,
+    passphrase: str,
+    created_at: str | None = None,
+    connect_command: str | None = None,
+    credential_instruction: str | None = None,
 ) -> str:
     """Build the explicitly requested plaintext record needed to reconnect elsewhere."""
     created_at = created_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    return "\n".join(
-        (
+    lines = [
             "Backer recovery record",
             f"Repository: {name}",
             f"Location: {location}",
             f"Created (UTC): {created_at}",
             f"Passphrase: {passphrase}",
-            connect_command or f'kopia repository connect filesystem --path "{location}"',
-            "",
-        )
-    )
+            connect_command or f'kopia repository connect filesystem --path "{location}" --no-persist-credentials',
+    ]
+    if credential_instruction:
+        lines.append(credential_instruction)
+    return "\n".join((*lines, ""))
 
 
 def valid_supplied_passphrase(candidate: str, confirmation: str) -> bool:
     """Keep the user-supplied route as strict as the generated confirmation route."""
-    return bool(candidate) and candidate == confirmation
+    return bool(passphrase_words(candidate)) and candidate == confirmation
+
+
+def passphrase_words(value: str) -> list[str]:
+    """Use the same readable positions for generated and user-supplied phrases."""
+    return [word for word in re.split(r"[\s-]+", value.strip()) if word]
+
+
+def confirmation_word(value: str, position: int) -> str:
+    return passphrase_words(value)[position - 1]
 
 
 def connection_conflict_message(server: str, conflict=None) -> str:
@@ -157,6 +172,8 @@ class RepositoryWizard(ttk.Frame):
 
     def _probe_selected_location(self):
         """Probe before asking for a passphrase so setup never guesses create versus attach."""
+        if self.values["name"] == "Repository":
+            self.values["name"] = self._suggested_repository_name()
         record = self._record()
         storage = (
             {"access_key_id": self.values["access_key_id"], "secret_access_key": self.values["secret_key"]}
@@ -193,6 +210,13 @@ class RepositoryWizard(ttk.Frame):
 
         self.app.set_status("Checking repository location")
         threading.Thread(target=worker, daemon=True).start()
+
+    def _suggested_repository_name(self):
+        if self.values["type"] == "s3":
+            location = self.values.get("prefix") or self.values.get("bucket") or "Repository"
+        else:
+            location = self.values.get("path") or self.values.get("share") or "Repository"
+        return location.replace("\\", "/").rstrip("/").split("/")[-1]
 
     def _storage(self):
         ttk.Label(self.body, text="Add repository", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
@@ -496,6 +520,7 @@ class RepositoryWizard(ttk.Frame):
             ttk.Label(self.body, textvariable=status, style="Muted.TLabel").pack(anchor=tk.W, pady=8)
             entry = ttk.Entry(self.body, textvariable=candidate, show="*")
             entry.pack(fill=tk.X)
+            self._attach_entry = entry
             self.primary = entry
 
             def validate_existing(*_):
@@ -574,7 +599,8 @@ class RepositoryWizard(ttk.Frame):
         ttk.Button(reveal, text="I saved the recovery copy", command=lambda: self._show_passphrase_frame(confirm)).pack(
             anchor=tk.W
         )
-        position = secrets.randbelow(len(value.split("-"))) + 1
+        words = passphrase_words(value)
+        position = secrets.randbelow(len(words)) + 1
         self.confirm = tk.StringVar()
         self.saved = tk.BooleanVar()
         ttk.Label(confirm, text=f"Enter word {position} to confirm it.").pack(anchor=tk.W, pady=(14, 0))
@@ -590,7 +616,7 @@ class RepositoryWizard(ttk.Frame):
         def validate(*_):
             self.primary.configure(
                 state=tk.NORMAL
-                if self.confirm.get().strip() == value.split("-")[position - 1] and self.saved.get()
+                if self.confirm.get().strip() == confirmation_word(value, position) and self.saved.get()
                 else tk.DISABLED
             )
 
@@ -612,8 +638,12 @@ class RepositoryWizard(ttk.Frame):
             if status:
                 status.set("Repository verified")
             self.primary.configure(state=tk.NORMAL)
-        elif status:
-            status.set(message or "Passphrase was not accepted")
+        else:
+            self._attach_candidate.set("")
+            self.primary.configure(state=tk.NORMAL)
+            self._attach_entry.focus_set()
+            if status:
+                status.set(message or "Passphrase was not accepted")
 
     def _show_passphrase_frame(self, frame):
         for candidate in self.passphrase_frames:
@@ -655,10 +685,17 @@ class RepositoryWizard(ttk.Frame):
         if not target:
             return None
         path = Path(target)
+        warning = (
+            f"This writes your passphrase to {path} in plain text. "
+            "A copy saved on this computer will not help if this computer fails. Continue?"
+        )
+        if not self.app.confirm_reveal_passphrase(warning):
+            return None
         record = self._record()
         location = self._recovery_location(record)
+        command, instruction = self._recovery_command(record, location)
         content = recovery_record(
-            record.name, location, value, connect_command=self._recovery_command(record, location)
+            record.name, location, value, connect_command=command, credential_instruction=instruction
         )
         path.write_text(content, encoding="utf-8")
         if os.name != "nt":
@@ -686,11 +723,16 @@ class RepositoryWizard(ttk.Frame):
     @staticmethod
     def _recovery_command(record, location):
         if record.type != "s3":
-            return f'kopia repository connect filesystem --path "{location}"'
-        return (
+            return f'kopia repository connect filesystem --path "{location}" --no-persist-credentials', None
+        command = (
             f'kopia repository connect s3 --bucket "{record.bucket}" --prefix "{record.prefix or ""}" '
-            f'--endpoint "{record.endpoint}" --region "{record.region}"'
+            f'--endpoint "{record.endpoint}" --region "{record.region}" --no-persist-credentials'
         )
+        instruction = (
+            "Supply AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from a password manager or secure shell environment; "
+            "do not add them to this recovery record."
+        )
+        return command, instruction
 
     def _job(self):
         ttk.Label(self.body, text="Source and schedule", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)

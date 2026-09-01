@@ -193,8 +193,10 @@ class BackerAgentApp:
             "Quit during backup", "The running backup will be cancelled. Quit?", parent=self.root
         )
 
-    def confirm_reveal_passphrase(self):
-        return messagebox.askyesno("Reveal passphrase", "Reveal the repository passphrase?", parent=self.root)
+    def confirm_reveal_passphrase(self, warning=None):
+        return messagebox.askyesno(
+            "Reveal passphrase", warning or "Reveal the repository passphrase?", parent=self.root
+        )
 
     def _make_tray(self):
         if not TRAY_AVAILABLE:
