@@ -1132,6 +1132,89 @@ def test_tray_pause_and_resume_restore_state_after_partial_save_failure(monkeypa
         assert status[-1][1]["error"] and "not changed" in status[-1][0] and later == ["Photos"]
 
 
+def test_failed_first_pause_restores_absent_user_and_machine_config(monkeypatch, tmp_path):
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+
+    for create_partial in (False, True):
+        def failed_save(desired):
+            if create_partial:
+                desired.save(user / "config.yaml")
+                desired.save(machine / "config.yaml")
+            raise OSError("write failed")
+
+        monkeypatch.setattr(gui_app, "save_schedule_pause", failed_save)
+        app = object.__new__(gui_app.BackerAgentApp)
+        app.config, app._pause_state_unknown = BackerConfig(), ""
+        app.set_status = lambda *_args, **_kwargs: None
+        app._refresh_tray_menu = lambda: None
+        app.pause_backups("hour")
+        assert not (user / "config.yaml").exists() and not (machine / "config.yaml").exists()
+        assert not app._pause_state_unknown
+
+
+def test_unproven_pause_rollback_shows_unknown_tray_state(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+
+    def partial_save(desired):
+        desired.save(user / "config.yaml")
+        raise OSError("write failed")
+
+    def delete_denied(*_args):
+        raise OSError("delete denied")
+
+    def write_denied(_snapshot):
+        raise OSError("write denied")
+
+    monkeypatch.setattr(gui_app, "save_schedule_pause", partial_save)
+    monkeypatch.setattr(views, "_remove_created_pause_config", delete_denied)
+
+    class Item:
+        def __init__(self, text, action=None, enabled=True):
+            self.text, self.action, self.enabled = text, action, enabled
+
+    class Menu:
+        def __init__(self, *items):
+            self.items = items
+
+    monkeypatch.setattr(gui_app, "pystray", SimpleNamespace(Menu=Menu, MenuItem=Item))
+    app = object.__new__(gui_app.BackerAgentApp)
+    app.config, app._pause_state_unknown = BackerConfig(), ""
+    app.pause_var = type("Value", (), {"set": lambda _self, value: setattr(_self, "value", value)})()
+    app.tray_icon = type("Tray", (), {"update_menu": lambda _self: None})()
+    status = []
+    app.set_status = lambda message, **kwargs: status.append((message, kwargs))
+    app._tray_intents = __import__("queue").SimpleQueue()
+    app._queue_tray_intent = lambda *_args: None
+
+    app.pause_backups("hour")
+
+    assert "unknown" in app._pause_state_unknown.lower() and status[-1][1]["error"]
+    assert app.pause_var.value == "Pause state unknown" and app.tray_icon.title == "Backer - pause state unknown"
+    assert [(item.text, item.enabled) for item in app.tray_icon.menu.items[:2]] == [
+        ("Pause state unknown", False),
+        ("Recheck pause state", True),
+    ]
+
+    monkeypatch.setattr(gui_app, "restore_schedule_pause", write_denied)
+    app._pause_state_unknown = ""
+    app.pause_backups("hour")
+    assert "rollback failed" in status[-1][0] and "unknown" in app._pause_state_unknown.lower()
+
+
 def test_cancel_running_never_waits_for_kopia_reap():
     import threading
     import time

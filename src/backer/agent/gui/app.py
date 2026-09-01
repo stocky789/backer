@@ -26,6 +26,7 @@ from backer.agent.gui.views import (
     restore_schedule_pause,
     save_config,
     save_schedule_pause,
+    schedule_pause_consensus,
     schedule_pause_matches,
     schedule_pause_snapshot,
     schedule_pause_snapshot_matches,
@@ -87,6 +88,7 @@ class BackerAgentApp:
         self._ui_callbacks: queue.SimpleQueue[tuple[tuple[str, int], object, object]] = queue.SimpleQueue()
         self._tray_intents: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._notification_run = None
+        self._pause_state_unknown = ""
         self._linux_close_notice = False
         self._notification_state = self._read_notification_state()
         self.container = ttk.Frame(self.root)
@@ -366,6 +368,8 @@ class BackerAgentApp:
                         self.pause_backups(value)
                     elif intent == "resume":
                         self.resume_backups()
+                    elif intent == "reconcile":
+                        self.reconcile_schedule_pause()
                     elif intent == "logs":
                         self._open_logs()
                     elif intent == "settings":
@@ -386,6 +390,20 @@ class BackerAgentApp:
                     pass
 
     def _refresh_tray_menu(self):
+        unknown = getattr(self, "_pause_state_unknown", "")
+        if unknown:
+            self.pause_var.set("Pause state unknown")
+            if not self.tray_icon:
+                return
+            self.tray_icon.menu = pystray.Menu(
+                pystray.MenuItem("Pause state unknown", None, enabled=False),
+                pystray.MenuItem("Recheck pause state", lambda *_: self._queue_tray_intent("reconcile")),
+                pystray.MenuItem("View logs", lambda *_: self._queue_tray_intent("logs")),
+                pystray.MenuItem("Exit", lambda *_: self._queue_tray_intent("exit")),
+            )
+            self.tray_icon.title = "Backer - pause state unknown"
+            self.tray_icon.update_menu()
+            return
         paused = scheduling_paused(self.config, datetime.now(UTC))
         self.pause_var.set("Paused" if paused else "")
         if not self.tray_icon:
@@ -449,11 +467,32 @@ class BackerAgentApp:
                     raise OSError("Pause state rollback did not match its previous value")
             except Exception as rollback:
                 rollback_error = f"; rollback failed: {rollback}"
+            if rollback_error:
+                paths = ", ".join(str(path) for path in snapshot)
+                self._pause_state_unknown = f"Pause state unknown; reconcile {paths}"
+                rollback_error += f"; {self._pause_state_unknown}"
+            else:
+                self._pause_state_unknown = ""
             self.set_status(f"Scheduled backup state was not changed: {error}{rollback_error}", error=True)
             self._refresh_tray_menu()
             return False
         self.config = desired
+        self._pause_state_unknown = ""
         self.set_status(success)
+        self._refresh_tray_menu()
+        return True
+
+    def reconcile_schedule_pause(self):
+        if (state := schedule_pause_consensus()) is None:
+            self._pause_state_unknown = "Pause state unknown; local and unattended configuration copies conflict"
+            self.set_status(self._pause_state_unknown, error=True)
+            self._refresh_tray_menu()
+            return False
+        self.config = self.config.model_copy(
+            update={"local_scheduled_paused": state[0], "local_scheduled_pause_until": state[1]}
+        )
+        self._pause_state_unknown = ""
+        self.set_status("Scheduled backup state reconciled")
         self._refresh_tray_menu()
         return True
 
