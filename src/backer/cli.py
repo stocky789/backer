@@ -761,6 +761,7 @@ def backup(
 @click.option("--yes-replace", is_flag=True)
 @click.option("--clean-up-replaced", is_flag=True)
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
+@click.option("--progress/--no-progress", default=None)
 def restore(
     source: str | None,
     legacy_destination: Path | None,
@@ -777,6 +778,7 @@ def restore(
     yes_replace: bool,
     clean_up_replaced: bool,
     dry_run: bool,
+    progress: bool | None,
 ) -> None:
     """Restore from a backup.
 
@@ -819,15 +821,28 @@ def restore(
         if into == "REPLACE" and not dry_run:
             if not _interactive():
                 raise click.UsageError("REPLACE requires an interactive typed confirmation")
+            count = sum(1 for item in destination.rglob("*") if item.is_file()) if destination.exists() else 0
+            stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+            click.echo(
+                f"{destination} holds {count} files. They will move to "
+                f"{destination.name}.replaced-{stamp} before snapshot {selected} is restored"
+            )
             if click.prompt("Type REPLACE to continue", default="", show_default=False) != "REPLACE":
                 raise click.ClickException("Stopped. Nothing was changed")
-        moved = _replace_destination(destination) if into == "REPLACE" and not dry_run else None
+        if dry_run:
+            click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
+            return
+        moved = _replace_destination(destination) if into == "REPLACE" else None
         if into == "NEW" and not dry_run:
             destination.mkdir(parents=True, exist_ok=True)
-        result = backend.restore(
-            BackupDestination(source_path), destination, snapshot=selected, dry_run=dry_run,
-            original_source_path=configured.source.path, include_path=include,
-        )
+        try:
+            with _local_progress(progress) as render:
+                result = backend.restore(
+                    BackupDestination(source_path), destination, snapshot=selected, progress_callback=render,
+                    original_source_path=configured.source.path, include_path=include,
+                )
+        except KeyboardInterrupt as error:
+            raise click.exceptions.Exit(130) from error
         if not result.success:
             raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
         if moved:
@@ -866,6 +881,9 @@ def restore(
         selected = snapshot or max(rows, key=lambda item: item.get("timestamp") or "")["full_id"]
         if snapshot and not any(snapshot in (item.get("id"), item.get("full_id")) for item in rows):
             raise click.ClickException("The requested snapshot was not found")
+        if dry_run:
+            click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
+            return
         if not dry_run:
             location = destination.parent if destination.parent.exists() else Path.cwd()
             free = __import__("shutil").disk_usage(location).free
@@ -873,7 +891,14 @@ def restore(
             if required and free < required:
                 raise click.ClickException("The destination does not have enough free space; nothing was changed")
             destination.mkdir(parents=True, exist_ok=True)
-        result = backend.restore(BackupDestination(from_path), destination, snapshot=selected, include_path=include)
+        try:
+            with _local_progress(progress) as render:
+                result = backend.restore(
+                    BackupDestination(from_path), destination, snapshot=selected, include_path=include,
+                    progress_callback=render,
+                )
+        except KeyboardInterrupt as error:
+            raise click.exceptions.Exit(130) from error
         if not result.success:
             raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
         click.echo("Restore completed")
@@ -1588,17 +1613,22 @@ def _repository_destination(record) -> str:
 
 def _restore_destination_allowed(destination: Path, config) -> None:
     resolved = destination.expanduser().resolve()
-    forbidden = {
+    system_roots = {
         Path(os.environ.get("WINDIR", "C:/Windows")).resolve(),
         Path("/").resolve(),
         Path("/home").resolve(),
         Path("/usr").resolve(),
-        Path.home().resolve(),
     }
+    if resolved == Path.home().resolve():
+        raise click.ClickException(
+            f"Backer will not restore over {Path.home().resolve()}. Choose a folder inside it instead."
+        )
     for record in config.repositories.values():
         if record.type == "local" and record.path:
-            forbidden.add(Path(record.path).expanduser().resolve())
-    for denied in forbidden:
+            denied = Path(record.path).expanduser().resolve()
+            if resolved == denied or denied in resolved.parents or resolved in denied.parents:
+                raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
+    for denied in system_roots:
         if resolved == denied or denied in resolved.parents or resolved in denied.parents:
             raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
 

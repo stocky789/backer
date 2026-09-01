@@ -28,4 +28,4 @@ def explain_failure(detail: str) -> str:
     for needle, message in _FAILURES.items():
         if needle in lowered:
             return message
-    return "Backer could not finish this backup. The details below are the full output from the backup engine."
+    return "Backer could not finish this backup. The details below are the full diagnostic output."
