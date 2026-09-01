@@ -395,6 +395,66 @@ def test_bump_version_rejects_symlinked_journal_artifact_without_mutation(
     assert {path: path.read_bytes() for path in release_paths(tmp_path)} == before
 
 
+def test_bump_version_rejects_a_symlinked_journal_without_reading_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_release_files(tmp_path)
+    bump_version = interrupt_after_first_target(monkeypatch, tmp_path)
+    journal_path = tmp_path / bump_version.JOURNAL
+    outside = tmp_path / "outside-journal"
+    outside.write_bytes(journal_path.read_bytes())
+    journal_path.unlink()
+    try:
+        journal_path.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    before = {path: path.read_bytes() for path in release_paths(tmp_path)}
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "invalid"])
+
+    assert bump_version.main() == 1
+    assert outside.read_bytes()
+    assert {path: path.read_bytes() for path in release_paths(tmp_path)} == before
+
+
+def test_bump_version_rejects_a_symlinked_lock_without_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_release_files(tmp_path)
+    bump_version = load_bump_version()
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    lock = bump_version.lock_path()
+    lock.unlink(missing_ok=True)
+    outside = tmp_path / "outside-lock"
+    outside.write_bytes(b"outside")
+    try:
+        lock.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "0.9.0"])
+
+    assert bump_version.main() == 1
+    assert outside.read_bytes() == b"outside"
+
+
+def test_bump_version_rejects_windows_reparse_point_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bump_version = load_bump_version()
+    artifact = tmp_path / "artifact"
+    artifact.write_bytes(b"x")
+    metadata = artifact.stat()
+
+    class ReparseMetadata:
+        st_mode = metadata.st_mode
+        st_file_attributes = bump_version.REPARSE_POINT
+
+    monkeypatch.setattr(bump_version.os, "lstat", lambda _path: ReparseMetadata())
+
+    with pytest.raises(bump_version.TransactionError, match="regular non-reparse"):
+        bump_version.regular_lstat(artifact)
+
+
 def test_bump_version_busy_lock_does_not_delete_another_process_staging(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
