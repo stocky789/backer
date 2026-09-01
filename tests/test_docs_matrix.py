@@ -22,3 +22,7 @@ def test_readme_states_the_v1_serverless_matrix_and_limits() -> None:
     assert "concurrent-writer" in readme
     assert "one designated maintenance owner" in readme
     assert "no cross-machine lease" in readme
+
+
+def test_readme_has_no_stale_release_image_examples() -> None:
+    assert "backer:0.8.0" not in (ROOT / "README.md").read_text(encoding="utf-8")

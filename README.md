@@ -77,13 +77,13 @@ Docker downloads Kopia on first use into its persistent data volume, verifying i
 #### Docker Run (Alternative)
 
 ```bash
-docker build -t backer:0.8.0 .
+docker build -t backer:0.9.0 .
 docker run -d --name backer \
   -p 8420:8420 \
   -v backer-data:/data \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
-  backer:0.8.0
+  backer:0.9.0
 ```
 
 #### Docker Security Notes
