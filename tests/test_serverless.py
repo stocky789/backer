@@ -206,12 +206,58 @@ def test_preview_and_apply_differ_only_by_delete(monkeypatch, tmp_path: Path) ->
     class Backend:
         def prune(self, *_args, **kwargs):
             calls.append(kwargs["dry_run"])
-            return type("Result", (), {"success": True, "output": "2 snapshot(s) of source would be deleted"})()
+            output = (
+                "2 snapshot(s) of source would be deleted"
+                if kwargs["dry_run"]
+                else "Deleted 2 snapshots of source"
+            )
+            return type("Result", (), {"success": True, "output": output})()
 
     monkeypatch.setattr("backer.serverless.retention._backend", lambda *_: Backend())
-    assert prune_job(config, "nightly") == (2, "2 snapshot(s) of source would be deleted")
-    prune_job(config, "nightly", apply=True)
+    preview_count, preview = prune_job(config, "nightly")
+    assert preview_count == 2
+    assert preview == "2 snapshot(s) of source would be deleted"
+    assert prune_job(config, "nightly", apply=True) == (2, "Deleted 2 snapshots of source")
     assert calls == [True, False]
+
+
+def test_prune_loads_smb_storage_password_before_opening_operation(monkeypatch) -> None:
+    from backer.serverless.retention import prune_job
+
+    config = BackerConfig(
+        repositories={
+            "repo": RepositoryConfig(
+                name="NAS", type="smb", server="nas", share="backups", username="matt",
+                passphrase_ref="pass", storage_password_ref="smb",
+            )
+        },
+        jobs={
+            "nightly": JobConfig(
+                repository="repo", source=SourceConfig(path="/data"), retention=RetentionConfig(keep_last=1)
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "backer.serverless.retention.keystore.get",
+        lambda reference, **_kwargs: {"pass": "passphrase", "smb": "smb-password"}[reference],
+    )
+    storage: list[str | None] = []
+
+    @contextmanager
+    def operation_context(record, value):
+        storage.append(value)
+        yield record
+
+    class Backend:
+        def prune(self, *_args, **_kwargs):
+            return type("Result", (), {"success": True, "output": "Nothing to delete"})()
+
+    monkeypatch.setattr("backer.serverless.retention.repository_operation_context", operation_context)
+    monkeypatch.setattr("backer.serverless.retention._backend", lambda *_: Backend())
+
+    prune_job(config, "nightly")
+
+    assert storage == ["smb-password"]
 
 
 def test_local_job_create_refuses_duplicate_source(monkeypatch, tmp_path: Path) -> None:

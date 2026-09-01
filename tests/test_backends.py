@@ -493,6 +493,8 @@ class TestKopiaBackend:
         result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
 
         assert result.success
+        assert not any(c[1:3] == ["policy", "set"] for c in calls)
+        assert "currently persisted" in result.output
         expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
         assert "--delete" not in expire_call
         assert "--dry-run" not in expire_call
@@ -534,26 +536,6 @@ class TestKopiaBackend:
         assert "--global" in policy_call
         expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
         assert "--all" in expire_call
-
-    def test_prune_preview_writes_policy_then_omits_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The preview uses the proposed per-source policy and never deletes."""
-        backend = KopiaBackend({"repository_password": "test-password"})
-        calls: list[list[str]] = []
-        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
-        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
-
-        def run(command: list[str], **_: object) -> CompletedProcess[str]:
-            calls.append(command)
-            return CompletedProcess(command, 0, "", "")
-
-        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-        result = backend.prune(BackupDestination("repo"), keep_last=5, dry_run=True)
-
-        assert result.success
-        assert any(c[1:3] == ["policy", "set"] for c in calls)
-        expire_call = next(c for c in calls if c[1:3] == ["snapshot", "expire"])
-        assert "--all" in expire_call
-        assert "--delete" not in expire_call
 
     def test_prune_with_source_path_scopes_to_source_and_skips_global(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """source_path -> target that one source, never --global."""

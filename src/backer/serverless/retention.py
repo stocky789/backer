@@ -22,11 +22,11 @@ def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
     if not passphrase:
         raise ValueError(f"Repository '{repository.name}' passphrase is unavailable")
     storage = None
-    if repository.type == "s3":
+    if repository.type in {"s3", "smb"}:
         raw = keystore.get(repository.storage_password_ref or "", machine_scope=repository.scope == "machine")
         if not raw:
             raise ValueError(f"Repository '{repository.name}' storage credential is unavailable")
-        storage = json.loads(raw)
+        storage = json.loads(raw) if repository.type == "s3" else raw
     policy = job.retention
     with repository_operation_context(repository, storage) as operation_record:
         result = _backend(repository, passphrase, storage).prune(
@@ -41,5 +41,5 @@ def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
         )
     if not result.success:
         raise ValueError("\n".join(result.errors) or "Retention failed")
-    match = re.search(r"(\d+) snapshot\(s\).*would be deleted", result.output, re.I)
-    return int(match.group(1)) if match else 0, result.output
+    match = re.search(r"(?:\b(\d+) snapshot\(s\).*would be deleted|\bDeleted (\d+) snapshots\b)", result.output, re.I)
+    return int(match.group(1) or match.group(2)) if match else 0, result.output
