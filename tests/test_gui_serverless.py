@@ -1078,6 +1078,7 @@ def test_tray_pause_and_resume_restore_state_after_partial_save_failure(monkeypa
 
     user, machine = tmp_path / "user", tmp_path / "machine"
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
 
     class Root:
@@ -1139,6 +1140,7 @@ def test_failed_first_pause_restores_absent_user_and_machine_config(monkeypatch,
 
     user, machine = tmp_path / "user", tmp_path / "machine"
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
 
     for create_partial in (False, True):
@@ -1167,6 +1169,7 @@ def test_unproven_pause_rollback_shows_unknown_tray_state(monkeypatch, tmp_path)
 
     user, machine = tmp_path / "user", tmp_path / "machine"
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
 
     def partial_save(desired):
@@ -1213,6 +1216,64 @@ def test_unproven_pause_rollback_shows_unknown_tray_state(monkeypatch, tmp_path)
     app._pause_state_unknown = ""
     app.pause_backups("hour")
     assert "rollback failed" in status[-1][0] and "unknown" in app._pause_state_unknown.lower()
+
+
+def test_pause_consensus_prefers_user_and_reconcile_restores_normal_tray(monkeypatch, tmp_path):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+    deadline = datetime.now(UTC) + timedelta(hours=1)
+    paused = BackerConfig(local_scheduled_paused=True, local_scheduled_pause_until=deadline)
+    paused.save(user / "config.yaml")
+    assert views.schedule_pause_consensus() == (True, deadline)
+    paused.save(machine / "config.yaml")
+    assert views.schedule_pause_consensus() == (True, deadline)
+    BackerConfig().save(machine / "config.yaml")
+    assert views.schedule_pause_consensus() is None
+    (user / "config.yaml").unlink()
+    assert views.schedule_pause_consensus() is None
+    (machine / "config.yaml").unlink()
+    assert views.schedule_pause_consensus() == (False, None)
+    paused.save(user / "config.yaml")
+
+    class Item:
+        def __init__(self, text, action=None, enabled=True):
+            self.text, self.action, self.enabled = text, action, enabled
+
+    class Menu:
+        def __init__(self, *items):
+            self.items = items
+
+    monkeypatch.setattr(gui_app, "pystray", SimpleNamespace(Menu=Menu, MenuItem=Item))
+    app = object.__new__(gui_app.BackerAgentApp)
+    app.config, app._pause_state_unknown = BackerConfig(), "Pause state unknown; rollback failed"
+    app.pause_var = type("Value", (), {"set": lambda _self, value: setattr(_self, "value", value)})()
+    app.tray_icon = type("Tray", (), {"update_menu": lambda _self: None})()
+    app._notification_run = None
+    app._notification_state = {}
+    app._queue_tray_intent = lambda *_args: None
+    status = []
+    app.set_status = lambda message, **kwargs: status.append((message, kwargs))
+    app._refresh_tray_menu()
+    assert app.pause_var.value == "Pause state unknown"
+
+    paused.save(machine / "config.yaml")
+    assert app.reconcile_schedule_pause()
+    reloaded = BackerConfig.load(user / "config.yaml")
+    assert (app.config.local_scheduled_paused, app.config.local_scheduled_pause_until) == (
+        reloaded.local_scheduled_paused,
+        reloaded.local_scheduled_pause_until,
+    ) == (True, deadline)
+    assert not app._pause_state_unknown and app.pause_var.value == "Paused"
+    assert app.tray_icon.title == "Backer"
+    assert any(item.text == "Pause backups" for item in app.tray_icon.menu.items)
 
 
 def test_cancel_running_never_waits_for_kopia_reap():
@@ -1450,6 +1511,7 @@ def test_schedule_pause_updates_the_unattended_copy_first(monkeypatch, tmp_path)
     BackerConfig().save(machine / "config.yaml")
     config = BackerConfig(local_scheduled_paused=True)
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
 
     views.save_schedule_pause(config)
@@ -1675,6 +1737,7 @@ def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):
     user, machine = tmp_path / "user", tmp_path / "machine"
     BackerConfig().save(machine / "config.yaml")
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_user_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
     app = object.__new__(gui_app.BackerAgentApp)
     app.config = config

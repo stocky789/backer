@@ -24,7 +24,7 @@ from backer.agent.gui.support import supported_repository_types
 from backer.core import keystore
 from backer.core.config import BackerConfig, ClientConfig, ScheduleConfig
 from backer.core.config import load_config as _load_config
-from backer.core.paths import get_config_dir, get_data_dir, get_machine_config_dir
+from backer.core.paths import _user_config_dir, get_config_dir, get_data_dir, get_machine_config_dir
 from backer.core.repo_metadata import RepositoryMetadata
 from backer.serverless.store import read_runs
 
@@ -53,6 +53,11 @@ def save_config(config: BackerConfig) -> None:
     config.save(get_config_dir() / "config.yaml")
 
 
+def get_user_config_dir() -> Path:
+    """Return the interactive configuration location without machine fallback."""
+    return _user_config_dir()
+
+
 def save_schedule_pause(config: BackerConfig) -> None:
     """Update the unattended copy before the interactive copy can advertise a pause."""
     machine_path = get_machine_config_dir() / "config.yaml"
@@ -64,13 +69,13 @@ def save_schedule_pause(config: BackerConfig) -> None:
             }
         )
         machine.save(machine_path)
-    save_config(config)
+    config.save(get_user_config_dir() / "config.yaml")
 
 
 def schedule_pause_snapshot():
     """Capture just the durable pause state before a tray change."""
     snapshot = {}
-    for path in (get_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml"):
+    for path in (get_user_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml"):
         target = path.resolve(strict=False)
         if path.is_file():
             config = BackerConfig.load(path)
@@ -82,7 +87,7 @@ def schedule_pause_snapshot():
 
 def schedule_pause_matches(config: BackerConfig) -> bool:
     """Verify every existing durable pause copy before advertising it."""
-    paths = (get_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml")
+    paths = (get_user_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml")
     user, machine = paths
     if not user.is_file():
         return False
@@ -98,14 +103,17 @@ def schedule_pause_matches(config: BackerConfig) -> bool:
 
 def schedule_pause_consensus():
     """Return one durable pause state, or ``None`` when copies conflict."""
-    states = set()
-    for path in (get_config_dir() / "config.yaml", get_machine_config_dir() / "config.yaml"):
-        if path.is_file():
-            config = BackerConfig.load(path)
-            states.add((config.local_scheduled_paused, config.local_scheduled_pause_until))
-        else:
-            states.add((False, None))
-    return states.pop() if len(states) == 1 else None
+    user = get_user_config_dir() / "config.yaml"
+    machine = get_machine_config_dir() / "config.yaml"
+    if not user.is_file():
+        return (False, None) if not machine.is_file() else None
+    config = BackerConfig.load(user)
+    state = (config.local_scheduled_paused, config.local_scheduled_pause_until)
+    if not machine.is_file():
+        return state
+    machine_config = BackerConfig.load(machine)
+    machine_state = (machine_config.local_scheduled_paused, machine_config.local_scheduled_pause_until)
+    return state if state == machine_state else None
 
 
 def _remove_created_pause_config(path: Path, target: Path) -> None:
