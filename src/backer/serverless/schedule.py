@@ -75,12 +75,18 @@ def scheduling_paused(config: BackerConfig, now: datetime) -> bool:
     """Whether the durable local pause still covers ``now``."""
     if not config.local_scheduled_paused:
         return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     until = config.local_scheduled_pause_until
     if until is None:
         return True
     if until.tzinfo is None:
         until = until.replace(tzinfo=UTC)
-    return until > now
+    if until > now:
+        return True
+    config.local_scheduled_paused = False
+    config.local_scheduled_pause_until = None
+    return False
 
 
 def due_jobs(config: BackerConfig, now: datetime, data_dir: Path) -> list[str]:

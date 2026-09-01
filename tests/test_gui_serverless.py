@@ -90,9 +90,18 @@ def test_share_listing_does_not_block_the_event_loop():
         app.marshal = lambda _token, callback, current: root.after(0, lambda: callback() if current() else None)
         app.set_status = lambda *_args, **_kwargs: None
         instance = wizard.RepositoryWizard(app)
+        instance.values.update(server="nas.local", username="backup", storage_password="secret", domain=None)
         instance.step = 3
         original = wizard.SMBBrowser.list_shares
-        wizard.SMBBrowser.list_shares = lambda *_args: (time.sleep(3), (True, []))[1]
+        called, completed = [], []
+
+        def slow_listing(server, username, password, domain):
+            called.append((server, username, password, domain, time.monotonic()))
+            time.sleep(3)
+            completed.append(time.monotonic())
+            return True, []
+
+        wizard.SMBBrowser.list_shares = slow_listing
         try:
             instance._render()
             serviced = 0
@@ -106,7 +115,8 @@ def test_share_listing_does_not_block_the_event_loop():
             while time.monotonic() < deadline:
                 root.update()
                 time.sleep(0.1)
-            assert serviced >= 25
+            assert serviced >= 25 and called[0][:4] == ("nas.local", "backup", "secret", None)
+            assert completed and 2.9 <= completed[0] - called[0][4] <= 3.2
             assert instance.listing.get() == "Loading shares…"
         finally:
             wizard.SMBBrowser.list_shares = original
@@ -169,7 +179,11 @@ def test_unattended_setup_rejects_interactive_only_smb_repositories():
     config = BackerConfig(
         repositories={
             "nas": RepositoryConfig(
-                name="NAS", type="smb", server="nas", share="backups", username="backup",
+                name="NAS",
+                type="smb",
+                server="nas",
+                share="backups",
+                username="backup",
                 use_existing_session=True,
             )
         }
@@ -350,6 +364,7 @@ def test_mode_apply_returns_one_shape_when_scheduler_snapshot_fails(monkeypatch,
     previous = BackerConfig()
     monkeypatch.setattr(views, "get_config_dir", lambda: tmp_path / "user")
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: tmp_path / "machine")
+
     def fail_snapshot():
         raise OSError("read")
 
@@ -373,6 +388,7 @@ def test_mode_apply_restores_real_scheduler_snapshot_after_mutation_failure(monk
     monkeypatch.setattr(views.sys, "platform", "win32")
     monkeypatch.setattr("backer.client.windows_service.snapshot_local_scheduler", lambda: {"actual": "task xml"})
     monkeypatch.setattr("backer.client.windows_service.create_local_scheduled_task", lambda: (False, "create failed"))
+
     def restore(snapshot):
         restored.append(snapshot)
         return True, ""
@@ -515,6 +531,7 @@ def test_mode_apply_rolls_back_config_when_final_freeze_check_detects_reactivati
 
     assert result == (False, previous, "trigger reactivated")
     assert ((user / "config.yaml").read_bytes(), (machine / "config.yaml").read_bytes()) == before
+
 
 def test_repository_details_disclose_type_and_keystore_state_without_secret():
     from backer.agent.gui.views import repository_details
@@ -709,7 +726,7 @@ def test_save_recovery_record_writes_complete_record_and_copy_acknowledges_clipb
                 {
                     "clipboard_clear": lambda _self: events.append("clear"),
                     "clipboard_append": lambda _self, value: events.append(value),
-            },
+                },
             )(),
             "set_status": lambda _self, value, **_kwargs: events.append(value),
         },
@@ -914,11 +931,11 @@ def test_1219_actions_keep_selected_target_and_only_disconnect_the_named_conflic
     instance.app = type(
         "App",
         (),
-            {
-                "root": Root(),
-                "_generations": {"repository": 1},
-                "marshal": lambda _self, _token, callback, _current: callback(),
-                "confirm_remove_repository": lambda _self, _connection: True,
+        {
+            "root": Root(),
+            "_generations": {"repository": 1},
+            "marshal": lambda _self, _token, callback, _current: callback(),
+            "confirm_remove_repository": lambda _self, _connection: True,
             "set_status": lambda *_args, **_kwargs: None,
         },
     )()
@@ -1130,10 +1147,12 @@ def test_repository_save_failure_removes_only_new_refs(monkeypatch, tmp_path):
         repositories.keystore, "delete", lambda reference, *, machine_scope: deleted.append((reference, machine_scope))
     )
     calls = []
+
     def save(_self, _path):
         calls.append(True)
         if len(calls) == 1:
             raise OSError("disk full")
+
     monkeypatch.setattr(BackerConfig, "save", save)
     record = RepositoryConfig(name="New", type="local", path="x")
     try:
@@ -1156,11 +1175,13 @@ def test_repository_second_secret_write_is_compensated(monkeypatch, tmp_path):
     monkeypatch.setattr(repositories, "parse_s3_config", lambda values: type("Parsed", (), {"public_config": values})())
     monkeypatch.setattr(repositories, "probe", lambda *_args: ("present", "existing", ""))
     removed, calls = [], []
+
     def put(reference, *_args, **_kwargs):
         calls.append(reference)
         if len(calls) == 2:
             raise OSError("storage write failed")
         return "test"
+
     monkeypatch.setattr(repositories.keystore, "put", put)
     monkeypatch.setattr(
         repositories.keystore, "delete", lambda reference, *, machine_scope: removed.append((reference, machine_scope))
@@ -1168,7 +1189,13 @@ def test_repository_second_secret_write_is_compensated(monkeypatch, tmp_path):
     record = RepositoryConfig(name="S3", type="s3", bucket="bucket", endpoint="https://s3.invalid", region="x")
     try:
         repositories.add_repository(
-            config, tmp_path / "config.yaml", "S3", record, "secret", attach=True, init=False,
+            config,
+            tmp_path / "config.yaml",
+            "S3",
+            record,
+            "secret",
+            attach=True,
+            init=False,
             storage={"access_key_id": "id", "secret_access_key": "key"},
         )
     except OSError:
@@ -1238,16 +1265,26 @@ def test_run_progress_retains_kopia_counts_and_reverts_after_stale_frame(monkeyp
     changes, labels = [], []
     view = object.__new__(RunView)
     view.bar = type(
-        "Bar", (), {"configure": lambda _self, **kwargs: changes.append(kwargs), "start": lambda *_args: None,
-                   "stop": lambda *_args: None}
+        "Bar",
+        (),
+        {
+            "configure": lambda _self, **kwargs: changes.append(kwargs),
+            "start": lambda *_args: None,
+            "stop": lambda *_args: None,
+        },
     )()
     view.label = type("Label", (), {"set": lambda _self, value: labels.append(value)})()
     view._last_progress = view._last_frame = None
     view._throughput = 0
     view.app = type(
-        "App", (), {"running": True, "progress_frame": {"bytes_processed": 2, "total_bytes": 4,
-                                                      "hashed_bytes": 2, "cached_bytes": 1},
-                    "progress_at": time.monotonic(), "root": type("Root", (), {"after": lambda *_args: None})()}
+        "App",
+        (),
+        {
+            "running": True,
+            "progress_frame": {"bytes_processed": 2, "total_bytes": 4, "hashed_bytes": 2, "cached_bytes": 1},
+            "progress_at": time.monotonic(),
+            "root": type("Root", (), {"after": lambda *_args: None})(),
+        },
     )()
 
     view.tick()
@@ -1341,3 +1378,64 @@ def test_persisted_run_input_needed_uses_the_shared_catalogue(tmp_path):
         ),
     )
     assert read_runs(tmp_path, "Photos", 1)[0].needs_input
+
+
+def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
+    import yaml
+
+    from backer.agent.gui.support import workflow_cells
+
+    jobs = {
+        "serverless-local": {
+            "runs-on": "ubuntu-latest",
+            "strategy": {"matrix": {"os": ["ubuntu-latest", "windows-latest"]}},
+        },
+        "serverless-smb-linux": {"runs-on": "ubuntu-latest"},
+        "serverless-smb-windows": {"runs-on": "windows-latest"},
+        "s3-contract": {
+            "runs-on": "ubuntu-latest",
+            "strategy": {"matrix": {"os": ["ubuntu-latest", "windows-latest"]}},
+            "steps": [{"run": "pytest", "env": {"BACKER_TEST_S3_BUCKET": "test"}}],
+        },
+    }
+    env = {f"R{i}": f"${{{{ needs.{job}.result }}}}" for i, job in enumerate(jobs)}
+    names = " ".join(env)
+    jobs["release-artifacts-ready"] = {
+        "needs": list(jobs),
+        "steps": [{"env": env, "run": f"for job in {names}; do\n  :\ndone"}],
+    }
+    path = tmp_path / "workflow.yml"
+    path.write_text(yaml.safe_dump({"jobs": jobs}), encoding="utf-8")
+    expected = {("linux", kind) for kind in ("local", "smb", "s3")} | {
+        ("win32", kind) for kind in ("local", "smb", "s3")
+    }
+    assert workflow_cells(path) == expected
+
+    jobs["release-artifacts-ready"]["needs"].remove("serverless-smb-windows")
+    path.write_text(yaml.safe_dump({"jobs": jobs}), encoding="utf-8")
+    assert ("win32", "smb") not in workflow_cells(path)
+    jobs["release-artifacts-ready"]["needs"].append("serverless-smb-windows")
+    jobs["s3-contract"]["steps"][0]["env"].clear()
+    path.write_text(yaml.safe_dump({"jobs": jobs}), encoding="utf-8")
+    assert not {cell for cell in workflow_cells(path) if cell[1] == "s3"}
+
+
+def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from backer.agent.gui import views
+    from backer.core.config import BackerConfig
+    from backer.serverless.schedule import scheduling_paused
+
+    config = BackerConfig(
+        local_scheduled_paused=True, local_scheduled_pause_until=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    assert not scheduling_paused(config, datetime.now(UTC))
+    assert not config.local_scheduled_paused and config.local_scheduled_pause_until is None
+    user, machine = tmp_path / "user", tmp_path / "machine"
+    BackerConfig().save(machine / "config.yaml")
+    monkeypatch.setattr(views, "get_config_dir", lambda: user)
+    monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
+    views.save_schedule_pause(config)
+    assert not BackerConfig.load(user / "config.yaml").local_scheduled_paused
+    assert not BackerConfig.load(machine / "config.yaml").local_scheduled_paused
