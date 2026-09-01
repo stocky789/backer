@@ -428,6 +428,65 @@ def snapshot_local_scheduler() -> dict[str, object]:
     return {"platform": "linux", "directory": directory, "units": units, "state": state}
 
 
+def prepare_local_scheduler_mutation(snapshot: dict[str, object]) -> tuple[bool, str]:
+    """Freeze the trigger and recheck its job before changing its definition.
+
+    A settings save must never delete a definition while a scheduler-triggered
+    backup is running.  Disabling/stopping only the trigger closes the race
+    between the initial read and the later definition change; an already-started
+    service is left alone and the trigger is restored before returning failure.
+    """
+    if snapshot.get("platform") == "windows":
+        task = snapshot.get("task", {})
+        if not isinstance(task, dict) or not task.get("exists"):
+            return True, "No local scheduled task to freeze"
+        if task.get("running"):
+            return False, "Local scheduled backup is running; retry after it finishes"
+        disabled = subprocess.run(
+            ["schtasks", "/change", "/tn", "BackerLocalSchedule", "/disable"],
+            capture_output=True,
+            text=True,
+            creationflags=get_subprocess_flags(),
+        )
+        if disabled.returncode:
+            return False, disabled.stderr.strip() or "Could not freeze local scheduled task"
+        current = _windows_task_state("BackerLocalSchedule")
+        if not current.get("running"):
+            return True, "Local scheduled task is idle"
+        if task.get("enabled"):
+            enabled = subprocess.run(
+                ["schtasks", "/change", "/tn", "BackerLocalSchedule", "/enable"],
+                capture_output=True,
+                text=True,
+                creationflags=get_subprocess_flags(),
+            )
+            if enabled.returncode:
+                return False, "Local scheduled backup started; task could not be re-enabled"
+        return False, "Local scheduled backup started; retry after it finishes"
+
+    state = snapshot.get("state", {})
+    units = snapshot.get("units", {})
+    if not isinstance(state, dict) or not isinstance(units, dict) or not any(units.values()):
+        return True, "No local systemd timer to freeze"
+    service_state = state.get("backer-local.service", {})
+    if isinstance(service_state, dict) and service_state.get("running"):
+        return False, "Local scheduled backup is running; retry after it finishes"
+    stopped = subprocess.run(["systemctl", "--user", "stop", "backer-local.timer"], capture_output=True, text=True)
+    if stopped.returncode:
+        return False, stopped.stderr.strip() or "Could not freeze local backup timer"
+    active = subprocess.run(
+        ["systemctl", "--user", "is-active", "backer-local.service"], capture_output=True, text=True
+    )
+    if active.returncode:
+        return True, "Local systemd timer is idle"
+    timer_state = state.get("backer-local.timer", {})
+    if isinstance(timer_state, dict) and timer_state.get("running"):
+        restarted = subprocess.run(["systemctl", "--user", "start", "backer-local.timer"], capture_output=True)
+        if restarted.returncode:
+            return False, "Local scheduled backup started; timer could not be restored"
+    return False, "Local scheduled backup started; retry after it finishes"
+
+
 def restore_local_scheduler(snapshot: dict[str, object]) -> tuple[bool, str]:
     """Restore exactly the scheduler state captured by :func:`snapshot_local_scheduler`."""
     if snapshot.get("platform") == "windows":

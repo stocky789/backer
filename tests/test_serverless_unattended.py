@@ -146,6 +146,56 @@ def test_windows_scheduled_test_cleanup_retains_task_when_stop_cannot_be_verifie
     assert not any("/delete" in command for command in calls)
 
 
+def test_windows_scheduler_freeze_refuses_a_run_that_starts_between_snapshot_and_mutation(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    calls = []
+    states = iter([{"exists": True, "running": True}])
+    monkeypatch.setattr(windows_service, "_windows_task_state", lambda _task: next(states))
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command) or type("Result", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    ok, message = windows_service.prepare_local_scheduler_mutation(
+        {"platform": "windows", "task": {"exists": True, "enabled": True, "running": False}}
+    )
+
+    assert not ok and "started" in message
+    assert ["schtasks", "/change", "/tn", "BackerLocalSchedule", "/disable"] in calls
+    assert ["schtasks", "/change", "/tn", "BackerLocalSchedule", "/enable"] in calls
+    assert not any("/delete" in command or "/run" in command for command in calls)
+
+
+def test_linux_scheduler_freeze_refuses_a_run_that_starts_between_snapshot_and_mutation(monkeypatch) -> None:
+    from backer.client import windows_service
+
+    calls = []
+    monkeypatch.setattr(
+        windows_service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command)
+        or type("Result", (), {"returncode": 0 if "is-active" in command else 0, "stderr": "", "stdout": ""})(),
+    )
+
+    ok, message = windows_service.prepare_local_scheduler_mutation(
+        {
+            "platform": "linux",
+            "units": {"service": b"unit", "timer": b"unit"},
+            "state": {
+                "backer-local.service": {"running": False},
+                "backer-local.timer": {"running": True},
+            },
+        }
+    )
+
+    assert not ok and "started" in message
+    assert ["systemctl", "--user", "stop", "backer-local.timer"] in calls
+    assert ["systemctl", "--user", "start", "backer-local.timer"] in calls
+    assert not any("disable" in command or "daemon-reload" in command for command in calls)
+
+
 def test_linux_scheduled_test_cleanup_retains_service_when_stop_fails(monkeypatch) -> None:
     from backer.client import windows_service
 
