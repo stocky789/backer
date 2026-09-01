@@ -590,9 +590,26 @@ class RepositoryWizard(ttk.Frame):
             anchor=tk.W, pady=8
         )
         ttk.Button(reveal, text="Use my own passphrase", command=self._supplied_passphrase).pack(anchor=tk.W)
-        ttk.Button(reveal, text="Save recovery record", command=lambda: self._save_recovery_record(value)).pack(
+        self._recovery_target = None
+        self._recovery_warning = tk.StringVar()
+        self._recovery_ack = tk.BooleanVar()
+        ttk.Button(
+            reveal, text="Choose recovery record location", command=lambda: self._choose_recovery_record()
+        ).pack(anchor=tk.W)
+        ttk.Label(reveal, textvariable=self._recovery_warning, style="Danger.TLabel", wraplength=640).pack(
             anchor=tk.W
         )
+        ttk.Checkbutton(
+            reveal,
+            text="I understand this file contains my passphrase in plain text",
+            variable=self._recovery_ack,
+            command=self._update_recovery_save_state,
+        ).pack(anchor=tk.W, pady=(4, 0))
+        self._recovery_save_button = ttk.Button(
+            reveal, text="Save recovery record", command=lambda: self._save_recovery_record(value)
+        )
+        self._recovery_save_button.pack(anchor=tk.W)
+        self._recovery_save_button.configure(state=tk.DISABLED)
         ttk.Button(
             reveal, text="Save and print recovery record", command=lambda: self._print_recovery_record(value)
         ).pack(anchor=tk.W, pady=(4, 8))
@@ -680,16 +697,27 @@ class RepositoryWizard(ttk.Frame):
 
         self._buttons(continue_with_supplied, back=False)
 
-    def _save_recovery_record(self, value):
+    def _choose_recovery_record(self):
         target = filedialog.asksaveasfilename(title="Save recovery record", defaultextension=".txt")
         if not target:
-            return None
-        path = Path(target)
-        warning = (
-            f"This writes your passphrase to {path} in plain text. "
-            "A copy saved on this computer will not help if this computer fails. Continue?"
+            return
+        self._recovery_target = Path(target)
+        self._recovery_ack.set(False)
+        self._recovery_warning.set(
+            f"This writes your passphrase to {self._recovery_target} in plain text. "
+            "A copy saved on this computer will not help if this computer fails."
         )
-        if not self.app.confirm_reveal_passphrase(warning):
+        self._update_recovery_save_state()
+
+    def _update_recovery_save_state(self):
+        ready = self._recovery_target and self._recovery_ack.get()
+        self._recovery_save_button.configure(state=tk.NORMAL if ready else tk.DISABLED)
+
+    def _save_recovery_record(self, value):
+        path = getattr(self, "_recovery_target", None)
+        acknowledged = getattr(self, "_recovery_ack", None)
+        if not path or not acknowledged or not acknowledged.get():
+            self.app.set_status("Choose a recovery record location and acknowledge the plaintext warning", error=True)
             return None
         record = self._record()
         location = self._recovery_location(record)
@@ -697,9 +725,13 @@ class RepositoryWizard(ttk.Frame):
         content = recovery_record(
             record.name, location, value, connect_command=command, credential_instruction=instruction
         )
-        path.write_text(content, encoding="utf-8")
-        if os.name != "nt":
-            path.chmod(0o600)
+        try:
+            path.write_text(content, encoding="utf-8")
+            if os.name != "nt":
+                path.chmod(0o600)
+        except OSError as error:
+            self.app.set_status(f"Could not save recovery record: {error}", error=True)
+            return None
         self.app.set_status("Recovery record saved; keep it off this computer")
         return path
 

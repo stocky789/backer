@@ -216,13 +216,13 @@ def test_save_recovery_record_writes_complete_record_and_copy_acknowledges_clipb
                 {
                     "clipboard_clear": lambda _self: events.append("clear"),
                     "clipboard_append": lambda _self, value: events.append(value),
-                },
+            },
             )(),
             "set_status": lambda _self, value, **_kwargs: events.append(value),
-            "confirm_reveal_passphrase": lambda _self, warning=None: events.append(warning) or True,
         },
     )()
-    monkeypatch.setattr(wizard.filedialog, "asksaveasfilename", lambda **_kwargs: str(target))
+    instance._recovery_target = target
+    instance._recovery_ack = type("Ack", (), {"get": lambda _self: True})()
 
     assert instance._save_recovery_record("six-safe-words") == target
     instance._copy_passphrase("six-safe-words")
@@ -231,7 +231,83 @@ def test_save_recovery_record_writes_complete_record_and_copy_acknowledges_clipb
     assert "Repository: Office" in content and "Location: E:/Backups" in content
     assert "Passphrase: six-safe-words" in content and "kopia repository connect filesystem" in content
     assert any("clipboard is not durable" in event.lower() for event in events if isinstance(event, str))
-    assert any(f"This writes your passphrase to {target} in plain text." in event for event in events if event)
+
+
+def test_recovery_save_never_invokes_a_messagebox_confirmation(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+    from backer.core.config import RepositoryConfig
+
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance._record = lambda: RepositoryConfig(name="Office", type="local", path="E:/Backups")
+    instance._recovery_target = tmp_path / "recovery.txt"
+    instance._recovery_ack = type("Ack", (), {"get": lambda _self: True})()
+    instance.app = type(
+        "App",
+        (),
+        {
+            "set_status": lambda *_args, **_kwargs: None,
+            "confirm_reveal_passphrase": lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("modal")),
+        },
+    )()
+
+    assert instance._save_recovery_record("six-safe-words") == instance._recovery_target
+
+
+def test_recovery_location_requires_an_inline_plaintext_acknowledgement(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+
+    target = tmp_path / "recovery.txt"
+    warning, button = [], []
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance._recovery_ack = type(
+        "Ack", (), {"set": lambda _self, value: warning.append(value), "get": lambda _self: False}
+    )()
+    instance._recovery_warning = type("Warning", (), {"set": lambda _self, value: warning.append(value)})()
+    instance._recovery_save_button = type("Button", (), {"configure": lambda _self, **kwargs: button.append(kwargs)})()
+    monkeypatch.setattr(wizard.filedialog, "asksaveasfilename", lambda **_kwargs: str(target))
+
+    instance._choose_recovery_record()
+
+    assert instance._recovery_target == target
+    assert warning[0] is False and str(target) in warning[1] and "plain text" in warning[1]
+    assert button == [{"state": wizard.tk.DISABLED}]
+
+
+def test_recovery_save_write_or_chmod_failure_is_statused_and_can_retry(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+    from backer.core.config import RepositoryConfig
+
+    events = []
+    target = tmp_path / "recovery.txt"
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance._record = lambda: RepositoryConfig(name="Office", type="local", path="E:/Backups")
+    instance._recovery_target = target
+    instance._recovery_ack = type("Ack", (), {"get": lambda _self: True})()
+    instance.app = type("App", (), {"set_status": lambda _self, value, **kwargs: events.append((value, kwargs))})()
+    monkeypatch.setattr(Path, "write_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    assert instance._save_recovery_record("six-safe-words") is None
+    assert instance._recovery_target == target
+    assert events == [("Could not save recovery record: disk full", {"error": True})]
+
+
+def test_recovery_save_chmod_failure_is_statused_and_can_retry(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+    from backer.core.config import RepositoryConfig
+
+    events = []
+    target = tmp_path / "recovery.txt"
+    instance = object.__new__(wizard.RepositoryWizard)
+    instance._record = lambda: RepositoryConfig(name="Office", type="local", path="E:/Backups")
+    instance._recovery_target = target
+    instance._recovery_ack = type("Ack", (), {"get": lambda _self: True})()
+    instance.app = type("App", (), {"set_status": lambda _self, value, **kwargs: events.append((value, kwargs))})()
+    monkeypatch.setattr(wizard.os, "name", "posix")
+    monkeypatch.setattr(Path, "chmod", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("not permitted")))
+
+    assert instance._save_recovery_record("six-safe-words") is None
+    assert instance._recovery_target == target
+    assert events == [("Could not save recovery record: not permitted", {"error": True})]
 
 
 def test_user_supplied_passphrase_route_is_masked_and_enters_the_same_confirmation_flow(monkeypatch):
