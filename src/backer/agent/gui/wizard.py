@@ -8,8 +8,8 @@ from tkinter import filedialog, ttk
 
 from croniter import croniter
 
-from backer.core import keystore
 from backer.core.config import JobConfig, RepositoryConfig, ScheduleConfig, SourceConfig
+from backer.core.paths import get_config_dir
 from backer.core.smb_browse import SMBBrowser
 
 
@@ -61,6 +61,8 @@ class RepositoryWizard(ttk.Frame):
         self.cancel = threading.Event()
         if self.step == 1:
             self._storage()
+        elif self.step == "s3":
+            self._s3()
         elif self.step == 2:
             self._server()
         elif self.step == 3:
@@ -99,17 +101,56 @@ class RepositoryWizard(ttk.Frame):
             if kind.get() == "local":
                 self.values["path"] = filedialog.askdirectory() or self.values["path"]
                 self._go(4)
+            elif kind.get() == "s3":
+                self._go("s3")
             else:
                 self._go(2)
+
+        self._buttons(next_step)
+
+    def _s3(self):
+        ttk.Label(self.body, text="S3-compatible storage", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
+        fields = ("bucket", "prefix", "endpoint", "region", "access_key_id", "secret_key")
+        entries = {}
+        for key in fields:
+            entries[key] = tk.StringVar(value=self.values.get(key, ""))
+            ttk.Label(self.body, text=key.replace("_", " ").title()).pack(anchor=tk.W)
+            ttk.Entry(self.body, textvariable=entries[key], show="*" if key == "secret_key" else "").pack(fill=tk.X)
+
+        def next_step():
+            values = {key: variable.get().strip() for key, variable in entries.items()}
+            if not all(values.values()):
+                self.app.set_status("All S3 fields are required", error=True)
+                return
+            self.values.update(values)
+            self._go(4)
 
         self._buttons(next_step)
 
     def _server(self):
         ttk.Label(self.body, text="Name the file server", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
         self.host = tk.StringVar(value=self.values.get("server", ""))
+        self.username = tk.StringVar(value=self.values.get("username", ""))
+        self.password = tk.StringVar(value=self.values.get("storage_password", ""))
         self.primary = ttk.Entry(self.body, textvariable=self.host)
         self.primary.pack(fill=tk.X, pady=10)
-        self._buttons(lambda: (self.values.__setitem__("server", self.host.get().strip()), self._go(3)))
+        ttk.Label(self.body, text="Username").pack(anchor=tk.W)
+        ttk.Entry(self.body, textvariable=self.username).pack(fill=tk.X)
+        ttk.Label(self.body, text="Password").pack(anchor=tk.W)
+        ttk.Entry(self.body, textvariable=self.password, show="*").pack(fill=tk.X)
+
+        def next_step():
+            if not all((self.host.get().strip(), self.username.get().strip(), self.password.get())):
+                self.app.set_status("File server credentials are required", error=True)
+                return
+            self.values.update(
+                server=self.host.get().strip(),
+                username=self.username.get().strip(),
+                storage_password=self.password.get(),
+            )
+            self._go(3)
+
+        self._buttons(next_step)
 
     def _share(self):
         ttk.Label(self.body, text="Pick the share and folder", font=("Segoe UI", 16, "bold")).pack(anchor=tk.W)
@@ -217,24 +258,45 @@ class RepositoryWizard(ttk.Frame):
     def _commit(self):
         name = self.values["name"] or "Backup"
         repository_id = name.lower().replace(" ", "-") + "-repo"
-        machine = False
         try:
-            key = f"repository:{repository_id}:passphrase"
-            backend = keystore.put(key, self.values["passphrase"], machine_scope=machine)
             repo = RepositoryConfig(
                 name=name,
                 type=self.values["type"],
                 path=self.values["path"] or None,
                 server=self.values.get("server"),
                 share=self.values.get("share"),
-                passphrase_ref=key,
+                username=self.values.get("username"),
+                bucket=self.values.get("bucket"),
+                prefix=self.values.get("prefix"),
+                endpoint=self.values.get("endpoint"),
+                region=self.values.get("region"),
             )
-            self.app.config.repositories[repository_id] = repo
+            storage = None
+            if self.values["type"] == "s3":
+                storage = {
+                    "access_key_id": self.values["access_key_id"],
+                    "secret_access_key": self.values["secret_key"],
+                }
+            elif self.values["type"] == "smb":
+                storage = self.values.get("storage_password")
+            from backer.serverless.repositories import add_repository, rescope_secrets_for_system
+
+            repository_id, backend = add_repository(
+                self.app.config,
+                get_config_dir() / "config.yaml",
+                name,
+                repo,
+                self.values["passphrase"],
+                attach=self.values.get("attach", False),
+                init=not self.values.get("attach", False),
+                storage=storage,
+            )
             self.app.config.jobs[name] = JobConfig(
                 repository=repository_id,
                 source=SourceConfig(path=self.values["source"]),
                 schedule=ScheduleConfig(cron=self.values["schedule"]),
             )
+            rescope_secrets_for_system(self.app.config)
             from backer.agent.gui.views import save_config
 
             save_config(self.app.config)
