@@ -8,6 +8,7 @@ from tkinter import filedialog, ttk
 
 from croniter import croniter
 
+from backer.core import keystore
 from backer.core.config import JobConfig, RepositoryConfig, ScheduleConfig, SourceConfig
 from backer.core.paths import get_config_dir
 from backer.core.smb_browse import SMBBrowser
@@ -24,6 +25,17 @@ def connection_conflict_message(server: str) -> str:
             f"Windows is already connected to {share} as {username or 'another account'}. Close it or use that account."
         )
     return "Windows already has a connection to this server with different credentials."
+
+
+def rollback_repository(config, config_path, repository_id: str) -> None:
+    """Undo a partially-created repository, including both secret scopes."""
+    record = config.repositories.pop(repository_id, None)
+    if record:
+        for reference in (record.passphrase_ref, record.storage_password_ref):
+            if reference:
+                keystore.delete(reference, machine_scope=False)
+                keystore.delete(reference, machine_scope=True)
+    config.save(config_path)
 
 
 class RepositoryWizard(ttk.Frame):
@@ -258,6 +270,8 @@ class RepositoryWizard(ttk.Frame):
     def _commit(self):
         name = self.values["name"] or "Backup"
         repository_id = name.lower().replace(" ", "-") + "-repo"
+        config_path = get_config_dir() / "config.yaml"
+        created = False
         try:
             repo = RepositoryConfig(
                 name=name,
@@ -283,7 +297,7 @@ class RepositoryWizard(ttk.Frame):
 
             repository_id, backend = add_repository(
                 self.app.config,
-                get_config_dir() / "config.yaml",
+                config_path,
                 name,
                 repo,
                 self.values["passphrase"],
@@ -291,6 +305,7 @@ class RepositoryWizard(ttk.Frame):
                 init=not self.values.get("attach", False),
                 storage=storage,
             )
+            created = True
             self.app.config.jobs[name] = JobConfig(
                 repository=repository_id,
                 source=SourceConfig(path=self.values["source"]),
@@ -304,5 +319,6 @@ class RepositoryWizard(ttk.Frame):
             self.app._show("home")
         except Exception as error:
             self.app.config.jobs.pop(name, None)
-            self.app.config.repositories.pop(repository_id, None)
+            if created:
+                rollback_repository(self.app.config, config_path, repository_id)
             self.app.set_status(str(error), error=True)

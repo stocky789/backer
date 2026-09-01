@@ -79,3 +79,22 @@ def test_messagebox_sites_are_the_five_irreversible_actions():
 def test_no_engine_control_exists():
     source = "\n".join(path.read_text().lower() for path in ROOT.glob("*.py"))
     assert 'text="kopia"' not in source and "text='kopia'" not in source
+
+
+def test_rollback_repository_removes_config_and_both_secret_scopes(monkeypatch, tmp_path):
+    from backer.agent.gui import wizard
+    from backer.agent.gui.wizard import rollback_repository
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config = BackerConfig(
+        repositories={
+            "repo": RepositoryConfig(
+                name="Repo", type="local", path="x", passphrase_ref="pass", storage_password_ref="store"
+            )
+        }
+    )
+    removed = []
+    monkeypatch.setattr(wizard.keystore, "delete", lambda key, *, machine_scope: removed.append((key, machine_scope)))
+    rollback_repository(config, tmp_path / "config.yaml", "repo")
+    assert config.repositories == {}
+    assert set(removed) == {("pass", False), ("pass", True), ("store", False), ("store", True)}
