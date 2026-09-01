@@ -244,7 +244,7 @@ def setup(force: bool, quiet: bool) -> None:
         raise click.ClickException(f"Failed to install: {', '.join(failures)}")
 
     if not quiet:
-        console.print("\n[bold]Setup complete![/bold]")
+        console.print("\n[bold]Setup complete[/bold]")
         console.print("Run 'backer tools' to see Kopia status.")
 
 
@@ -1236,12 +1236,12 @@ def server_update(dev: bool, version: str | None, yes: bool) -> None:
         if result.returncode == 0:
             console.print("   [green]✓[/green] Service is running")
         else:
-            console.print("   [yellow]![/yellow] Service may not be running properly")
+            console.print("   [yellow]Warning:[/yellow] Service may not be running properly")
             console.print("   Check logs with: journalctl -u backer -n 50")
     except Exception:
         pass
 
-    console.print("\n[bold green]✓ Update complete![/bold green]")
+    console.print("\n[bold green]✓ Update complete[/bold green]")
     console.print(f"  Previous version: {__version__}")
     console.print(f"  New version: {new_version}")
     console.print()
@@ -2745,7 +2745,7 @@ def agent_update(dev: bool, yes: bool) -> None:
             subprocess.run(["systemctl", "start", "backer-agent"], capture_output=True)
             console.print("   [green]✓[/green] Service started")
 
-        console.print("\n[bold green]✓ Update complete![/bold green]")
+        console.print("\n[bold green]✓ Update complete[/bold green]")
         console.print(f"  Previous version: {__version__}")
         console.print(f"  New version: {new_version}")
 
@@ -2762,7 +2762,7 @@ def agent_update(dev: bool, yes: bool) -> None:
                 raise SystemExit(1)
             console.print("[green]✓[/green] Package updated")
             console.print()
-            console.print("[bold green]✓ Update complete![/bold green]")
+            console.print("[bold green]✓ Update complete[/bold green]")
             console.print("Restart the agent to use the new version.")
         except Exception as e:
             console.print(f"[red]✗[/red] Failed: {e}")

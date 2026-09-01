@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 import pytest
 
 from backer.core.messages import FAILURE_MESSAGES, explain_failure
@@ -54,3 +57,16 @@ def test_secret_copy_is_qualified_and_catalogue_is_not_engine_branded():
     assert "repository passphrase" in rendered
     assert "file-server sign-in" in rendered
     assert "kopia" not in rendered
+
+
+def test_no_exclamation_marks_in_cli_or_gui_display_literals():
+    """An excited punctuation change would violate the shared failure-copy rule."""
+    source_root = Path(__file__).parents[1] / "src" / "backer"
+    paths = [source_root / "cli.py", *(source_root / "agent" / "gui").rglob("*.py")]
+    strings = [
+        node.value
+        for path in paths
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    assert all("!" not in value for value in strings)

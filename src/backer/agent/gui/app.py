@@ -428,7 +428,7 @@ class BackerAgentApp:
         self.disconnect_btn.pack(side=tk.LEFT)  # Show disconnect button
         self.start_btn.config(state=tk.NORMAL)
         msg = (
-            f"Successfully connected to server!\n\n"
+            f"Successfully connected to server.\n\n"
             f"This machine is now registered as '{agent_name}'\n\n"
             f"Click 'Start Agent' to begin receiving backup jobs."
         )
@@ -613,7 +613,7 @@ class BackerAgentApp:
             if has_background_service:
                 messagebox.showinfo(
                     "Agent Started",
-                    "Backer Agent is now running!\n\n"
+                    "Backer Agent is now running.\n\n"
                     "Background service is installed - the agent will run even at the lockscreen.\n\n"
                     "You can close this window - backups will continue automatically.\n\n"
                     "Look for the Backer icon in your system tray to access the agent."
@@ -622,7 +622,7 @@ class BackerAgentApp:
                 # Offer to install as service
                 if messagebox.askyesno(
                     "Agent Started",
-                    "Backer Agent is now running!\n\n"
+                    "Backer Agent is now running.\n\n"
                     "For reliable operation at the lockscreen, you can install the agent as a background service.\n\n"
                     "Would you like to install it now?\n\n"
                     "(Requires Administrator privileges)"
@@ -873,7 +873,7 @@ class BackerAgentApp:
 
         messagebox.showinfo(
             "Update Complete",
-            "Backer Agent has been updated successfully!\n\n"
+            "Backer Agent has been updated successfully.\n\n"
             "Please restart the application to use the new version."
         )
 
@@ -962,7 +962,7 @@ class BackerAgentApp:
                 self.status_label.config(foreground='green')
                 messagebox.showinfo(
                     "Service Installed",
-                    "Background service installed successfully!\n\n"
+                    "Background service installed successfully.\n\n"
                     "The agent will now:\n"
                     "• Start automatically at boot\n"
                     "• Run in the background (no login required)\n"
