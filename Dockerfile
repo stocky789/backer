@@ -2,13 +2,10 @@
 # Build: docker build -t backer .
 # Run: docker run -d -p 8420:8420 -v backer-data:/data backer
 
-ARG VERSION=latest
-
 FROM python:3.12-slim
 
 LABEL maintainer="Backer Contributors"
 LABEL description="Self-hosted directory backup and restore management powered by Kopia"
-LABEL version="${VERSION}"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
