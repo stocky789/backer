@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -75,6 +76,38 @@ def test_restore_passes_progress_callback_without_inspecting_backend_signature(t
     runner.run_restore({"job_name": "job", "source_path": "proxy://repo", "destination_path": str(tmp_path)})
 
     assert len(received) == 1
+
+
+def test_clean_restore_cancellation_rolls_back_the_staged_original(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "restore"
+    destination.mkdir()
+    (destination / "original.txt").write_text("keep", encoding="utf-8")
+    cancelled = threading.Event()
+
+    class Backend(_Backend):
+        def list_snapshots(self, _source):
+            return [{"id": "snapshot"}]
+
+        def restore(self, **kwargs):
+            (kwargs["destination"] / "partial.txt").write_text("new", encoding="utf-8")
+            cancelled.set()
+            return BackendResult(True, OperationType.RESTORE, datetime.now(), datetime.now())
+
+    monkeypatch.setattr(runner, "get_backend", lambda *_: Backend())
+
+    report = runner.run_restore(
+        {
+            "job_name": "job",
+            "source_path": str(tmp_path / "repo"),
+            "destination_path": str(destination),
+            "snapshot": "snapshot",
+            "clean_restore": True,
+            "repository_options": {"cancel_event": cancelled},
+        }
+    )
+
+    assert report["cancelled"] and (destination / "original.txt").read_text(encoding="utf-8") == "keep"
+    assert not (destination / "partial.txt").exists()
 
 
 def test_backup_reports_interruption_once_before_reraising(tmp_path: Path, monkeypatch):

@@ -206,6 +206,14 @@ class TestKopiaBackend:
         with pytest.raises(RuntimeError, match="single operation"):
             owner.register(second)
 
+    def test_process_owner_latches_cancel_before_child_registers(self) -> None:
+        from backer.backends.kopia import KopiaProcessOwner
+
+        owner = KopiaProcessOwner()
+        owner.cancel()
+
+        assert owner.register(object()) is False
+
     def test_progress_reader_splits_carriage_returns_and_keeps_result_json(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -93,6 +93,9 @@ def run_backup(
     smb_cleanup_ctx = None
     try:
         repository_options = job.get("repository_options", {}).copy()
+        cancel_event = repository_options.get("cancel_event")
+        if cancel_event and cancel_event.is_set():
+            raise KeyboardInterrupt
         if job.get("destination_path", "").lower().startswith(("proxy://", "proxys://")):
             proxy_id, proxy_secret = agent_credentials or (None, None)
             repository_options["client_id"] = proxy_id
@@ -106,9 +109,13 @@ def run_backup(
         if not available:
             print(f"[BACKUP] Backend not available: {message}")
             raise RuntimeError(f"Backend not available: {message}")
+        if cancel_event and cancel_event.is_set():
+            raise KeyboardInterrupt
         print(f"[BACKUP] Backend ready: {message}")
         print(f"[BACKUP] Preparing destination path for {backend_name} backend...")
         dest_path, smb_cleanup_ctx = prepare_destination(job, backend_name)
+        if cancel_event and cancel_event.is_set():
+            raise KeyboardInterrupt
         print(f"[BACKUP] Using destination: {dest_path}")
         _progress(
             on_progress,
@@ -256,15 +263,19 @@ def run_restore(
     _progress(on_progress, run_id=run_id, status="running", progress_percent=0, message="Initializing restore...")
     mount_cleanup_ctx = None
     cancel_event = None
+
+    def cancelled_report() -> dict[str, Any]:
+        return {
+            "run_id": run_id, "job_name": f"restore:{job_name}", "client_id": client_id, "success": False,
+            "cancelled": True, "started_at": started_at.isoformat(), "finished_at": datetime.now().isoformat(),
+            "bytes_transferred": 0, "files_transferred": 0, "errors": ["Restore cancelled"], "output": "",
+        }
+
     try:
         repository_options = job.get("repository_options", {}).copy()
         cancel_event = repository_options.get("cancel_event")
         if cancel_event and cancel_event.is_set():
-            return {
-                "run_id": run_id, "job_name": f"restore:{job_name}", "client_id": client_id, "success": False,
-                "cancelled": True, "started_at": started_at.isoformat(), "finished_at": datetime.now().isoformat(),
-                "bytes_transferred": 0, "files_transferred": 0, "errors": ["Restore cancelled"], "output": "",
-            }
+            return cancelled_report()
         if job.get("source_path", "").lower().startswith(("proxy://", "proxys://")):
             proxy_id, proxy_secret = agent_credentials or (None, None)
             repository_options["client_id"] = proxy_id
@@ -278,9 +289,13 @@ def run_restore(
         if not available:
             print(f"[RESTORE] Backend not available: {message}")
             raise RuntimeError(f"Backend not available: {message}")
+        if cancel_event and cancel_event.is_set():
+            return cancelled_report()
         print(f"[RESTORE] Backend ready: {message}")
         print(f"[RESTORE] Preparing source path for {backend_name} backend...")
         source_path, mount_cleanup_ctx = prepare_source(job, backend_name)
+        if cancel_event and cancel_event.is_set():
+            return cancelled_report()
         print(f"[RESTORE] Prepared source path: {source_path}")
         _progress(
             on_progress,
@@ -313,7 +328,26 @@ def run_restore(
         clean_restore = job.get("clean_restore", False)
         restore_snapshot = job.get("snapshot")
         staged_destination: Path | None = None
+
+        def rollback_clean_restore() -> str | None:
+            try:
+                if destination.exists():
+                    if destination.is_dir() and not destination.is_symlink():
+                        shutil.rmtree(destination)
+                    else:
+                        destination.unlink()
+                if staged_destination:
+                    staged_destination.replace(destination)
+            except Exception as rollback_err:
+                return (
+                    "Clean restore rollback failed; original destination remains at "
+                    f"{staged_destination}: {rollback_err}"
+                )
+            return None
+
         if clean_restore and not dry_run:
+            if cancel_event and cancel_event.is_set():
+                return cancelled_report()
             if backend_name == "proxy":
                 raise RuntimeError(
                     "Clean restore is not supported for proxy backends because the server cannot yet validate "
@@ -379,6 +413,11 @@ def run_restore(
                     print("[RESTORE] Created destination directory")
             except Exception as setup_err:
                 raise RuntimeError(f"Clean restore failed to prepare destination: {setup_err}") from setup_err
+        if cancel_event and cancel_event.is_set():
+            rollback_error = rollback_clean_restore() if staged_destination else None
+            if rollback_error:
+                raise RuntimeError(rollback_error)
+            return cancelled_report()
         original_source_path = job.get("original_source_path")
         if original_source_path:
             print(f"[RESTORE] Original source path for snapshot lookup: {original_source_path}")
@@ -394,25 +433,13 @@ def run_restore(
             )
         except Exception:
             if clean_restore and not dry_run:
-                try:
-                    if destination.exists():
-                        shutil.rmtree(
-                            destination
-                        ) if destination.is_dir() and not destination.is_symlink() else destination.unlink()
-                    if staged_destination:
-                        staged_destination.replace(destination)
-                except Exception as rollback_err:
-                    raise RuntimeError(
-                        "Clean restore rollback failed; original destination remains at "
-                        f"{staged_destination}: {rollback_err}"
-                    ) from rollback_err
+                if rollback_error := rollback_clean_restore():
+                    raise RuntimeError(rollback_error)
             raise
-        if cancel_event and cancel_event.is_set():
-            return {
-                "run_id": run_id, "job_name": f"restore:{job_name}", "client_id": client_id, "success": False,
-                "cancelled": True, "started_at": started_at.isoformat(), "finished_at": datetime.now().isoformat(),
-                "bytes_transferred": 0, "files_transferred": 0, "errors": ["Restore cancelled"], "output": "",
-            }
+        was_cancelled = bool(cancel_event and cancel_event.is_set())
+        if was_cancelled:
+            result.success = False
+            result.errors = ["Restore cancelled"]
         if (
             clean_restore
             and not dry_run
@@ -455,6 +482,7 @@ def run_restore(
             "job_name": f"restore:{job_name}",
             "client_id": client_id,
             "success": result.success,
+            "cancelled": was_cancelled,
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "bytes_transferred": getattr(result, "bytes_transferred", 0),
@@ -497,6 +525,8 @@ def run_restore(
             pass
         raise
     except Exception as e:
+        if cancel_event and cancel_event.is_set():
+            return cancelled_report()
         finished_at = datetime.now()
         _progress(on_progress, run_id=run_id, status="failed", progress_percent=0, message=str(e)[:200])
         report = {

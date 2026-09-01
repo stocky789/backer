@@ -508,6 +508,41 @@ def test_cancel_running_never_waits_for_kopia_reap():
     assert app.run_cancel.is_set() and finished.wait(1)
 
 
+def test_restore_stop_becomes_enabled_when_operation_starts(monkeypatch):
+    import threading
+
+    from backer.agent.gui import app as gui_app
+    from backer.agent.gui.app import RestoreView
+
+    changes = []
+
+    class Thread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    class Root:
+        def after(self, *_args):
+            pass
+
+    instance = object.__new__(RestoreView)
+    instance.app = type("App", (), {"running": False, "run_cancel": threading.Event(), "root": Root()})()
+    instance.status = type("Status", (), {"set": lambda _self, value: changes.append(("status", value))})()
+    instance.primary = type("Button", (), {"configure": lambda _self, **kwargs: changes.append(kwargs)})()
+    instance.restore_frame, instance.restore_at = None, 0
+    monkeypatch.setattr(gui_app.threading, "Thread", Thread)
+
+    instance._prepared(("restore", 1), "target", "NEW", "", "snapshot", "repo", "source", None)
+
+    assert instance.app.running
+    assert any(
+        isinstance(change, dict) and change.get("text") == "Stop" and change.get("state") == "normal"
+        for change in changes
+    )
+
+
 def test_1219_panel_names_the_conflicting_connection(monkeypatch):
     from backer.agent.gui.wizard import connection_conflict_message
 

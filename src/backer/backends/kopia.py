@@ -46,13 +46,17 @@ class KopiaProcessOwner:
         self._lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
         self._claimed = False
+        self._cancelled = False
 
-    def register(self, process: subprocess.Popen[str]) -> None:
+    def register(self, process: subprocess.Popen[str]) -> bool:
         with self._lock:
             if self._claimed:
                 raise RuntimeError("KopiaProcessOwner is single operation only")
             self._claimed = True
+            if self._cancelled:
+                return False
             self._process = process
+            return True
 
     def release(self, process: subprocess.Popen[str]) -> None:
         with self._lock:
@@ -61,6 +65,7 @@ class KopiaProcessOwner:
 
     def cancel(self) -> bool:
         with self._lock:
+            self._cancelled = True
             process = self._process
         return _stop_kopia_process(process) if process is not None else False
 
@@ -161,10 +166,13 @@ def _run_kopia_with_progress(
     process = subprocess.Popen(cmd, **popen_args)
     if process_owner:
         try:
-            process_owner.register(process)
+            registered = process_owner.register(process)
         except Exception:
             _stop_kopia_process(process)
             raise
+        if not registered:
+            _stop_kopia_process(process)
+            raise RuntimeError("Kopia operation cancelled before launch")
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     last = {"bytes_done": 0, "files_done": 0}

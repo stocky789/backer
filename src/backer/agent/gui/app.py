@@ -291,6 +291,8 @@ class RunView(ttk.Frame):
         self.app.progress_frame = None
         self.app.progress_at = time.monotonic()
         self._last_progress = None
+        self._last_frame = None
+        self._throughput = 0
         self.app.process_owner = KopiaProcessOwner()
         self.primary.configure(state=tk.NORMAL)
         self.label.set("Scanning · first backup has no percentage")
@@ -330,17 +332,23 @@ class RunView(ttk.Frame):
             done = frame.get("bytes_processed", frame.get("bytes_done", 0))
             total = frame.get("total_bytes")
             now = time.monotonic()
-            prior = self._last_progress
-            self._last_progress = (done, now)
-            rate = (done - prior[0]) / (now - prior[1]) if prior and now > prior[1] else 0
-            speed = f" · {int(max(0, rate))} B/s" if prior else ""
+            if frame is not self._last_frame:
+                prior = self._last_progress
+                self._last_progress = (done, now)
+                self._last_frame = frame
+                if prior and now > prior[1]:
+                    self._throughput = max(0, (done - prior[0]) / (now - prior[1]))
+            speed = f" · {int(self._throughput)} B/s" if self._last_progress and self._throughput else ""
+            detail = ""
+            if "hashed_bytes" in frame:
+                detail = f" · {frame['hashed_bytes']} hashed, {frame.get('cached_bytes', 0)} cached"
             if total:
                 self.bar.stop()
                 self.bar.configure(mode="determinate", maximum=total, value=done)
-                self.label.set(f"Running · {done} of {total} bytes{speed}")
+                self.label.set(f"Running · {done} of {total} bytes{detail}{speed}")
             else:
                 self.bar.configure(mode="indeterminate")
-                self.label.set(f"Scanning · {done} bytes{speed}")
+                self.label.set(f"Scanning · {done} bytes{detail}{speed}")
         if self.app.running:
             self.app.root.after(200, self.tick)
 
@@ -481,6 +489,7 @@ class RestoreView(ttk.Frame):
         generation = self.app.generation("restore")
 
         def worker():
+            target = raw_target
             try:
                 from backer.cli import _restore_prepare_destination, _restore_target
 
@@ -517,7 +526,7 @@ class RestoreView(ttk.Frame):
         self.app.process_owner = KopiaProcessOwner()
         self.status.set("Restoring…")
         self.restore_frame, self.restore_at = None, time.monotonic()
-        self.primary.configure(text="Stop", command=self.stop)
+        self.primary.configure(text="Stop", command=self.stop, state=tk.NORMAL)
 
         def worker():
             def progress(**frame):
@@ -572,7 +581,7 @@ class RestoreView(ttk.Frame):
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
             self.status.set("Restoring · scanning")
-        if str(self.primary.cget("state")) == "disabled":
+        if self.app.running:
             self.app.root.after(200, lambda: self._tick_restore(generation))
 
     def _progress_frame(self, *, bytes_processed=0, total_bytes=0, files_processed=0, total_files=0, **_frame):
