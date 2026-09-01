@@ -666,6 +666,7 @@ def _write_metadata_to_path(
             "hostname": socket.gethostname(),
             "platform": sys.platform,
             "os_info": f"{platform.system()} {platform.release()}",
+            "modes": ["serverless"] if serverless_job else ["server"],
         },
     )
     if serverless_job:

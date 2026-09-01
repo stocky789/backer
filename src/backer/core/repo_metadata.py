@@ -361,27 +361,17 @@ class RepositoryMetadata:
 
         agent_path = self.metadata_dir / "agents" / f"{agent_id}.json"
 
-        # Atomic read-modify-write with file locking
         try:
-            with file_lock(agent_path, mode="r+") as f:
-                # Read existing data
-                f.seek(0)
-                content = f.read().strip()
-                existing = json.loads(content) if content else {}
-
-                # Merge and update
-                existing.update(agent_data)
-                existing["agent_id"] = agent_id
-                existing["updated_at"] = datetime.now().isoformat()
-                if "first_seen" not in existing:
-                    existing["first_seen"] = datetime.now().isoformat()
-
-                # Write back
-                f.seek(0)
-                f.truncate()
-                json.dump(existing, f, indent=2, default=str)
-
-            return True
+            existing = self._read_json(agent_path) or {}
+            existing.update(agent_data)
+            now = datetime.now().isoformat()
+            existing["agent_id"] = agent_id
+            existing["schema_version"] = "2"
+            existing["backer_version"] = self._get_backer_version()
+            existing.setdefault("modes", ["server"])
+            existing["updated_at"] = now
+            existing.setdefault("first_seen", now)
+            return self._write_json(agent_path, existing)
         except Exception as e:
             logger.error(f"Failed to save agent {agent_id}: {e}")
             return False
@@ -424,33 +414,19 @@ class RepositoryMetadata:
 
         config_path = job_dir / "config.json"
 
-        # Atomic read-modify-write with file locking
         try:
-            with file_lock(config_path, mode="r+") as f:
-                # Read existing data
-                f.seek(0)
-                content = f.read().strip()
-                existing = json.loads(content) if content else {}
-
-                # Build config data
-                config_data = {
+            existing = self._read_json(config_path) or {}
+            now = datetime.now().isoformat()
+            return self._write_json(
+                config_path,
+                {
+                    "schema_version": "2",
                     "job_name": job_name,
                     "config": job_config,
-                    "updated_at": datetime.now().isoformat(),
-                }
-
-                # Preserve created_at if exists
-                if existing:
-                    config_data["created_at"] = existing.get("created_at", datetime.now().isoformat())
-                else:
-                    config_data["created_at"] = datetime.now().isoformat()
-
-                # Write back
-                f.seek(0)
-                f.truncate()
-                json.dump(config_data, f, indent=2, default=str)
-
-            return True
+                    "created_at": existing.get("created_at", now),
+                    "updated_at": now,
+                },
+            )
         except Exception as e:
             logger.error(f"Failed to save job {job_name}: {e}")
             return False

@@ -1,6 +1,7 @@
 """Tests for repository metadata functionality."""
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -106,6 +107,55 @@ class TestRepositoryMetadata:
         assert retrieved["platform"] == "linux"
         assert "first_seen" in retrieved
         assert "updated_at" in retrieved
+
+    def test_save_agent_uses_atomic_schema_v2_sidecar(self, temp_repo, monkeypatch):
+        """The serverless agent record is a replace-only, secret-free v2 document."""
+        repo_meta = RepositoryMetadata(temp_repo)
+        replaced = []
+        real_replace = os.replace
+
+        def replace(source, destination):
+            replaced.append((Path(source), Path(destination)))
+            real_replace(source, destination)
+
+        monkeypatch.setattr("backer.core.repo_metadata.os.replace", replace)
+
+        assert repo_meta.save_agent(
+            "agent-123",
+            {"hostname": "test-host", "platform": "linux", "os_info": "Linux", "modes": ["serverless"]},
+        )
+
+        path = temp_repo / BACKER_METADATA_DIR / "agents" / "agent-123.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert len(replaced) == 1
+        temporary, destination = replaced[0]
+        assert destination == path
+        assert temporary.parent == path.parent
+        assert temporary.suffix == ".tmp"
+        assert record["schema_version"] == "2"
+        assert {
+            "agent_id", "hostname", "platform", "os_info", "backer_version", "modes", "first_seen", "updated_at"
+        } <= record.keys()
+        assert "password" not in json.dumps(record).lower()
+
+    def test_save_job_uses_atomic_schema_v2_sidecar(self, temp_repo, monkeypatch):
+        repo_meta = RepositoryMetadata(temp_repo)
+        replaced = []
+        real_replace = os.replace
+
+        def replace(source, destination):
+            replaced.append((Path(source), Path(destination)))
+            real_replace(source, destination)
+
+        monkeypatch.setattr("backer.core.repo_metadata.os.replace", replace)
+
+        assert repo_meta.save_job("nightly", {"source_path": "/data"})
+
+        path = temp_repo / BACKER_METADATA_DIR / "jobs" / "nightly" / "config.json"
+        assert len(replaced) == 1
+        assert replaced[0][1] == path
+        assert replaced[0][0].parent == path.parent
+        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == "2"
 
     def test_list_agents(self, temp_repo):
         """Test listing all agents."""

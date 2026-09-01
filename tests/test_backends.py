@@ -971,6 +971,27 @@ class TestKopiaBackend:
             }
         ]
 
+    def test_get_snapshot_files_keeps_repository_connected_while_resolving_short_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Short-id browsing must not disconnect between snapshot list and kopia ls."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        events: list[str] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: events.append("connect") or (True, "connected"))
+        monkeypatch.setattr(backend, "_disconnect_repo", lambda _: events.append("disconnect"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            events.append("snapshot-list" if command[1:3] == ["snapshot", "list"] else "ls")
+            if command[1:3] == ["snapshot", "list"]:
+                return CompletedProcess(command, 0, '[{"id": "f0a62d5b3dc5a02eb2674791653ebb78"}]', "")
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+
+        assert backend.get_snapshot_files(BackupDestination("repo"), "f0a62d5b3dc5") == []
+        assert events == ["connect", "snapshot-list", "ls", "disconnect"]
+
     def test_get_snapshot_files_fails_closed_on_bad_snapshot_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A kopia error (nonexistent snapshot/path) must return no files, not raise or fabricate a listing."""
         backend = KopiaBackend({"repository_password": "test-password"})

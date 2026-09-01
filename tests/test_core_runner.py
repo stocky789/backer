@@ -186,3 +186,41 @@ def test_one_backend_instance_per_run_and_agent_forwards_credentials(tmp_path: P
             "agent_credentials": ("agent", "secret"),
         }
     ]
+
+
+def test_serverless_metadata_identifies_the_agent_mode(tmp_path: Path, monkeypatch) -> None:
+    saved = []
+
+    class Metadata:
+        def __init__(self, _path):
+            pass
+
+        def is_initialized(self):
+            return True
+
+        def save_agent(self, **kwargs):
+            saved.append(kwargs)
+
+        def save_job_run(self, *_args, **_kwargs):
+            return True
+
+    result = BackendResult(True, OperationType.BACKUP, datetime.now(), datetime.now())
+    monkeypatch.setattr(runner, "RepositoryMetadata", Metadata)
+
+    runner._write_metadata_to_path(
+        tmp_path,
+        "nightly",
+        "run",
+        "/data",
+        "kopia",
+        result,
+        datetime.now(),
+        datetime.now(),
+        None,
+        "agent",
+        {"serverless": True},
+    )
+
+    assert len(saved) == 1
+    assert saved[0]["agent_id"] == "agent"
+    assert saved[0]["agent_data"]["modes"] == ["serverless"]

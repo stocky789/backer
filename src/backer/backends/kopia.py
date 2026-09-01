@@ -1030,37 +1030,13 @@ class KopiaBackend(BackendBase):
     def list_snapshots(self, destination: BackupDestination) -> list[dict[str, Any]]:
         """List available kopia snapshots."""
         try:
-            binary = self._get_binary()
-
             # Connect to repository first
             connected, _ = self._connect_repo(destination.path)
             if not connected:
                 return []
 
             try:
-                result = subprocess.run(
-                    [str(binary), "snapshot", "list", "--json", "--all"],
-                    capture_output=True,
-                    text=True,
-                    env=self._repo_env(destination.path),
-                    timeout=60,
-                )
-
-                if result.returncode == 0 and result.stdout.strip():
-                    snapshots = json.loads(result.stdout)
-                    return [
-                        {
-                            "id": snap.get("id", "unknown")[:12],
-                            "full_id": snap.get("id"),
-                            "timestamp": snap.get("startTime"),
-                            "hostname": snap.get("source", {}).get("host"),
-                            "username": snap.get("source", {}).get("userName"),
-                            "paths": [snap.get("source", {}).get("path", "")],
-                            "tags": snap.get("tags", []),
-                            "size": snap.get("stats", {}).get("totalSize", 0),
-                        }
-                        for snap in snapshots
-                    ]
+                return self._list_snapshots_connected(destination)
             finally:
                 self._disconnect_repo(destination.path)
 
@@ -1068,6 +1044,32 @@ class KopiaBackend(BackendBase):
             logger.warning(f"[KOPIA] Failed to list snapshots: {e}")
 
         return []
+
+    def _list_snapshots_connected(self, destination: BackupDestination) -> list[dict[str, Any]]:
+        """List snapshots using the caller's existing repository connection."""
+        result = subprocess.run(
+            [str(self._get_binary()), "snapshot", "list", "--json", "--all"],
+            capture_output=True,
+            text=True,
+            env=self._repo_env(destination.path),
+            timeout=60,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        snapshots = json.loads(result.stdout)
+        return [
+            {
+                "id": snap.get("id", "unknown")[:12],
+                "full_id": snap.get("id"),
+                "timestamp": snap.get("startTime"),
+                "hostname": snap.get("source", {}).get("host"),
+                "username": snap.get("source", {}).get("userName"),
+                "paths": [snap.get("source", {}).get("path", "")],
+                "tags": snap.get("tags", []),
+                "size": snap.get("stats", {}).get("totalSize", 0),
+            }
+            for snap in snapshots
+        ]
 
     def _resolve_source_target(self, repo_path: str, source_path: str) -> str | None:
         """Build the kopia 'user@host:path' target for a given source path.
@@ -1451,7 +1453,7 @@ class KopiaBackend(BackendBase):
                     match = next(
                         (
                             snap.get("full_id")
-                            for snap in self.list_snapshots(destination)
+                            for snap in self._list_snapshots_connected(destination)
                             if snapshot_id in (snap.get("id"), snap.get("full_id"))
                         ),
                         None,
@@ -1494,7 +1496,7 @@ class KopiaBackend(BackendBase):
             finally:
                 self._disconnect_repo(destination.path)
 
-        except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as e:
             logger.warning(f"[KOPIA] Failed to get snapshot files: {e}")
 
         return []
