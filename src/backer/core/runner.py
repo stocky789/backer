@@ -123,32 +123,23 @@ def run_backup(
         def progress_callback(
             bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0
         ) -> None:
-            percent = (
-                5 + int((bytes_done / total_bytes) * 90)
-                if total_bytes > 0
-                else min(5 + files_done, 95)
-                if files_done > 0
-                else 5
-            )
-            _progress(
-                on_progress,
-                run_id=run_id,
-                status="running",
-                progress_percent=percent,
-                current_file=current_file[:200] if current_file else None,
-                bytes_processed=bytes_done,
-                files_processed=files_done,
-            )
+            event = {
+                "run_id": run_id,
+                "status": "running",
+                "current_file": current_file[:200] if current_file else None,
+                "bytes_processed": bytes_done,
+                "files_processed": files_done,
+            }
+            if total_bytes > 0:
+                event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))
+            _progress(on_progress, **event)
 
-        supports_progress = (
-            hasattr(backend.backup, "__code__") and "progress_callback" in backend.backup.__code__.co_varnames
-        )
         print(f"[BACKUP] Executing backup: {source.path} -> {dest_path}")
         result = backend.backup(
             source=source,
             destination=destination,
             dry_run=dry_run,
-            progress_callback=progress_callback if supports_progress else None,
+            progress_callback=progress_callback,
         )
         finished_at = datetime.now()
         if result.success:

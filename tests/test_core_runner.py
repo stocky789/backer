@@ -30,6 +30,22 @@ def test_proxy_backup_passes_both_agent_credentials(tmp_path: Path, monkeypatch)
     assert options == [{"client_id": "agent", "client_secret": "secret", "location": "proxy://repo"}]
 
 
+def test_backup_passes_progress_callback_without_inspecting_backend_signature(tmp_path: Path, monkeypatch):
+    """A backend can learn progress from frames; a parameter-name probe must not suppress it."""
+    received = []
+
+    class Backend(_Backend):
+        def backup(self, **kwargs):
+            received.append(kwargs["progress_callback"])
+            return super().backup(**kwargs)
+
+    monkeypatch.setattr(runner, "get_backend", lambda *_: Backend())
+
+    runner.run_backup({"job_name": "job", "source_path": str(tmp_path), "destination_path": str(tmp_path / "repo")})
+
+    assert len(received) == 1
+
+
 def test_proxy_restore_passes_both_agent_credentials(tmp_path: Path, monkeypatch):
     """Dropping either proxy credential prevents server-managed local restores."""
     options = []

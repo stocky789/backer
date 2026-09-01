@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,9 @@ def _write_log(data_dir: Path, run_id: str, text: str, secrets: list[str]) -> No
         old.unlink(missing_ok=True)
 
 
-def _run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any]:
+def _run_local_job(
+    config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None
+) -> dict[str, Any]:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}"
     started = datetime.now(UTC)
     data_dir = get_data_dir()
@@ -136,8 +139,9 @@ def _run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fal
                     "passphrase_ref",
                 }
             },
-        }, agent_credentials=(config.agent_id, ""), on_progress=lambda **event: _write_progress(
-            data_dir, run_id, **{key: value for key, value in event.items() if key != "run_id"}
+        }, agent_credentials=(config.agent_id, ""), on_progress=lambda **event: (
+            _write_progress(data_dir, run_id, **{key: value for key, value in event.items() if key != "run_id"}),
+            on_progress(**event) if on_progress else None,
         ))
         if not report["success"]:
             raise RuntimeError("; ".join(report.get("errors") or ["Backup failed"]))
@@ -160,10 +164,12 @@ def _run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = Fal
             smb_manager.disconnect_serverless(repository.server or "", repository.share or "")
 
 
-def run_local_job(config: BackerConfig, name: str, *, run_as_system: bool = False) -> dict[str, Any] | None:
+def run_local_job(
+    config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None
+) -> dict[str, Any] | None:
     """Run one local job only when the shared serverless lock is available."""
     with run_lock(get_data_dir()) as acquired:
-        return _run_local_job(config, name, run_as_system=run_as_system) if acquired else None
+        return _run_local_job(config, name, run_as_system=run_as_system, on_progress=on_progress) if acquired else None
 
 
 def run_due_jobs(

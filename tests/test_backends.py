@@ -1,15 +1,22 @@
 """Tests for backup backends."""
 
+import signal
 import threading
 import time
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 
 import pytest
 
 from backer.backends.base import BackendResult, BackendType, BackupDestination, BackupSource, OperationType
-from backer.backends.kopia import KopiaBackend
+from backer.backends.kopia import (
+    KopiaBackend,
+    _parse_restore_progress,
+    _parse_snapshot_progress,
+    _run_kopia_with_progress,
+)
 from backer.backends.proxy import ProxyBackend
 from backer.backends.registry import BackendRegistry, get_backend
 
@@ -51,13 +58,9 @@ class TestProxyBackend:
 
         assert backend.session.verify is True
 
-    def test_proxy_maintenance_operations_do_not_make_requests(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_proxy_maintenance_operations_do_not_make_requests(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = ProxyBackend({"location": "proxy://backer.example.com/repo/repo-123"})
-        monkeypatch.setattr(
-            backend, "_request", lambda *_args, **_kwargs: pytest.fail("unexpected network request")
-        )
+        monkeypatch.setattr(backend, "_request", lambda *_args, **_kwargs: pytest.fail("unexpected network request"))
         destination = BackupDestination(path="proxy://backer.example.com/repo/repo-123")
 
         assert backend.list_snapshots(destination) == []
@@ -148,6 +151,82 @@ class TestKopiaBackend:
         backend = KopiaBackend(config={"repository_password": "test_password"})
         assert backend._env.get("KOPIA_PASSWORD") == "test_password"
 
+    def test_snapshot_progress_uses_hashed_and_cached_against_previous_snapshot_size(self) -> None:
+        """A recorded Kopia CR frame must report real completed bytes, never an invented percent."""
+        event = _parse_snapshot_progress(
+            " * 0 hashing, 60 hashed (720 MB), 4 cached (8 MB), uploaded 713.2 MB, estimating...",
+            800 * 1024 * 1024,
+        )
+
+        assert event == {"bytes_done": 728 * 1024 * 1024, "total_bytes": 800 * 1024 * 1024, "files_done": 64}
+
+    def test_snapshot_progress_without_previous_snapshot_stays_indeterminate(self) -> None:
+        """Removing the prior snapshot size must not manufacture a denominator."""
+        event = _parse_snapshot_progress(
+            " * 0 hashing, 60 hashed (720 MB), 0 cached (0 B), uploaded 713.2 MB, estimating...", None
+        )
+
+        assert event == {"bytes_done": 720 * 1024 * 1024, "total_bytes": 0, "files_done": 60}
+
+    def test_restore_progress_uses_kopias_processed_denominator(self) -> None:
+        """Changing the restore frame parser must fail this direct Kopia-output contract."""
+        assert _parse_restore_progress("Processed 17 (216 MB) of 60 (720 MB).") == {
+            "bytes_done": 216 * 1024 * 1024,
+            "total_bytes": 720 * 1024 * 1024,
+            "files_done": 17,
+        }
+
+    def test_progress_reader_splits_carriage_returns_and_keeps_result_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If stderr CR handling regresses, callbacks disappear while Kopia's JSON result must survive."""
+        events: list[dict[str, int]] = []
+
+        class Process:
+            stdout = StringIO('{"id":"snapshot"}\n')
+            stderr = StringIO(" * 0 hashing, 1 hashed (2 MB), 0 cached (0 B), uploaded 0 B\r")
+            returncode = 0
+
+            def wait(self, timeout: int | None = None) -> int:
+                return self.returncode
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.Popen", lambda *_args, **_kwargs: Process())
+
+        result = _run_kopia_with_progress(
+            ["kopia", "snapshot", "create", "--json", "--progress", "source"],
+            {},
+            lambda frame: _parse_snapshot_progress(frame, 4 * 1024 * 1024),
+            lambda **event: events.append(event),
+            60,
+        )
+
+        assert result.stdout == '{"id":"snapshot"}\n'
+        assert events == [{"bytes_done": 2 * 1024 * 1024, "total_bytes": 4 * 1024 * 1024, "files_done": 1}]
+
+    def test_progress_runner_interrupts_kopia_before_propagating_ctrl_c(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Removing the interrupt cleanup would leave a connected Kopia process behind."""
+        sent: list[int] = []
+
+        class Process:
+            stdout = StringIO("")
+            stderr = StringIO("")
+
+            def wait(self, timeout: int | None = None) -> int:
+                if timeout != 30:
+                    raise KeyboardInterrupt
+                return 0
+
+            def send_signal(self, value: int) -> None:
+                sent.append(value)
+
+        monkeypatch.setattr("backer.backends.kopia.os.name", "posix")
+        monkeypatch.setattr("backer.backends.kopia.subprocess.Popen", lambda *_args, **_kwargs: Process())
+
+        with pytest.raises(KeyboardInterrupt):
+            _run_kopia_with_progress(["kopia"], {}, lambda _: None, None, 60)
+
+        assert sent == [signal.SIGINT]
+
     def test_connect_requires_repository_password_before_kopia_runs(self) -> None:
         success, message = KopiaBackend()._connect_repo("/backup/repo")
         assert not success
@@ -158,6 +237,7 @@ class TestKopiaBackend:
     ) -> None:
         backend = KopiaBackend({"repository_password": "test-password"})
         calls: list[list[str]] = []
+        progress_calls: list[list[str]] = []
         monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
         monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
 
@@ -166,6 +246,11 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        def run_progress(command: list[str], *_: object) -> CompletedProcess[str]:
+            progress_calls.append(command)
+            return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
+
+        monkeypatch.setattr("backer.backends.kopia._run_kopia_with_progress", run_progress)
         for excludes in (["*.one"], ["*.two"], []):
             assert backend.backup(BackupSource(tmp_path, excludes=excludes), BackupDestination("repo")).success
 
@@ -175,11 +260,14 @@ class TestKopiaBackend:
             ["kopia", "policy", "set", str(tmp_path), "--clear-ignore", "--add-ignore", "*.two"],
             ["kopia", "policy", "set", str(tmp_path), "--clear-ignore"],
         ]
+        assert progress_calls == [
+            ["kopia", "snapshot", "create", "--json", "--progress", str(tmp_path)],
+            ["kopia", "snapshot", "create", "--json", "--progress", str(tmp_path)],
+            ["kopia", "snapshot", "create", "--json", "--progress", str(tmp_path)],
+        ]
 
     def test_restore_dry_run_is_rejected_without_running_kopia(self) -> None:
-        result = KopiaBackend().restore(
-            BackupDestination(path="/backup"), Path("/restore"), dry_run=True
-        )
+        result = KopiaBackend().restore(BackupDestination(path="/backup"), Path("/restore"), dry_run=True)
 
         assert not result.success
         assert result.errors == ["Kopia restore dry runs are not supported"]
@@ -194,10 +282,18 @@ class TestKopiaBackend:
 
     def test_get_repo_type_s3(self) -> None:
         """Test S3 repository type detection."""
-        backend = KopiaBackend({"s3": {
-            "bucket": "mybucket", "prefix": "prefix", "endpoint": "https://minio.test",
-            "region": "us-east-1", "access_key_id": "access", "secret_access_key": "secret",
-        }})
+        backend = KopiaBackend(
+            {
+                "s3": {
+                    "bucket": "mybucket",
+                    "prefix": "prefix",
+                    "endpoint": "https://minio.test",
+                    "region": "us-east-1",
+                    "access_key_id": "access",
+                    "secret_access_key": "secret",
+                }
+            }
+        )
         repo_type, args = backend._get_repo_type("s3://mybucket/prefix")
         assert repo_type == "s3"
         assert "--bucket" in args
@@ -344,9 +440,7 @@ class TestKopiaBackend:
         calls: list[list[str]] = []
         monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
         monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
-        snapshot_json = (
-            '[{"source": {"host": "myhost", "userName": "myuser", "path": "/data/app"}}]'
-        )
+        snapshot_json = '[{"source": {"host": "myhost", "userName": "myuser", "path": "/data/app"}}]'
 
         def run(command: list[str], **_: object) -> CompletedProcess[str]:
             calls.append(command)
@@ -450,9 +544,7 @@ class TestKopiaBackend:
         # that repo always lands on that repo's own connection state.
         assert backend._repo_env("/backup/repoA")["KOPIA_CONFIG_PATH"] == env_a["KOPIA_CONFIG_PATH"]
 
-    def test_disconnect_cannot_touch_a_different_repositorys_config(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_disconnect_cannot_touch_a_different_repositorys_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """One operation's disconnect must not be able to tear down a sibling repo's connection."""
         backend = KopiaBackend({"repository_password": "test-password"})
         calls: list[tuple[list[str], dict[str, str]]] = []
@@ -479,9 +571,7 @@ class TestKopiaBackend:
         def run(command: list[str], **_: object) -> CompletedProcess[str]:
             calls.append(command)
             if command[1:3] == ["repository", "connect"]:
-                return CompletedProcess(
-                    command, 1, "", "can't connect to storage: cannot access storage path"
-                )
+                return CompletedProcess(command, 1, "", "can't connect to storage: cannot access storage path")
             return CompletedProcess(command, 0, "", "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
@@ -502,9 +592,7 @@ class TestKopiaBackend:
         def run(command: list[str], **_: object) -> CompletedProcess[str]:
             calls.append(command)
             if command[1:3] == ["repository", "connect"]:
-                return CompletedProcess(
-                    command, 1, "", "unable to create format manager: invalid repository password"
-                )
+                return CompletedProcess(command, 1, "", "unable to create format manager: invalid repository password")
             return CompletedProcess(command, 0, "", "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
@@ -533,6 +621,10 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        monkeypatch.setattr(
+            "backer.backends.kopia._run_kopia_with_progress",
+            lambda command, *_: CompletedProcess(command, 0, '{"id":"snapshot"}\n', ""),
+        )
         result = backend.backup(BackupSource(tmp_path), BackupDestination(str(tmp_path / "repo")))
 
         assert result.success
@@ -611,9 +703,7 @@ class TestKopiaBackend:
 
         assert set(entered) == {"A", "B"}
 
-    def test_find_latest_snapshot_refuses_basename_only_match(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_find_latest_snapshot_refuses_basename_only_match(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A snapshot from an unrelated directory that merely shares a basename must never be selected."""
         backend = KopiaBackend({"repository_password": "test-password"})
         monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))

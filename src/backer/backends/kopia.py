@@ -6,7 +6,10 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
+import threading
+from collections.abc import Callable
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -24,6 +27,123 @@ from backer.backends.s3 import kopia_s3_config
 from backer.tools.manager import get_tool_manager
 
 logger = logging.getLogger(__name__)
+
+_SNAPSHOT_PROGRESS = re.compile(
+    r"\b(?P<hashed_files>\d+) hashed \((?P<hashed_size>[\d.]+) (?P<hashed_unit>[KMGT]?B)\),\s*"
+    r"(?P<cached_files>\d+) cached \((?P<cached_size>[\d.]+) (?P<cached_unit>[KMGT]?B)\)"
+)
+_RESTORE_PROGRESS = re.compile(
+    r"^Processed (?P<done_files>\d+) \((?P<done_size>[\d.]+) (?P<done_unit>[KMGT]?B)\) of "
+    r"(?P<total_files>\d+) \((?P<total_size>[\d.]+) (?P<total_unit>[KMGT]?B)\)\.?$"
+)
+_BYTE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+
+
+def _progress_bytes(number: str, unit: str) -> int:
+    return int(float(number) * _BYTE_UNITS[unit])
+
+
+def _parse_snapshot_progress(frame: str, total_bytes: int | None) -> dict[str, int] | None:
+    """Parse the pinned Kopia 0.23.1 snapshot progress frame."""
+    match = _SNAPSHOT_PROGRESS.search(frame)
+    if not match:
+        return None
+    return {
+        "bytes_done": _progress_bytes(match["hashed_size"], match["hashed_unit"])
+        + _progress_bytes(match["cached_size"], match["cached_unit"]),
+        "total_bytes": total_bytes or 0,
+        "files_done": int(match["hashed_files"]) + int(match["cached_files"]),
+    }
+
+
+def _parse_restore_progress(frame: str) -> dict[str, int] | None:
+    """Parse the pinned Kopia 0.23.1 restore progress frame."""
+    match = _RESTORE_PROGRESS.match(frame.strip())
+    if not match:
+        return None
+    return {
+        "bytes_done": _progress_bytes(match["done_size"], match["done_unit"]),
+        "total_bytes": _progress_bytes(match["total_size"], match["total_unit"]),
+        "files_done": int(match["done_files"]),
+    }
+
+
+def _read_progress_stream(stream: Any, consume: Callable[[str], None], captured: list[str] | None = None) -> None:
+    """Split Kopia's stderr progress frames on either carriage return or newline."""
+    pending = ""
+    while chunk := stream.read(1024):
+        if captured is not None:
+            captured.append(chunk)
+        pending += chunk
+        parts = re.split(r"[\r\n]+", pending)
+        pending = parts.pop()
+        for frame in parts:
+            if frame:
+                consume(frame)
+    if pending:
+        consume(pending)
+
+
+def _stop_kopia_process(process: subprocess.Popen[str]) -> None:
+    """Give Kopia time to disconnect cleanly before a last-resort kill."""
+    try:
+        process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+        process.wait(timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        process.kill()
+        process.wait()
+        logger.warning(
+            "Kopia was hard-stopped; run 'kopia repository unlock' and check its repository config before retrying"
+        )
+
+
+def _run_kopia_with_progress(
+    cmd: list[str],
+    env: dict[str, str],
+    parse_frame: Callable[[str], dict[str, int] | None],
+    progress_callback: Callable[..., None] | None,
+    timeout: int | float | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run Kopia without letting its CR-delimited stderr block JSON stdout."""
+    popen_args: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    if os.name == "nt":
+        popen_args["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    process = subprocess.Popen(cmd, **popen_args)
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    last = {"bytes_done": 0, "files_done": 0}
+
+    def read_stdout() -> None:
+        stdout_parts.append(process.stdout.read())
+
+    def read_stderr(frame: str) -> None:
+        event = parse_frame(frame)
+        if event and progress_callback:
+            event["bytes_done"] = max(last["bytes_done"], event["bytes_done"])
+            event["files_done"] = max(last["files_done"], event["files_done"])
+            last.update(bytes_done=event["bytes_done"], files_done=event["files_done"])
+            progress_callback(**event)
+
+    stdout_reader = threading.Thread(target=read_stdout, daemon=True)
+    stderr_reader = threading.Thread(
+        target=_read_progress_stream, args=(process.stderr, read_stderr, stderr_parts), daemon=True
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except KeyboardInterrupt:
+        _stop_kopia_process(process)
+        raise
+    finally:
+        stdout_reader.join()
+        stderr_reader.join()
+    return subprocess.CompletedProcess(cmd, returncode, "".join(stdout_parts), "".join(stderr_parts))
 
 
 def _is_wrong_password_error(stderr: str) -> bool:
@@ -264,8 +384,12 @@ class KopiaBackend(BackendBase):
 
         if not self._has_repository_password:
             return BackendResult(
-                success=False, operation=OperationType.BACKUP, started_at=started_at,
-                finished_at=datetime.now(), errors=["Repository encryption password is required"], return_code=-1,
+                success=False,
+                operation=OperationType.BACKUP,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=["Repository encryption password is required"],
+                return_code=-1,
             )
 
         try:
@@ -367,7 +491,10 @@ class KopiaBackend(BackendBase):
         try:
             result = subprocess.run(
                 [str(self._get_binary()), "repository", "status", "--json"],
-                capture_output=True, text=True, env=self._repo_env(path), timeout=30,
+                capture_output=True,
+                text=True,
+                env=self._repo_env(path),
+                timeout=30,
             )
             if result.returncode:
                 self.last_repository_error = result.stderr
@@ -513,8 +640,9 @@ class KopiaBackend(BackendBase):
         try:
             env = self._repo_env(destination.path)
 
-            # Build snapshot command
-            cmd = [str(binary), "snapshot", "create", "--json"]
+            # `--json` remains one completion document on stdout; live updates
+            # are the pinned Kopia 0.23.1 `--progress` stderr frames.
+            cmd = [str(binary), "snapshot", "create", "--json", "--progress"]
 
             if dry_run:
                 cmd.append("--dry-run")
@@ -545,13 +673,13 @@ class KopiaBackend(BackendBase):
                 cmd.extend(["--tags", tag])
 
             cmd.append(str(source.path))
-
-            result = subprocess.run(
+            previous_size = self._previous_snapshot_size(destination.path, str(source.path))
+            result = _run_kopia_with_progress(
                 cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=self.config.get("timeout", 86400),
+                env,
+                lambda frame: _parse_snapshot_progress(frame, previous_size),
+                progress_callback,
+                self.config.get("timeout", 86400),
             )
 
             finished_at = datetime.now()
@@ -668,10 +796,7 @@ class KopiaBackend(BackendBase):
                 return None
 
             # Sort by start time (most recent first)
-            matching_snapshots.sort(
-                key=lambda x: x.get("startTime", ""),
-                reverse=True
-            )
+            matching_snapshots.sort(key=lambda x: x.get("startTime", ""), reverse=True)
 
             latest = matching_snapshots[0]
             snapshot_id = latest.get("id")
@@ -680,6 +805,35 @@ class KopiaBackend(BackendBase):
 
         except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as e:
             print(f"[KOPIA] Error finding snapshot: {e}")
+            return None
+
+    def _previous_snapshot_size(self, repo_path: str, source_path: str) -> int | None:
+        """Return the latest exact-source snapshot's recorded byte size, if any."""
+        try:
+            result = subprocess.run(
+                [str(self._get_binary()), "snapshot", "list", "--json", "--all"],
+                capture_output=True,
+                text=True,
+                env=self._repo_env(repo_path),
+                timeout=60,
+            )
+            if result.returncode or not result.stdout.strip():
+                return None
+            snapshots = json.loads(result.stdout)
+            if not isinstance(snapshots, list):
+                return None
+            matches = [
+                snapshot
+                for snapshot in snapshots
+                if _normalize_source_path(snapshot.get("source", {}).get("path", ""))
+                == _normalize_source_path(source_path)
+            ]
+            if not matches:
+                return None
+            latest = max(matches, key=lambda snapshot: snapshot.get("startTime", ""))
+            size = latest.get("stats", {}).get("totalSize")
+            return int(size) if size is not None else None
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
             return None
 
     @_serialize_by_repo("source")
@@ -759,7 +913,10 @@ class KopiaBackend(BackendBase):
             # Kopia restore syntax: kopia snapshot restore <snapshot-id> <target-path>
             # Add flags to overwrite existing files and restore all content
             cmd = [
-                str(binary), "snapshot", "restore",
+                str(binary),
+                "snapshot",
+                "restore",
+                "--progress",
                 "--overwrite-files",
                 "--overwrite-directories",
                 "--overwrite-symlinks",
@@ -772,12 +929,12 @@ class KopiaBackend(BackendBase):
             # Kopia doesn't have a direct --dry-run for restore
             # We could use --skip-existing or similar
 
-            result = subprocess.run(
+            result = _run_kopia_with_progress(
                 cmd,
-                capture_output=True,
-                text=True,
-                env=self._repo_env(source.path),
-                timeout=self.config.get("timeout", 86400),
+                self._repo_env(source.path),
+                _parse_restore_progress,
+                progress_callback,
+                self.config.get("timeout", 86400),
             )
 
             errors = []
@@ -988,8 +1145,12 @@ class KopiaBackend(BackendBase):
             policy_result = subprocess.run(policy_cmd, capture_output=True, text=True, env=env, timeout=60)
             if policy_result.returncode != 0:
                 return BackendResult(
-                    success=False, operation=OperationType.PRUNE, started_at=started_at, finished_at=datetime.now(),
-                    errors=[policy_result.stderr], output=policy_result.stdout + policy_result.stderr,
+                    success=False,
+                    operation=OperationType.PRUNE,
+                    started_at=started_at,
+                    finished_at=datetime.now(),
+                    errors=[policy_result.stderr],
+                    output=policy_result.stdout + policy_result.stderr,
                     return_code=policy_result.returncode,
                 )
 
