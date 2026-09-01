@@ -381,11 +381,12 @@ class ReleaseLock:
         os.fsync(self.fd)
 
 
-def stage(target, data, mode, atime_ns, mtime_ns):
+def stage(target, data, mode, atime_ns, mtime_ns, record=None):
     _validate_parent(target.parent)
     fd, name = tempfile.mkstemp(prefix=".backer-version-", dir=target.parent)
     path = Path(name)
     safe = False
+    staged = None
     try:
         if not regular(os.fstat(fd)):
             raise TransactionError("bad staging descriptor")
@@ -396,13 +397,15 @@ def stage(target, data, mode, atime_ns, mtime_ns):
         _set_mode(fd, mode)
         _set_times(fd, atime_ns, mtime_ns)
         os.fsync(fd)
+        staged = Staged(path, _identity(os.fstat(fd)))
+        if record is not None:
+            record(staged)
     except BaseException:
         staged = Staged(path, _identity(os.fstat(fd))) if safe else None
         os.close(fd)
         if staged is not None:
             cleanup_staged(staged)
         raise
-    staged = Staged(path, _identity(os.fstat(fd)))
     os.close(fd)
     return staged
 
@@ -421,7 +424,7 @@ def validate(journal):
     for rel, entry in zip(TARGETS, entries, strict=True):
         if (
             not isinstance(entry, dict)
-            or set(entry) != {"target", "data", "sha256", "mode", "atime_ns", "mtime_ns"}
+            or set(entry) != {"target", "data", "sha256", "mode", "atime_ns", "mtime_ns", "staged"}
             or entry["target"] != rel.as_posix()
             or not isinstance(entry["data"], str)
             or not isinstance(entry["sha256"], str)
@@ -436,7 +439,21 @@ def validate(journal):
             raise TransactionError("invalid recovery data") from exc
         if len(data) > MAX_JOURNAL or len(entry["sha256"]) != 64 or hashlib.sha256(data).hexdigest() != entry["sha256"]:
             raise TransactionError("invalid recovery data")
-        checked.append((ROOT / rel, data, entry["mode"], entry["atime_ns"], entry["mtime_ns"]))
+        staged = entry["staged"]
+        if staged is not None:
+            if (
+                not isinstance(staged, dict)
+                or set(staged) != {"name", "identity"}
+                or not isinstance(staged["name"], str)
+                or not staged["name"].startswith(".backer-version-")
+                or Path(staged["name"]).name != staged["name"]
+                or not isinstance(staged["identity"], list)
+                or len(staged["identity"]) != 6
+                or not all(_metadata(value, MAX_TIME_NS) for value in staged["identity"])
+            ):
+                raise TransactionError("invalid recovery journal")
+            staged = Staged(ROOT / rel.parent / staged["name"], tuple(staged["identity"]))
+        checked.append((ROOT / rel, data, entry["mode"], entry["atime_ns"], entry["mtime_ns"], staged))
     return checked
 
 
@@ -446,9 +463,11 @@ def _replace(staged, target):
 
 
 def recover(lock, journal):
-    staged = []
+    staged, update_staged = [], []
     try:
-        for target, data, mode, atime_ns, mtime_ns in validate(journal):
+        for target, data, mode, atime_ns, mtime_ns, update in validate(journal):
+            if update is not None:
+                update_staged.append(update)
             staged.append((stage(target, data, mode, atime_ns, mtime_ns), target))
         for source, target in staged:
             _replace(source, target)
@@ -456,6 +475,8 @@ def recover(lock, journal):
         for source, _ in staged:
             cleanup_staged(source)
         raise
+    for source in update_staged:
+        cleanup_staged(source)
     lock.clear()
 
 
@@ -505,6 +526,7 @@ def write_all(updates, originals, lock):
                 "mode": stat.S_IMODE(state.st_mode),
                 "atime_ns": state.st_atime_ns,
                 "mtime_ns": state.st_mtime_ns,
+                "staged": None,
             }
         )
         metadata.append((target, state))
@@ -512,8 +534,14 @@ def write_all(updates, originals, lock):
     lock.save(journal)
     staged, replaced = [], False
     try:
-        for target, state in metadata:
-            staged.append((stage(target, updates[target], state.st_mode, state.st_atime_ns, state.st_mtime_ns), target))
+        for index, (target, state) in enumerate(metadata):
+            def record(source, *, entry=entries[index]):
+                entry["staged"] = {"name": source.path.name, "identity": list(source.identity)}
+                lock.save(journal)
+
+            staged.append(
+                (stage(target, updates[target], state.st_mode, state.st_atime_ns, state.st_mtime_ns, record), target)
+            )
         for source, target in staged:
             replaced = True
             _replace(source, target)

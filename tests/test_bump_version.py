@@ -70,6 +70,7 @@ def journal(root):
                 "mode": state.st_mode & 0o7777,
                 "atime_ns": state.st_atime_ns,
                 "mtime_ns": state.st_mtime_ns,
+                "staged": None,
             }
         )
     return {"schema": 1, "entries": entries}
@@ -178,10 +179,13 @@ def test_crash_recovers_on_next_invocation(tmp_path, monkeypatch):
     monkeypatch.setattr(m.os, "replace", crash)
     with pytest.raises(KeyboardInterrupt):
         run(m, tmp_path, "0.9.0")
-    assert set(json.loads((tmp_path / m.LOCK).read_bytes()[1:])) == {"schema", "entries"}
+    pending = json.loads((tmp_path / m.LOCK).read_bytes()[1:])
+    assert set(pending) == {"schema", "entries"}
+    assert all(entry["staged"] for entry in pending["entries"])
     monkeypatch.undo()
     assert run(load(), tmp_path, "bad") == 2
     assert {p: p.read_bytes() for p in paths(tmp_path)} == before
+    assert not temps(tmp_path)
 
 
 def test_recovery_preserves_original_bytes_mode_and_mtime(tmp_path):
@@ -398,6 +402,7 @@ def test_invalid_journal_metadata_fails_before_restore(tmp_path, field, value):
                 "mode": 0o644,
                 "atime_ns": 1,
                 "mtime_ns": 1,
+                "staged": None,
             }
         )
     entries[0][field] = value
