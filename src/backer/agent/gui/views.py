@@ -71,8 +71,8 @@ def save_schedule_pause(paused: bool, until) -> None:
 
 def schedule_pause_snapshot():
     """Capture pause state before a tray change for rollback."""
-    path = get_data_dir() / "schedule.json"
-    return path, path.exists(), schedule_pause_state(get_data_dir())
+    path = get_data_dir() / "schedule-runtime.json"
+    return path, path.read_bytes() if path.exists() else None
 
 
 def schedule_pause_matches(paused: bool, until) -> bool:
@@ -85,28 +85,16 @@ def schedule_pause_consensus():
     return schedule_pause_state(get_data_dir())
 
 
-def _remove_created_pause_config(path: Path, target: Path) -> None:
-    """Remove only the exact schedule file created by a rejected pause transaction."""
-    if path.resolve(strict=False) != target.resolve(strict=False):
-        raise OSError(f"Refusing to remove unexpected schedule state: {path}")
-    path.unlink()
-
-
 def restore_schedule_pause(snapshot) -> None:
-    """Restore only pause state, preserving scheduled-fire timestamps."""
-    path, existed, (paused, until) = snapshot
-    if not existed and path.is_file():
-        _remove_created_pause_config(path, path)
-        return
-    if not path.is_file() and existed:
-        raise OSError(f"Schedule state disappeared: {path}")
-    _schedule_pause(get_data_dir(), paused, until)
+    """Restore the exact pause runtime file without touching fire timestamps."""
+    path, content = snapshot
+    _restore_config_file(path, content)
 
 
 def schedule_pause_snapshot_matches(snapshot) -> bool:
     """Return whether durable pause fields still match their pre-change snapshot."""
-    path, existed, state = snapshot
-    return path.exists() == existed and (not existed or schedule_pause_state(get_data_dir()) == state)
+    path, content = snapshot
+    return (path.read_bytes() if path.exists() else None) == content
 
 
 def unattended_blocker(config: BackerConfig) -> str | None:

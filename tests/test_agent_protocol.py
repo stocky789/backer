@@ -710,7 +710,7 @@ def test_failed_backup_run_is_recorded_with_its_error(tmp_path: Path) -> None:
         "kopia",
         SimpleNamespace(
             success=False, bytes_transferred=0, files_transferred=0,
-            errors=["repository unavailable"],
+            errors=["repository unavailable\nwith details"], return_code=1,
         ),
         datetime.now(),
         datetime.now(),
@@ -721,7 +721,10 @@ def test_failed_backup_run_is_recorded_with_its_error(tmp_path: Path) -> None:
     runs = metadata.get_job_runs("photos")
     assert len(runs) == 1
     assert runs[0]["status"] == "failed"
-    assert runs[0]["errors"] == ["repository unavailable"]
+    assert runs[0]["errors"] == ["repository unavailable\nwith details"]
+    assert runs[0]["return_code"] == 1
+    assert runs[0]["error"] == "repository unavailable with details"
+    assert runs[0]["error_stage"] == "backup"
 
 
 def test_execute_backup_writes_repo_metadata_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

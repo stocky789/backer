@@ -38,7 +38,6 @@ def _add_and_run(runner: CliRunner, config: Path, source: Path, repository_type:
             *location,
             "--passphrase-stdin",
             "--headless",
-            "--yes",
         ],
         input="serverless-test-passphrase\n",
     )
@@ -182,7 +181,6 @@ def test_s3_serverless_first_and_changed_backup(monkeypatch: pytest.MonkeyPatch,
             str(secret),
             "--passphrase-stdin",
             "--headless",
-            "--yes",
         ],
         input="serverless-test-passphrase\n",
     )
@@ -266,7 +264,6 @@ def test_smb_linux_serverless_mount_contract(monkeypatch: pytest.MonkeyPatch, tm
             username,
             "--password-stdin",
             "--headless",
-            "--yes",
         ],
         input=f"{password}\nserverless-test-passphrase\n",
     )
@@ -333,7 +330,6 @@ def test_smb_windows_real_redirector_and_1219(monkeypatch: pytest.MonkeyPatch, t
             username,
             "--password-stdin",
             "--headless",
-            "--yes",
         ],
         input=f"{password}\nserverless-test-passphrase\n",
     )

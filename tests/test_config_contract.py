@@ -35,23 +35,54 @@ def test_schedule_pause_preserves_fire_times_and_expiry_resumes(tmp_path):
     schedule_pause(tmp_path, True, now - timedelta(seconds=1))
 
     assert not scheduling_paused(tmp_path, now)
-    assert __import__("json").loads((tmp_path / "schedule.json").read_text())["fires"] == {
-        "nightly": "2026-01-01T00:00:00Z"
-    }
+    assert __import__("json").loads((tmp_path / "schedule.json").read_text()) == {"nightly": "2026-01-01T00:00:00Z"}
     assert schedule_pause_state(tmp_path) == (False, None)
 
 
-def test_pause_rollback_restores_only_pause_state(monkeypatch, tmp_path):
+def test_pause_rollback_restores_exact_runtime_file(monkeypatch, tmp_path):
     from backer.agent.gui import views
 
     monkeypatch.setattr(views, "get_data_dir", lambda: tmp_path)
-    (tmp_path / "schedule.json").write_text('{"fires": {"nightly": "2026-01-01T00:00:00Z"}}')
+    runtime = tmp_path / "schedule-runtime.json"
+    runtime.write_bytes(b'{\n  "pause": {"paused": false, "until": null}\n}')
     snapshot = views.schedule_pause_snapshot()
     views.save_schedule_pause(True, None)
 
     views.restore_schedule_pause(snapshot)
 
-    assert schedule_pause_state(tmp_path) == (False, None)
-    assert __import__("json").loads((tmp_path / "schedule.json").read_text())["fires"] == {
-        "nightly": "2026-01-01T00:00:00Z"
+    assert runtime.read_bytes() == b'{\n  "pause": {"paused": false, "until": null}\n}'
+
+
+def test_schedule_keeps_jobs_named_fires_and_pause_flat(tmp_path):
+    config = BackerConfig(jobs={
+        name: {"repository": "repo", "source": {"path": "/source"}, "schedule": {"cron": "* * * * *"}}
+        for name in ("fires", "pause")
+    })
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    assert due_jobs(config, now, tmp_path) == ["fires", "pause"]
+    assert __import__("json").loads((tmp_path / "schedule.json").read_text()) == {
+        "fires": "2026-01-01T00:00:00Z", "pause": "2026-01-01T00:00:00Z"
     }
+
+
+def test_schedule_upgrades_wrapped_legacy_fires_without_losing_pause(tmp_path):
+    (tmp_path / "schedule.json").write_text(
+        '{"fires": {"nightly": "2026-01-01T00:00:00Z"}, "pause": {"paused": true, "until": null}}'
+    )
+
+    assert schedule_pause_state(tmp_path) == (True, None)
+    assert __import__("json").loads((tmp_path / "schedule.json").read_text()) == {"nightly": "2026-01-01T00:00:00Z"}
+
+
+def test_pause_and_fire_use_independent_runtime_files(tmp_path):
+    config = BackerConfig(
+        jobs={"nightly": {"repository": "repo", "source": {"path": "/source"}, "schedule": {"cron": "* * * * *"}}}
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    assert due_jobs(config, now, tmp_path) == ["nightly"]
+    schedule_pause(tmp_path, True, None)
+
+    assert __import__("json").loads((tmp_path / "schedule.json").read_text()) == {"nightly": "2026-01-01T00:00:00Z"}
+    assert schedule_pause_state(tmp_path) == (True, None)

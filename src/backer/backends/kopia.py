@@ -1241,8 +1241,8 @@ class KopiaBackend(BackendBase):
             metadata: dict[str, Any] = {}
             if dry_run and list_expired and return_code == 0:
                 list_result = subprocess.run(
-                    [str(binary), "snapshot", "list", "--json", target] if target is not None else [
-                        str(binary), "snapshot", "list", "--json", "--all"
+                    [str(binary), "snapshot", "list", "--json", "--retention", target] if target is not None else [
+                        str(binary), "snapshot", "list", "--json", "--retention", "--all"
                     ],
                     capture_output=True,
                     text=True,

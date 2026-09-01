@@ -537,7 +537,7 @@ class TestKopiaBackend:
         assert result.success
         assert result.metadata["expired_snapshots"] == [{"id": "expire", "timestamp": "2026-09-01T01:00:00Z"}]
         assert calls.index(["kopia", "policy", "set", target, "--keep-latest", "1"]) < calls.index(
-            ["kopia", "snapshot", "list", "--json", target]
+            ["kopia", "snapshot", "list", "--json", "--retention", target]
         )
 
     def test_prune_refuses_with_no_retention_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:

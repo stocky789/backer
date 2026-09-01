@@ -749,7 +749,6 @@ def init(
         passphrase_out=passphrase_out,
         print_passphrase=print_passphrase,
         headless=True,
-        yes=True,
         storage_password=values.get("_storage_password"),
         generated_passphrase=values.get("_generated_passphrase"),
     )
@@ -1536,7 +1535,6 @@ def _read_storage(stream: bool, file: Path | None) -> str | None:
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.option("--print-passphrase", is_flag=True)
 @click.option("--headless", is_flag=True, help="Allow the protected local-file secret fallback")
-@click.option("--yes", is_flag=True)
 @click.pass_context
 def repo_add(
     ctx: click.Context,
@@ -1566,7 +1564,6 @@ def repo_add(
     passphrase_out: Path | None,
     print_passphrase: bool,
     headless: bool,
-    yes: bool,
     storage_password: str | None = None,
     generated_passphrase: str | None = None,
 ) -> None:
@@ -1576,12 +1573,14 @@ def repo_add(
     from backer.serverless.repositories import add_repository
 
     try:
+        if not _interactive() and not headless:
+            raise click.UsageError("--headless is required when repo add is not run from a terminal")
         if passphrase_stdin and (storage_stdin or secret_key_stdin):
             raise click.UsageError("Use --passphrase-file when --storage-stdin is used")
         if generate_passphrase:
             if passphrase_stdin or passphrase_file:
                 raise click.UsageError("Choose one passphrase source")
-            if not _interactive() and not (passphrase_out or print_passphrase):
+            if (headless or not _interactive()) and not (passphrase_out or print_passphrase):
                 _missing_flags("repo add " + name, ["--passphrase-out FILE or --print-passphrase"])
             passphrase = generated_passphrase or _generated_passphrase()
             if print_passphrase and generated_passphrase is None:

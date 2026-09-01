@@ -48,6 +48,8 @@ The release workflow publishes the top section verbatim as the release notes.
 - The CLI saves agent credentials with its supported call and passes the original source to Kopia restores.
 - Agent configuration uses one canonical path across the GUI, interactive client, and service.
 - Short snapshot IDs stay connected while their full Kopia IDs are resolved, and sidecar agent/job records now use atomic v2 writes.
+- Retention previews request Kopia's retention reasons, non-interactive repository setup requires explicit headless mode, and scheduler fires and pause state no longer overwrite each other.
+- Repository run records now include result codes and a safe failure summary.
 
 ## 0.8.0
 

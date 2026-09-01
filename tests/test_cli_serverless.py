@@ -67,7 +67,7 @@ def test_noninteractive_first_run_creates_runs_and_lists_one_snapshot(monkeypatc
         main,
         [
             "--config", str(config_path), "repo", "add", "repo", "--init", "--type", "local", "--path",
-            str(tmp_path), "--passphrase-stdin", "--headless", "--yes",
+            str(tmp_path), "--passphrase-stdin", "--headless",
         ],
         input="ultra-secret\n",
     )
@@ -150,7 +150,7 @@ def test_noninteractive_first_run_uses_real_config_keystore_and_kopia_boundary(m
         main,
         [
             "--config", str(config_path), "repo", "add", "repo", "--init", "--type", "local", "--path",
-            str(repository), "--passphrase-stdin", "--headless", "--yes",
+            str(repository), "--passphrase-stdin", "--headless",
         ],
         input="ultra-secret\n",
     )
@@ -245,10 +245,54 @@ def test_init_no_tty_aggregates_missing_flags_for_each_repository_type(arguments
 def test_generated_passphrase_needs_visible_output_off_tty(tmp_path):
     result = CliRunner().invoke(
         main,
-        ["repo", "add", "r1", "--init", "--type", "local", "--path", str(tmp_path), "--generate-passphrase", "--yes"],
+        [
+            "repo", "add", "r1", "--init", "--type", "local", "--path", str(tmp_path),
+            "--generate-passphrase", "--headless",
+        ],
     )
     assert result.exit_code == 2
     assert "--passphrase-out FILE or --print-passphrase" in result.output
+
+
+def test_repo_add_non_tty_requires_headless(monkeypatch, tmp_path):
+    called = []
+
+    def add_repository(*_args, **_kwargs):
+        called.append(True)
+        return "id", "keyring"
+
+    monkeypatch.setattr(
+        "backer.serverless.repositories.add_repository", add_repository
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "r1", "--attach", "--path", str(tmp_path), "--passphrase-stdin"],
+        input="secret\n",
+    )
+
+    assert result.exit_code == 2
+    assert "--headless" in result.output
+    assert not called
+
+
+def test_repo_add_non_tty_headless_allows_explicit_passphrase(monkeypatch, tmp_path):
+    monkeypatch.setattr("backer.serverless.repositories.add_repository", lambda *_args, **_kwargs: ("id", "keyring"))
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "r1", "--attach", "--path", str(tmp_path), "--passphrase-stdin", "--headless"],
+        input="secret\n",
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_repo_add_does_not_advertise_unused_yes_flag():
+    result = CliRunner().invoke(main, ["repo", "add", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--yes" not in result.output
 
 
 def test_generated_passphrase_uses_six_eff_words_and_recovery_record_is_private(tmp_path):

@@ -59,9 +59,7 @@ def _read(path: Path) -> dict[str, object]:
         return {}
     if not isinstance(values, dict):
         return {}
-    # The original format was a flat map of fire times.  Keep it readable while
-    # moving transient state under the data directory rather than config.yaml.
-    return values if "fires" in values or "pause" in values else {"fires": values}
+    return values
 
 
 def _write(path: Path, values: dict[str, object]) -> None:
@@ -89,9 +87,23 @@ def _pause(values: dict[str, object]) -> tuple[bool, datetime | None]:
         return True, None
 
 
+def _fires(data_dir: Path) -> dict[str, object]:
+    """Read the flat fire-time contract and migrate the one wrapped legacy form."""
+    path = data_dir / "schedule.json"
+    values = _read(path)
+    legacy_fires = values.get("fires")
+    if isinstance(legacy_fires, dict):
+        pause = values.get("pause")
+        if isinstance(pause, dict):
+            _write(data_dir / "schedule-runtime.json", {"pause": pause})
+        _write(path, legacy_fires)
+        return legacy_fires
+    return values
+
+
 def schedule_pause(data_dir: Path, paused: bool, until: datetime | None) -> None:
     """Atomically persist the local scheduler pause beside its other runtime state."""
-    path = data_dir / "schedule.json"
+    path = data_dir / "schedule-runtime.json"
     values = _read(path)
     values["pause"] = {"paused": paused, "until": _iso(until) if paused and until else None}
     _write(path, values)
@@ -99,7 +111,8 @@ def schedule_pause(data_dir: Path, paused: bool, until: datetime | None) -> None
 
 def schedule_pause_state(data_dir: Path) -> tuple[bool, datetime | None]:
     """Return the raw durable pause selection for the tray and rollback path."""
-    return _pause(_read(data_dir / "schedule.json"))
+    _fires(data_dir)
+    return _pause(_read(data_dir / "schedule-runtime.json"))
 
 
 def scheduling_paused(data_dir: Path, now: datetime) -> bool:
@@ -124,10 +137,7 @@ def due_jobs(config: BackerConfig, now: datetime, data_dir: Path) -> list[str]:
     if scheduling_paused(data_dir, now):
         return []
     schedule_path = data_dir / "schedule.json"
-    values = _read(schedule_path)
-    fires = values.setdefault("fires", {})
-    if not isinstance(fires, dict):
-        fires = values["fires"] = {}
+    fires = _fires(data_dir)
     due: list[str] = []
     for name, job in config.jobs.items():
         if not job.enabled or not job.schedule or not job.schedule.cron:
@@ -141,5 +151,5 @@ def due_jobs(config: BackerConfig, now: datetime, data_dir: Path) -> list[str]:
             fires[name] = _iso(now)
             due.append(name)
     if due:
-        _write(schedule_path, values)
+        _write(schedule_path, fires)
     return due
