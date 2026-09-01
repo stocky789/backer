@@ -141,6 +141,7 @@ class InitStep:
     applicable: Callable[[dict[str, Any]], bool]
     required: bool | str
     serializer: Callable[[Any], list[str]]
+    wizard_group: int | None = None
 
 
 def _always(_: dict[str, Any]) -> bool:
@@ -181,11 +182,12 @@ INIT_STEPS = (
         _always,
         True,
         _value("--type"),
+        1,
     ),
-    InitStep("path", "--path", "Repository path", bool, _is_type("local", "smb"), True, _value("--path")),
-    InitStep("host", "--host", "SMB host", bool, _is_type("smb"), True, _value("--host")),
-    InitStep("share", "--share", "SMB share", bool, _is_type("smb"), True, _value("--share")),
-    InitStep("username", "--username", "File-server user", bool, _is_type("smb"), True, _value("--username")),
+    InitStep("path", "--path", "Repository path", bool, _is_type("local", "smb"), True, _value("--path"), 2),
+    InitStep("host", "--host", "SMB host", bool, _is_type("smb"), True, _value("--host"), 2),
+    InitStep("share", "--share", "SMB share", bool, _is_type("smb"), True, _value("--share"), 2),
+    InitStep("username", "--username", "File-server user", bool, _is_type("smb"), True, _value("--username"), 2),
     InitStep(
         "password_stdin",
         "--password-stdin",
@@ -194,6 +196,7 @@ INIT_STEPS = (
         _is_type("smb"),
         "smb-password",
         _switch("--password-stdin"),
+        2,
     ),
     InitStep(
         "password_file",
@@ -203,18 +206,19 @@ INIT_STEPS = (
         _is_type("smb"),
         "smb-password",
         _value("--password-file"),
+        2,
     ),
     InitStep(
-        "password_env", "$BACKER_SMB_PASSWORD", "File-server sign-in", bool, _is_type("smb"), "smb-password", _never
+        "password_env", "$BACKER_SMB_PASSWORD", "File-server sign-in", bool, _is_type("smb"), "smb-password", _never, 2
     ),
-    InitStep("bucket", "--bucket", "S3 bucket", bool, _is_type("s3"), True, _value("--bucket")),
+    InitStep("bucket", "--bucket", "S3 bucket", bool, _is_type("s3"), True, _value("--bucket"), 2),
     InitStep(
-        "prefix", "--prefix", "S3 prefix", lambda value: value is not None, _is_type("s3"), False, _value("--prefix")
+        "prefix", "--prefix", "S3 prefix", lambda value: value is not None, _is_type("s3"), False, _value("--prefix"), 2
     ),
-    InitStep("endpoint", "--endpoint", "S3 endpoint", bool, _is_type("s3"), True, _value("--endpoint")),
-    InitStep("region", "--region", "S3 region", bool, _is_type("s3"), True, _value("--region")),
+    InitStep("endpoint", "--endpoint", "S3 endpoint", bool, _is_type("s3"), True, _value("--endpoint"), 2),
+    InitStep("region", "--region", "S3 region", bool, _is_type("s3"), True, _value("--region"), 2),
     InitStep(
-        "access_key_id", "--access-key-id", "S3 access key", bool, _is_type("s3"), True, _value("--access-key-id")
+        "access_key_id", "--access-key-id", "S3 access key", bool, _is_type("s3"), True, _value("--access-key-id"), 2
     ),
     InitStep(
         "secret_key_stdin",
@@ -224,6 +228,7 @@ INIT_STEPS = (
         _is_type("s3"),
         "s3-secret",
         _switch("--secret-key-stdin"),
+        2,
     ),
     InitStep(
         "secret_key_file",
@@ -233,8 +238,9 @@ INIT_STEPS = (
         _is_type("s3"),
         "s3-secret",
         _value("--secret-key-file"),
+        2,
     ),
-    InitStep("secret_key_env", "$BACKER_S3_SECRET_KEY", "S3 secret key", bool, _is_type("s3"), "s3-secret", _never),
+    InitStep("secret_key_env", "$BACKER_S3_SECRET_KEY", "S3 secret key", bool, _is_type("s3"), "s3-secret", _never, 2),
     InitStep(
         "passphrase_stdin",
         "--passphrase-stdin",
@@ -243,6 +249,7 @@ INIT_STEPS = (
         _not_interactive,
         "passphrase",
         _switch("--passphrase-stdin"),
+        3,
     ),
     InitStep(
         "passphrase_file",
@@ -252,6 +259,7 @@ INIT_STEPS = (
         _not_interactive,
         "passphrase",
         _value("--passphrase-file"),
+        3,
     ),
     InitStep(
         "generate_passphrase",
@@ -261,6 +269,7 @@ INIT_STEPS = (
         _not_interactive,
         "passphrase",
         _switch("--generate-passphrase"),
+        3,
     ),
     InitStep(
         "passphrase_out",
@@ -270,6 +279,7 @@ INIT_STEPS = (
         _always,
         False,
         _value("--passphrase-out"),
+        3,
     ),
     InitStep(
         "print_passphrase",
@@ -279,6 +289,7 @@ INIT_STEPS = (
         _always,
         False,
         _switch("--print-passphrase"),
+        3,
     ),
     InitStep(
         "update_password",
@@ -298,7 +309,7 @@ INIT_STEPS = (
         False,
         _switch("--update-passphrase"),
     ),
-    InitStep("source", "--source", "Folder to back up", bool, _always, True, _repeated("--source")),
+    InitStep("source", "--source", "Folder to back up", bool, _always, True, _repeated("--source"), 4),
     InitStep(
         "exclude",
         "--exclude",
@@ -307,9 +318,10 @@ INIT_STEPS = (
         _always,
         False,
         _repeated("--exclude"),
+        4,
     ),
-    InitStep("schedule", "--schedule", "Schedule", bool, _always, "schedule", _value("--schedule")),
-    InitStep("no_schedule", "--no-schedule", "No schedule", bool, _always, "schedule", _switch("--no-schedule")),
+    InitStep("schedule", "--schedule", "Schedule", bool, _always, "schedule", _value("--schedule"), 5),
+    InitStep("no_schedule", "--no-schedule", "No schedule", bool, _always, "schedule", _switch("--no-schedule"), 5),
     InitStep(
         "keep_last",
         "--keep-last",
@@ -379,7 +391,12 @@ def _init_missing(values: dict[str, Any]) -> list[str]:
 
 
 def _render_init_command(values: dict[str, Any]) -> str:
-    arguments = [part for step in INIT_STEPS if step.applicable(values) for part in step.serializer(values[step.key])]
+    rendered = dict(values)
+    if rendered.get("_generated_passphrase") and rendered.get("passphrase_out"):
+        rendered.update(generate_passphrase=False, passphrase_file=rendered["passphrase_out"], passphrase_out=None)
+    arguments = [
+        part for step in INIT_STEPS if step.applicable(rendered) for part in step.serializer(rendered[step.key])
+    ]
     return "backer init " + " ".join(shlex.quote(argument) for argument in arguments)
 
 

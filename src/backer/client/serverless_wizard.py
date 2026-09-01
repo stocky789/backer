@@ -29,6 +29,17 @@ class WizardAbortError(Exception):
     """The user deliberately left setup before it wrote configuration."""
 
 
+def wizard_steps(group: int):
+    """Return the one init-table slice rendered by a compact wizard screen."""
+    from backer.cli import INIT_STEPS
+
+    return tuple(step for step in INIT_STEPS if step.wizard_group == group)
+
+
+def _step(group: int, key: str):
+    return next(step for step in wizard_steps(group) if step.key == key)
+
+
 def valid_folder_name(name: str) -> bool:
     return bool(name) and len(name) <= 255 and name[0] != "." and name not in {".", ".."} and not any(
         separator in name for separator in ("/", "\\")
@@ -188,10 +199,11 @@ def _passphrase(values: dict[str, Any]) -> None:
 
     phrase = _generated_passphrase()
     words = phrase.split("-")
-    export = Prompt.ask("Save recovery copy to (leave blank to print once)", default="").strip()
+    export = Prompt.ask(_step(3, "passphrase_out").prompt).strip()
+    if not export:
+        raise WizardAbortError()
     console.print(f"[bold]Repository passphrase[/bold]\n{phrase}")
-    if export:
-        console.print(f"This writes your passphrase to {export} in plain text.")
+    console.print(f"This will write your passphrase to {export} in plain text after Create.")
     Prompt.ask("Press Enter after saving it", default="")
     console.clear()
     while Prompt.ask("Type words 3 and 6, separated by a space") != f"{words[2]} {words[5]}":
@@ -203,8 +215,8 @@ def _passphrase(values: dict[str, Any]) -> None:
         console.clear()
     values["generate_passphrase"] = True
     values["_generated_passphrase"] = phrase
-    values["passphrase_out"] = Path(export) if export else None
-    values["print_passphrase"] = not export
+    values["passphrase_out"] = Path(export)
+    values["print_passphrase"] = False
 
 
 def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
@@ -214,31 +226,27 @@ def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
     if not _interactive():
         raise RuntimeError("Interactive setup requires a terminal")
     result = dict(values)
-    console.print("[bold]Step 1 of 5[/bold]  Where backups are stored")
-    selected = Prompt.ask("1 local, 2 SMB, 3 S3", choices=("1", "2", "3"), default="1")
+    first = wizard_steps(1)[0]
+    console.print(f"[bold]Step 1 of 5[/bold]  {first.prompt}")
+    selected = Prompt.ask(first.prompt, choices=("1", "2", "3"), default="1")
     result["repository_type"] = {"1": "local", "2": "smb", "3": "s3"}[selected]
     console.print("[bold]Step 2 of 5[/bold]  Repository")
     if result["repository_type"] == "local":
-        result["path"] = _ask_path("Repository folder (Enter to browse)")
+        result["path"] = _ask_path(_step(2, "path").prompt)
     elif result["repository_type"] == "smb":
-        result["host"] = Prompt.ask("Server")
-        result["username"] = Prompt.ask("Username")
+        result["host"] = Prompt.ask(_step(2, "host").prompt)
+        result["username"] = Prompt.ask(_step(2, "username").prompt)
         password = Prompt.ask("Password", password=True)
         result["share"] = choose_smb_share(result["host"], result["username"], password)
         result["path"] = browse_smb_directory(result["host"], result["share"], result["username"], password)
         result["password_stdin"] = True
         result["_storage_password"] = password
     else:
-        fields = (
-            ("bucket", "Bucket"),
-            ("prefix", "Prefix"),
-            ("endpoint", "Endpoint"),
-            ("region", "Region"),
-            ("access_key_id", "Access key ID"),
-        )
-        for key, prompt in fields:
-            result[key] = Prompt.ask(prompt, default="" if key == "prefix" else None)
-        secret = Prompt.ask("Secret key", password=True)
+        keys = {"bucket", "prefix", "endpoint", "region", "access_key_id"}
+        fields = [step for step in wizard_steps(2) if step.key in keys]
+        for step in fields:
+            result[step.key] = Prompt.ask(step.prompt, default="" if step.key == "prefix" else None)
+        secret = Prompt.ask(_step(2, "secret_key_stdin").prompt, password=True)
         result["secret_key_stdin"] = True
         result["_storage_password"] = json.dumps(
             {"access_key_id": result["access_key_id"], "secret_access_key": secret}
@@ -246,11 +254,11 @@ def run_wizard(values: dict[str, Any]) -> dict[str, Any]:
     console.print("[bold]Step 3 of 5[/bold]  Encryption")
     _passphrase(result)
     console.print("[bold]Step 4 of 5[/bold]  What to back up")
-    result["source"] = (_ask_path("Folder to back up (Enter to browse)"),)
-    excludes = Prompt.ask("Exclude patterns, comma separated", default="")
+    result["source"] = (_ask_path(_step(4, "source").prompt),)
+    excludes = Prompt.ask(_step(4, "exclude").prompt, default="")
     result["exclude"] = tuple(item.strip() for item in excludes.split(",") if item.strip())
     console.print("[bold]Step 5 of 5[/bold]  Schedule")
-    schedule = Prompt.ask("1 daily 02:00, 2 hourly, 3 manual, 4 cron", choices=("1", "2", "3", "4"), default="1")
+    schedule = Prompt.ask(_step(5, "schedule").prompt, choices=("1", "2", "3", "4"), default="1")
     schedules = {"1": "0 2 * * *", "2": "0 * * * *", "3": None, "4": Prompt.ask("Cron")}
     result["schedule"], result["no_schedule"] = schedules[schedule], schedule == "3"
     result["repo_name"] = Prompt.ask("Repository name", default=result["repo_name"])

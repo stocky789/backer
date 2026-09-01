@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,67 @@ def test_folder_name_rejects_paths_and_hidden_names() -> None:
     assert not valid_folder_name("nested/backup")
     assert not valid_folder_name(".hidden")
     assert not valid_folder_name("x" * 256)
+
+
+def test_wizard_prompt_groups_are_derived_from_init_steps() -> None:
+    from backer.client.serverless_wizard import wizard_steps
+
+    assert [step.key for step in wizard_steps(1)] == ["repository_type"]
+    assert {step.key for step in wizard_steps(4)} == {"source", "exclude"}
+    assert all(step.prompt for step in wizard_steps(5))
+    assert wizard_steps(1)[0].validator("local")
+    assert not wizard_steps(1)[0].validator("nfs")
+
+
+def test_wizard_replay_uses_the_saved_passphrase_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from backer.cli import _render_init_command, main
+
+    values = {
+        "repository_type": "local", "path": str(tmp_path), "host": None, "share": None, "username": None,
+        "password_stdin": False, "password_file": None, "password_env": False, "bucket": None, "prefix": None,
+        "endpoint": None, "region": None, "access_key_id": None, "secret_key_stdin": False, "secret_key_file": None,
+        "secret_key_env": False, "source": (str(tmp_path),), "exclude": (), "schedule": None, "no_schedule": True,
+        "keep_last": None, "keep_daily": None, "keep_weekly": None, "keep_monthly": None, "keep_yearly": None,
+        "repo_name": "repository", "job_name": "backup", "passphrase_stdin": False, "passphrase_file": None,
+        "generate_passphrase": True, "passphrase_out": tmp_path / "recovery.txt", "print_passphrase": False,
+        "update_password": False, "update_passphrase": False, "install": False,
+        "_generated_passphrase": "six-safe-words-for-this-test-only",
+    }
+    values.update(
+        repository_type="local",
+        path=str(tmp_path),
+        source=(str(tmp_path),),
+        no_schedule=True,
+        repo_name="repository",
+        job_name="backup",
+        generate_passphrase=True,
+    )
+
+    command = _render_init_command(values)
+
+    assert "--passphrase-file" in command
+    assert "--generate-passphrase" not in command
+    recovery = tmp_path / "recovery.txt"
+    recovery.write_text("six-safe-words-for-this-test-only\n", encoding="utf-8")
+    calls: list[str] = []
+    runner = CliRunner()
+    monkeypatch.setattr("backer.cli.repo_add", lambda **_kwargs: calls.append("repo"))
+    monkeypatch.setattr("backer.cli.job_create", lambda **_kwargs: calls.append("job"))
+    result = runner.invoke(main, shlex.split(command.removeprefix("backer ")))
+    assert result.exit_code == 0, result.output
+    assert calls == ["repo", "job"]
+
+
+def test_aborting_passphrase_export_writes_no_recovery_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from backer.client.serverless_wizard import WizardAbortError, _passphrase
+
+    target = tmp_path / "recovery.txt"
+    monkeypatch.setattr("backer.client.serverless_wizard.Prompt.ask", lambda *_args, **_kwargs: "")
+
+    with pytest.raises(WizardAbortError):
+        _passphrase({})
+
+    assert not target.exists()
 
 
 def test_local_entries_mark_directories_and_sort_them_first(tmp_path: Path) -> None:
