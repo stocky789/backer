@@ -254,6 +254,33 @@ class TestKopiaBackend:
         assert sent == [signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT]
         assert waits == [1, 30]
 
+    def test_progress_runner_bounds_a_hard_kill_that_never_reaps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unkillable child must not leave the timeout path waiting forever on pipes or wait()."""
+        waits: list[int | None] = []
+        killed = []
+
+        class Process:
+            stdout = StringIO("")
+            stderr = StringIO("")
+
+            def wait(self, timeout: int | None = None) -> int:
+                waits.append(timeout)
+                raise subprocess.TimeoutExpired(["kopia"], timeout)
+
+            def send_signal(self, _value: int) -> None:
+                pass
+
+            def kill(self) -> None:
+                killed.append(True)
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.Popen", lambda *_args, **_kwargs: Process())
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_kopia_with_progress(["kopia"], {}, lambda _: None, None, 1)
+
+        assert killed == [True]
+        assert waits == [1, 30, 5]
+
     def test_connect_requires_repository_password_before_kopia_runs(self) -> None:
         success, message = KopiaBackend()._connect_repo("/backup/repo")
         assert not success

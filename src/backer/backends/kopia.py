@@ -71,30 +71,39 @@ def _parse_restore_progress(frame: str) -> dict[str, int] | None:
 def _read_progress_stream(stream: Any, consume: Callable[[str], None], captured: list[str] | None = None) -> None:
     """Split Kopia's stderr progress frames on either carriage return or newline."""
     pending = ""
-    while chunk := stream.read(1024):
-        if captured is not None:
-            captured.append(chunk)
-        pending += chunk
-        parts = re.split(r"[\r\n]+", pending)
-        pending = parts.pop()
-        for frame in parts:
-            if frame:
-                consume(frame)
+    try:
+        while chunk := stream.read(1024):
+            if captured is not None:
+                captured.append(chunk)
+            pending += chunk
+            parts = re.split(r"[\r\n]+", pending)
+            pending = parts.pop()
+            for frame in parts:
+                if frame:
+                    consume(frame)
+    except (OSError, ValueError):
+        return
     if pending:
         consume(pending)
 
 
-def _stop_kopia_process(process: subprocess.Popen[str]) -> None:
+def _stop_kopia_process(process: subprocess.Popen[str]) -> bool:
     """Give Kopia time to disconnect cleanly before a last-resort kill."""
     try:
         process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
         process.wait(timeout=30)
+        return True
     except (OSError, subprocess.TimeoutExpired):
-        process.kill()
-        process.wait()
-        logger.warning(
-            "Kopia was hard-stopped; run 'kopia repository unlock' and check its repository config before retrying"
-        )
+        try:
+            process.kill()
+            process.wait(timeout=5)
+            logger.warning(
+                "Kopia was hard-stopped; run 'kopia repository unlock' and check its repository config before retrying"
+            )
+            return True
+        except (OSError, subprocess.TimeoutExpired):
+            logger.error("Kopia could not be reaped after a hard stop; check its repository unlock and config")
+            return False
 
 
 def _run_kopia_with_progress(
@@ -117,9 +126,13 @@ def _run_kopia_with_progress(
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     last = {"bytes_done": 0, "files_done": 0}
+    stopped = True
 
     def read_stdout() -> None:
-        stdout_parts.append(process.stdout.read())
+        try:
+            stdout_parts.append(process.stdout.read())
+        except (OSError, ValueError):
+            pass
 
     def read_stderr(frame: str) -> None:
         event = parse_frame(frame)
@@ -138,11 +151,17 @@ def _run_kopia_with_progress(
     try:
         returncode = process.wait(timeout=timeout)
     except (KeyboardInterrupt, subprocess.TimeoutExpired):
-        _stop_kopia_process(process)
+        stopped = _stop_kopia_process(process)
         raise
     finally:
-        stdout_reader.join()
-        stderr_reader.join()
+        if not stopped:
+            process.stdout.close()
+            process.stderr.close()
+            stdout_reader.join(timeout=1)
+            stderr_reader.join(timeout=1)
+        else:
+            stdout_reader.join()
+            stderr_reader.join()
     return subprocess.CompletedProcess(cmd, returncode, "".join(stdout_parts), "".join(stderr_parts))
 
 
