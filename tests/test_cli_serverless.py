@@ -380,7 +380,7 @@ def test_prune_checks_confirmation_before_any_delete(monkeypatch):
 
 
 def test_prune_preview_discloses_that_it_saved_the_source_policy(monkeypatch):
-    monkeypatch.setattr("backer.serverless.retention.prune_job", lambda *_args, **_kwargs: (2, "preview"))
+    monkeypatch.setattr("backer.serverless.retention.prune_job", lambda *_args, **_kwargs: (2, "preview", []))
 
     result = CliRunner().invoke(main, ["prune", "job"])
 
@@ -394,13 +394,35 @@ def test_prune_preview_discloses_that_it_saved_the_source_policy(monkeypatch):
     assert result.exit_code == 0, result.output
     assert __import__("json").loads(result.output)["policy_saved"] is True
 
+    result = CliRunner().invoke(main, ["prune", "job", "--apply", "--yes-remove", "2"])
+
+    assert result.exit_code == 0, result.output
+    assert "policy was saved" not in result.output.lower()
+    assert "no snapshots were deleted" not in result.output.lower()
+
+
+def test_prune_list_shows_kopia_expired_snapshot_dates_and_json(monkeypatch):
+    snapshots = [{"id": "expire", "timestamp": "2026-09-01T01:00:00Z"}]
+    monkeypatch.setattr("backer.serverless.retention.prune_job", lambda *_args, **_kwargs: (1, "preview", snapshots))
+
+    result = CliRunner().invoke(main, ["prune", "job", "--list"])
+
+    assert result.exit_code == 0, result.output
+    assert "2026-09-01T01:00:00Z" in result.output
+    assert "expire" in result.output
+
+    result = CliRunner().invoke(main, ["prune", "job", "--list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert __import__("json").loads(result.output)["snapshots"] == snapshots
+
 
 def test_prune_refuses_delete_when_second_preview_changes(monkeypatch):
     calls = []
 
     def prune_job(*_args, **kwargs):
         calls.append(kwargs)
-        return (2 if len(calls) == 1 else 3), "preview"
+        return (2 if len(calls) == 1 else 3), "preview", []
 
     monkeypatch.setattr("backer.serverless.retention.prune_job", prune_job)
     result = CliRunner().invoke(main, ["prune", "job", "--apply", "--yes-remove", "2"])
@@ -415,7 +437,7 @@ def test_prune_refuses_delete_when_same_count_preview_has_different_snapshots(mo
 
     def prune_job(*_args, **kwargs):
         calls.append(kwargs)
-        return 2, "a snapshot(s) would be deleted" if len(calls) == 1 else "b snapshot(s) would be deleted"
+        return 2, "preview", [{"id": "first" if len(calls) == 1 else "second", "timestamp": "2026-09-01"}]
 
     monkeypatch.setattr("backer.serverless.retention.prune_job", prune_job)
     result = CliRunner().invoke(main, ["prune", "job", "--apply", "--yes-remove", "2"])

@@ -214,10 +214,11 @@ def test_preview_and_apply_differ_only_by_delete(monkeypatch, tmp_path: Path) ->
             return type("Result", (), {"success": True, "output": output})()
 
     monkeypatch.setattr("backer.serverless.retention._backend", lambda *_: Backend())
-    preview_count, preview = prune_job(config, "nightly")
+    preview_count, preview, snapshots = prune_job(config, "nightly")
     assert preview_count == 2
     assert preview == "2 snapshot(s) of source would be deleted"
-    assert prune_job(config, "nightly", apply=True) == (2, "Deleted 2 snapshots of source")
+    assert snapshots == []
+    assert prune_job(config, "nightly", apply=True) == (2, "Deleted 2 snapshots of source", [])
     assert calls == [True, False]
 
 

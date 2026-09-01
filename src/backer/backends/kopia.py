@@ -1118,6 +1118,7 @@ class KopiaBackend(BackendBase):
         keep_yearly: int | None = None,
         dry_run: bool = False,
         source_path: str | None = None,
+        list_expired: bool = False,
     ) -> BackendResult:
         """Preview or apply one source's configured policy."""
         started_at = datetime.now()
@@ -1235,6 +1236,51 @@ class KopiaBackend(BackendBase):
             output = expire_result.stdout + expire_result.stderr
             return_code = expire_result.returncode
 
+            metadata: dict[str, Any] = {}
+            if dry_run and list_expired and return_code == 0:
+                list_result = subprocess.run(
+                    [str(binary), "snapshot", "list", "--json", target] if target is not None else [
+                        str(binary), "snapshot", "list", "--json", "--all"
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=60,
+                )
+                output += list_result.stdout + list_result.stderr
+                if list_result.returncode != 0:
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.PRUNE,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=[list_result.stderr or "Could not list snapshots after retention preview"],
+                        output=output,
+                        return_code=list_result.returncode,
+                    )
+                try:
+                    snapshots = json.loads(list_result.stdout)
+                except json.JSONDecodeError:
+                    snapshots = None
+                if not isinstance(snapshots, list) or any(
+                    not isinstance(snapshot, dict) or not isinstance(snapshot.get("retentionReason"), list)
+                    for snapshot in snapshots
+                ):
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.PRUNE,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=["Could not read Kopia retention reasons after preview"],
+                        output=output,
+                        return_code=-1,
+                    )
+                metadata["expired_snapshots"] = [
+                    {"id": snapshot.get("id", ""), "timestamp": snapshot.get("startTime", "")}
+                    for snapshot in snapshots
+                    if snapshot["retentionReason"] == []
+                ]
+
             errors = []
             if return_code != 0:
                 errors = [line for line in output.split("\n") if line.strip() and "error" in line.lower()]
@@ -1247,6 +1293,7 @@ class KopiaBackend(BackendBase):
                 errors=errors,
                 output=output,
                 return_code=return_code,
+                metadata=metadata,
             )
 
         except (subprocess.TimeoutExpired, OSError) as e:

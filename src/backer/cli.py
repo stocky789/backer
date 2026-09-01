@@ -3264,31 +3264,40 @@ def prune(name: str, list_only: bool, apply: bool, yes_remove: int | None, as_js
         raise click.UsageError("--yes-remove N is required with --apply")
     config = load_config(get_config_dir() / "config.yaml")
     try:
-        count, preview = prune_job(config, name, apply=False)
+        count, preview, snapshots = prune_job(config, name, apply=False, list_expired=list_only or apply)
     except ValueError as error:
         raise click.ClickException(str(error)) from error
     if apply and yes_remove != count:
         raise click.UsageError(f"--yes-remove must equal the previewed count ({count})")
     if apply:
         try:
-            refreshed_count, refreshed_preview = prune_job(config, name, apply=False)
+            refreshed_count, refreshed_preview, refreshed_snapshots = prune_job(
+                config, name, apply=False, list_expired=True
+            )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
-        if refreshed_count != count or refreshed_preview != preview:
+        if refreshed_count != count or refreshed_preview != preview or refreshed_snapshots != snapshots:
             raise click.ClickException("Retention preview changed; nothing was deleted")
         try:
-            count, _ = prune_job(config, name, apply=True)
+            count, _, _ = prune_job(config, name, apply=True)
         except ValueError as error:
             raise click.ClickException(str(error)) from error
     message = f"{count} snapshot(s) {'deleted' if apply else 'would be deleted'}"
     if as_json:
-        click.echo(json.dumps({"count": count, "applied": apply, "policy_saved": True}))
+        payload = {"count": count, "applied": apply, "policy_saved": True}
+        if list_only:
+            payload["snapshots"] = snapshots
+        click.echo(json.dumps(payload))
     else:
         click.echo(message)
-        click.echo(
-            "Retention policy was saved for this source and remains saved if you stop; "
-            "no snapshots were deleted during the preview."
-        )
+        if list_only:
+            for snapshot in snapshots:
+                click.echo(f"{snapshot.get('timestamp', '')} {snapshot.get('id', '')}".strip())
+        if not apply:
+            click.echo(
+                "Retention policy was saved for this source and remains saved if you stop; "
+                "no snapshots were deleted during the preview."
+            )
 
 
 @main.command("snapshots")

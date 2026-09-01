@@ -504,6 +504,42 @@ class TestKopiaBackend:
         assert "--delete" not in expire_call
         assert "--dry-run" not in expire_call
 
+    def test_prune_preview_lists_expired_snapshots_from_kopia_retention_reasons(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--list data comes from Kopia's policy evaluation, not local retention logic."""
+        backend = KopiaBackend({"repository_password": "test-password"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _: (True, "connected"))
+        target = "myuser@myhost:/data/app"
+        sources_json = (
+            '[{"source": {"host": "myhost", "userName": "myuser", "path": "/data/app"}}]'
+        )
+        snapshots_json = (
+            '[{"id": "keep", "startTime": "2026-09-02T01:00:00Z", "retentionReason": ["latest-1"]}, '
+            '{"id": "expire", "startTime": "2026-09-01T01:00:00Z", "retentionReason": []}]'
+        )
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if command[1:3] == ["snapshot", "list"] and "--all" in command:
+                return CompletedProcess(command, 0, sources_json, "")
+            if command[1:3] == ["snapshot", "list"]:
+                return CompletedProcess(command, 0, snapshots_json, "")
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+        result = backend.prune(
+            BackupDestination("repo"), keep_last=1, dry_run=True, source_path="/data/app", list_expired=True
+        )
+
+        assert result.success
+        assert result.metadata["expired_snapshots"] == [{"id": "expire", "timestamp": "2026-09-01T01:00:00Z"}]
+        assert calls.index(["kopia", "policy", "set", target, "--keep-latest", "1"]) < calls.index(
+            ["kopia", "snapshot", "list", "--json", target]
+        )
+
     def test_prune_refuses_with_no_retention_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No keep_* at all must refuse and spawn no kopia process that could delete."""
         backend = KopiaBackend({"repository_password": "test-password"})

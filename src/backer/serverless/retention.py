@@ -11,7 +11,7 @@ from backer.core.config import BackerConfig
 from backer.serverless.repositories import _backend, _destination, repository_operation_context
 
 
-def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
+def prune_job(config: BackerConfig, name: str, *, apply: bool = False, list_expired: bool = False):
     job = config.jobs.get(name)
     if not job or not job.retention:
         raise ValueError(f"Job '{name}' has no retention policy configured")
@@ -38,8 +38,10 @@ def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
             keep_yearly=policy.keep_yearly,
             dry_run=not apply,
             source_path=job.source.path,
+            list_expired=list_expired,
         )
     if not result.success:
         raise ValueError("\n".join(result.errors) or "Retention failed")
     match = re.search(r"(?:\b(\d+) snapshot\(s\).*would be deleted|\bDeleted (\d+) snapshots\b)", result.output, re.I)
-    return int(match.group(1) or match.group(2)) if match else 0, result.output
+    snapshots = getattr(result, "metadata", {}).get("expired_snapshots", [])
+    return int(match.group(1) or match.group(2)) if match else 0, result.output, snapshots
