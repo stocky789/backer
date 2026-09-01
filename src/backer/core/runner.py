@@ -129,6 +129,7 @@ def run_backup(
                 "current_file": current_file[:200] if current_file else None,
                 "bytes_processed": bytes_done,
                 "files_processed": files_done,
+                "total_bytes": total_bytes,
             }
             if total_bytes > 0:
                 event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))

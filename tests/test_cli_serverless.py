@@ -1,5 +1,6 @@
 import shlex
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -166,7 +167,12 @@ def test_repository_name_resolves_to_its_canonical_config_key():
     assert _resolve_job_repository(config, "display-name") == "canonical-id"
 
 
-def test_repo_discover_reads_password_only_from_stdin_or_environment():
+def test_repo_discover_reads_password_only_from_stdin_or_environment(monkeypatch):
+    from backer.core.smb_browse import ShareInfo
+
+    monkeypatch.setattr(
+        "backer.core.smb_browse.SMBBrowser.list_shares", lambda *_args: (True, [ShareInfo("Backups", "Disk")])
+    )
     result = CliRunner().invoke(
         main,
         ["repo", "discover", "--host", "nas", "--username", "svc", "--json"],
@@ -284,6 +290,19 @@ def test_init_s3_accepts_an_empty_prefix(monkeypatch, tmp_path):
         ],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_restore_include_refuses_traversal():
+    from backer.cli import _restore_include_path
+
+    with pytest.raises(click.UsageError):
+        _restore_include_path("../outside")
+
+
+def test_status_message_maps_known_kopia_failure():
+    from backer.core.messages import explain_failure
+
+    assert "passphrase" in explain_failure("invalid repository password").lower()
 
 
 @pytest.mark.parametrize(

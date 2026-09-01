@@ -1019,8 +1019,8 @@ class KopiaBackend(BackendBase):
                             "id": snap.get("id", "unknown")[:12],
                             "full_id": snap.get("id"),
                             "timestamp": snap.get("startTime"),
-                            "hostname": snap.get("hostname"),
-                            "username": snap.get("username"),
+                            "hostname": snap.get("source", {}).get("host"),
+                            "username": snap.get("source", {}).get("userName"),
                             "paths": [snap.get("source", {}).get("path", "")],
                             "tags": snap.get("tags", []),
                             "size": snap.get("stats", {}).get("totalSize", 0),
@@ -1223,7 +1223,7 @@ class KopiaBackend(BackendBase):
             self._disconnect_repo(destination.path)
 
     @_serialize_by_repo("destination")
-    def check(self, destination: BackupDestination) -> BackendResult:
+    def check(self, destination: BackupDestination, verify_files_percent: float | None = None) -> BackendResult:
         """Check repository integrity using kopia maintenance."""
         started_at = datetime.now()
 
@@ -1248,7 +1248,11 @@ class KopiaBackend(BackendBase):
                 # only verifies metadata (--verify-files-percent=0), reading no
                 # file content, which is fast. Reading actual content is much
                 # slower, so it stays opt-in via config.
-                verify_percent = self.config.get("verify_files_percent", 0)
+                verify_percent = (
+                    self.config.get("verify_files_percent", 0)
+                    if verify_files_percent is None
+                    else verify_files_percent
+                )
                 result = subprocess.run(
                     [
                         str(binary),
@@ -1281,6 +1285,37 @@ class KopiaBackend(BackendBase):
                 finished_at=datetime.now(),
                 errors=[str(e)],
                 return_code=-1,
+            )
+
+    @_serialize_by_repo("destination")
+    def repair_index(self, destination: BackupDestination, commit: bool = False) -> BackendResult:
+        """Inspect or explicitly commit Kopia index recovery."""
+        started_at = datetime.now()
+        try:
+            binary = self._get_binary()
+            connected, error = self._connect_repo(destination.path)
+            if not connected:
+                return BackendResult(
+                    False, OperationType.CHECK, started_at, datetime.now(), errors=[error], return_code=-1
+                )
+            try:
+                command = [str(binary), "index", "recover"]
+                if commit:
+                    command.append("--commit")
+                result = subprocess.run(
+                    command, capture_output=True, text=True, env=self._repo_env(destination.path),
+                    timeout=self.config.get("timeout", 3600),
+                )
+                return BackendResult(
+                    result.returncode == 0, OperationType.CHECK, started_at, datetime.now(),
+                    errors=[] if result.returncode == 0 else [result.stderr.strip() or "Kopia index recovery failed"],
+                    output=result.stdout + result.stderr, return_code=result.returncode,
+                )
+            finally:
+                self._disconnect_repo(destination.path)
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as error:
+            return BackendResult(
+                False, OperationType.CHECK, started_at, datetime.now(), errors=[str(error)], return_code=-1
             )
 
     # kopia's `ls` output has no --json mode; one line per entry, e.g.:

@@ -6,6 +6,7 @@ import shlex
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from secrets import choice
 from typing import Any
@@ -45,6 +46,16 @@ def _redact_error(error: BaseException, *secrets: str | None) -> str:
         if secret:
             text = text.replace(secret, "***")
     return text
+
+
+def _restore_include_path(value: str | None) -> str | None:
+    """Accept only a relative snapshot subtree; it must never escape the snapshot."""
+    if value is None:
+        return None
+    candidate = Path(value)
+    if candidate.is_absolute() or any(part == ".." for part in candidate.parts) or candidate.drive:
+        raise click.UsageError("--include must be a relative path inside the snapshot")
+    return value
 
 
 def _stale_cutoff(cron: str, now) -> object:
@@ -769,7 +780,8 @@ def restore(
     DESTINATION is where to restore files.
     """
     destination = destination or legacy_destination
-    if job or from_path:
+    include = _restore_include_path(include)
+    if job:
         if into == "REPLACE" and not yes_replace:
             raise click.UsageError("--yes-replace is required with --into REPLACE")
         if not into or not destination:
@@ -778,7 +790,49 @@ def restore(
             )
         if sum(bool(value) for value in (snapshot, before, latest)) != 1:
             raise click.UsageError("Choose exactly one of --snapshot, --before, or --latest")
-        raise click.ClickException("Serverless restore execution is provided by Phase 5c")
+        from backer.core.config import load_config
+        from backer.core.paths import get_config_dir
+
+        config = load_config(get_config_dir() / "config.yaml")
+        configured = config.jobs.get(job)
+        if not configured:
+            raise click.ClickException(f"Job '{job}' is not configured")
+        record = config.repositories.get(configured.repository)
+        if not record:
+            raise click.ClickException(f"Job '{job}' names an unknown repository")
+        _restore_destination_allowed(destination, config)
+        backend, passphrase, _ = _repository_backend(record)
+        source_path = _repository_destination(record)
+        snapshots = backend.list_snapshots(BackupDestination(source_path))
+        candidates = [item for item in snapshots if not computer or item.get("hostname") == computer]
+        if before:
+            candidates = [item for item in candidates if (item.get("timestamp") or "") <= before]
+        if not candidates:
+            raise click.ClickException("No matching immutable snapshot was found")
+        selected = snapshot if snapshot else max(candidates, key=lambda item: item.get("timestamp") or "")["full_id"]
+        if snapshot and not any(snapshot in (item.get("id"), item.get("full_id")) for item in candidates):
+            raise click.ClickException("The requested snapshot was not found for this job")
+        moved = _replace_destination(destination) if into == "REPLACE" and not dry_run else None
+        if into == "NEW" and not dry_run:
+            destination.mkdir(parents=True, exist_ok=True)
+        result = backend.restore(
+            BackupDestination(source_path), destination, snapshot=selected, dry_run=dry_run,
+            original_source_path=configured.source.path, include_path=include,
+        )
+        if not result.success:
+            raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
+        if moved:
+            click.echo(f"What was in that folder was moved to {moved}")
+            if clean_up_replaced:
+                import shutil
+
+                shutil.rmtree(moved)
+        click.echo("Restore completed")
+        return
+    if from_path:
+        raise click.ClickException(
+            "--from requires a configured repository; add it with backer repo add NAME --attach first"
+        )
     repository_password = os.environ.get("BACKER_REPOSITORY_PASSWORD")
     if not source or not destination or not repository_password:
         raise click.UsageError("SOURCE and DESTINATION are required")
@@ -1461,6 +1515,80 @@ def _repository(config, name: str):
     return item
 
 
+def _repository_backend(record, *, timeout: int | None = None):
+    """Open one configured repository without ever placing a secret in argv."""
+    from backer.core import keystore
+    from backer.serverless.repositories import _backend
+
+    passphrase = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
+    if not passphrase:
+        raise click.ClickException("Repository passphrase is unavailable")
+    storage = None
+    if record.storage_password_ref:
+        raw = keystore.get(record.storage_password_ref, machine_scope=record.scope == "machine")
+        if not raw:
+            raise click.ClickException("Repository storage credential is unavailable")
+        storage = json.loads(raw) if record.type == "s3" else raw
+    backend = _backend(record, passphrase, storage)
+    if timeout:
+        backend.config["timeout"] = timeout
+    return backend, passphrase, storage
+
+
+def _repository_destination(record) -> str:
+    from backer.serverless.repositories import _destination
+
+    return _destination(record)
+
+
+def _restore_destination_allowed(destination: Path, config) -> None:
+    resolved = destination.expanduser().resolve()
+    forbidden = {
+        Path(os.environ.get("WINDIR", "C:/Windows")).resolve(),
+        Path("/").resolve(),
+        Path("/home").resolve(),
+        Path("/usr").resolve(),
+        Path.home().resolve(),
+    }
+    for record in config.repositories.values():
+        if record.type == "local" and record.path:
+            forbidden.add(Path(record.path).expanduser().resolve())
+    for denied in forbidden:
+        if resolved == denied or denied in resolved.parents:
+            raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
+
+
+def _replace_destination(destination: Path) -> Path | None:
+    if not destination.exists():
+        destination.mkdir(parents=True, exist_ok=True)
+        return None
+    if destination.is_symlink() or not destination.is_dir():
+        raise click.ClickException("Restore destination must be a non-symlink directory")
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    moved = destination.with_name(f"{destination.name}.replaced-{stamp}")
+    suffix = 2
+    while moved.exists():
+        moved = destination.with_name(f"{destination.name}.replaced-{stamp}-{suffix}")
+        suffix += 1
+    destination.replace(moved)
+    destination.mkdir()
+    return moved
+
+
+def _local_progress(enabled: bool | None):
+    """Render local Kopia frames without inventing a percentage for first runs."""
+    show_live = sys.stdout.isatty() if enabled is None else enabled
+
+    def render(**event: Any) -> None:
+        if "bytes_processed" not in event:
+            return
+        done, total = event["bytes_processed"], event.get("total_bytes", 0)
+        prefix = "" if show_live else datetime.now().strftime("%H:%M:%S ")
+        click.echo(f"{prefix}{done}/{total} bytes" if total else f"{prefix}{done} bytes")
+
+    return render
+
+
 def _resolve_job_repository(config, requested: str | None, name: str | None = None) -> str:
     if requested:
         repository_id, _ = _repository(config, requested)
@@ -1517,8 +1645,10 @@ def repo_unlock(ctx: click.Context, name: str) -> None:
     """Discard this machine's isolated connection state, then probe it."""
     # The per-repository config is deliberately disposable; Kopia reconnects next operation.
     _, config = _local_config(ctx)
-    _repository(config, name)
-    click.echo(f"Repository '{name}' will reconnect on its next operation")
+    _, record = _repository(config, name)
+    backend, _, _ = _repository_backend(record)
+    backend._disconnect_repo(_repository_destination(record))
+    click.echo(f"Repository '{name}' disconnected and will reconnect on its next operation")
 
 
 @repo.command("passphrase")
@@ -1585,8 +1715,17 @@ def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool)
     password = sys.stdin.read().rstrip("\r\n") if password_stdin else os.environ.get("BACKER_SMB_PASSWORD", "")
     if not password:
         _missing_flags("repo discover", ["--password-stdin"])
-    # Discovery transport is supplied by the Phase 3 SMB browser; defer its rendering to 5b.
-    click.echo("[]" if as_json else f"Share discovery for {host} is not available in this build")
+    from backer.core.smb_browse import SMBBrowser
+
+    success, result = SMBBrowser.list_shares(host, username, password)
+    if not success:
+        raise click.ClickException(str(result))
+    rows = [{"name": share.name, "comment": share.comment} for share in result]
+    if as_json:
+        click.echo(json.dumps(rows))
+    else:
+        for row in rows:
+            click.echo(f"{row['name']}\t{row['comment']}")
 
 
 @repo.command("recover")
@@ -1595,9 +1734,29 @@ def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool)
 @click.option("--passphrase-file", type=click.Path(exists=True, path_type=Path))
 @click.pass_context
 def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphrase_file: Path | None) -> None:
-    """Recovery needs the Phase 5c repository verification path."""
-    _local_config(ctx)
-    _missing_flags("repo recover " + name, ["repository verification support (Phase 5c)"])
+    """Explicitly store a passphrase only after it opens the existing repository."""
+    from backer.core import keystore
+    from backer.serverless.repositories import probe
+
+    if bool(passphrase_stdin) == bool(passphrase_file):
+        raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
+    path, config = _local_config(ctx)
+    key, record = _repository(config, name)
+    passphrase = (
+        sys.stdin.read().rstrip("\r\n")
+        if passphrase_stdin
+        else passphrase_file.read_text(encoding="utf-8").rstrip("\r\n")
+    )
+    if not passphrase:
+        raise click.UsageError("A repository passphrase is required")
+    status, _, message = probe(record, passphrase)
+    if status != "present":
+        raise click.ClickException(message or "The supplied passphrase could not open this existing repository")
+    reference = record.passphrase_ref or f"backer/repo/{key}/passphrase"
+    keystore.put(reference, passphrase, machine_scope=record.scope == "machine")
+    config.repositories[key] = record.model_copy(update={"passphrase_ref": reference})
+    config.save(path)
+    click.echo(f"Repository '{record.name}' opened. Its passphrase is now stored on this computer")
 
 
 @agent.command("setup")
@@ -2646,13 +2805,15 @@ def job_history(name: str, limit: int, repo: str | None, server: str | None, as_
 def job_show(
     ctx: click.Context, name: str, repo: str | None, server: str | None, last_run: bool, verbose: bool, as_json: bool
 ) -> None:
-    if bool(repo) == bool(server):
-        raise click.UsageError("Choose exactly one of --repo or --server")
+    if repo and server:
+        raise click.UsageError("Choose --repo or --server, not both")
     if server:
         raise click.ClickException("Server job details are not implemented by the local CLI")
     _, config = _local_config(ctx)
     configured = config.jobs.get(name)
-    if not configured or configured.repository != repo:
+    if not configured:
+        raise click.ClickException(f"Job '{name}' is not configured")
+    if repo and configured.repository != _resolve_job_repository(config, repo, name):
         raise click.ClickException(f"Job '{name}' is not configured for repository '{repo}'")
     payload = configured.model_dump(exclude_none=True)
     click.echo(json.dumps(payload) if as_json else f"{name}: {payload}")
@@ -2727,10 +2888,38 @@ def snapshots(
     all_snapshots: bool,
     as_json: bool,
 ) -> None:
-    """List snapshots; repository connection execution arrives with Phase 5c."""
+    """List snapshots from one local repository."""
     if not job and not repo:
         raise click.UsageError("JOB or --repo NAME is required")
-    raise click.ClickException("Snapshot listing is provided by Phase 5c")
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+    from backer.serverless.repositories import probe
+
+    config = load_config(get_config_dir() / "config.yaml")
+    repository_id = _resolve_job_repository(config, repo, job)
+    record = config.repositories[repository_id]
+    backend, passphrase, storage = _repository_backend(record)
+    rows = backend.list_snapshots(BackupDestination(_repository_destination(record)))
+    if source:
+        rows = [item for item in rows if item.get("paths") == [source]]
+    if host:
+        rows = [item for item in rows if item.get("hostname") == host]
+    if job and not all_snapshots:
+        rows = [item for item in rows if item.get("paths") == [config.jobs[job].source.path]]
+    if not rows:
+        status, _, message = probe(record, passphrase, storage)
+        if status != "present":
+            raise click.ClickException(message or f"Repository is {status}")
+    rows = sorted(rows, key=lambda item: item.get("timestamp") or "", reverse=True)
+    if limit:
+        rows = rows[:limit]
+    if as_json:
+        click.echo(json.dumps(rows))
+    elif rows:
+        for row in rows:
+            click.echo(f"{row.get('id')}\t{row.get('timestamp')}\t{row.get('paths', [''])[0]}")
+    else:
+        click.echo("No snapshots yet")
 
 
 @main.command("verify")
@@ -2742,8 +2931,38 @@ def snapshots(
 def verify(
     job: str, restore_test: bool, verify_files_percent: float | None, repair_index: bool, timeout: int | None
 ) -> None:
-    """Verify a serverless repository when Phase 5c backend support is installed."""
-    raise click.ClickException("Repository verification is provided by Phase 5c")
+    """Verify a local repository; index recovery is always explicit."""
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+
+    config = load_config(get_config_dir() / "config.yaml")
+    configured = config.jobs.get(job)
+    if not configured:
+        raise click.ClickException(f"Job '{job}' is not configured")
+    record = config.repositories.get(configured.repository)
+    if not record:
+        raise click.ClickException(f"Job '{job}' names an unknown repository")
+    backend, passphrase, _ = _repository_backend(record, timeout=timeout)
+    destination = BackupDestination(_repository_destination(record))
+    if repair_index:
+        preview = backend.repair_index(destination, commit=False)
+        if not preview.success:
+            raise click.ClickException(
+                _redact_error(RuntimeError(preview.output or "; ".join(preview.errors)), passphrase)
+            )
+        if not _interactive() or not click.confirm("Commit this index recovery", default=False):
+            click.echo(preview.output)
+            return
+        result = backend.repair_index(destination, commit=True)
+    else:
+        result = backend.check(destination, verify_files_percent=verify_files_percent)
+    if not result.success:
+        raise click.ClickException(_redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase))
+    click.echo("Repository check passed")
+    if verify_files_percent is None:
+        click.echo("File contents were not downloaded or restored")
+    if restore_test:
+        click.echo("Restore testing is not available for this snapshot selection")
 
 
 @main.command("status")
@@ -2774,9 +2993,15 @@ def status(job: str | None, why: bool, exit_code: bool, as_json: bool) -> None:
         if latest and configured.schedule and configured.schedule.cron:
             stale_before = _stale_cutoff(configured.schedule.cron, now)
             failed = failed or latest.started_at.astimezone(UTC) < stale_before.astimezone(UTC)
-        results.append({"job": name, "status": "failed" if failed else "success"})
+        message = latest.error_message if latest and latest.error_message else None
+        results.append({"job": name, "status": "failed" if failed else "success", "message": message})
         if not as_json:
             console.print(f"{name}: {'failed' if failed else 'success'}")
+            if why and message:
+                from backer.core.messages import explain_failure
+
+                console.print(explain_failure(message))
+                console.print(message)
         unhealthy = unhealthy or failed
     if as_json:
         click.echo(json.dumps(results))
@@ -2825,7 +3050,7 @@ def job_run(
         from backer.serverless.runs import run_local_job
 
         for item in names:
-            report = run_local_job(local_config, item)
+            report = run_local_job(local_config, item, on_progress=_local_progress(progress))
             if not report or not report["success"]:
                 raise click.ClickException("Backup failed")
         return
@@ -2839,7 +3064,7 @@ def job_run(
             reports = (
                 run_due_jobs(local_config, run_as_system=system_run)
                 if due
-                else run_local_job(local_config, name, run_as_system=system_run)
+                else run_local_job(local_config, name, run_as_system=system_run, on_progress=_local_progress(progress))
             )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
