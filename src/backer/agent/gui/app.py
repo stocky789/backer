@@ -226,7 +226,10 @@ class BackerAgentApp:
         if not notification_allowed(self._notification_state, name, report, today):
             return
         if report.get("needs_input"):
-            self._notification_state.setdefault("input", {})[name] = report.get("run_id")
+            run_id = report.get("run_id") or "latest"
+            self._notification_state.setdefault("input", {})[name] = run_id
+            self._notification_state.setdefault("attention", {})[name] = run_id
+            self._notification_run = (name, run_id)
             title, body = "Backer needs input", f"{name} needs your attention."
         elif report.get("success"):
             self._notification_state.setdefault("first_success", []).append(name)
@@ -251,6 +254,8 @@ class BackerAgentApp:
             if not rows:
                 continue
             run = rows[0]
+            if run.status.value != "success" and self._notification_state.get("attention", {}).get(name) == run.run_id:
+                self._notification_run = (name, run.run_id)
             self._record_run_notification(name, {
                 "success": run.status.value == "success", "run_id": run.run_id,
                 "needs_input": run.needs_input,

@@ -20,22 +20,13 @@ from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
+from backer.agent.gui.support import supported_repository_types
 from backer.core import keystore
 from backer.core.config import BackerConfig, ClientConfig, ScheduleConfig
 from backer.core.config import load_config as _load_config
 from backer.core.paths import get_config_dir, get_data_dir, get_machine_config_dir
 from backer.core.repo_metadata import RepositoryMetadata
 from backer.serverless.store import read_runs
-
-# Phase 7 changes this manifest only alongside the mandatory workflow result loop.
-# Until an end-to-end cell is mandatory, the GUI must not construct its control.
-PROVEN_SERVERLESS_CELLS: frozenset[tuple[str, str]] = frozenset()
-
-
-def supported_repository_types(platform: str | None = None) -> tuple[str, ...]:
-    platform = platform or sys.platform
-    platform = "linux" if platform.startswith("linux") else platform
-    return tuple(kind for kind in ("local", "smb", "s3") if (platform, kind) in PROVEN_SERVERLESS_CELLS)
 
 
 class ModeApplyResult(NamedTuple):

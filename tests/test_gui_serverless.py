@@ -77,37 +77,74 @@ def test_show_leaves_one_child_and_constructs_no_toplevel():
 
 
 def test_share_listing_does_not_block_the_event_loop():
-    import threading
     import time
+    import tkinter as tk
+    from tkinter import ttk
 
-    from backer.agent.gui.wizard import RepositoryWizard
+    from backer.agent.gui import wizard
 
-    painted = []
-    instance = object.__new__(RepositoryWizard)
-    instance._generation = 2
-    instance.cancel = type("Cancel", (), {"is_set": lambda _self: False})()
-    instance.primary = type("Combo", (), {"configure": lambda _self, **_kwargs: painted.append("paint")})()
-    instance.listing = type("Value", (), {"set": lambda _self, _value: None})()
-
-    worker = threading.Thread(target=lambda: (time.sleep(3), instance._apply_share_listing(1, True, [])), daemon=True)
-    worker.start()
-    serviced = 0
-    deadline = time.monotonic() + 3.2
-    while worker.is_alive() and time.monotonic() < deadline:
-        serviced += 1
-        time.sleep(0.1)
-    worker.join()
-
-    assert serviced >= 25 and painted == []
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = type("App", (), {"root": root, "container": ttk.Frame(root), "_generations": {"repository": 1}})()
+        app.marshal = lambda _token, callback, current: root.after(0, lambda: callback() if current() else None)
+        app.set_status = lambda *_args, **_kwargs: None
+        instance = wizard.RepositoryWizard(app)
+        instance.step = 3
+        original = wizard.SMBBrowser.list_shares
+        wizard.SMBBrowser.list_shares = lambda *_args: (time.sleep(3), (True, []))[1]
+        try:
+            instance._render()
+            serviced = 0
+            deadline = time.monotonic() + 2.6
+            while time.monotonic() < deadline:
+                root.update()
+                serviced += 1
+                time.sleep(0.1)
+            instance._generation += 1
+            deadline = time.monotonic() + 0.8
+            while time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.1)
+            assert serviced >= 25
+            assert instance.listing.get() == "Loading shares…"
+        finally:
+            wizard.SMBBrowser.list_shares = original
+    finally:
+        root.destroy()
 
 
 def test_passphrase_step_requires_confirmation():
-    from backer.agent.gui.wizard import confirmation_word, valid_supplied_passphrase
+    import re
+    import tkinter as tk
+    from tkinter import ttk
 
-    phrase = "safe usable recovery phrase"
-    assert not valid_supplied_passphrase(phrase, "wrong")
-    assert valid_supplied_passphrase(phrase, phrase)
-    assert confirmation_word(phrase, 3) == "recovery"
+    from backer.agent.gui import wizard
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = type("App", (), {"root": root, "container": ttk.Frame(root), "_generations": {"repository": 1}})()
+        app.marshal = lambda *_args: None
+        app.set_status = lambda *_args, **_kwargs: None
+        instance = wizard.RepositoryWizard(app)
+        instance.values["passphrase"] = "safe usable recovery phrase"
+        instance.step = 4
+        instance._render()
+        instance._show_passphrase_frame(instance.passphrase_frames[1])
+        label = next(child for child in instance.passphrase_frames[1].winfo_children() if isinstance(child, ttk.Label))
+        position = int(re.search(r"\d+", label.cget("text")).group())
+        instance.confirm.set("wrong")
+        root.update()
+        assert str(instance.primary.cget("state")) == "disabled"
+        instance.confirm.set(wizard.confirmation_word(instance.values["passphrase"], position))
+        root.update()
+        assert str(instance.primary.cget("state")) == "disabled"
+        instance.saved.set(True)
+        root.update()
+        assert str(instance.primary.cget("state")) == "normal"
+    finally:
+        root.destroy()
 
 
 def test_passphrase_generation_uses_a_separate_reveal_and_confirmation_frame():
@@ -1223,18 +1260,9 @@ def test_run_progress_retains_kopia_counts_and_reverts_after_stale_frame(monkeyp
 
 
 def test_support_map_only_advertises_the_six_ci_cells():
-    from backer.agent.gui.views import PROVEN_SERVERLESS_CELLS, supported_repository_types
+    from backer.agent.gui.support import PROVEN_SERVERLESS_CELLS, supported_repository_types, workflow_cells
 
-    workflow = Path(".gitea/workflows/release-validation.yml").read_text(encoding="utf-8")
-    mandatory = {
-        ("linux", "local") if "SERVERLESS_LOCAL_RESULT" in workflow else None,
-        ("linux", "smb") if "SERVERLESS_SMB_LINUX_RESULT" in workflow else None,
-        ("win32", "smb") if "SERVERLESS_SMB_WINDOWS_RESULT" in workflow else None,
-    } - {None}
-    if "Kopia S3 Contract (${{ matrix.os }})" in workflow and "S3_CONTRACT_RESULT" in workflow:
-        mandatory |= {("linux", "s3"), ("win32", "s3")}
-
-    assert PROVEN_SERVERLESS_CELLS == mandatory
+    assert PROVEN_SERVERLESS_CELLS == workflow_cells(Path(".gitea/workflows/release-validation.yml"))
     assert supported_repository_types("win32") == ()
     assert supported_repository_types("linux") == ()
     assert supported_repository_types("darwin") == ()
