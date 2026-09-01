@@ -160,7 +160,15 @@ class TestKopiaBackend:
             800 * 1024 * 1024,
         )
 
-        assert event == {"bytes_done": 728 * 1024 * 1024, "total_bytes": 800 * 1024 * 1024, "files_done": 64}
+        assert event == {
+            "bytes_done": 728 * 1024 * 1024,
+            "total_bytes": 800 * 1024 * 1024,
+            "files_done": 64,
+            "hashed_bytes": 720 * 1024 * 1024,
+            "cached_bytes": 8 * 1024 * 1024,
+            "hashed_files": 60,
+            "cached_files": 4,
+        }
 
     def test_snapshot_progress_without_previous_snapshot_stays_indeterminate(self) -> None:
         """Removing the prior snapshot size must not manufacture a denominator."""
@@ -168,7 +176,15 @@ class TestKopiaBackend:
             " * 0 hashing, 60 hashed (720 MB), 0 cached (0 B), uploaded 713.2 MB, estimating...", None
         )
 
-        assert event == {"bytes_done": 720 * 1024 * 1024, "total_bytes": 0, "files_done": 60}
+        assert event == {
+            "bytes_done": 720 * 1024 * 1024,
+            "total_bytes": 0,
+            "files_done": 60,
+            "hashed_bytes": 720 * 1024 * 1024,
+            "cached_bytes": 0,
+            "hashed_files": 60,
+            "cached_files": 0,
+        }
 
     def test_restore_progress_uses_kopias_processed_denominator(self) -> None:
         """Changing the restore frame parser must fail this direct Kopia-output contract."""
@@ -178,6 +194,17 @@ class TestKopiaBackend:
             "files_done": 17,
             "total_files": 60,
         }
+
+    def test_process_owner_is_single_operation_only(self) -> None:
+        """Reusing one owner must never let a later run steal cancellation."""
+        from backer.backends.kopia import KopiaProcessOwner
+
+        owner = KopiaProcessOwner()
+        first, second = object(), object()
+        owner.register(first)
+
+        with pytest.raises(RuntimeError, match="single operation"):
+            owner.register(second)
 
     def test_progress_reader_splits_carriage_returns_and_keeps_result_json(
         self, monkeypatch: pytest.MonkeyPatch
@@ -204,7 +231,15 @@ class TestKopiaBackend:
         )
 
         assert result.stdout == '{"id":"snapshot"}\n'
-        assert events == [{"bytes_done": 2 * 1024 * 1024, "total_bytes": 4 * 1024 * 1024, "files_done": 1}]
+        assert events == [{
+            "bytes_done": 2 * 1024 * 1024,
+            "total_bytes": 4 * 1024 * 1024,
+            "files_done": 1,
+            "hashed_bytes": 2 * 1024 * 1024,
+            "cached_bytes": 0,
+            "hashed_files": 1,
+            "cached_files": 0,
+        }]
 
     def test_progress_runner_interrupts_kopia_before_propagating_ctrl_c(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Removing the interrupt cleanup would leave a connected Kopia process behind."""

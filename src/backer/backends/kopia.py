@@ -45,9 +45,13 @@ class KopiaProcessOwner:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
+        self._claimed = False
 
     def register(self, process: subprocess.Popen[str]) -> None:
         with self._lock:
+            if self._claimed:
+                raise RuntimeError("KopiaProcessOwner is single operation only")
+            self._claimed = True
             self._process = process
 
     def release(self, process: subprocess.Popen[str]) -> None:
@@ -70,11 +74,18 @@ def _parse_snapshot_progress(frame: str, total_bytes: int | None) -> dict[str, i
     match = _SNAPSHOT_PROGRESS.search(frame)
     if not match:
         return None
+    hashed_bytes = _progress_bytes(match["hashed_size"], match["hashed_unit"])
+    cached_bytes = _progress_bytes(match["cached_size"], match["cached_unit"])
+    hashed_files = int(match["hashed_files"])
+    cached_files = int(match["cached_files"])
     return {
-        "bytes_done": _progress_bytes(match["hashed_size"], match["hashed_unit"])
-        + _progress_bytes(match["cached_size"], match["cached_unit"]),
+        "bytes_done": hashed_bytes + cached_bytes,
         "total_bytes": total_bytes or 0,
-        "files_done": int(match["hashed_files"]) + int(match["cached_files"]),
+        "files_done": hashed_files + cached_files,
+        "hashed_bytes": hashed_bytes,
+        "cached_bytes": cached_bytes,
+        "hashed_files": hashed_files,
+        "cached_files": cached_files,
     }
 
 
@@ -149,7 +160,11 @@ def _run_kopia_with_progress(
         popen_args["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(cmd, **popen_args)
     if process_owner:
-        process_owner.register(process)
+        try:
+            process_owner.register(process)
+        except Exception:
+            _stop_kopia_process(process)
+            raise
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     last = {"bytes_done": 0, "files_done": 0}

@@ -55,8 +55,18 @@ def _run_local_job(
     secrets: list[str] = []
     smb_manager = None
     smb_session_created = False
+
+    def cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    def cancel_report() -> dict[str, Any]:
+        return {**report, "success": False, "cancelled": True, "errors": ["Backup cancelled"]}
+
     try:
         _write_progress(data_dir, run_id, status="started", started_at=started.isoformat().replace("+00:00", "Z"))
+        if cancelled():
+            report = cancel_report()
+            return report
         job = config.jobs.get(name)
         if not job:
             raise ValueError(f"Job '{name}' is not configured")
@@ -119,11 +129,17 @@ def _run_local_job(
             smb_session_created = (
                 not repository.use_existing_session or run_as_system
             ) and getattr(smb_manager, "serverless_session_created", True)
+        if cancelled():
+            report = cancel_report()
+            return report
         stage = "connect"
         status, unique_id, message = probe(repository, passphrase, storage)
         if status != "present" or (repository.unique_id and unique_id != repository.unique_id):
             stage = "prepare_destination" if status != "wrong_passphrase" else "connect"
             raise ValueError(message or f"Repository is {status}; backup did not start")
+        if cancelled():
+            report = cancel_report()
+            return report
         stage = "backup"
         report = run_backup({
             "serverless": True,
@@ -159,15 +175,19 @@ def _run_local_job(
             _write_progress(data_dir, run_id, **{key: value for key, value in event.items() if key != "run_id"}),
             on_progress(**event) if on_progress else None,
         ))
-        if cancel_event and cancel_event.is_set():
-            report = {**report, "success": False, "cancelled": True, "errors": ["Backup cancelled"]}
+        if cancelled():
+            report = cancel_report()
+            return report
         if not report["success"]:
             raise RuntimeError("; ".join(report.get("errors") or ["Backup failed"]))
         return report
     except KeyboardInterrupt:
-        report = {**report, "success": False, "errors": ["Backup interrupted"]}
-        raise
+        report = cancel_report() if cancelled() else {**report, "success": False, "errors": ["Backup interrupted"]}
+        return report
     except Exception as error:
+        if cancelled():
+            report = cancel_report()
+            return report
         text = str(error)
         for secret in secrets:
             text = text.replace(secret, "***")

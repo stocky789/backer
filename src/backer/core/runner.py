@@ -122,7 +122,7 @@ def run_backup(
 
         def progress_callback(
             bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0,
-            total_files: int = 0,
+            total_files: int = 0, **frame_details: int,
         ) -> None:
             event = {
                 "run_id": run_id,
@@ -133,6 +133,7 @@ def run_backup(
                 "total_bytes": total_bytes,
                 "total_files": total_files,
             }
+            event.update(frame_details)
             if total_bytes > 0:
                 event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))
             _progress(on_progress, **event)
@@ -254,8 +255,16 @@ def run_restore(
     print(f"[RESTORE] Destination: {job.get('destination_path')}")
     _progress(on_progress, run_id=run_id, status="running", progress_percent=0, message="Initializing restore...")
     mount_cleanup_ctx = None
+    cancel_event = None
     try:
         repository_options = job.get("repository_options", {}).copy()
+        cancel_event = repository_options.get("cancel_event")
+        if cancel_event and cancel_event.is_set():
+            return {
+                "run_id": run_id, "job_name": f"restore:{job_name}", "client_id": client_id, "success": False,
+                "cancelled": True, "started_at": started_at.isoformat(), "finished_at": datetime.now().isoformat(),
+                "bytes_transferred": 0, "files_transferred": 0, "errors": ["Restore cancelled"], "output": "",
+            }
         if job.get("source_path", "").lower().startswith(("proxy://", "proxys://")):
             proxy_id, proxy_secret = agent_credentials or (None, None)
             repository_options["client_id"] = proxy_id
@@ -285,7 +294,7 @@ def run_restore(
 
         def progress_callback(
             bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0,
-            total_files: int = 0,
+            total_files: int = 0, **frame_details: int,
         ) -> None:
             event = {
                 "run_id": run_id,
@@ -296,6 +305,7 @@ def run_restore(
                 "total_bytes": total_bytes,
                 "total_files": total_files,
             }
+            event.update(frame_details)
             if total_bytes > 0:
                 event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))
             _progress(on_progress, **event)
@@ -397,6 +407,12 @@ def run_restore(
                         f"{staged_destination}: {rollback_err}"
                     ) from rollback_err
             raise
+        if cancel_event and cancel_event.is_set():
+            return {
+                "run_id": run_id, "job_name": f"restore:{job_name}", "client_id": client_id, "success": False,
+                "cancelled": True, "started_at": started_at.isoformat(), "finished_at": datetime.now().isoformat(),
+                "bytes_transferred": 0, "files_transferred": 0, "errors": ["Restore cancelled"], "output": "",
+            }
         if (
             clean_restore
             and not dry_run

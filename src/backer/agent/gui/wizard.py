@@ -122,6 +122,10 @@ class RepositoryWizard(ttk.Frame):
         for child in self.body.winfo_children():
             child.destroy()
 
+    def _marshal(self, generation, callback):
+        token = ("repository", self.app._generations.get("repository", 0))
+        self.app.marshal(token, callback, lambda: generation == self._generation and not self.cancel.is_set())
+
     def _render(self):
         self._clear()
         self.cancel = threading.Event()
@@ -203,10 +207,7 @@ class RepositoryWizard(ttk.Frame):
                 else:
                     self.app.set_status(message or f"Repository is {status}", error=True)
 
-            try:
-                self.app.root.after(0, done)
-            except RuntimeError:
-                return
+            self._marshal(generation, done)
 
         self.app.set_status("Checking repository location")
         threading.Thread(target=worker, daemon=True).start()
@@ -322,7 +323,7 @@ class RepositoryWizard(ttk.Frame):
             def done():
                 self._apply_share_listing(generation, ok, result)
 
-            self.app.root.after(0, done)
+            self._marshal(generation, done)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -376,7 +377,7 @@ class RepositoryWizard(ttk.Frame):
                         item = self.tree.insert(parent, tk.END, text=entry.name, values=(child_path,))
                         self.tree.insert(item, tk.END, text="Loading…")
 
-            self.app.root.after(0, done)
+            self._marshal(generation, done)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -422,7 +423,7 @@ class RepositoryWizard(ttk.Frame):
                     else:
                         entry.configure(state=tk.NORMAL)
                         self.app.set_status("Could not create folder", error=True)
-                self.app.root.after(0, done)
+                self._marshal(generation, done)
             threading.Thread(target=worker, daemon=True).start()
 
         entry.bind("<Return>", create_folder)
@@ -474,10 +475,7 @@ class RepositoryWizard(ttk.Frame):
                             "Nothing was disconnected."
                         )
 
-                try:
-                    self.app.root.after(0, done)
-                except RuntimeError:
-                    return
+                self._marshal(generation, done)
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -498,10 +496,7 @@ class RepositoryWizard(ttk.Frame):
                     else:
                         self.listing.set(f"Could not disconnect {connection}. Nothing else was changed.")
 
-                try:
-                    self.app.root.after(0, done)
-                except RuntimeError:
-                    return
+                self._marshal(generation, done)
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -551,10 +546,7 @@ class RepositoryWizard(ttk.Frame):
                     def done():
                         self._apply_attach_probe(generation, token, passphrase, result, message, status)
 
-                    try:
-                        self.app.root.after(0, done)
-                    except RuntimeError:
-                        return
+                    self._marshal(generation, done)
 
                 threading.Thread(target=worker, daemon=True).start()
 

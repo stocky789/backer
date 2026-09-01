@@ -162,6 +162,26 @@ def test_preflight_failure_writes_one_local_attempt(monkeypatch, tmp_path: Path)
     assert (tmp_path / "last_attempt" / "nightly.json").exists()
 
 
+def test_cancelled_preflight_records_one_cancelled_attempt(monkeypatch, tmp_path: Path) -> None:
+    import threading
+
+    from backer.serverless.runs import run_local_job
+    from backer.serverless.store import read_runs
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    cancelled = threading.Event()
+    cancelled.set()
+    config = BackerConfig(
+        agent_id="agent-one",
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))},
+    )
+
+    report = run_local_job(config, "nightly", cancel_event=cancelled)
+    attempts = read_runs(tmp_path, "nightly", 2)
+
+    assert report["cancelled"] and len(attempts) == 1 and attempts[0].status.value == "cancelled"
+
+
 def test_preview_and_apply_differ_only_by_delete(monkeypatch, tmp_path: Path) -> None:
     from backer.serverless.retention import prune_job
 

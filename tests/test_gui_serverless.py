@@ -39,7 +39,7 @@ def test_show_leaves_one_child_and_constructs_no_toplevel():
 def test_share_listing_does_not_block_the_event_loop():
     source = _source("wizard.py")
     assert "threading.Thread(target=worker, daemon=True).start()" in source
-    assert "self.app.root.after(0, done)" in source
+    assert "self._marshal(generation, done)" in source
     assert "generation != self._generation" in source
 
 
@@ -421,9 +421,11 @@ def test_1219_actions_keep_selected_target_and_only_disconnect_the_named_conflic
     instance.app = type(
         "App",
         (),
-        {
-            "root": Root(),
-            "confirm_remove_repository": lambda _self, _connection: True,
+            {
+                "root": Root(),
+                "_generations": {"repository": 1},
+                "marshal": lambda _self, _token, callback, _current: callback(),
+                "confirm_remove_repository": lambda _self, _connection: True,
             "set_status": lambda *_args, **_kwargs: None,
         },
     )()
@@ -486,6 +488,24 @@ def test_worker_marshal_drops_callbacks_after_shutdown():
     app.marshal(("restore", 1), lambda: calls.append("paint"))
 
     assert calls == []
+
+
+def test_cancel_running_never_waits_for_kopia_reap():
+    import threading
+    import time
+
+    from backer.agent.gui.app import BackerAgentApp
+
+    finished = threading.Event()
+    app = object.__new__(BackerAgentApp)
+    app.run_cancel = threading.Event()
+    app.process_owner = type("Owner", (), {"cancel": lambda _self: (time.sleep(0.1), finished.set())})()
+
+    started = time.monotonic()
+    app.cancel_running()
+
+    assert time.monotonic() - started < 0.05
+    assert app.run_cancel.is_set() and finished.wait(1)
 
 
 def test_1219_panel_names_the_conflicting_connection(monkeypatch):

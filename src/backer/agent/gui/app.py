@@ -94,13 +94,13 @@ class BackerAgentApp:
     def current(self, token):
         return self._generations.get(token[0]) == token[1]
 
-    def marshal(self, token, callback):
+    def marshal(self, token, callback, current=None):
         """Post worker results only while this view and root still exist."""
         if not self.alive:
             return
 
         def guarded():
-            if self.alive and self.current(token):
+            if self.alive and self.current(token) and (current is None or current()):
                 callback()
 
         try:
@@ -260,7 +260,7 @@ class BackerAgentApp:
         self.run_cancel.set()
         owner = getattr(self, "process_owner", None)
         if owner:
-            owner.cancel()
+            threading.Thread(target=owner.cancel, daemon=True).start()
 
     def run(self):
         self.root.mainloop()
@@ -281,7 +281,7 @@ class RunView(ttk.Frame):
         self.details.pack(fill=tk.BOTH, expand=True, pady=12)
         self.primary = ttk.Button(self, text="Stop", command=self.stop, state=tk.DISABLED)
         self.primary.pack(anchor=tk.W)
-        ttk.Button(self, text="Back", command=lambda: app._show("home")).pack(anchor=tk.W, pady=6)
+        ttk.Button(self, text="Back", command=self.back).pack(anchor=tk.W, pady=6)
 
     def start(self, name):
         from backer.backends.kopia import KopiaProcessOwner
@@ -290,6 +290,7 @@ class RunView(ttk.Frame):
         self.app.run_cancel.clear()
         self.app.progress_frame = None
         self.app.progress_at = time.monotonic()
+        self._last_progress = None
         self.app.process_owner = KopiaProcessOwner()
         self.primary.configure(state=tk.NORMAL)
         self.label.set("Scanning · first backup has no percentage")
@@ -328,13 +329,18 @@ class RunView(ttk.Frame):
         elif frame:
             done = frame.get("bytes_processed", frame.get("bytes_done", 0))
             total = frame.get("total_bytes")
+            now = time.monotonic()
+            prior = self._last_progress
+            self._last_progress = (done, now)
+            rate = (done - prior[0]) / (now - prior[1]) if prior and now > prior[1] else 0
+            speed = f" · {int(max(0, rate))} B/s" if prior else ""
             if total:
                 self.bar.stop()
                 self.bar.configure(mode="determinate", maximum=total, value=done)
-                self.label.set(f"Running · {done} of {total} bytes")
+                self.label.set(f"Running · {done} of {total} bytes{speed}")
             else:
                 self.bar.configure(mode="indeterminate")
-                self.label.set(f"Scanning · {done} bytes")
+                self.label.set(f"Scanning · {done} bytes{speed}")
         if self.app.running:
             self.app.root.after(200, self.tick)
 
@@ -357,6 +363,12 @@ class RunView(ttk.Frame):
         self.app.cancel_running()
         self.primary.configure(state=tk.DISABLED)
         self.app.set_status("Stop requested; Backer will safely disconnect after this Kopia operation", error=True)
+
+    def back(self):
+        if self.app.running:
+            self.stop()
+            return
+        self.app._show("home")
 
 
 class RestoreView(ttk.Frame):
@@ -396,7 +408,7 @@ class RestoreView(ttk.Frame):
         self.copy_error.pack(side=tk.LEFT)
         self.open_log = ttk.Button(actions, text="Open log folder", command=self._open_log, state=tk.DISABLED)
         self.open_log.pack(side=tk.LEFT, padx=6)
-        ttk.Button(self, text="Back", command=lambda: app._show("home")).pack(anchor=tk.W, pady=6)
+        ttk.Button(self, text="Back", command=self.back).pack(anchor=tk.W, pady=6)
 
     def _choose_destination(self):
         chosen = filedialog.askdirectory()
@@ -449,6 +461,9 @@ class RestoreView(ttk.Frame):
         self.primary.configure(state=tk.NORMAL if rows else tk.DISABLED)
 
     def restore(self):
+        if self.app.running:
+            self.app.set_status("Another backup operation is already running", error=True)
+            return
         selected = self.snapshots.selection()
         if not self.job_name or not selected:
             self.app.set_status("Select a snapshot first", error=True)
@@ -495,8 +510,14 @@ class RestoreView(ttk.Frame):
             self.status.set("Restore cancelled; destination unchanged")
             self.primary.configure(state=tk.NORMAL)
             return
+        from backer.backends.kopia import KopiaProcessOwner
+
+        self.app.running = True
+        self.app.run_cancel.clear()
+        self.app.process_owner = KopiaProcessOwner()
         self.status.set("Restoring…")
         self.restore_frame, self.restore_at = None, time.monotonic()
+        self.primary.configure(text="Stop", command=self.stop)
 
         def worker():
             def progress(**frame):
@@ -509,7 +530,11 @@ class RestoreView(ttk.Frame):
 
                 repository = self.app.config.repositories[repository_name]
                 backend, passphrase, storage = _repository_backend(repository)
-                options = {"repository_password": passphrase}
+                options = {
+                    "repository_password": passphrase,
+                    "process_owner": self.app.process_owner,
+                    "cancel_event": self.app.run_cancel,
+                }
                 if storage and repository.type == "s3":
                     options["s3"] = {
                         **storage,
@@ -560,11 +585,18 @@ class RestoreView(ttk.Frame):
             self.status.set(f"Restoring · {bytes_processed} bytes")
 
     def _done(self, report):
+        self.app.running = False
         self.progress.stop()
         ok = bool(report.get("success"))
-        self.status.set("Restore completed" if ok else "; ".join(report.get("errors") or ["Restore failed"]))
+        self.status.set(
+            "Restore completed" if ok else (
+                "Restore cancelled"
+                if report.get("cancelled")
+                else "; ".join(report.get("errors") or ["Restore failed"])
+            )
+        )
         self.app.set_status(self.status.get(), error=not ok)
-        self.primary.configure(state=tk.NORMAL)
+        self.primary.configure(text="Restore", command=self.restore, state=tk.NORMAL)
         if not ok:
             self.copy_error.configure(state=tk.NORMAL)
             self.open_log.configure(state=tk.NORMAL)
@@ -579,6 +611,17 @@ class RestoreView(ttk.Frame):
             os.startfile(LOG_DIR)  # type: ignore[attr-defined]
         else:
             subprocess.run(["xdg-open", str(LOG_DIR)], check=False)
+
+    def stop(self):
+        self.app.cancel_running()
+        self.primary.configure(state=tk.DISABLED)
+        self.status.set("Stopping restore safely…")
+
+    def back(self):
+        if self.app.running:
+            self.stop()
+            return
+        self.app._show("home")
 
 
 def main():
