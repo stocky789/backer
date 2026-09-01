@@ -8,8 +8,9 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
+from importlib.resources import files
 from pathlib import Path
 from secrets import choice
 from tempfile import TemporaryDirectory
@@ -39,9 +40,56 @@ def _missing_flags(command: str, flags: list[str]) -> None:
 
 
 def _generated_passphrase() -> str:
-    # Six readable words are enough for a displayed recovery secret without a new dependency.
-    words = ("amber", "birch", "cinder", "dawn", "ember", "fjord", "grove", "harbor", "ivory", "juniper")
+    words = tuple(
+        line.split("\t", 1)[1]
+        for line in files("backer").joinpath("assets/eff_large_wordlist.txt").read_text(encoding="utf-8").splitlines()
+        if "\t" in line
+    )
     return "-".join(choice(words) for _ in range(6))
+
+
+def _write_recovery_export(path: Path, name: str, repository_id: str | None, hint: str, passphrase: str) -> None:
+    """Atomically save the one recovery record before removing local access."""
+    payload = json.dumps(
+        {
+            "repository_name": name,
+            "repository_id": repository_id,
+            "location_hint": hint,
+            "exported_at": datetime.now(UTC).isoformat(),
+            "passphrase": passphrase,
+        },
+        sort_keys=True,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload + "\n")
+        if os.name != "nt":
+            temporary.chmod(0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _load_recovery_passphrase(path: Path) -> str:
+    """Read a recovery record without accepting malformed secret-bearing JSON."""
+    value = path.read_text(encoding="utf-8").rstrip("\r\n")
+    if value.startswith("{"):
+        try:
+            record = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise click.UsageError("Recovery file is not valid JSON") from error
+        if not isinstance(record, dict) or set(record) != {
+            "repository_name", "repository_id", "location_hint", "exported_at", "passphrase"
+        } or not isinstance(record["passphrase"], str):
+            raise click.UsageError("Recovery file has an invalid format")
+        value = record["passphrase"]
+    if not value:
+        raise click.UsageError("Repository passphrase is required")
+    return value
 
 
 def _redact_error(error: BaseException, *secrets: str | None) -> str:
@@ -859,6 +907,13 @@ def backup(
 @click.option("--domain")
 @click.option("--password-stdin", is_flag=True)
 @click.option("--password-file", type=click.Path(path_type=Path))
+@click.option("--bucket")
+@click.option("--prefix")
+@click.option("--endpoint")
+@click.option("--region")
+@click.option("--access-key-id")
+@click.option("--secret-key-stdin", is_flag=True)
+@click.option("--secret-key-file", type=click.Path(path_type=Path))
 @click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]), default=None)
 @click.option("--destination", type=click.Path(path_type=Path))
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
@@ -882,6 +937,13 @@ def restore(
     domain: str | None,
     password_stdin: bool,
     password_file: Path | None,
+    bucket: str | None,
+    prefix: str | None,
+    endpoint: str | None,
+    region: str | None,
+    access_key_id: str | None,
+    secret_key_stdin: bool,
+    secret_key_file: Path | None,
     into: str | None,
     destination: Path | None,
     before: str | None,
@@ -943,9 +1005,10 @@ def restore(
         click.echo("Restore completed")
         return
     if from_path:
-        if passphrase_stdin and password_stdin:
+        if passphrase_stdin and (password_stdin or secret_key_stdin):
             raise click.UsageError(
-                "--passphrase-stdin and --password-stdin cannot share stdin; use a file or environment for one secret"
+                "Repository and storage secret stdin inputs cannot share stdin; "
+                "use a file or environment for one secret"
             )
         passphrase_sources = (passphrase_stdin, passphrase_file, os.environ.get("BACKER_REPOSITORY_PASSWORD"))
         if sum(bool(value) for value in passphrase_sources) != 1:
@@ -955,7 +1018,7 @@ def restore(
         raw_passphrase = (
             sys.stdin.read()
             if passphrase_stdin
-            else passphrase_file.read_text()
+            else _load_recovery_passphrase(passphrase_file)
             if passphrase_file
             else os.environ.get("BACKER_REPOSITORY_PASSWORD", "")
         )
@@ -986,7 +1049,37 @@ def restore(
             if manager.serverless_session_created:
                 def cleanup() -> None:
                     manager.disconnect_serverless(parts[0], parts[1])
-        backend = KopiaBackend({"repository_password": passphrase})
+        if from_path.startswith("s3://"):
+            from backer.backends.s3 import parse_s3_config
+
+            if secret_key_stdin and secret_key_file:
+                raise click.UsageError("Choose at most one of --secret-key-stdin or --secret-key-file")
+            secret_key = (
+                sys.stdin.read().rstrip("\r\n")
+                if secret_key_stdin
+                else secret_key_file.read_text(encoding="utf-8").rstrip("\r\n")
+                if secret_key_file
+                else os.environ.get("BACKER_S3_SECRET_KEY", "")
+            )
+            path_bucket, _, path_prefix = from_path[5:].partition("/")
+            try:
+                s3 = parse_s3_config(
+                    {
+                        "bucket": bucket or path_bucket,
+                        "prefix": prefix if prefix is not None else path_prefix,
+                        "endpoint": endpoint,
+                        "region": region,
+                        "access_key_id": access_key_id,
+                        "secret_access_key": secret_key,
+                    }
+                )
+            except ValueError as error:
+                raise click.UsageError(str(error)) from error
+            if bucket and bucket != path_bucket:
+                raise click.UsageError("--bucket must match the bucket in --from")
+            backend = KopiaBackend({"repository_password": passphrase, "s3": s3.__dict__})
+        else:
+            backend = KopiaBackend({"repository_password": passphrase})
         try:
             probe_status, _ = backend.repository_probe(from_path)
             rows = backend.list_snapshots(BackupDestination(from_path))
@@ -1397,7 +1490,7 @@ def _read_passphrase(stream: bool, file: Path | None) -> str:
             raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
         value = os.environ.get("BACKER_REPOSITORY_PASSWORD", "")
     else:
-        value = sys.stdin.read() if stream else file.read_text(encoding="utf-8")
+        value = sys.stdin.read() if stream else _load_recovery_passphrase(file)
     value = value.rstrip("\r\n")
     if not value:
         raise click.UsageError("Repository passphrase is required")
@@ -1945,8 +2038,7 @@ def repo_passphrase(ctx: click.Context, name: str, passphrase_out: Path | None, 
     if not passphrase_out and not print_passphrase:
         _missing_flags("repo passphrase " + name, ["--passphrase-out FILE or --print-passphrase"])
     if passphrase_out:
-        passphrase_out.parent.mkdir(parents=True, exist_ok=True)
-        passphrase_out.write_text(value + "\n", encoding="utf-8")
+        _write_recovery_export(passphrase_out, record.name, record.id, _repository_destination(record), value)
     if print_passphrase:
         click.echo(value)
 
@@ -1954,10 +2046,9 @@ def repo_passphrase(ctx: click.Context, name: str, passphrase_out: Path | None, 
 @repo.command("rm")
 @click.argument("name")
 @click.option("--yes", is_flag=True)
-@click.option("--confirm", help="Type the repository name to confirm local-access removal")
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.pass_context
-def repo_rm(ctx: click.Context, name: str, yes: bool, confirm: str | None, passphrase_out: Path | None) -> None:
+def repo_rm(ctx: click.Context, name: str, yes: bool, passphrase_out: Path | None) -> None:
     """Remove local access only; repository data is left untouched."""
     from backer.core import keystore
 
@@ -1965,15 +2056,16 @@ def repo_rm(ctx: click.Context, name: str, yes: bool, confirm: str | None, passp
     key, record = _repository(config, name)
     if not yes:
         raise click.UsageError("--yes acknowledges that backup data will be left unreadable on this computer")
-    if confirm != name:
-        raise click.UsageError(f"--confirm must exactly match repository name '{name}'")
+    if not _interactive():
+        raise click.UsageError("Repository removal requires an interactive typed repository name")
+    if click.prompt("Type the repository name to remove local access") != name:
+        raise click.ClickException("Repository name did not match; nothing was changed")
     if not passphrase_out:
         raise click.UsageError("--passphrase-out FILE is required before removing local access")
     value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
     if not value:
         raise click.ClickException("Repository passphrase is unavailable")
-    passphrase_out.parent.mkdir(parents=True, exist_ok=True)
-    passphrase_out.write_text(value + "\n", encoding="utf-8")
+    _write_recovery_export(passphrase_out, record.name, record.id, _repository_destination(record), value)
     for reference in (record.passphrase_ref, record.storage_password_ref):
         if reference:
             keystore.delete(reference, machine_scope=record.scope == "machine")
@@ -2022,7 +2114,7 @@ def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphra
     passphrase = (
         sys.stdin.read().rstrip("\r\n")
         if passphrase_stdin
-        else passphrase_file.read_text(encoding="utf-8").rstrip("\r\n")
+        else _load_recovery_passphrase(passphrase_file)
     )
     if not passphrase:
         raise click.UsageError("A repository passphrase is required")
@@ -2254,6 +2346,10 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
     )
 
     if mode == "local":
+        if is_windows() and method != "task":
+            raise click.UsageError("--mode local on Windows requires --method task")
+        if not is_windows() and method != "systemd":
+            raise click.UsageError("--mode local on Linux requires --method systemd")
         from backer.core.config import load_config
         from backer.core.paths import get_config_dir, get_machine_config_dir
         from backer.serverless.repositories import rescope_secrets_for_system
@@ -2263,17 +2359,18 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
             rescope_secrets_for_system(config)
         except ValueError as error:
             raise click.ClickException(str(error)) from error
-        config.save(get_machine_config_dir() / "config.yaml")
+        machine_config = get_machine_config_dir() / "config.yaml"
+        config.save(machine_config)
         if not is_windows():
             success, message = create_local_systemd_timer(headless=headless)
             if not success:
                 raise click.ClickException(message)
-            console.print(f"[green]✓[/green] {message}")
+            console.print(f"[green]✓[/green] {message} (backer-local.timer; config {machine_config})")
             return
         success, message = create_local_scheduled_task()
         if not success:
             raise click.ClickException(message)
-        console.print(f"[green]✓[/green] {message}")
+        console.print(f"[green]✓[/green] {message} (BackerLocalSchedule as SYSTEM; config {machine_config})")
         return
 
     from backer.client.agent import BackerAgent
@@ -3144,12 +3241,18 @@ def prune(name: str, list_only: bool, apply: bool, yes_remove: int | None, as_js
         raise click.UsageError("--yes-remove N is required with --apply")
     config = load_config(get_config_dir() / "config.yaml")
     try:
-        count, _ = prune_job(config, name, apply=False)
+        count, preview = prune_job(config, name, apply=False)
     except ValueError as error:
         raise click.ClickException(str(error)) from error
     if apply and yes_remove != count:
         raise click.UsageError(f"--yes-remove must equal the previewed count ({count})")
     if apply:
+        try:
+            refreshed_count, refreshed_preview = prune_job(config, name, apply=False)
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+        if refreshed_count != count or refreshed_preview != preview:
+            raise click.ClickException("Retention preview changed; nothing was deleted")
         try:
             count, _ = prune_job(config, name, apply=True)
         except ValueError as error:

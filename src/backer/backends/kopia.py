@@ -527,51 +527,6 @@ class KopiaBackend(BackendBase):
         finally:
             self._disconnect_repo(path)
 
-    def _auto_init_repo(self, path: str) -> tuple[bool, str]:
-        """Create a repository for a backup that found none connected there.
-
-        Only ever called from `backup()` after a connect failure that
-        matched `_is_not_initialized_error` - never on a wrong password or
-        an unreachable path. See the comment in `backup()` for the residual
-        "unmounted share looks like an empty local directory" hazard this
-        does not close.
-
-        The one cheap guard applied here: for a filesystem-type destination
-        (local path, or a mapped/mounted SMB or NFS path - anything that
-        isn't an s3://, gs://, azure:// or sftp:// URL), refuse to create if
-        the path already exists as a non-empty directory. Kopia itself
-        would happily "create" a repository inside a directory that
-        already holds unrelated files, so this is the difference between
-        "nothing here yet" and "something here that isn't a repository or
-        is a stale mount point" - it's a real signal, but it says nothing
-        about the EMPTY case, which still passes straight through.
-        """
-        if not path.startswith(("s3://", "gs://", "azure://", "sftp://")):
-            p = Path(path)
-            try:
-                if p.exists() and p.is_dir() and any(p.iterdir()):
-                    return False, (
-                        f"'{path}' already exists and is not empty - refusing to initialize a repository there"
-                    )
-            except OSError as e:
-                return False, str(e)
-
-        try:
-            binary = self._get_binary()
-            repo_type, repo_args = self._get_repo_type(path)
-            cmd = [str(binary), "repository", "create", repo_type]
-            cmd.extend(repo_args)
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=self._repo_env(path),
-                timeout=120,
-            )
-            return result.returncode == 0, result.stderr.strip()
-        except (subprocess.TimeoutExpired, OSError, ValueError) as e:
-            return False, str(e)
-
     @_serialize_by_repo("destination")
     def test_connection(self, destination: BackupDestination) -> tuple[bool, str]:
         """Test S3 access without creating a repository."""
@@ -606,41 +561,11 @@ class KopiaBackend(BackendBase):
                 return_code=-1,
             )
 
-        # Connect to the repository. Repository creation at add time
-        # (server/app.py's ServerKopia.ensure_repo) only covers repo_type ==
-        # "local" - for SMB/NFS/S3 destinations nothing else ever creates
-        # the repository, so the first backup to a genuinely new one must be
-        # able to. We auto-create ONLY on kopia's "repository not
-        # initialized in the provided storage" - never on a wrong password
-        # or an unreachable/unmounted path, which must keep failing loudly.
-        #
-        # Residual hazard, and it is real: kopia reports that exact same
-        # "not initialized" message whether the repository is genuinely
-        # absent OR the destination resolved to an unmounted share that
-        # looks, to kopia, like an empty local directory - kopia cannot
-        # tell those apart, and neither can we from its error text alone.
-        # The one cheap signal we do check (see _auto_init_repo): a
-        # filesystem-type destination that already exists as a non-empty
-        # directory is refused rather than initialized into, since that's
-        # either unrelated data or a stale mount point - never something
-        # safe to build a fresh repository inside. A destination that
-        # resolves to an EMPTY directory (the classic "share never
-        # mounted, fell through to a bare local folder" case) still looks
-        # identical to "nothing here yet" and can still be auto-created
-        # into by mistake. That gap is not closed here.
         connected, err = self._connect_repo(destination.path)
-        auto_init_attempted = False
-        if not connected and _is_not_initialized_error(err):
-            # `repository create` also connects, so a successful auto-init leaves us
-            # ready to proceed exactly as if _connect_repo had succeeded.
-            auto_init_attempted = True
-            connected, err = self._auto_init_repo(destination.path)
 
         if not connected:
             if _is_wrong_password_error(err):
                 message = f"Wrong repository password for {destination.path}: {err}"
-            elif auto_init_attempted:
-                message = f"Repository at {destination.path} was not initialized and could not be auto-created: {err}"
             else:
                 message = (
                     f"Failed to connect to repository at {destination.path}: {err}. "

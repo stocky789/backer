@@ -656,10 +656,10 @@ class TestKopiaBackend:
         assert not any(c[1:3] == ["repository", "create"] for c in calls)
         assert "wrong repository password" in result.errors[0].lower()
 
-    def test_backup_auto_inits_when_repository_genuinely_not_initialized(
+    def test_backup_refuses_an_uninitialized_repository_without_creating_it(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The first backup to a never-created SMB/NFS/S3 repository must create it, not fail forever."""
+        """Only explicit repo add --init may create storage."""
         backend = KopiaBackend({"repository_password": "test-password"})
         calls: list[list[str]] = []
         monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
@@ -675,14 +675,11 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-        monkeypatch.setattr(
-            "backer.backends.kopia._run_kopia_with_progress",
-            lambda command, *_: CompletedProcess(command, 0, '{"id":"snapshot"}\n', ""),
-        )
         result = backend.backup(BackupSource(tmp_path), BackupDestination(str(tmp_path / "repo")))
 
-        assert result.success
-        assert any(c[1:3] == ["repository", "create"] for c in calls)
+        assert not result.success
+        assert not any(c[1:3] == ["repository", "create"] for c in calls)
+        assert "repository must already be initialized" in result.errors[0].lower()
 
     def test_backup_does_not_auto_init_into_a_nonempty_existing_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -81,6 +81,54 @@ def test_generated_passphrase_needs_visible_output_off_tty(tmp_path):
     assert "--passphrase-out FILE or --print-passphrase" in result.output
 
 
+def test_generated_passphrase_uses_six_eff_words_and_recovery_record_is_private(tmp_path):
+    from backer.cli import _generated_passphrase, _load_recovery_passphrase, _write_recovery_export
+
+    phrase = _generated_passphrase()
+    export = tmp_path / "recovery.json"
+    _write_recovery_export(export, "office", "repo-id", "/backups", phrase)
+
+    wordlist = Path(__file__).parents[1] / "src/backer/assets/eff_large_wordlist.txt"
+    words = {line.split("\t", 1)[1] for line in wordlist.read_text().splitlines()}
+    assert len(phrase.split("-")) == 6
+    assert set(phrase.split("-")) <= words
+    assert _load_recovery_passphrase(export) == phrase
+    if __import__("os").name != "nt":
+        assert export.stat().st_mode & 0o077 == 0
+
+
+def test_s3_recovery_restore_is_memory_only(monkeypatch, tmp_path):
+    passphrase = tmp_path / "passphrase"
+    secret = tmp_path / "secret"
+    passphrase.write_text("repository phrase\n", encoding="utf-8")
+    secret.write_text("s3 secret\n", encoding="utf-8")
+    seen = {}
+
+    def probe(self, _path):
+        seen.update(self.config)
+        return "present", "id"
+
+    monkeypatch.setattr("backer.backends.kopia.KopiaBackend.repository_probe", probe)
+    monkeypatch.setattr(
+        "backer.backends.kopia.KopiaBackend.list_snapshots",
+        lambda *_args: [{"full_id": "snapshot", "timestamp": "2026-01-01", "paths": ["/source"]}],
+    )
+    config_dir = tmp_path / "unwritten-config"
+    result = CliRunner().invoke(
+        main,
+        [
+            "restore", "--from", "s3://bucket/prefix", "--passphrase-file", str(passphrase), "--endpoint",
+            "https://s3.example", "--region", "au", "--access-key-id", "key", "--secret-key-file", str(secret),
+            "--latest", "--destination", str(tmp_path / "restore"), "--dry-run",
+        ],
+        env={"BACKER_CONFIG_DIR": str(config_dir)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen["s3"]["secret_access_key"] == "s3 secret"
+    assert not config_dir.exists()
+
+
 def test_every_init_step_has_a_flag():
     result = CliRunner().invoke(main, ["init", "--help"])
     for step in INIT_STEPS:
@@ -142,6 +190,36 @@ def test_prune_checks_confirmation_before_any_delete(monkeypatch):
     result = CliRunner().invoke(main, ["prune", "job", "--apply"])
     assert result.exit_code == 2
     assert calls == []
+
+
+def test_prune_refuses_delete_when_second_preview_changes(monkeypatch):
+    calls = []
+
+    def prune_job(*_args, **kwargs):
+        calls.append(kwargs)
+        return (2 if len(calls) == 1 else 3), "preview"
+
+    monkeypatch.setattr("backer.serverless.retention.prune_job", prune_job)
+    result = CliRunner().invoke(main, ["prune", "job", "--apply", "--yes-remove", "2"])
+
+    assert result.exit_code != 0
+    assert len(calls) == 2
+    assert all(not call["apply"] for call in calls)
+
+
+def test_prune_refuses_delete_when_same_count_preview_has_different_snapshots(monkeypatch):
+    calls = []
+
+    def prune_job(*_args, **kwargs):
+        calls.append(kwargs)
+        return 2, "a snapshot(s) would be deleted" if len(calls) == 1 else "b snapshot(s) would be deleted"
+
+    monkeypatch.setattr("backer.serverless.retention.prune_job", prune_job)
+    result = CliRunner().invoke(main, ["prune", "job", "--apply", "--yes-remove", "2"])
+
+    assert result.exit_code != 0
+    assert len(calls) == 2
+    assert all(not call["apply"] for call in calls)
 
 
 def test_repo_rm_refuses_before_mutating_without_typed_name(tmp_path, monkeypatch):
