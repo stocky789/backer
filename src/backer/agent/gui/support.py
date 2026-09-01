@@ -58,7 +58,8 @@ def _run_lines(job: dict, *, condition: str | None = None) -> tuple[str, ...]:
             continue
         for raw_line in str(step.get("run", "")).splitlines():
             line = raw_line.strip()
-            if not line or line.startswith("#") or line.startswith(("echo ", "Write-Output ")):
+            command_line = re.sub(r"^try\s*\{\s*", "", line, flags=re.IGNORECASE)
+            if not line or line.startswith("#") or command_line.casefold().startswith(("echo ", "write-output ")):
                 continue
             line = f"{continued} {line}".strip() if continued else line
             if line.endswith("\\"):
@@ -73,9 +74,10 @@ def _has_command(job: dict, command: str, *arguments: str, condition: str | None
     command_tokens = tuple(command.split())
     for line in _run_lines(job, condition=condition):
         tokens = tuple(line.split())
-        if any(tokens[index : index + len(command_tokens)] == command_tokens for index in range(len(tokens))):
-            if all(argument in tokens for argument in arguments):
-                return True
+        if tokens[:2] == ("try", "{"):
+            tokens = tokens[2:]
+        if tokens[: len(command_tokens)] == command_tokens and all(argument in tokens for argument in arguments):
+            return True
     return False
 
 

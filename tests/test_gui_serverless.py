@@ -1748,7 +1748,8 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
                         "if (!$expected -or $actual -ne $expected) { throw 'checksum mismatch' }\n"
                         "Start-Process -FilePath \"$PWD\\minio.exe\" -ArgumentList 'server', '--address', "
                         "':9000', 'C:\\minio-data' -WindowStyle Hidden\n"
-                        "Invoke-WebRequest http://127.0.0.1:9000/minio/health/live"
+                        "try { Invoke-WebRequest http://127.0.0.1:9000/minio/health/live -UseBasicParsing | "
+                        "Out-Null; exit 0 } catch { Start-Sleep -Seconds 1 }"
                     ),
                 },
                 {
@@ -1904,7 +1905,19 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
     )
     assert_empty(
         lambda value: value["s3-contract"]["steps"][1].update(
-            run=value["s3-contract"]["steps"][1]["run"].replace("Invoke-WebRequest http", "echo Invoke-WebRequest http")
+            run=value["s3-contract"]["steps"][1]["run"].replace(
+                "try { Invoke-WebRequest http", "try { echo Invoke-WebRequest http"
+            )
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][0].update(
+            run=value["s3-contract"]["steps"][0]["run"].replace("docker run", ": # docker run")
+        )
+    )
+    assert_empty(
+        lambda value: value["s3-contract"]["steps"][1].update(
+            run=value["s3-contract"]["steps"][1]["run"].replace("Start-Process", "write-output Start-Process")
         )
     )
 
