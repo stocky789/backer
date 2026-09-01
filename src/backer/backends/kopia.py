@@ -39,6 +39,28 @@ _RESTORE_PROGRESS = re.compile(
 _BYTE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
 
+class KopiaProcessOwner:
+    """The one cancellation handle for a running Kopia child."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+
+    def register(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._process = process
+
+    def release(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            if self._process is process:
+                self._process = None
+
+    def cancel(self) -> bool:
+        with self._lock:
+            process = self._process
+        return _stop_kopia_process(process) if process is not None else False
+
+
 def _progress_bytes(number: str, unit: str) -> int:
     return int(float(number) * _BYTE_UNITS[unit])
 
@@ -65,6 +87,7 @@ def _parse_restore_progress(frame: str) -> dict[str, int] | None:
         "bytes_done": _progress_bytes(match["done_size"], match["done_unit"]),
         "total_bytes": _progress_bytes(match["total_size"], match["total_unit"]),
         "files_done": int(match["done_files"]),
+        "total_files": int(match["total_files"]),
     }
 
 
@@ -113,6 +136,7 @@ def _run_kopia_with_progress(
     parse_frame: Callable[[str], dict[str, int] | None],
     progress_callback: Callable[..., None] | None,
     timeout: int | float | None,
+    process_owner: KopiaProcessOwner | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Kopia without letting its CR-delimited stderr block JSON stdout."""
     popen_args: dict[str, Any] = {
@@ -124,6 +148,8 @@ def _run_kopia_with_progress(
     if os.name == "nt":
         popen_args["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(cmd, **popen_args)
+    if process_owner:
+        process_owner.register(process)
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     last = {"bytes_done": 0, "files_done": 0}
@@ -157,6 +183,8 @@ def _run_kopia_with_progress(
             setattr(error, "backer_hard_stopped", True)
         raise
     finally:
+        if process_owner:
+            process_owner.release(process)
         if not stopped:
             process.stdout.close()
             process.stderr.close()
@@ -627,6 +655,7 @@ class KopiaBackend(BackendBase):
                 lambda frame: _parse_snapshot_progress(frame, previous_size),
                 progress_callback,
                 self.config.get("timeout", 86400),
+                self.config.get("process_owner"),
             )
 
             finished_at = datetime.now()
@@ -888,6 +917,7 @@ class KopiaBackend(BackendBase):
                 _parse_restore_progress,
                 progress_callback,
                 self.config.get("timeout", 86400),
+                self.config.get("process_owner"),
             )
 
             errors = []

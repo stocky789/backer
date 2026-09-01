@@ -453,6 +453,41 @@ def test_no_percentage_without_a_frame():
     assert "bytes_done" in source
 
 
+def test_restore_progress_uses_the_shared_determinate_frame():
+    from backer.agent.gui.app import RestoreView
+
+    changes = []
+    instance = object.__new__(RestoreView)
+    instance.progress = type(
+        "Bar",
+        (),
+        {"stop": lambda _self: changes.append(("stop",)), "configure": lambda _self, **kw: changes.append(kw)},
+    )()
+    instance.status = type("Status", (), {"set": lambda _self, value: changes.append(("status", value))})()
+
+    instance._progress_frame(bytes_processed=2048, total_bytes=4096, files_processed=2, total_files=10)
+
+    assert {"mode": "determinate", "maximum": 4096, "value": 2048} in changes
+    assert ("status", "Restoring · 2 of 10 files") in changes
+
+
+def test_worker_marshal_drops_callbacks_after_shutdown():
+    from backer.agent.gui.app import BackerAgentApp
+
+    calls = []
+
+    class Root:
+        def after(self, _delay, callback):
+            callback()
+
+    app = object.__new__(BackerAgentApp)
+    app.root, app.alive, app._generations = Root(), False, {"restore": 1}
+
+    app.marshal(("restore", 1), lambda: calls.append("paint"))
+
+    assert calls == []
+
+
 def test_1219_panel_names_the_conflicting_connection(monkeypatch):
     from backer.agent.gui.wizard import connection_conflict_message
 

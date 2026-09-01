@@ -43,7 +43,8 @@ def _write_log(data_dir: Path, run_id: str, text: str, secrets: list[str]) -> No
 
 
 def _run_local_job(
-    config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None
+    config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None,
+    cancel_event: Any | None = None, process_owner: Any | None = None,
 ) -> dict[str, Any]:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{config.agent_id[:8]}"
     started = datetime.now(UTC)
@@ -70,6 +71,8 @@ def _run_local_job(
             raise ValueError(f"Repository '{repository.name}' passphrase is unavailable")
         secrets.append(passphrase)
         options: dict[str, Any] = {"repository_password": passphrase}
+        if process_owner is not None:
+            options["process_owner"] = process_owner
         storage = None
         if repository.type == "s3":
             raw = keystore.get(repository.storage_password_ref or "", machine_scope=machine_scope)
@@ -156,6 +159,8 @@ def _run_local_job(
             _write_progress(data_dir, run_id, **{key: value for key, value in event.items() if key != "run_id"}),
             on_progress(**event) if on_progress else None,
         ))
+        if cancel_event and cancel_event.is_set():
+            report = {**report, "success": False, "cancelled": True, "errors": ["Backup cancelled"]}
         if not report["success"]:
             raise RuntimeError("; ".join(report.get("errors") or ["Backup failed"]))
         return report
@@ -171,7 +176,8 @@ def _run_local_job(
     finally:
         finished = datetime.now(UTC)
         error_message = "; ".join(report.get("errors") or []) or None
-        append_run(data_dir, JobRun(name, run_id, JobStatus.SUCCESS if report.get("success") else JobStatus.FAILED,
+        append_run(data_dir, JobRun(name, run_id, JobStatus.SUCCESS if report.get("success") else (
+            JobStatus.CANCELLED if report.get("cancelled") else JobStatus.FAILED),
                                    started, finished, error_message=error_message, client_id=config.agent_id,
                                    repository_id=repository_id, error_stage=None if report.get("success") else stage))
         _write_log(data_dir, run_id, report.get("output") or error_message or "", secrets)
@@ -181,11 +187,15 @@ def _run_local_job(
 
 
 def run_local_job(
-    config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None
+    config: BackerConfig, name: str, *, run_as_system: bool = False, on_progress: Callable[..., None] | None = None,
+    cancel_event: Any | None = None, process_owner: Any | None = None,
 ) -> dict[str, Any] | None:
     """Run one local job only when the shared serverless lock is available."""
     with run_lock(get_data_dir()) as acquired:
-        return _run_local_job(config, name, run_as_system=run_as_system, on_progress=on_progress) if acquired else None
+        return _run_local_job(
+            config, name, run_as_system=run_as_system, on_progress=on_progress,
+            cancel_event=cancel_event, process_owner=process_owner,
+        ) if acquired else None
 
 
 def run_due_jobs(

@@ -121,7 +121,8 @@ def run_backup(
         destination = BackupDestination(path=dest_path)
 
         def progress_callback(
-            bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0
+            bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0,
+            total_files: int = 0,
         ) -> None:
             event = {
                 "run_id": run_id,
@@ -130,6 +131,7 @@ def run_backup(
                 "bytes_processed": bytes_done,
                 "files_processed": files_done,
                 "total_bytes": total_bytes,
+                "total_files": total_files,
             }
             if total_bytes > 0:
                 event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))
@@ -282,7 +284,8 @@ def run_restore(
         destination = Path(job["destination_path"])
 
         def progress_callback(
-            bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0
+            bytes_done: int = 0, files_done: int = 0, current_file: str = "", total_bytes: int = 0,
+            total_files: int = 0,
         ) -> None:
             event = {
                 "run_id": run_id,
@@ -290,6 +293,8 @@ def run_restore(
                 "current_file": current_file[:200] if current_file else None,
                 "bytes_processed": bytes_done,
                 "files_processed": files_done,
+                "total_bytes": total_bytes,
+                "total_files": total_files,
             }
             if total_bytes > 0:
                 event["progress_percent"] = min(95, 5 + int((bytes_done / total_bytes) * 90))

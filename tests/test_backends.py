@@ -176,6 +176,7 @@ class TestKopiaBackend:
             "bytes_done": 216 * 1024 * 1024,
             "total_bytes": 720 * 1024 * 1024,
             "files_done": 17,
+            "total_files": 60,
         }
 
     def test_progress_reader_splits_carriage_returns_and_keeps_result_json(
