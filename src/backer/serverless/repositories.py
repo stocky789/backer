@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import socket
+import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
 from backer.backends.base import BackupDestination
@@ -53,6 +57,42 @@ def create(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | 
     return result.success, "\n".join(result.errors or [])
 
 
+def set_maintenance_owner(
+    record: RepositoryConfig, passphrase: str, agent_id: str, storage: dict[str, str] | str | None = None
+) -> tuple[bool, str]:
+    result = _backend(record, passphrase, storage).set_maintenance_owner(
+        _destination(record), f"{agent_id}@{socket.gethostname()}"
+    )
+    return result.success, "\n".join(result.errors or [])
+
+
+@contextmanager
+def repository_operation_context(
+    record: RepositoryConfig, storage: dict[str, str] | str | None
+) -> Generator[RepositoryConfig, None, None]:
+    """Yield the filesystem path Kopia must use for this operation."""
+    if getattr(record, "type", None) != "smb" or sys.platform == "win32":
+        yield record
+        return
+    if not all((record.server, record.share, record.username)) or not isinstance(storage, str) or not storage:
+        raise ValueError("SMB server, share, username and password are required")
+    if record.use_existing_session:
+        raise ValueError("Linux SMB repositories require a password, not a Windows session")
+    raw_path = (record.path or "").replace("\\", "/")
+    if PureWindowsPath(raw_path).is_absolute() or raw_path.startswith("/") or ".." in raw_path.split("/"):
+        raise ValueError("SMB repository path must be relative to the share")
+    from backer.core.mounts import smb_mount_context
+
+    with smb_mount_context(
+        record.server or "",
+        record.share or "",
+        record.username,
+        storage if isinstance(storage, str) else None,
+        record.domain,
+    ) as mount_point:
+        yield record.model_copy(update={"type": "local", "path": str(mount_point / raw_path)})
+
+
 def add_repository(
     config: BackerConfig,
     config_path: Path,
@@ -79,7 +119,7 @@ def add_repository(
         record = record.model_copy(update={**parsed.public_config, "path": None})
     smb_manager = None
     smb_session_created = False
-    if record.type == "smb":
+    if record.type == "smb" and sys.platform == "win32":
         if not all((record.server, record.share, record.username)) or (
             not record.use_existing_session and not isinstance(storage, str)
         ):
@@ -100,24 +140,30 @@ def add_repository(
             smb_manager, "serverless_session_created", True
         )
     try:
-        status, unique_id, message = probe(record, passphrase, storage)
-        if attach and status != "present":
-            raise ValueError(message or f"Repository is {status}; nothing was created")
-        if init:
-            if status == "present":
-                if not adopt:
-                    raise ValueError("Repository already exists; use --attach or --adopt")
-            elif adopt:
-                raise ValueError(message or "Repository is absent; adoption requires an existing repository")
-            elif status != "absent":
-                raise ValueError(message or f"Repository is {status}; refusing to create")
-            elif status == "absent":
-                created, error = create(record, passphrase, storage)
-                if not created:
-                    raise ValueError(error or "Repository creation failed")
-                status, unique_id, message = probe(record, passphrase, storage)
-                if status != "present":
-                    raise ValueError(message or "Created repository could not be verified")
+        with repository_operation_context(record, storage) as operation_record:
+            status, unique_id, message = probe(operation_record, passphrase, storage)
+            if attach and status != "present":
+                raise ValueError(message or f"Repository is {status}; nothing was created")
+            if init:
+                if status == "present":
+                    if not adopt:
+                        raise ValueError("Repository already exists; use --attach or --adopt")
+                elif adopt:
+                    raise ValueError(message or "Repository is absent; adoption requires an existing repository")
+                elif status != "absent":
+                    raise ValueError(message or f"Repository is {status}; refusing to create")
+                elif status == "absent":
+                    created, error = create(operation_record, passphrase, storage)
+                    if not created:
+                        raise ValueError(error or "Repository creation failed")
+                    status, unique_id, message = probe(operation_record, passphrase, storage)
+                    if status != "present":
+                        raise ValueError(message or "Created repository could not be verified")
+                    owner_set, owner_error = set_maintenance_owner(
+                        operation_record, passphrase, config.agent_id, storage
+                    )
+                    if not owner_set:
+                        raise ValueError(owner_error or "Could not set repository maintenance owner")
         repo_id = record.id or uuid4().hex[:12]
         if repo_id in config.repositories:
             raise ValueError(f"Repository id '{repo_id}' already exists")

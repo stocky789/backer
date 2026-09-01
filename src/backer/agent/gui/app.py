@@ -748,12 +748,13 @@ class RestoreView(ttk.Frame):
                 job = self.app.config.jobs[job_name]
                 repository = self.app.config.repositories[job.repository]
                 backend, passphrase, storage = _repository_backend(repository)
-                from backer.serverless.repositories import probe
+                from backer.serverless.repositories import probe, repository_operation_context
 
-                status, _unique_id, message = probe(repository, passphrase, storage)
-                if status != "present":
-                    raise ValueError(message or f"Repository is {status}")
-                rows = backend.list_snapshots(BackupDestination(_repository_destination(repository)))
+                with repository_operation_context(repository, storage) as operation_record:
+                    status, _unique_id, message = probe(operation_record, passphrase, storage)
+                    if status != "present":
+                        raise ValueError(message or f"Repository is {status}")
+                    rows = backend.list_snapshots(BackupDestination(_repository_destination(operation_record)))
                 result = (rows, None, message)
             except Exception as error:
                 result = ([], str(error), "")

@@ -35,6 +35,10 @@ class ModeApplyResult(NamedTuple):
     message: str
 
 
+def installer_update_command(destination: str | Path) -> list[str]:
+    return [str(destination), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+
+
 def _restore_config_file(path: Path, content: bytes | None) -> None:
     if content is None:
         path.unlink(missing_ok=True)
@@ -702,9 +706,7 @@ class SettingsView(ttk.Frame):
         ttk.Button(utilities, text="Open logs", command=self.open_logs).pack(side=tk.LEFT)
         ttk.Button(utilities, text="Check for updates", command=self.check_for_updates).pack(side=tk.LEFT, padx=6)
         backend = keystore.backend_name()
-        ttk.Label(self, text=f"Repository secrets use {backend}.", style="Muted.TLabel").pack(
-            anchor=tk.W, pady=(10, 0)
-        )
+        ttk.Label(self, text=f"Repository secrets use {backend}.", style="Muted.TLabel").pack(anchor=tk.W, pady=(10, 0))
         self.repository_choice = tk.StringVar(value=next(iter(app.config.repositories), ""))
         self.repository_detail = tk.StringVar(value=repository_details(app.config, self.repository_choice.get()))
         repository_actions = ttk.Frame(self)
@@ -1059,6 +1061,7 @@ class SettingsView(ttk.Frame):
 
                 def cleanup():
                     return remove_local_systemd_test_service(token)
+
             if not launch:
                 cleanup_errors = remove_scheduled_test(directory, refs)
                 return False, message + ("; cleanup: " + "; ".join(cleanup_errors) if cleanup_errors else "")
@@ -1092,11 +1095,12 @@ class SettingsView(ttk.Frame):
 
     def check_for_updates(self):
         release_url = "https://git.stockhome.com.au/stocky789/backer/releases"
+
         def install():
             if sys.platform == "win32":
                 destination = get_config_dir() / "backer-agent-setup.exe"
                 urllib.request.urlretrieve(release_url + "/download/release-main/backer-agent-setup.exe", destination)
-                subprocess.Popen([str(destination), "/S"])
+                subprocess.Popen(installer_update_command(destination))
                 return True, "Installer started; restart Backer when it completes"
             repository = release_url.removesuffix("/releases")
             result = subprocess.run(

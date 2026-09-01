@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from backer.client.agent import BackerAgent
 from backer.core import paths
-from backer.core.config import BackerConfig, RepositoryConfig, load_config
+from backer.core.config import BackerConfig, RepositoryConfig, RetentionConfig, load_config
 
 
 def _server() -> dict[str, str]:
@@ -189,6 +189,28 @@ def test_repository_config_rejects_engine_fields(field: str) -> None:
         RepositoryConfig.model_validate({"name": "repo", "type": "local", "path": "/repo", field: "kopia"})
 
 
+def test_repository_config_rejects_types_outside_the_serverless_matrix() -> None:
+    with pytest.raises(ValidationError):
+        RepositoryConfig(name="repo", type="nfs", path="/repo")
+
+
+def test_config_load_rejects_negative_retention_before_kopia_can_delete(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "repositories: {}\njobs:\n  nightly:\n    repository: repo\n    source: {path: /data}\n"
+        "    retention: {keep_daily: -1}\n"
+    )
+
+    with pytest.raises(ValidationError):
+        BackerConfig.load(path)
+
+
+@pytest.mark.parametrize("field", ["keep_last", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly"])
+def test_retention_config_rejects_negative_values(field: str) -> None:
+    with pytest.raises(ValidationError):
+        RetentionConfig(**{field: -1})
+
+
 def test_client_agent_reexports_config_dir() -> None:
     from backer.client.agent import get_config_dir
 
@@ -240,6 +262,7 @@ def test_from_config_migrates_inline_secret_only_after_keystore_verifies(monkeyp
 def test_from_config_preserves_inline_secret_when_keystore_migration_fails(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     BackerConfig(agent_id="agent-1", server=_server()).save(tmp_path / "config.yaml")
+
     def fail(*_args, **_kwargs):
         raise OSError("keystore unavailable")
 

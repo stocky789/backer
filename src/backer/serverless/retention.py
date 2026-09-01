@@ -8,7 +8,7 @@ import re
 from backer.backends.base import BackupDestination
 from backer.core import keystore
 from backer.core.config import BackerConfig
-from backer.serverless.repositories import _backend, _destination
+from backer.serverless.repositories import _backend, _destination, repository_operation_context
 
 
 def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
@@ -28,16 +28,17 @@ def prune_job(config: BackerConfig, name: str, *, apply: bool = False):
             raise ValueError(f"Repository '{repository.name}' storage credential is unavailable")
         storage = json.loads(raw)
     policy = job.retention
-    result = _backend(repository, passphrase, storage).prune(
-        BackupDestination(_destination(repository)),
-        keep_last=policy.keep_last,
-        keep_daily=policy.keep_daily,
-        keep_weekly=policy.keep_weekly,
-        keep_monthly=policy.keep_monthly,
-        keep_yearly=policy.keep_yearly,
-        dry_run=not apply,
-        source_path=job.source.path,
-    )
+    with repository_operation_context(repository, storage) as operation_record:
+        result = _backend(repository, passphrase, storage).prune(
+            BackupDestination(_destination(operation_record)),
+            keep_last=policy.keep_last,
+            keep_daily=policy.keep_daily,
+            keep_weekly=policy.keep_weekly,
+            keep_monthly=policy.keep_monthly,
+            keep_yearly=policy.keep_yearly,
+            dry_run=not apply,
+            source_path=job.source.path,
+        )
     if not result.success:
         raise ValueError("\n".join(result.errors) or "Retention failed")
     match = re.search(r"(\d+) snapshot\(s\).*would be deleted", result.output, re.I)

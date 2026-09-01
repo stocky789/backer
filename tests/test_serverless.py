@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -95,9 +96,11 @@ def test_repo_attach_refuses_absent_without_create(monkeypatch, tmp_path: Path) 
     created = []
     monkeypatch.setattr("backer.serverless.repositories.create", lambda *_: created.append(True))
 
-    result = CliRunner().invoke(main, [
-        "repo", "add", "Home", "--attach", "--path", str(tmp_path / "repo"), "--passphrase-stdin"
-    ], input="secret\n")
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--attach", "--path", str(tmp_path / "repo"), "--passphrase-stdin"],
+        input="secret\n",
+    )
 
     assert result.exit_code != 0
     assert created == []
@@ -110,11 +113,14 @@ def test_repo_init_stores_only_verified_passphrase(monkeypatch, tmp_path: Path) 
     states = iter([("absent", None, ""), ("present", "unique", "")])
     monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: next(states))
     monkeypatch.setattr("backer.serverless.repositories.create", lambda *_: (True, ""))
+    monkeypatch.setattr("backer.serverless.repositories.set_maintenance_owner", lambda *_: (True, ""))
     monkeypatch.setattr("backer.serverless.repositories.keystore.put", lambda *args, **_: "file")
 
-    result = CliRunner().invoke(main, [
-        "repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin"
-    ], input="secret\n")
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin"],
+        input="secret\n",
+    )
 
     assert result.exit_code == 0, result.output
     saved = (tmp_path / "config.yaml").read_text()
@@ -126,9 +132,9 @@ def test_repo_add_requires_headless_for_file_keystore(monkeypatch, tmp_path: Pat
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: True)
 
-    result = CliRunner().invoke(main, [
-        "repo", "add", "Home", "--attach", "--path", "repo", "--passphrase-stdin"
-    ], input="secret\n")
+    result = CliRunner().invoke(
+        main, ["repo", "add", "Home", "--attach", "--path", "repo", "--passphrase-stdin"], input="secret\n"
+    )
 
     assert result.exit_code != 0
     assert "--headless" in result.output
@@ -209,8 +215,10 @@ def test_preview_and_apply_differ_only_by_delete(monkeypatch, tmp_path: Path) ->
 
 def test_local_job_create_refuses_duplicate_source(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
-    config = BackerConfig(repositories={"repo": RepositoryConfig(name="Repo", type="local", path="repo")},
-                          jobs={"first": JobConfig(repository="repo", source=SourceConfig(path="/data"))})
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="repo")},
+        jobs={"first": JobConfig(repository="repo", source=SourceConfig(path="/data"))},
+    )
     config.save(tmp_path / "config.yaml")
 
     result = CliRunner().invoke(
@@ -227,13 +235,22 @@ def test_local_attempt_is_atomic_and_utc(tmp_path: Path, monkeypatch) -> None:
 
     replaces: list[tuple[Path, Path]] = []
     original = __import__("os").replace
+
     def replace(source: str, target: str) -> None:
         replaces.append((Path(source), Path(target)))
         original(source, target)
 
     monkeypatch.setattr("backer.serverless.store.os.replace", replace)
-    append_run(tmp_path, JobRun("nightly", "20260901T020000Z-agent", JobStatus.FAILED,
-                               datetime(2026, 9, 1, 2, tzinfo=UTC), datetime(2026, 9, 1, 2, 1, tzinfo=UTC)))
+    append_run(
+        tmp_path,
+        JobRun(
+            "nightly",
+            "20260901T020000Z-agent",
+            JobStatus.FAILED,
+            datetime(2026, 9, 1, 2, tzinfo=UTC),
+            datetime(2026, 9, 1, 2, 1, tzinfo=UTC),
+        ),
+    )
 
     attempt = read_runs(tmp_path, "nightly", 1)[0]
     assert attempt.to_dict()["started_at"].endswith("Z")
@@ -298,8 +315,13 @@ def test_smb_preflight_authenticates_before_probe_and_records_failure(monkeypatc
     config = BackerConfig(
         repositories={
             "repo": RepositoryConfig(
-                name="Repo", type="smb", server="nas", share="backups", username="backup",
-                passphrase_ref="pass", storage_password_ref="storage",
+                name="Repo",
+                type="smb",
+                server="nas",
+                share="backups",
+                username="backup",
+                passphrase_ref="pass",
+                storage_password_ref="storage",
             )
         },
         jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path="/data"))},
@@ -355,9 +377,23 @@ def test_repo_add_s3_stores_credentials_outside_config_and_adopt_never_creates(m
     result = CliRunner().invoke(
         main,
         [
-            "repo", "add", "Cloud", "--init", "--adopt", "--type", "s3", "--bucket", "bucket",
-            "--endpoint", "https://s3.example", "--region", "us-east-1",
-            "--storage-stdin", "--passphrase-file", str(passphrase_file), "--headless",
+            "repo",
+            "add",
+            "Cloud",
+            "--init",
+            "--adopt",
+            "--type",
+            "s3",
+            "--bucket",
+            "bucket",
+            "--endpoint",
+            "https://s3.example",
+            "--region",
+            "us-east-1",
+            "--storage-stdin",
+            "--passphrase-file",
+            str(passphrase_file),
+            "--headless",
         ],
         input='{"access_key_id":"access","secret_access_key":"storage-secret"}\n',
     )
@@ -374,8 +410,10 @@ def test_repo_add_s3_stores_credentials_outside_config_and_adopt_never_creates(m
     [
         (True, False, [("present", "id", "")], ["connect", "probe", "disconnect"]),
         (
-            False, True, [("absent", None, ""), ("present", "id", "")],
-            ["connect", "probe", "create", "probe", "disconnect"],
+            False,
+            True,
+            [("absent", None, ""), ("present", "id", "")],
+            ["connect", "probe", "create", "probe", "owner", "disconnect"],
         ),
     ],
 )
@@ -408,14 +446,109 @@ def test_smb_repository_add_authenticates_before_every_probe(
 
     monkeypatch.setattr("backer.serverless.repositories.probe", checked_probe)
     monkeypatch.setattr("backer.serverless.repositories.create", lambda *_args: order.append("create") or (True, ""))
+    monkeypatch.setattr(
+        "backer.serverless.repositories.set_maintenance_owner", lambda *_args: order.append("owner") or (True, "")
+    )
     record = RepositoryConfig(name="NAS", type="smb", server="nas", share="backups", username="backup", path="backer")
 
     add_repository(
-        BackerConfig(), tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=attach, init=init,
-        storage="smb-password", headless=True,
+        BackerConfig(),
+        tmp_path / "config.yaml",
+        "NAS",
+        record,
+        "repo-pass",
+        attach=attach,
+        init=init,
+        storage="smb-password",
+        headless=True,
     )
 
     assert order == expected
+
+
+@pytest.mark.parametrize("repo_type", ["local", "smb", "s3"])
+def test_new_repository_sets_maintenance_owner_before_persisting_secrets(
+    monkeypatch, tmp_path: Path, repo_type: str
+) -> None:
+    from backer.serverless.repositories import add_repository
+
+    monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
+    calls: list[str] = []
+    states = [("absent", None, ""), ("present", "id", "")]
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: states.pop(0))
+    monkeypatch.setattr("backer.serverless.repositories.create", lambda *_: (True, ""))
+    monkeypatch.setattr(
+        "backer.serverless.repositories.set_maintenance_owner", lambda *_: calls.append("owner") or (True, "")
+    )
+    monkeypatch.setattr(
+        "backer.serverless.repositories.keystore.put", lambda *_args, **_kwargs: calls.append("secret") or "file"
+    )
+    record = RepositoryConfig(
+        name="Repo",
+        type=repo_type,
+        path="repo",
+        server="nas" if repo_type == "smb" else None,
+        share="share" if repo_type == "smb" else None,
+        username="user" if repo_type == "smb" else None,
+        bucket="bucket" if repo_type == "s3" else None,
+        endpoint="https://s3.example" if repo_type == "s3" else None,
+        region="us-east-1" if repo_type == "s3" else None,
+    )
+    if repo_type == "smb":
+
+        class Manager:
+            serverless_session_created = True
+
+            def connect_serverless(self, *_args, **_kwargs):
+                return True
+
+            def disconnect_serverless(self, *_args):
+                pass
+
+        monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+
+    add_repository(
+        BackerConfig(agent_id="agent"),
+        tmp_path / "config.yaml",
+        "Repo",
+        record,
+        "pass",
+        attach=False,
+        init=True,
+        storage={"access_key_id": "key", "secret_access_key": "secret"}
+        if repo_type == "s3"
+        else "smb"
+        if repo_type == "smb"
+        else None,
+        headless=True,
+    )
+
+    assert calls[0] == "owner"
+    assert calls.count("owner") == 1
+
+
+@pytest.mark.parametrize("attach,adopt", [(True, False), (False, True)])
+def test_attach_and_adopt_never_change_maintenance_owner(
+    monkeypatch, tmp_path: Path, attach: bool, adopt: bool
+) -> None:
+    from backer.serverless.repositories import add_repository
+
+    monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: ("present", "id", ""))
+    monkeypatch.setattr("backer.serverless.repositories.keystore.put", lambda *_args, **_kwargs: "file")
+    monkeypatch.setattr("backer.serverless.repositories.set_maintenance_owner", lambda *_: pytest.fail("owner changed"))
+
+    add_repository(
+        BackerConfig(),
+        tmp_path / "config.yaml",
+        "Repo",
+        RepositoryConfig(name="Repo", type="local", path="repo"),
+        "pass",
+        attach=attach,
+        init=not attach,
+        adopt=adopt,
+        headless=True,
+    )
 
 
 def test_smb_repository_add_disconnects_after_probe_failure(monkeypatch, tmp_path: Path) -> None:
@@ -443,8 +576,15 @@ def test_smb_repository_add_disconnects_after_probe_failure(monkeypatch, tmp_pat
 
     with pytest.raises(ValueError, match="offline"):
         add_repository(
-            BackerConfig(), tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=True, init=False,
-            storage="smb-password", headless=True,
+            BackerConfig(),
+            tmp_path / "config.yaml",
+            "NAS",
+            record,
+            "repo-pass",
+            attach=True,
+            init=False,
+            storage="smb-password",
+            headless=True,
         )
 
     assert order == ["connect", "probe", "disconnect"]
@@ -478,12 +618,144 @@ def test_smb_attach_reuses_a_verified_windows_connection_without_tearing_it_down
 
     config = BackerConfig()
     repository_id, _ = add_repository(
-        config, tmp_path / "config.yaml", "NAS", record, "repo-pass", attach=True, init=False,
-        storage=None, headless=True,
+        config,
+        tmp_path / "config.yaml",
+        "NAS",
+        record,
+        "repo-pass",
+        attach=True,
+        init=False,
+        storage=None,
+        headless=True,
     )
 
     assert order == ["reuse", "probe"]
     assert config.repositories[repository_id].storage_password_ref is None
+
+
+def test_linux_smb_repository_setup_mounts_once_for_probe_create_and_owner(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless import repositories
+
+    monkeypatch.setattr(repositories.sys, "platform", "linux", raising=False)
+    monkeypatch.setattr(repositories, "file_fallback_required", lambda: False)
+    monkeypatch.setattr(
+        repositories, "SMBConnectionManager", lambda: pytest.fail("Windows net use invoked"), raising=False
+    )
+    order: list[object] = []
+
+    @contextmanager
+    def mount(*_args):
+        order.append("mount")
+        yield tmp_path / "mounted"
+        order.append("unmount")
+
+    monkeypatch.setattr("backer.core.mounts.smb_mount_context", mount)
+    states = [("absent", None, ""), ("present", "id", "")]
+    monkeypatch.setattr(
+        repositories, "probe", lambda record, *_: order.append(("probe", record.type, record.path)) or states.pop(0)
+    )
+    monkeypatch.setattr(
+        repositories, "create", lambda record, *_: order.append(("create", record.type, record.path)) or (True, "")
+    )
+    monkeypatch.setattr(
+        repositories,
+        "set_maintenance_owner",
+        lambda record, *_: order.append(("owner", record.type, record.path)) or (True, ""),
+    )
+    monkeypatch.setattr(repositories.keystore, "put", lambda *_args, **_kwargs: "file")
+
+    repositories.add_repository(
+        BackerConfig(agent_id="agent"),
+        tmp_path / "config.yaml",
+        "NAS",
+        RepositoryConfig(name="NAS", type="smb", server="nas", share="share", username="user", path="sub/dir"),
+        "pass",
+        attach=False,
+        init=True,
+        storage="smb-pass",
+        headless=True,
+    )
+
+    assert order == [
+        "mount",
+        ("probe", "local", str(tmp_path / "mounted" / "sub" / "dir")),
+        ("create", "local", str(tmp_path / "mounted" / "sub" / "dir")),
+        ("probe", "local", str(tmp_path / "mounted" / "sub" / "dir")),
+        ("owner", "local", str(tmp_path / "mounted" / "sub" / "dir")),
+        "unmount",
+    ]
+
+
+def test_linux_smb_run_mounts_once_for_probe_and_backup(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless import runs
+
+    monkeypatch.setattr(runs.sys, "platform", "linux", raising=False)
+    monkeypatch.setattr(runs, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(runs, "SMBConnectionManager", lambda: pytest.fail("Windows net use invoked"), raising=False)
+    order: list[object] = []
+
+    @contextmanager
+    def mount(*_args):
+        order.append("mount")
+        yield tmp_path / "mounted"
+        order.append("unmount")
+
+    monkeypatch.setattr("backer.core.mounts.smb_mount_context", mount)
+    monkeypatch.setattr(runs.keystore, "get", lambda ref, **_: "pass" if ref == "pass" else "smb-pass")
+    monkeypatch.setattr(
+        runs, "probe", lambda record, *_: order.append(("probe", record.type, record.path)) or ("present", "id", "")
+    )
+    monkeypatch.setattr(
+        runs,
+        "run_backup",
+        lambda job, **_: order.append(("run", job["destination_path"])) or {"success": True, "output": "ok"},
+    )
+    config = BackerConfig(
+        repositories={
+            "repo": RepositoryConfig(
+                name="NAS",
+                type="smb",
+                server="nas",
+                share="share",
+                username="user",
+                path="sub/dir",
+                passphrase_ref="pass",
+                storage_password_ref="smb",
+            )
+        },
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path=str(tmp_path / "source")))},
+    )
+
+    assert runs._run_local_job(config, "nightly")["success"]
+    assert order == [
+        "mount",
+        ("probe", "local", str(tmp_path / "mounted" / "sub" / "dir")),
+        ("run", str(tmp_path / "mounted" / "sub" / "dir")),
+        "unmount",
+    ]
+
+
+@pytest.mark.parametrize("path", ["../outside", "/absolute", r"C:\\outside"])
+def test_linux_smb_repository_context_rejects_escaping_subpaths(monkeypatch, path: str) -> None:
+    from backer.serverless import repositories
+
+    monkeypatch.setattr(repositories.sys, "platform", "linux")
+    record = RepositoryConfig(name="NAS", type="smb", server="nas", share="share", username="user", path=path)
+
+    with pytest.raises(ValueError, match="relative"):
+        with repositories.repository_operation_context(record, "smb-pass"):
+            pytest.fail("unsafe SMB subpath mounted")
+
+
+def test_linux_smb_repository_context_requires_a_password(monkeypatch) -> None:
+    from backer.serverless import repositories
+
+    monkeypatch.setattr(repositories.sys, "platform", "linux")
+    record = RepositoryConfig(name="NAS", type="smb", server="nas", share="share", username="user")
+
+    with pytest.raises(ValueError, match="password"):
+        with repositories.repository_operation_context(record, None):
+            pytest.fail("passwordless SMB mount")
 
 
 def test_system_run_refuses_interactive_only_smb_repository(monkeypatch, tmp_path: Path) -> None:
@@ -493,8 +765,13 @@ def test_system_run_refuses_interactive_only_smb_repository(monkeypatch, tmp_pat
     config = BackerConfig(
         repositories={
             "repo": RepositoryConfig(
-                name="NAS", type="smb", server="nas", share="backups", username="backup",
-                passphrase_ref="pass", use_existing_session=True,
+                name="NAS",
+                type="smb",
+                server="nas",
+                share="backups",
+                username="backup",
+                passphrase_ref="pass",
+                use_existing_session=True,
             )
         },
         jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path=str(tmp_path)))},

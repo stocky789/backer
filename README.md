@@ -97,6 +97,8 @@ docker run -d --name backer \
 
 Download `backer-agent-setup.exe` from [Releases](https://git.stockhome.com.au/stocky789/backer/releases/tag/release-main).
 
+The Windows installer is currently unsigned.
+
 ### Linux Agent
 
 ```bash

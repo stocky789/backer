@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -1724,7 +1725,7 @@ def repo_adopt(
     from backer.core.config import load_config
     from backer.core.paths import get_config_dir
     from backer.core.repo_metadata import RepositoryMetadata
-    from backer.serverless.repositories import _destination, probe
+    from backer.serverless.repositories import _destination, probe, repository_operation_context
     from backer.serverless.sidecar import adopt_documents, adopt_jobs
 
     config_path = ctx.obj.get("config_path") or get_config_dir() / "config.yaml"
@@ -1739,44 +1740,46 @@ def repo_adopt(
         raise click.ClickException(f"Repository '{record.name}' passphrase is unavailable")
     raw_storage = keystore.get(record.storage_password_ref or "", machine_scope=machine_scope)
     storage = json.loads(raw_storage) if record.type == "s3" and raw_storage else None
-    status, _, message = probe(record, passphrase, storage)
-    if status != "present":
-        raise click.ClickException(message or f"Repository is {status}; adoption did not change local config")
+    operation_context = ExitStack()
     smb_manager = None
     smb_created = False
-    if record.type == "smb":
-        from backer.core.mounts import SMBConnectionManager
-
-        smb_manager = SMBConnectionManager()
-        smb_created = smb_manager._find_existing_connection(record.server or "") is None
-        if not smb_manager.connect_serverless(
-            record.server or "", record.share or "", record.username or "", raw_storage or "", domain=record.domain
-        ):
-            raise click.ClickException("Could not connect to SMB repository for adoption")
-    root = Path(_destination(record))
-    documents = None
-    if record.type == "s3":
-        from backer.serverless.s3_sidecar import S3Sidecar
-
-        if not storage:
-            raise click.ClickException(f"Repository '{record.name}' storage credential is unavailable")
-        sidecar = S3Sidecar(record.model_dump(exclude_none=True), storage)
-        documents = {}
-        for key in sidecar.list(".backer/jobs/"):
-            if key.endswith("/config.json"):
-                document = sidecar.get(key.removeprefix(f"{record.prefix.strip('/')}/"))
-                if document:
-                    payload = json.loads(document)
-                    documents[payload["job_name"]] = payload
-        available = list(documents)
-    else:
-        discovery = RepositoryMetadata(root, record.type).discover_all()
-        available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
-    selected = available if all_jobs else list(jobs)
-    if not selected:
-        raise click.ClickException("Choose --job NAME or --all")
-    mapping = dict(item.split("=", 1) for item in sources if "=" in item)
     try:
+        operation_record = operation_context.enter_context(repository_operation_context(record, raw_storage))
+        status, _, message = probe(operation_record, passphrase, storage)
+        if status != "present":
+            raise click.ClickException(message or f"Repository is {status}; adoption did not change local config")
+        if record.type == "smb" and sys.platform == "win32":
+            from backer.core.mounts import SMBConnectionManager
+
+            smb_manager = SMBConnectionManager()
+            smb_created = smb_manager._find_existing_connection(record.server or "") is None
+            if not smb_manager.connect_serverless(
+                record.server or "", record.share or "", record.username or "", raw_storage or "", domain=record.domain
+            ):
+                raise click.ClickException("Could not connect to SMB repository for adoption")
+        root = Path(_destination(operation_record))
+        documents = None
+        if record.type == "s3":
+            from backer.serverless.s3_sidecar import S3Sidecar
+
+            if not storage:
+                raise click.ClickException(f"Repository '{record.name}' storage credential is unavailable")
+            sidecar = S3Sidecar(record.model_dump(exclude_none=True), storage)
+            documents = {}
+            for key in sidecar.list(".backer/jobs/"):
+                if key.endswith("/config.json"):
+                    document = sidecar.get(key.removeprefix(f"{record.prefix.strip('/')}/"))
+                    if document:
+                        payload = json.loads(document)
+                        documents[payload["job_name"]] = payload
+            available = list(documents)
+        else:
+            discovery = RepositoryMetadata(root, operation_record.type).discover_all()
+            available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
+        selected = available if all_jobs else list(jobs)
+        if not selected:
+            raise click.ClickException("Choose --job NAME or --all")
+        mapping = dict(item.split("=", 1) for item in sources if "=" in item)
         adopted = (
             adopt_documents(config, repository_id, documents, selected, source_paths=mapping)
             if documents is not None
@@ -1786,8 +1789,11 @@ def repo_adopt(
     except ValueError as error:
         raise click.ClickException(str(error)) from error
     finally:
-        if smb_manager and smb_created:
-            smb_manager.disconnect_serverless(record.server or "", record.share or "")
+        try:
+            if smb_manager and smb_created:
+                smb_manager.disconnect_serverless(record.server or "", record.share or "")
+        finally:
+            operation_context.close()
     if as_json:
         click.echo(json.dumps(adopted))
     else:
@@ -3308,23 +3314,24 @@ def snapshots(
     """List snapshots from one local repository."""
     if not job and not repo:
         raise click.UsageError("JOB or --repo NAME is required")
-    from backer.serverless.repositories import probe
+    from backer.serverless.repositories import probe, repository_operation_context
 
     _, config = _local_config(ctx)
     repository_id = _resolve_job_repository(config, repo, job)
     record = config.repositories[repository_id]
     backend, passphrase, storage = _repository_backend(record)
-    rows = backend.list_snapshots(BackupDestination(_repository_destination(record)))
-    if source:
-        rows = [item for item in rows if item.get("paths") == [source]]
-    if host:
-        rows = [item for item in rows if item.get("hostname") == host]
-    if job and not all_snapshots:
-        rows = [item for item in rows if item.get("paths") == [config.jobs[job].source.path]]
-    if not rows:
-        status, _, message = probe(record, passphrase, storage)
-        if status != "present":
-            raise click.ClickException(message or f"Repository is {status}")
+    with repository_operation_context(record, storage) as operation_record:
+        rows = backend.list_snapshots(BackupDestination(_repository_destination(operation_record)))
+        if source:
+            rows = [item for item in rows if item.get("paths") == [source]]
+        if host:
+            rows = [item for item in rows if item.get("hostname") == host]
+        if job and not all_snapshots:
+            rows = [item for item in rows if item.get("paths") == [config.jobs[job].source.path]]
+        if not rows:
+            status, _, message = probe(operation_record, passphrase, storage)
+            if status != "present":
+                raise click.ClickException(message or f"Repository is {status}")
     rows = sorted(rows, key=lambda item: item.get("timestamp") or "", reverse=True)
     if limit:
         rows = rows[:limit]
@@ -3349,6 +3356,7 @@ def verify(
     """Verify a local repository; index recovery is always explicit."""
     from backer.core.config import load_config
     from backer.core.paths import get_config_dir
+    from backer.serverless.repositories import repository_operation_context
 
     config = load_config(get_config_dir() / "config.yaml")
     configured = config.jobs.get(job)
@@ -3357,30 +3365,31 @@ def verify(
     record = config.repositories.get(configured.repository)
     if not record:
         raise click.ClickException(f"Job '{job}' names an unknown repository")
-    backend, passphrase, _ = _repository_backend(record, timeout=timeout)
-    destination = BackupDestination(_repository_destination(record))
-    if repair_index:
-        preview = backend.repair_index(destination, commit=False)
-        if not preview.success:
-            raise click.ClickException(
-                _redact_error(RuntimeError(preview.output or "; ".join(preview.errors)), passphrase)
-            )
-        click.echo(_redact_error(RuntimeError(preview.output), passphrase))
-        if not _interactive():
-            raise click.UsageError(
-                "Index recovery preview completed; --repair-index requires an interactive confirmation"
-            )
-        if not click.confirm("Commit this index recovery", default=False):
-            click.echo("Index recovery was not committed")
-            return
-        result = backend.repair_index(destination, commit=True)
-    else:
-        if verify_files_percent is not None:
-            click.echo(
-                f"Checking {verify_files_percent:g}% downloads and rehashes real file contents. "
-                "It may take longer on this connection."
-            )
-        result = backend.check(destination, verify_files_percent=verify_files_percent)
+    backend, passphrase, storage = _repository_backend(record, timeout=timeout)
+    with repository_operation_context(record, storage) as operation_record:
+        destination = BackupDestination(_repository_destination(operation_record))
+        if repair_index:
+            preview = backend.repair_index(destination, commit=False)
+            if not preview.success:
+                raise click.ClickException(
+                    _redact_error(RuntimeError(preview.output or "; ".join(preview.errors)), passphrase)
+                )
+            click.echo(_redact_error(RuntimeError(preview.output), passphrase))
+            if not _interactive():
+                raise click.UsageError(
+                    "Index recovery preview completed; --repair-index requires an interactive confirmation"
+                )
+            if not click.confirm("Commit this index recovery", default=False):
+                click.echo("Index recovery was not committed")
+                return
+            result = backend.repair_index(destination, commit=True)
+        else:
+            if verify_files_percent is not None:
+                click.echo(
+                    f"Checking {verify_files_percent:g}% downloads and rehashes real file contents. "
+                    "It may take longer on this connection."
+                )
+            result = backend.check(destination, verify_files_percent=verify_files_percent)
     if not result.success:
         detail = _redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase)
         timeout_detail = " ".join([result.output, *result.errors]).lower()

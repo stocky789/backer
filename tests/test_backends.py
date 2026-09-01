@@ -239,15 +239,17 @@ class TestKopiaBackend:
         )
 
         assert result.stdout == '{"id":"snapshot"}\n'
-        assert events == [{
-            "bytes_done": 2 * 1024 * 1024,
-            "total_bytes": 4 * 1024 * 1024,
-            "files_done": 1,
-            "hashed_bytes": 2 * 1024 * 1024,
-            "cached_bytes": 0,
-            "hashed_files": 1,
-            "cached_files": 0,
-        }]
+        assert events == [
+            {
+                "bytes_done": 2 * 1024 * 1024,
+                "total_bytes": 4 * 1024 * 1024,
+                "files_done": 1,
+                "hashed_bytes": 2 * 1024 * 1024,
+                "cached_bytes": 0,
+                "hashed_files": 1,
+                "cached_files": 0,
+            }
+        ]
 
     def test_progress_runner_interrupts_kopia_before_propagating_ctrl_c(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Removing the interrupt cleanup would leave a connected Kopia process behind."""
@@ -330,6 +332,26 @@ class TestKopiaBackend:
         assert not success
         assert message == "Repository encryption password is required"
 
+    def test_set_maintenance_owner_uses_an_isolated_nonpersistent_connection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = KopiaBackend({"repository_password": "secret"})
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+
+        def run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            return CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+
+        assert backend.set_maintenance_owner("repo", "agent@host").success
+        assert calls[0][1:3] == ["repository", "disconnect"]
+        assert calls[1][1:3] == ["repository", "connect"]
+        assert "--no-persist-credentials" in calls[1]
+        assert calls[2] == ["kopia", "maintenance", "set", "--owner=agent@host", "--no-persist-credentials"]
+        assert calls[-1][1:3] == ["repository", "disconnect"]
+
     def test_backup_replaces_kopia_ignore_policy_for_changed_or_removed_excludes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -344,6 +366,7 @@ class TestKopiaBackend:
             return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")
 
         monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
+
         def run_progress(command: list[str], *_: object) -> CompletedProcess[str]:
             progress_calls.append(command)
             return CompletedProcess(command, 0, '{"id":"snapshot"}\n', "")

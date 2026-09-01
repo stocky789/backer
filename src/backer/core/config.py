@@ -5,6 +5,7 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 import yaml
@@ -26,11 +27,11 @@ class SourceConfig(ConfigModel):
 
 
 class RetentionConfig(ConfigModel):
-    keep_last: int | None = None
-    keep_daily: int | None = None
-    keep_weekly: int | None = None
-    keep_monthly: int | None = None
-    keep_yearly: int | None = None
+    keep_last: int | None = Field(default=None, ge=0)
+    keep_daily: int | None = Field(default=None, ge=0)
+    keep_weekly: int | None = Field(default=None, ge=0)
+    keep_monthly: int | None = Field(default=None, ge=0)
+    keep_yearly: int | None = Field(default=None, ge=0)
 
 
 class ScheduleConfig(ConfigModel):
@@ -53,7 +54,7 @@ class RepositoryOptions(ConfigModel):
 class RepositoryConfig(ConfigModel):
     id: str | None = None
     name: str
-    type: str
+    type: Literal["local", "smb", "s3"]
     path: str | None = None
     server: str | None = None
     share: str | None = None

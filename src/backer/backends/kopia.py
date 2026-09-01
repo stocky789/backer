@@ -137,9 +137,7 @@ def _stop_kopia_process(process: subprocess.Popen[str]) -> bool:
             process.kill()
             process.wait(timeout=5)
             setattr(process, "_backer_hard_stopped", True)
-            logger.warning(
-                "Kopia was hard-stopped; Backer will name the repository recovery command to the caller"
-            )
+            logger.warning("Kopia was hard-stopped; Backer will name the repository recovery command to the caller")
             return True
         except (OSError, subprocess.TimeoutExpired):
             logger.error("Kopia could not be reaped after a hard stop; check its repository unlock and config")
@@ -547,6 +545,49 @@ class KopiaBackend(BackendBase):
         except Exception:
             # Disconnect errors are non-fatal and expected when not connected
             pass
+
+    @_serialize_by_repo("path")
+    def set_maintenance_owner(self, path: str, owner: str) -> BackendResult:
+        """Assign the sole Kopia maintenance owner immediately after creation."""
+        started_at = datetime.now()
+        connected, message = self._connect_repo(path)
+        if not connected:
+            return BackendResult(
+                success=False,
+                operation=OperationType.BACKUP,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[message],
+                return_code=-1,
+            )
+        try:
+            result = subprocess.run(
+                [str(self._get_binary()), "maintenance", "set", f"--owner={owner}", "--no-persist-credentials"],
+                capture_output=True,
+                text=True,
+                env=self._repo_env(path),
+                timeout=60,
+            )
+            return BackendResult(
+                success=result.returncode == 0,
+                operation=OperationType.BACKUP,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                output=result.stdout + result.stderr,
+                return_code=result.returncode,
+                errors=[result.stderr] if result.returncode else [],
+            )
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as error:
+            return BackendResult(
+                success=False,
+                operation=OperationType.BACKUP,
+                started_at=started_at,
+                finished_at=datetime.now(),
+                errors=[str(error)],
+                return_code=-1,
+            )
+        finally:
+            self._disconnect_repo(path)
 
     @_serialize_by_repo("path")
     def repository_probe(self, path: str) -> tuple[str, str | None]:
@@ -1242,9 +1283,7 @@ class KopiaBackend(BackendBase):
                 # file content, which is fast. Reading actual content is much
                 # slower, so it stays opt-in via config.
                 verify_percent = (
-                    self.config.get("verify_files_percent", 0)
-                    if verify_files_percent is None
-                    else verify_files_percent
+                    self.config.get("verify_files_percent", 0) if verify_files_percent is None else verify_files_percent
                 )
                 result = subprocess.run(
                     [
@@ -1296,13 +1335,20 @@ class KopiaBackend(BackendBase):
                 if commit:
                     command.append("--commit")
                 result = subprocess.run(
-                    command, capture_output=True, text=True, env=self._repo_env(destination.path),
+                    command,
+                    capture_output=True,
+                    text=True,
+                    env=self._repo_env(destination.path),
                     timeout=self.config.get("timeout", 3600),
                 )
                 return BackendResult(
-                    result.returncode == 0, OperationType.CHECK, started_at, datetime.now(),
+                    result.returncode == 0,
+                    OperationType.CHECK,
+                    started_at,
+                    datetime.now(),
                     errors=[] if result.returncode == 0 else [result.stderr.strip() or "Kopia index recovery failed"],
-                    output=result.stdout + result.stderr, return_code=result.returncode,
+                    output=result.stdout + result.stderr,
+                    return_code=result.returncode,
                 )
             finally:
                 self._disconnect_repo(destination.path)
