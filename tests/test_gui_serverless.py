@@ -1381,6 +1381,8 @@ def test_persisted_run_input_needed_uses_the_shared_catalogue(tmp_path):
 
 
 def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
+    from copy import deepcopy
+
     import yaml
 
     from backer.agent.gui.support import workflow_cells
@@ -1395,7 +1397,12 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
         "s3-contract": {
             "runs-on": "ubuntu-latest",
             "strategy": {"matrix": {"os": ["ubuntu-latest", "windows-latest"]}},
-            "steps": [{"run": "pytest", "env": {"BACKER_TEST_S3_BUCKET": "test"}}],
+            "steps": [
+                {
+                    "run": "pytest -q tests/test_s3.py::test_s3_minio_end_to_end",
+                    "env": {"BACKER_TEST_S3_BUCKET": "test"},
+                }
+            ],
         },
     }
     env = {f"R{i}": f"${{{{ needs.{job}.result }}}}" for i, job in enumerate(jobs)}
@@ -1411,21 +1418,39 @@ def test_workflow_cell_parser_requires_every_structural_gate(tmp_path):
     }
     assert workflow_cells(path) == expected
 
-    jobs["release-artifacts-ready"]["needs"].remove("serverless-smb-windows")
-    path.write_text(yaml.safe_dump({"jobs": jobs}), encoding="utf-8")
-    assert ("win32", "smb") not in workflow_cells(path)
-    jobs["release-artifacts-ready"]["needs"].append("serverless-smb-windows")
-    jobs["s3-contract"]["steps"][0]["env"].clear()
-    path.write_text(yaml.safe_dump({"jobs": jobs}), encoding="utf-8")
-    assert not {cell for cell in workflow_cells(path) if cell[1] == "s3"}
+    def assert_empty(mutator):
+        partial = deepcopy(jobs)
+        mutator(partial)
+        path.write_text(yaml.safe_dump({"jobs": partial}), encoding="utf-8")
+        assert workflow_cells(path) == frozenset()
+
+    assert_empty(lambda value: value["release-artifacts-ready"]["needs"].remove("serverless-smb-windows"))
+    assert_empty(lambda value: value["release-artifacts-ready"]["steps"][0]["env"].pop("R0"))
+    assert_empty(
+        lambda value: value["release-artifacts-ready"]["steps"][0]["env"].update(
+            R0="${{ needs.s3-contract.result }}"
+        )
+    )
+    assert_empty(
+        lambda value: value["release-artifacts-ready"]["steps"][0].update(
+            run=value["release-artifacts-ready"]["steps"][0]["run"].replace("R0", "R1")
+        )
+    )
+    assert_empty(lambda value: value["serverless-local"]["strategy"]["matrix"].update(os=["ubuntu-latest"]))
+    assert_empty(lambda value: value["s3-contract"]["strategy"]["matrix"].update(os=["ubuntu-latest"]))
+    for job_name in ("serverless-local", "serverless-smb-linux", "serverless-smb-windows", "s3-contract"):
+        assert_empty(lambda value, job_name=job_name: value.pop(job_name))
+    assert_empty(lambda value: value["s3-contract"]["steps"][0].update(run="pytest -q tests/test_s3.py"))
+    assert_empty(lambda value: value["s3-contract"]["steps"][0]["env"].clear())
 
 
 def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime, timedelta, timezone
 
+    from backer.agent.gui import app as gui_app
     from backer.agent.gui import views
-    from backer.core.config import BackerConfig
-    from backer.serverless.schedule import scheduling_paused
+    from backer.core.config import BackerConfig, JobConfig, ScheduleConfig, SourceConfig
+    from backer.serverless.schedule import due_jobs, scheduling_paused
 
     config = BackerConfig(
         local_scheduled_paused=True, local_scheduled_pause_until=datetime.now(UTC) - timedelta(seconds=1)
@@ -1436,6 +1461,107 @@ def test_expired_pause_clears_and_resume_is_persisted(monkeypatch, tmp_path):
     BackerConfig().save(machine / "config.yaml")
     monkeypatch.setattr(views, "get_config_dir", lambda: user)
     monkeypatch.setattr(views, "get_machine_config_dir", lambda: machine)
-    views.save_schedule_pause(config)
+    app = object.__new__(gui_app.BackerAgentApp)
+    app.config = config
+    app.set_status = lambda *_args, **_kwargs: None
+    app._refresh_tray_menu = lambda: None
+    gui_app.BackerAgentApp.resume_backups(app)
     assert not BackerConfig.load(user / "config.yaml").local_scheduled_paused
     assert not BackerConfig.load(machine / "config.yaml").local_scheduled_paused
+    deadline = datetime(2026, 9, 1, 10, tzinfo=timezone(timedelta(hours=10)))
+    offset_config = BackerConfig(local_scheduled_paused=True, local_scheduled_pause_until=deadline)
+    assert scheduling_paused(offset_config, datetime(2026, 8, 31, 23, 59, tzinfo=UTC))
+    assert not scheduling_paused(offset_config, datetime(2026, 9, 1, 0, 1, tzinfo=UTC))
+    resumed = BackerConfig.load(user / "config.yaml").model_copy(
+        update={
+            "jobs": {
+                "Photos": JobConfig(
+                    repository="repo",
+                    source=SourceConfig(path="source"),
+                    schedule=ScheduleConfig(cron="* * * * *"),
+                )
+            }
+        }
+    )
+    assert due_jobs(resumed, datetime.now(UTC), tmp_path / "data") == ["Photos"]
+
+
+def test_notification_policy_persists_reloads_and_tray_opens_details(monkeypatch, tmp_path):
+    import queue
+    from datetime import UTC, datetime
+
+    from backer.agent.gui import app as gui_app
+    from backer.core.config import BackerConfig, JobConfig, SourceConfig
+    from backer.core.job import JobRun, JobStatus
+    from backer.serverless.store import append_run
+
+    monkeypatch.setattr(gui_app, "get_data_dir", lambda: tmp_path)
+
+    def shell(config):
+        instance = object.__new__(gui_app.BackerAgentApp)
+        instance.config = config
+        instance._notification_state = instance._read_notification_state()
+        instance._notification_run = None
+        instance._tray_intents = queue.SimpleQueue()
+        instance.alive = False
+        instance._refresh_tray_menu = lambda: None
+        instance.notify = lambda title, body: notices.append((title, body))
+        return instance
+
+    config = BackerConfig(
+        jobs={
+            "Photos": JobConfig(repository="repo", source=SourceConfig(path="source")),
+            "Videos": JobConfig(repository="repo", source=SourceConfig(path="source")),
+        }
+    )
+    notices = []
+    first = shell(config)
+    first.record_run_result("Photos", {"success": True, "run_id": "success-1"})
+    assert notices == [("Backer", "Photos completed its first backup.")]
+    notices.clear()
+    reloaded = shell(config)
+    reloaded.record_run_result("Photos", {"success": True, "run_id": "success-2"})
+    assert notices == []
+
+    reloaded.record_run_result("Photos", {"needs_input": True, "run_id": "input-1"})
+    assert reloaded._notification_state["attention"] == {"Photos": "input-1"}
+    notices.clear()
+    after_input = shell(config)
+    after_input.record_run_result("Photos", {"needs_input": True, "run_id": "input-1"})
+    assert notices == [] and after_input._notification_state["input"] == {"Photos": "input-1"}
+
+    append_run(
+        tmp_path,
+        JobRun(
+            "Photos", "input-1", JobStatus.FAILED, datetime.now(UTC), error_message="needs password", needs_input=True
+        ),
+    )
+    opened, backed_up = [], []
+    after_input._show = lambda name: opened.append(("view", name))
+    after_input.views = {
+        "run": type("Run", (), {"show_history": lambda _self, name, run_id: opened.append((name, run_id))})()
+    }
+    after_input.backup_job = lambda name: backed_up.append(name)
+    after_input._replay_pending_notifications()
+    after_input._queue_tray_intent("failure")
+    after_input._poll_tray_intents()
+    assert opened == [("view", "run"), ("Photos", "input-1")] and backed_up == []
+    assert after_input._notification_state["attention"] == {}
+
+    failure = shell(config)
+    failure.record_run_result("Videos", {"success": False, "run_id": "failure-1"})
+    assert failure._notification_state["attention"] == {"Videos": "failure-1"}
+    append_run(
+        tmp_path,
+        JobRun("Videos", "failure-1", JobStatus.FAILED, datetime.now(UTC), error_message="network unavailable"),
+    )
+    after_failure = shell(config)
+    reopened = []
+    after_failure._show = lambda name: reopened.append(("view", name))
+    after_failure.views = {
+        "run": type("Run", (), {"show_history": lambda _self, name, run_id: reopened.append((name, run_id))})()
+    }
+    after_failure._replay_pending_notifications()
+    after_failure._queue_tray_intent("failure")
+    after_failure._poll_tray_intents()
+    assert reopened == [("view", "run"), ("Videos", "failure-1")]

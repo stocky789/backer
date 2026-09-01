@@ -18,6 +18,9 @@ _JOB_TYPES = {
     "s3-contract": "s3",
 }
 
+_SERVERLESS_JOBS = frozenset(_JOB_TYPES)
+_S3_E2E = "tests/test_s3.py::test_s3_minio_end_to_end"
+
 
 def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
     """Read mandatory serverless matrix cells from the release workflow structure."""
@@ -35,22 +38,32 @@ def workflow_cells(path: Path) -> frozenset[tuple[str, str]]:
         for variable, value in env.items()
         if (match := re.search(r"needs\.([\w-]+)\.result", str(value)))
     }
+    # A partial release workflow has not earned any advertised local surface.
+    # ponytail: all-or-nothing support; split once platforms can be released independently.
+    if (
+        not _SERVERLESS_JOBS <= required
+        or not _SERVERLESS_JOBS <= set(jobs)
+        or not _SERVERLESS_JOBS <= {result_jobs.get(result) for result in mandatory_results}
+    ):
+        return frozenset()
+
     cells: set[tuple[str, str]] = set()
-    for result in mandatory_results:
-        job_name = result_jobs.get(result)
-        if job_name not in required or job_name not in _JOB_TYPES:
-            continue
+    for job_name in _SERVERLESS_JOBS:
         job = jobs.get(job_name, {})
         if job_name == "s3-contract":
             test_steps = [
                 step
                 for step in job.get("steps", [])
-                if isinstance(step, dict) and "pytest" in str(step.get("run"))
+                if isinstance(step, dict) and _S3_E2E in str(step.get("run"))
             ]
             if not test_steps or "BACKER_TEST_S3_BUCKET" not in test_steps[-1].get("env", {}):
-                continue
+                return frozenset()
         matrix = job.get("strategy", {}).get("matrix", {}).get("os")
         systems = matrix if isinstance(matrix, list) else [job.get("runs-on")]
+        if job_name in {"serverless-local", "s3-contract"} and {
+            "ubuntu-latest", "windows-latest"
+        } - set(systems):
+            return frozenset()
         for system in systems:
             if system == "windows-latest":
                 cells.add(("win32", _JOB_TYPES[job_name]))
