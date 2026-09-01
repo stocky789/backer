@@ -922,72 +922,47 @@ def restore(
         backend = KopiaBackend({"repository_password": passphrase})
         try:
             probe_status, _ = backend.repository_probe(from_path)
-        except BaseException:
-            if cleanup:
-                cleanup()
-            raise
-        if probe_status != "present":
-            if cleanup:
-                cleanup()
-            message = backend.last_repository_error or f"Repository is {probe_status}"
-            raise click.ClickException(
-                _redact_error(RuntimeError(message), passphrase) + "; nothing was created"
-            )
-        try:
             rows = backend.list_snapshots(BackupDestination(from_path))
-        except BaseException:
-            if cleanup:
-                cleanup()
-            raise
-        try:
+            if probe_status != "present":
+                message = backend.last_repository_error or f"Repository is {probe_status}"
+                raise click.ClickException(
+                    _redact_error(RuntimeError(message), passphrase) + "; nothing was created"
+                )
             selected, selected_row = _select_restore_snapshot(rows, snapshot, before, latest, computer)
-        except click.ClickException:
-            if cleanup:
-                cleanup()
-            raise
-        original_path = selected_row.get("paths", [None])[0]
-        destination = _restore_target(destination, into, Path(original_path) if original_path else None)
-        empty_config = type("RestoreConfig", (), {"repositories": {}})()
-        repository_paths = () if from_path.startswith(("\\\\", "//", "s3://")) else (Path(from_path),)
-        try:
+            original_path = selected_row.get("paths", [None])[0]
+            destination = _restore_target(destination, into, Path(original_path) if original_path else None)
+            empty_config = type("RestoreConfig", (), {"repositories": {}})()
+            repository_paths = () if from_path.startswith(("\\\\", "//", "s3://")) else (Path(from_path),)
             _restore_prepare_destination(
                 destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
             )
             if into == "REPLACE" and not dry_run:
                 _confirm_replace(destination, selected)
-        except BaseException:
-            if cleanup:
-                cleanup()
-            raise
-        if dry_run:
-            click.echo(f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written")
-            if cleanup:
-                cleanup()
-            return
-        if not dry_run:
+            if dry_run:
+                click.echo(
+                    f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written"
+                )
+                return
             location = destination.parent if destination.parent.exists() else Path.cwd()
             free = __import__("shutil").disk_usage(location).free
             required = next((item.get("size", 0) for item in rows if item.get("full_id") == selected), 0)
             if required and free < required:
-                if cleanup:
-                    cleanup()
                 raise click.ClickException("The destination does not have enough free space; nothing was changed")
             if into in {"NEW", "MERGE"}:
                 destination.mkdir(parents=True, exist_ok=into == "MERGE")
             moved = _replace_destination(destination) if into == "REPLACE" else None
-        try:
             _restore_execute(
                 backend, from_path, destination, selected, include=include, original_source_path=original_path,
                 progress=progress, passphrase=passphrase,
             )
+            if moved:
+                click.echo(f"What was in that folder was moved to {moved}")
+            click.echo("Restore completed")
+            click.echo("To keep using this repository: backer repo add NAME --attach, then backer job create")
+            return
         finally:
             if cleanup:
                 cleanup()
-        if moved:
-            click.echo(f"What was in that folder was moved to {moved}")
-        click.echo("Restore completed")
-        click.echo("To keep using this repository: backer repo add NAME --attach, then backer job create")
-        return
     if source:
         raise click.UsageError(
             "Positional restore was removed; use restore --from PATH with an immutable snapshot selector"
