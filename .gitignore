@@ -65,7 +65,6 @@ backer-agent-*.log
 # GEMINI.md and .cursor/rules/. Name personal scratch files something that
 # cannot collide, e.g. notes-local.md, and ignore that instead.
 notes-local.md
-/serverless-backups.md
 
 # ----- Agent & editor tooling -----
 # Local code-index caches and per-machine assistant state. The shared rule
