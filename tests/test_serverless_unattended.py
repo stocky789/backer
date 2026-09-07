@@ -26,6 +26,7 @@ def _sidecar_config(source_path: str, *, repository_hint: dict[str, str] | None 
         "repository_hint": repository_hint or {"type": "local", "path": "repo"},
         "repository_password_hint": None,
         "client_id": "agent-one",
+        "enabled": True,
     }
 
 
@@ -55,7 +56,8 @@ def test_adopt_preserves_job_name_and_never_rewrites_owner_sidecar(tmp_path: Pat
 
     adopted = adopt_jobs(config, "repo", tmp_path, ["Nightly"], source_paths={"Nightly": "/local"})
 
-    assert adopted == ["Nightly"]
+    assert adopted.adopted == ["Nightly"]
+    assert adopted.failures == {}
     assert config.jobs["Nightly"] == JobConfig(
         repository="repo", source=SourceConfig(path="/local", excludes=["*.tmp"])
     )
@@ -418,6 +420,7 @@ def test_sidecar_document_requires_full_adoption_config_and_rejects_secret_value
         "repository_hint": {"type": "s3", "bucket": "bucket"},
         "repository_password_hint": "stored elsewhere",
         "client_id": "agent-one",
+        "enabled": True,
     }
 
     document = build_job_document("nightly", "agent-one", config, ["repo-pass", "storage-secret"])
@@ -499,14 +502,15 @@ def test_s3_adoption_updates_only_local_config() -> None:
         repositories={"repo": RepositoryConfig(name="Repo", type="s3", bucket="b", endpoint="https://s3.example")},
     )
     document = {
+        "schema_version": "2",
         "job_name": "nightly",
         "owner_agent_id": "old",
         "config": {"source_path": "/old", "excludes": ["*.tmp"]},
     }
 
-    assert adopt_documents(config, "repo", {"nightly": document}, ["nightly"], source_paths={"nightly": "/new"}) == [
-        "nightly"
-    ]
+    assert adopt_documents(
+        config, "repo", {"nightly": document}, ["nightly"], source_paths={"nightly": "/new"}
+    ).adopted == ["nightly"]
     assert config.jobs["nightly"].source.path == "/new"
 
 
@@ -515,19 +519,17 @@ def test_runner_s3_sidecar_uses_full_document_and_owner_cannot_be_replaced(monke
 
     from backer.core.runner import _write_repo_metadata
 
-    stored: list[bytes] = []
+    stored: dict[str, bytes] = {}
 
     class Sidecar:
-        existing: bytes | None = None
-
         def __init__(self, *_: object) -> None:
             pass
 
-        def get(self, _: str) -> bytes | None:
-            return self.existing
+        def get(self, key: str) -> bytes | None:
+            return stored.get(key)
 
-        def put_atomic(self, _: str, data: bytes) -> None:
-            stored.append(data)
+        def put_atomic(self, key: str, data: bytes) -> None:
+            stored[key] = data
 
     monkeypatch.setattr("backer.serverless.s3_sidecar.S3Sidecar", Sidecar)
     job = {
@@ -545,7 +547,9 @@ def test_runner_s3_sidecar_uses_full_document_and_owner_cannot_be_replaced(monke
 
     _write_repo_metadata(job, "s3://bucket", "kopia", result, now, now, None, "owner")
 
-    document = json.loads(stored[0])
+    job_key = ".backer/jobs/nightly/config.json"
+    run_key = f".backer/jobs/nightly/runs/{job.get('run_id', 'unknown')}.json"
+    document = json.loads(stored[job_key])
     assert set(document["config"]) == {
         "source_path",
         "source_hostname",
@@ -558,13 +562,20 @@ def test_runner_s3_sidecar_uses_full_document_and_owner_cannot_be_replaced(monke
         "repository_hint",
         "repository_password_hint",
         "client_id",
+        "enabled",
     }
-    assert "repo-pass" not in stored[0].decode()
-    assert "storage-secret" not in stored[0].decode()
-    Sidecar.existing = json.dumps({**document, "owner_agent_id": "other"}).encode()
-    _write_repo_metadata(job, "s3://bucket", "kopia", result, now, now, None, "owner")
-    assert len(stored) == 2
-    assert json.loads(stored[1])["run_id"] == "unknown"
+    assert "repo-pass" not in stored[job_key].decode()
+    assert "storage-secret" not in stored[job_key].decode()
+    assert set(stored) == {".backer/metadata.json", ".backer/agents/owner.json", job_key, run_key}
+
+    # A machine that adopted this job may not rewrite the owner's document, but its run
+    # history must still reach the repository - that is the only store an adopter can read.
+    stored[job_key] = json.dumps({**document, "owner_agent_id": "other"}).encode()
+    _write_repo_metadata({**job, "run_id": "later"}, "s3://bucket", "kopia", result, now, now, None, "owner")
+
+    assert json.loads(stored[job_key])["owner_agent_id"] == "other"
+    assert ".backer/jobs/nightly/runs/later.json" in stored
+    assert json.loads(stored[".backer/jobs/nightly/runs/later.json"])["status"] == "success"
 
 
 def test_repo_adopt_s3_reads_prefixed_sidecars_and_saves_only_local_config(monkeypatch, tmp_path: Path) -> None:
@@ -609,7 +620,10 @@ def test_repo_adopt_s3_reads_prefixed_sidecars_and_saves_only_local_config(monke
 
         def get(self, key: str) -> bytes:
             operations.append(("get", key))
-            return b'{"job_name":"nightly","owner_agent_id":"old","config":{"source_path":"/old","excludes":["*.tmp"]}}'
+            return (
+                b'{"schema_version":"2","job_name":"nightly","owner_agent_id":"old",'
+                b'"config":{"source_path":"/old","excludes":["*.tmp"]}}'
+            )
 
         def put_atomic(self, key: str, _: bytes) -> None:
             operations.append(("put", key))
@@ -622,3 +636,158 @@ def test_repo_adopt_s3_reads_prefixed_sidecars_and_saves_only_local_config(monke
     assert operations == [("list", ".backer/jobs/"), ("get", ".backer/jobs/nightly/config.json")]
     saved = BackerConfig.load(tmp_path / "config.yaml")
     assert saved.jobs["nightly"].source.path == "/new"
+
+
+def _document(source_path: str, **overrides: object) -> dict[str, object]:
+    from backer.serverless.sidecar import build_job_document
+
+    config = {**_sidecar_config(source_path), **overrides.pop("config", {})}
+    return {**build_job_document("Nightly", "old-agent", config, []), **overrides}
+
+
+def _config(**jobs: JobConfig) -> BackerConfig:
+    return BackerConfig(
+        agent_id="new-agent",
+        repositories={"repo": RepositoryConfig(name="Repo", type="local", path="/repo")},
+        jobs=jobs,
+    )
+
+
+def test_adoption_warns_loudly_when_the_former_machine_source_is_not_here(tmp_path: Path) -> None:
+    """[11]/[26]: the job adopts, but the operator is told to remap it before 2am."""
+    from backer.serverless.sidecar import adopt_documents
+
+    document = _document(
+        "C:/Users/matt/Documents",
+        config={"repository_hint": {"type": "smb", "server": "nas"}},
+    )
+    config = _config()
+
+    outcome = adopt_documents(config, "repo", {"Nightly": document}, ["Nightly"])
+
+    assert outcome.adopted == ["Nightly"]
+    assert outcome.failures == {}
+    warning = "\n".join(outcome.warnings)
+    assert "C:/Users/matt/Documents" in warning
+    assert "host/win32" in warning
+    assert '--source "Nightly=<local path>"' in warning
+    assert '"server": "nas"' in warning
+    # A supplied remap is the operator's answer: no warning.
+    assert adopt_documents(
+        _config(), "repo", {"Nightly": document}, ["Nightly"], source_paths={"Nightly": str(tmp_path)}
+    ).warnings == []
+
+
+def test_adoption_refuses_to_overwrite_a_local_job_without_replace_existing() -> None:
+    """[15]: adopt silently repointed an existing job's source."""
+    from backer.serverless.sidecar import adopt_documents
+
+    document = _document("/srv/data")
+    config = _config(Nightly=JobConfig(repository="repo", source=SourceConfig(path="/local/keep")))
+
+    refused = adopt_documents(config, "repo", {"Nightly": document}, ["Nightly"])
+
+    assert refused.adopted == []
+    assert "already exists" in refused.failures["Nightly"]
+    assert "/local/keep" in refused.failures["Nightly"]
+    assert config.jobs["Nightly"].source.path == "/local/keep"
+
+    replaced = adopt_documents(config, "repo", {"Nightly": document}, ["Nightly"], replace_existing=True)
+
+    assert replaced.adopted == ["Nightly"]
+    assert config.jobs["Nightly"].source.path == "/srv/data"
+    assert any("/local/keep" in warning for warning in replaced.warnings)
+
+
+def test_adoption_of_many_jobs_keeps_the_good_ones(tmp_path: Path) -> None:
+    """[12]: one unresolvable job used to abort the whole --all run."""
+    from backer.serverless.sidecar import adopt_jobs, save_job_config
+
+    save_job_config(tmp_path, "Good", "old-agent", _sidecar_config(str(tmp_path)), [])
+    broken = tmp_path / ".backer" / "jobs" / "Broken" / "config.json"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("{not json", encoding="utf-8")
+    config = _config()
+
+    outcome = adopt_jobs(config, "repo", tmp_path, ["Good", "Broken", "Absent"])
+
+    assert outcome.adopted == ["Good"]
+    assert set(outcome.failures) == {"Broken", "Absent"}
+    assert "unreadable" in outcome.failures["Broken"]
+    assert list(config.jobs) == ["Good"]
+
+
+def test_adoption_reads_a_job_from_its_own_sidecar_folder(tmp_path: Path) -> None:
+    """[12]: discover_all merges Agents/<job>/.backer trees, so adopt must read them too."""
+    from backer.serverless.sidecar import adopt_jobs, save_job_config
+
+    save_job_config(tmp_path / "Agents" / "Legacy SMB Job", "Legacy SMB Job", "old-agent", _sidecar_config("/srv"), [])
+    config = _config()
+
+    outcome = adopt_jobs(
+        config, "repo", tmp_path, ["Legacy SMB Job"], job_folders={"Legacy SMB Job": "Agents/Legacy SMB Job"}
+    )
+
+    assert outcome.adopted == ["Legacy SMB Job"]
+
+
+def test_adoption_checks_the_schema_version() -> None:
+    """[38]: a 0.8 document adopted silently as a stub; a newer one must be refused."""
+    from backer.serverless.sidecar import adopt_documents
+
+    legacy = {"schema_version": "1", "job_name": "Nightly", "config": {"source_path": "/srv/old"}}
+    future = {"schema_version": "3", "job_name": "Nightly", "config": {"source_path": "/srv/old"}}
+
+    adopted = adopt_documents(_config(), "repo", {"Nightly": legacy}, ["Nightly"], source_paths={"Nightly": "/here"})
+    assert adopted.adopted == ["Nightly"]
+    assert any("pre-0.9" in warning for warning in adopted.warnings)
+
+    refused = adopt_documents(_config(), "repo", {"Nightly": future}, ["Nightly"], source_paths={"Nightly": "/here"})
+    assert refused.adopted == []
+    assert "schema version 3" in refused.failures["Nightly"]
+
+
+def test_a_disabled_job_is_recorded_and_adopts_disabled() -> None:
+    """[24]: 'enabled' was never written, so a paused job woke up on the new machine."""
+    from backer.serverless.sidecar import adopt_documents, build_serverless_job_document
+
+    document = build_serverless_job_document({"enabled": False}, "Nightly", "/srv/data", "old-agent")
+
+    assert document["config"]["enabled"] is False
+    config = _config()
+    adopt_documents(config, "repo", {"Nightly": document}, ["Nightly"], source_paths={"Nightly": "/here"})
+    assert config.jobs["Nightly"].enabled is False
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["aws_secret_access_key", "AWS_ACCESS_KEY_ID", "access-key", "connection-string", "auth_header", "pwd", "creds"],
+)
+def test_credential_shaped_keys_never_reach_the_sidecar(key: str) -> None:
+    """[25]: the sidecar is plain JSON on a share."""
+    from backer.serverless.sidecar import build_job_document
+
+    config = {**_sidecar_config("/srv"), "repository_hint": {"type": "s3", key: "hunter2"}}
+
+    with pytest.raises(ValueError, match="secret"):
+        build_job_document("Nightly", "agent-one", config, [])
+
+
+def test_an_unchanged_job_document_keeps_its_updated_at(tmp_path: Path) -> None:
+    """[33]: every run rewrote config.json and moved updated_at for nothing."""
+    from backer.serverless.sidecar import save_job_config
+
+    config = _sidecar_config("/srv")
+    path = save_job_config(tmp_path, "Nightly", "agent-one", config, [])
+    first = json.loads(path.read_text())
+    mtime = path.stat().st_mtime_ns
+
+    save_job_config(tmp_path, "Nightly", "agent-one", dict(config), [])
+
+    assert json.loads(path.read_text()) == first
+    assert path.stat().st_mtime_ns == mtime
+
+    save_job_config(tmp_path, "Nightly", "agent-one", {**config, "excludes": ["*.tmp"]}, [])
+    changed = json.loads(path.read_text())
+    assert changed["updated_at"] != first["updated_at"]
+    assert changed["created_at"] == first["created_at"]

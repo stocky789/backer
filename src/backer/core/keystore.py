@@ -161,6 +161,8 @@ def get(key: str, *, machine_scope: bool = False) -> str | None:
 
 def delete(key: str, *, machine_scope: bool = False) -> None:
     if os.name != "nt" and _secret_tool_available():
-        _secret_tool(["clear", "service", "backer", "key", key])
+        result = _secret_tool(["clear", "service", "backer", "key", key])
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "secret-tool clear failed")
         return
     _file_path(key, machine_scope).unlink(missing_ok=True)

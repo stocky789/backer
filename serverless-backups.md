@@ -12,6 +12,14 @@ definitions, credentials, scheduling, run history, retention and progress. It sh
 with a mode switch, not a second product (D5), so one machine holds server-managed and serverless
 jobs at once. Android is deferred and stays server-relay-only (D1).
 
+## Repository formats (current)
+
+Repository format is independent of transport and is immutable after creation. `kopia` is the default, including legacy records that omit a format; it supports local directories, SMB/CIFS, and S3-compatible storage with encrypted, compressed, deduplicated snapshots. `files` supports only local directories and mounted/UNC SMB paths. It stores unencrypted, browsable, immutable full-copy snapshots under `Agents/<job>/snapshots/<snapshot-id>/contents/`, with a completed `manifest.json` in each snapshot. S3 is rejected for `files`.
+
+Files repositories expose plaintext to anyone with storage access and do not preserve ACLs, ADS, xattrs, sparse files, hard-link identity, VSS, or crash consistency. Symlinks and unreadable files fail a snapshot. Restore reads one completed immutable snapshot and refuses a destination that overlaps repository storage. Android remains proxy-only: the server selects the format, while Android cannot attach direct local or SMB files storage.
+
+There is no in-place conversion between formats. Create a new repository of the required format and take a fresh backup. Kopia remains the only packaged external backup binary; files mode uses only Python's standard library and adds no dependency or installer payload.
+
 ## Decisions
 
 - D1 Android deferred; server-relay-only.
@@ -21,12 +29,52 @@ jobs at once. Android is deferred and stays server-relay-only (D1).
   second binary to the data path; kopia's native rclone provider is spiked in parallel and adopted
   in v2 only if it holds up. rclone is not re-added to the tool manager in v1.
 - D4 the passphrase is generated, displayed in full, save-confirmed, overridable, and stored in the
-  OS keystore only.
-- D5 one client with a mode switch; config is unified first and the proof is the GUI's Install as
-  Service working; both modes coexist on one machine.
+  OS keystore only. **Python is the single writer of that keystore.** `core/keystore.py` is the only
+  code that calls DPAPI or `secret-tool`; the desktop client never does, because two languages
+  writing one secret store is a bug class nothing in this plan would catch. The six-word generator
+  and its bundled EFF wordlist stay Python-side for the same reason (A1 item 1): the client shells
+  `backer repo add --generate-passphrase` rather than shipping a second copy of a
+  security-relevant wordlist. The client learns which backend is in use from
+  `backer keystore status --json` (`{"backend": str, "file_fallback": bool}`), a name, never a value.
+- D5 one client with a mode switch; config is unified first and the proof is the desktop client's
+  install action shelling `backer agent install --mode server`, producing a scheduled task whose run
+  leads to a heartbeat; both modes coexist on one machine. "One client" now means one engine and one
+  CLI with two front ends; the mode lives in `config.yaml` and in the CLI, not in a UI, which is a
+  stronger statement of D5 than a GUI that imported the agent in-process.
 - D6 Windows unattended runs as a SYSTEM task with machine-scoped credentials passed explicitly to
   `net use`, including the error-1219 story.
 - D7 no new TUI framework: click plus rich, every prompt also a flag, never prompt with no TTY.
+  "Every prompt is also a flag" has been promoted from CLI ergonomics to the desktop client's
+  integration mechanism (D8): a screen that cannot be expressed as a flagged, non-interactive
+  invocation cannot be built. Its corollary: every command the client reads from carries `--json`.
+- D8 the desktop client is a C#/Avalonia application at `desktop/` (`Backer.Desktop`, assembly
+  `backer-desktop`, net8.0) and reaches the engine in exactly two ways, and no third.
+  - **Reads** are direct and read-only: `config.yaml` as B1 defines it, and the files under the data
+    directory - `runs/`, `last_attempt/`, `progress/{run_id}.json`, `schedule.json`, `logs/`. The
+    client never writes `config.yaml`, never invokes kopia, and never touches the OS keystore (D4).
+  - **Every mutation** is a spawned `backer` process. Secrets reach it on stdin only, never on argv,
+    which is the rule protocolfixes.md Phase 0 item 3 already sets for the CLI itself. Cancel is
+    stopping the child, which is cleaner than the in-process design it replaces: the CLI owns the
+    kopia connection and its own `finally` runs the disconnect, so there is no cross-language
+    lifecycle registration to invent. The stop is not the same on both platforms and the UI text
+    must not pretend it is: on Linux the client sends SIGINT to the child, waits a five-second
+    grace for the CLI's own clean stop, and kills the process tree only if it does not go; on
+    Windows there is no equivalent signal for a redirected child, so the tree is ended immediately
+    and the wording says the run ends now with its snapshot unfinished (`Services/CliRunner.cs`).
+  - No local daemon and no HTTP API. A resident local service is refused for the same reasons as
+    Not building item 1, and adding one for the GUI would reintroduce it by the back door.
+  - User-facing failure text is the CLI's own output, shown verbatim. That is how the
+    single-catalogue no-drift guarantee of Appendix A survives a language boundary: there is no
+    second catalogue to drift. C# holds chrome strings only - button labels, view titles, column
+    headings - and the linting rule that replaces the shared-import claim is that no failure-message
+    literal appears under `desktop/`.
+  - Cost, stated rather than hidden: a second toolchain in CI and in the installer, and a payload
+    that is not a Python module. The gain is a supported UI stack on both platforms, a tray icon on
+    Linux that `pystray` could not give (Phase 6 step 9), and a UI that cannot bypass the CLI path
+    its own release gate tests.
+  - Trigger to reopen: a screen that genuinely cannot be driven by a subprocess. None is known; the
+    two that came closest, live progress and scheduler pause, are answered by Phase 6 step 8 and by
+    the `backer schedule` group.
 
 ## Support contract to adopt
 
@@ -41,8 +89,11 @@ Publish this for v1 and nothing wider.
 
 The standing release rule from protocolfixes.md applies unchanged: release only when every
 advertised matrix cell has a passing end-to-end test, otherwise remove that cell from the UI and the
-documentation. Six cells means six end-to-end CI jobs, and a cell is advertised in the CLI, the GUI
-and the README only once its job is green. Two of the six have foundations already:
+documentation. Six cells means six end-to-end CI jobs, and a cell is advertised in the CLI, the
+desktop client and the README only once its job is green. That gate now spans two languages: the
+Python `click.Choice` and the client's own type list. `test_cli_choices_match_ci_jobs` (Phase 7)
+parses the `Choice` only, so the C# advertisement surface needs its own check; it is named as an
+open task in Phase 7 step 5 rather than quietly dropped. Two of the six have foundations already:
 `.gitea/workflows/release-validation.yml:49-75` runs the protocol contract on a
 `[ubuntu-latest, windows-latest]` matrix, and `:77-114` runs an S3 end-to-end against MinIO
 (`tests/test_s3.py:226-234`).
@@ -90,8 +141,38 @@ src/backer/core/
   smb_browse.py   Share and directory enumeration on a host the user named; net view plus
                   Path(unc).iterdir() on Windows, SMBBrowser on Linux; server/repositories.py:19-261.
   keystore.py     Windows DPAPI blobs under an ACL'd directory, Linux Secret Service, headless fallback.
-  messages.py     Every user-facing string, the Appendix A catalogue; CLI and GUI import one copy.
+  messages.py     Every user-facing string, the Appendix A catalogue. One copy, imported by the
+                  CLI; the desktop client displays the CLI's output verbatim rather than importing
+                  anything, so there is no second catalogue and nothing to keep in sync (D8).
 ```
+
+`src/backer/serverless/` holds the GUI-free logic that used to sit inside the Tk package. The whole
+module list, because a partial one reads as a smaller package than it is:
+
+```
+src/backer/serverless/
+  cells.py           PROVEN_SERVERLESS_CELLS and supported_repository_types - the D2
+                     advertisement list in one importable place, and the source the
+                     desktop client's Cells.cs is contract-tested against.
+  modes.py           apply_scheduled_modes - the freeze-verify-rollback install
+                     transaction Phase 5 step 1 describes. Rollback is gated on a
+                     mutation having happened and restores each file in place.
+  schedule.py        The run lock, due-job selection and the paused/until runtime
+                     state behind `schedule pause|resume|show|status`.
+  retention.py       prune_job: the per-source preview and the explicit apply.
+  repositories.py    add_repository, probe, create, the machine-scope re-scoping
+                     of secrets, and the recovery record.
+  runs.py            run_local_job and run_due_jobs, plus the progress document
+                     and per-run log the desktop client reads.
+  history.py         Run-history and repository presentation shared by the CLI and
+                     the desktop client.
+  store.py           append_run / read_runs under the data directory.
+  sidecar.py         The repository `.backer/` sidecar: job documents and adoption.
+  s3_sidecar.py      The same sidecar over S3, credentials in SigV4 headers only.
+  scheduled_test.py  D6's privileged self-test: prepare, wait, remove, retry cleanup.
+```
+
+Nothing under `backer.core` or `backer.serverless` imports a UI toolkit.
 
 Where truth lives:
 
@@ -214,8 +295,32 @@ Transport per platform for v1:
    handed straight to kopia (`client/agent.py:1152-1155`).
 2. Linux as root: `mount -t cifs` via `_smb_mount_context` (`client/agent.py:580`), then the mount
    point.
-3. Linux unprivileged: the user pre-mounts the share and the repository is simply a serverless
-   `local` repository. Zero new code, and the rclone spike is what would remove this asterisk.
+3. Linux unprivileged: `gio mount smb://server/share` through gvfs, then the gvfs FUSE path under
+   `$XDG_RUNTIME_DIR/gvfs`. This is what the file manager does, so it needs no root, no terminal and
+   no desktop session - only `gio` and a session bus, which a `systemd --user` timer with linger
+   already has.
+
+`smb_mount_context` (`core/mounts.py`) is the single choke point every Linux caller reaches -
+`repository_operation_context` (`serverless/repositories.py:106-115`), `prepare_destination` and
+`prepare_source` (`core/destination.py`, so backups and restores both), and the metadata write in
+`core/runner.py:611` - and it is a four-rung ladder, stopping at the first rung that holds:
+
+1. An existing kernel `cifs` mount of `//server/share` in `/proc/mounts`, matched case-insensitively
+   with `/proc/mounts` octal escapes decoded. It is not ours, so it is yielded and never unmounted.
+2. `euid == 0`: `mount -t cifs` with the credentials in a `0600` temp file, unmounted in `finally`.
+3. Not root, with `gio` and a session bus: the gvfs mount above. Credentials go on the child's stdin
+   as three lines - user, domain (empty accepts gvfs's default), password - never on argv. `gio`
+   exits 0 after a failed authentication in some versions, so success is the gvfs entry existing
+   afterwards, not the exit code; a wrong password therefore surfaces as "Login failed - invalid
+   username or password" rather than falling through to another rung that could create a repository
+   in the wrong place. The mount is session-scoped and is left mounted on exit, exactly as the file
+   manager leaves it.
+4. Neither: refuse, leading with the promptless fix (install `gvfs` plus `gvfs-smb` /
+   `gvfs-backends`) before pre-mounting, `/etc/fstab`, and running as root.
+
+The honest caveat: gvfs FUSE throughput is below kernel `cifs`, and a root or `/etc/fstab` mount
+remains the heavy-duty path for large data sets. The rclone spike stays the v2 item, because it is
+what would take FUSE out of the picture entirely.
 
 ## Phase 0 - correctness prerequisites
 
@@ -246,9 +351,9 @@ the pinned 0.23.1 binary, not assumed.
 | 10a. `_write_json` atomic, `file_lock` off the write path | done | `ad23535` |
 | 10b. `discover_all` merges root and per-job sidecars | done | `ad23535` |
 | 10c. Run records written on failure | done | `ad23535` |
-| 10d. `get_config_dir` XDG branch | **deferred to Phase 1** | - |
-| 10e. `get_data_dir` honours `BACKER_DATA_DIR` | **will not do here** | - |
-| 10f. GUI cannot find `agent.yaml` | **deferred to Phase 1** | - |
+| 10d. `get_config_dir` XDG branch | done | `core/paths.py` |
+| 10e. `get_data_dir` honours `BACKER_DATA_DIR` | done | `core/paths.py` |
+| 10f. Desktop UI cannot find `agent.yaml` | **obsolete; subsumed by Phase 1** | - |
 | `os.getuid()` guard | already fixed upstream | `24f0768` |
 
 Three defects not in the original list were found reviewing the first attempt at this phase and are
@@ -258,19 +363,26 @@ delete the staged original and report success; the source scoping in item 3 firs
 that `_verify_repo_access` makes unreachable, so every request took the unscoped path; and a dry-run
 prune persisted the retention policy, arming deletion at the next ordinary snapshot.
 
-Two carry-forward items are deliberately not done, and the reasons are recorded in the code so they
-are not re-added by someone reading this list as a to-do:
+Both 10d and 10e are now implemented in `core/paths.py`, and each of the two objections that had
+deferred them is answered rather than ignored:
 
-- 10d cannot key on whether `/etc/backer` exists, because `backer agent setup` removes that directory
-  between two calls to `get_config_dir()` (`cli.py:601-604`, then `setup_wizard.py:120`) - the wizard
-  saves to `~/.config/backer` while the systemd unit still reads `/etc/backer`.
-- 10e is worse than the bug it fixes. `install.sh` exports `BACKER_DATA_DIR=/var/lib/backer` in both
-  the systemd unit (`:390`) and the `/usr/local/bin/backer` wrapper (`:407`), and the only caller of
-  `get_data_dir()` is `backer agent uninstall`, which `shutil.rmtree`s the result (`cli.py:963`). On a
-  host running both roles, uninstalling the agent would delete the server's database.
+- 10d does not key on whether `/etc/backer` exists - the objection that `backer agent setup` removes
+  that directory between two calls to `get_config_dir()`. It keys on `BACKER_CONFIG_DIR`, then on
+  `config.yaml` existing under `$XDG_CONFIG_HOME/backer` (`%APPDATA%\Backer` on Windows), then on
+  `config.yaml` existing under the machine directory, and falls back to the user directory.
+- 10e's data-loss objection - `agent uninstall` `rmtree`ing a colocated server's `BACKER_DATA_DIR` -
+  is answered by the `_is_server_data_dir` guard in `cli.py`, which keeps any directory holding
+  `backer.db` and says so, for both the data and the config directory. Beyond that, `agent uninstall
+  --mode server --service-only` removes only the installed service, task or systemd unit and leaves
+  config, data, keystore and binaries untouched; it works with `--yes` and it is what the desktop
+  client's "Remove agent service" shells, so the destructive full uninstall is no longer reachable
+  from a button.
 
-Both need `config.yaml` from Phase 1 to be fixed safely, which is where 10f belongs too - it is that
-phase's proof point, not a patch to apply here.
+10f no longer describes a live defect: the
+Tk GUI that wrote `%APPDATA%\Backer\config.json` is deleted, and the desktop client reads
+`config.yaml` and shells the CLI for every mutation (D8), so nothing writes a private JSON config
+any more. What survives is the migration obligation - a machine upgrading from a pre-Avalonia build
+still has that file on disk - and that belongs to Phase 1 step 5.
 
 1. Pass `--delete` when expiring snapshots. `prune` builds `["snapshot", "expire", "--all"]`
    (`backends/kopia.py:696`) and never appends `--delete`, so kopia reports what it would remove,
@@ -306,7 +418,7 @@ phase's proof point, not a patch to apply here.
      `--keep-yearly`. Add the parameter and the emission, and return a failure result rather than
      run when the assembled keep-flag list is empty. No phase may expose the flag before this lands.
    - Two jobs on one folder are not separable by source, and the exclude policy is per path
-     (`backends/kopia.py:287`), so two such jobs overwrite each other's ignore rules on every run.
+     (`backends/kopia.py`), so two such jobs overwrite each other's ignore rules on every run.
      Forbid that configuration in v1 rather than tag around it. The dead tag hook at
      `backends/kopia.py:307-309` stays dead until v2.
 
@@ -411,10 +523,11 @@ phase's proof point, not a patch to apply here.
       (`client/agent.py:80-91`) although `tools/manager.py:54` reads that variable and
       `agent/service_entry.py:13-14` sets it. That split is why a scheduled run and the interactive
       user resolve two different data directories, run every job twice, and show each other nothing.
-    - The GUI writes `%APPDATA%\Backer\config.json` (`agent/gui/app.py:50-51`) while the agent reads
-      `agent.yaml` from the same directory (`client/agent.py:114`), which is why
-      `install_as_service` (`agent/gui/app.py:882`) cannot find the config it just saved. Same
-      directory, different file, different format.
+    - Historical, and the reason Phase 1 exists: the deleted Tk GUI wrote
+      `%APPDATA%\Backer\config.json` while the agent read `agent.yaml` from the same directory
+      (`client/agent.py:114`), so installing the service could not find the config the UI had just
+      saved. Same directory, different file, different format. No shipping code writes that JSON any
+      more; the file still exists on upgraded machines and Phase 1 step 5 migrates it.
     - `cli.py:655` calls `ag._save_credentials(client_id, client_secret)` against
       `client/agent.py:174` `def _save_credentials(self) -> None:`, raising `TypeError` before
       anything is written. Call it with no arguments; both attributes are already assigned at
@@ -482,19 +595,29 @@ Acceptance:
 ## Phase 1 - config unification
 
 Implements D5. One client, one config file, both modes on one machine. No serverless behaviour ships
-here; this phase creates the file Phases 4-6 write into and repairs the GUI-to-service handoff that
-D5 uses as its proof.
+here; this phase creates the file Phases 4-6 write into and repairs the enrol-to-service handoff that
+D5 uses as its proof. Under D8 that handoff is a process boundary rather than an import boundary, and
+this phase's work is more load-bearing for it, not less: a C# client must read a documented file
+format, so `config.yaml` stops being an internal convenience and becomes a published contract
+(Appendix B1).
+
+**Status.** Largely on disk. `src/backer/core/config.py` holds the `BackerConfig` schema, loads and
+saves `config.yaml`, rejects unknown top-level keys, and carries `migrate_legacy`;
+`core/paths.py` resolves the one config directory (Phase 0's 10d/10e). Not verified here: that every
+one of the four legacy surfaces in step 1 is covered by the migration, and the D5 heartbeat proof,
+which needs a Windows host with a reachable server.
 
 1. The four surfaces today. The migration in step 5 is complete only against this list.
    - `agent.yaml`, located by `get_config_dir()` (`client/agent.py:59-77`), written by
      `BackerAgent._save_credentials` (`:174-191`) and again by the wizard
      (`client/setup_wizard.py:116-133`). Exactly three keys: `server_url`, `client_id`,
      `client_secret` (`:180-184`). `chmod 0600` on POSIX only (`:190-191`).
-   - `config.json`, the Tk GUI's private file at `%APPDATA%\Backer\config.json`
-     (`agent/gui/app.py:50-51`), JSON, in the same directory as `agent.yaml`. Four keys:
-     `server_url`, `client_id`, `client_secret`, `hostname` (`:396-399`), read and written at
-     `:157-169`. The GUI never writes `agent.yaml`, which is exactly why Install as Service fails
-     today.
+   - `config.json`, a legacy artefact and no longer a live surface: the deleted Tk GUI's private
+     file at `%APPDATA%\Backer\config.json`, JSON, in the same directory as `agent.yaml`. Four keys:
+     `server_url`, `client_id`, `client_secret`, `hostname`. Nothing writes it now - the desktop
+     client never writes config at all (D8) - but any machine upgraded from a pre-Avalonia build
+     still has it, and it may hold the only enrolment credentials on that machine, so step 5 must
+     read it. Migration-only, in both directions of the word: read it, never write it.
    - `backer.core.config`, a complete pydantic schema that nothing loads: `BackerConfig` with
      `mode`, `jobs` and per-job `ScheduleConfig`/`RetentionConfig` (`core/config.py:76-86`,
      `:41-53`), YAML `load`/`save` at `:88-99`. Its paths are POSIX-shaped with no platform branch
@@ -589,8 +712,9 @@ D5 uses as its proof.
 5. Migrate on first load, in `backer.core.config.migrate_legacy()`, called from `load_config()` when
    no `config.yaml` resolves.
    - Search both `%APPDATA%\Backer` and `%ProgramData%\Backer` on Windows, and `get_config_dir()`
-     plus `/etc/backer` on Linux. The GUI writes the first and the service reads the second; missing
-     that is the D5 defect itself.
+     plus `/etc/backer` on Linux. The old GUI wrote the first and the service reads the second;
+     missing that pairing is the D5 defect itself, and a machine that hit it is exactly the machine
+     with a stranded `config.json` to migrate.
    - Read `agent.yaml` (three keys) and `config.json` (four keys) and merge into `server:`,
      preferring `agent.yaml` on conflict because it is the file the agent itself wrote. Drop
      `hostname`; it is recomputed by `socket.gethostname()` at `client/agent.py:115`. Set `agent_id`
@@ -603,7 +727,11 @@ D5 uses as its proof.
      resolves, so a second `load_config()` neither rewrites the file nor re-reads the legacy pair.
    - Write `config.yaml` to `get_config_dir()`. Leave `agent.yaml` and `config.json` on disk
      untouched for one release so an already-installed frozen `backer-agent-service.exe` still
-     boots, and note both for deletion in CHANGELOG.md.
+     boots, and note both for deletion in CHANGELOG.md. The window covers one more artefact than it
+     used to: the frozen Tk `backer-agent.exe` a user may still have installed, which the rewritten
+     installer replaces with `backer.exe` plus the desktop client (Phase 7 step 10). Do not shorten
+     the window to one release on the strength of the new installer alone - a machine that never
+     runs the new installer is the machine that needs the legacy files most.
 
 6. Repoint the loader and every writer. Copying a file into place is not enough on its own:
    `agent/service_entry.py:15-16` pins `BACKER_CONFIG_DIR` and `:20` calls
@@ -620,9 +748,12 @@ D5 uses as its proof.
      does not change it again.
    - `client/setup_wizard.py:37`, `:120` and `:225` are three copies of `get_config_dir() /
      "agent.yaml"`. All three go through the unified loader.
-   - `agent/gui/app.py:157-169`: `load_config`/`save_config` become thin wrappers over the unified
-     file that still return and accept a flat dict, so `:396-399` and the four other call sites need
-     no edit.
+   - There is no GUI config wrapper to write. An earlier draft made the Tk GUI's
+     `load_config`/`save_config` thin wrappers over the unified file; that code is deleted. Its
+     replacement is a contract, not a function: `config.yaml` as B1 specifies it is what the desktop
+     client reads, and the client performs no write of its own (D8), so the set of processes that
+     may write this file is exactly `backer` and nothing else. State that in B1 and enforce it by
+     having no other writer exist.
    - `_prepare_service_config` (`client/windows_service.py:40-76`) copies `config.yaml` when
      present, else `agent.yaml`, keeping the icacls hardening and its rollback-on-failure path
      (`:69-76`) unchanged. Update the three tests at `tests/test_windows_packaging.py:79-140`, which
@@ -691,7 +822,7 @@ D5 uses as its proof.
 
 Acceptance:
 
-- `tests/test_config_unification.py::test_agent_yaml_and_gui_json_merge_into_one_config` passes: a
+- `tests/test_config_unification.py::test_agent_yaml_and_legacy_json_merge_into_one_config` passes: a
   directory seeded with both legacy files yields a `config.yaml` whose `server:` block carries
   `server_url`, `client_id` and `client_secret`, whose `agent_id` equals that `client_id`, and both
   legacy files still exist afterwards.
@@ -740,15 +871,19 @@ Acceptance:
 - `uv run pytest tests/` passes with the only edited test files being
   `tests/test_windows_packaging.py` and `tests/test_public_api_compat.py`, and the only deleted one
   `tests/test_core_job.py`.
-- D5 proof, on a Windows host with the server reachable. Enrol through the GUI only, with no
-  `agent.yaml` anywhere on disk. Menu > Install as Service (`agent/gui/app.py:148`) returns the
-  `Service Installed` dialog (`:953-961`) rather than today's `Installation Failed` (`:965`)
-  carrying `Agent config not found` (`client/windows_service.py:45-46`). Then `schtasks /run /tn
-  BackerAgentService`, and within 90 seconds (a)
+- D5 proof, on a Windows host with the server reachable. Enrol through the desktop client only, with
+  no `agent.yaml` and no `config.yaml` anywhere on disk beforehand. **The desktop client's install
+  action shells `backer agent install --mode server`, which produces a scheduled task whose run
+  leads to a heartbeat within 90 seconds.** That command exits 0 where `_prepare_service_config`
+  previously raised `FileNotFoundError` carrying `Agent config not found`
+  (`_prepare_service_config`, `client/windows_service.py`), because there is now one config file and the installer copies
+  it. Then `schtasks /run /tn BackerAgentService`, and within 90 seconds (a)
   `%ProgramData%\Backer\logs\backer-agent-<YYYY-MM-DD>.log` contains `Backer agent service
   starting`, which `agent/service_entry.py:17-19` writes to that directory explicitly, and (b) `GET
   /api/v1/clients/{client_id}` reports `status` of `online` with a `last_seen` newer than the
-  `schtasks /run`. A task that is merely created does not satisfy this bullet.
+  `schtasks /run`. A task that is merely created does not satisfy this bullet. The proof stays
+  falsifiable without the client: the same three steps run with `backer agent install --mode server`
+  typed directly, which is the form a CI leg can drive.
 
 ## Phase 2 - extraction into backer.core
 
@@ -756,6 +891,11 @@ Pure refactor. No defect is re-fixed, no branch re-ordered, no error string rewo
 that one extracted engine serves both the server-managed `BackerAgent` and the serverless client, so
 the twelve clean-restore tests at `tests/test_agent_protocol.py:198-546` guard the move in both
 modes at once.
+
+**Status.** Done as a package: `src/backer/core/` holds `paths.py`, `config.py`, `mounts.py`,
+`destination.py`, `runner.py`, `smb_browse.py`, `keystore.py`, `messages.py`, `job.py`,
+`recovery.py` and `repo_metadata.py`. Whether every listed call site now routes through them, rather
+than keeping a copy, is not verified here.
 
 Read that claim narrowly, because it was written against `ffe31b6` and is weaker at HEAD. Those
 twelve tests guard the refactor, not the behaviour: `:198`, `:258` and `:285` now assert that a
@@ -788,9 +928,10 @@ Commit `0e3df43` moved the module there; `parse_s3_config` survives at `backends
 
 2. `src/backer/core/smb_browse.py`: move `smb_auth_file` (`server/repositories.py:19-67`),
    `ShareInfo` (`:77-83`), `DirectoryEntry` (`:86-92`) and `SMBBrowser` (`:95-288`), and re-export
-   all four from `server/repositories.py` for the server's own callers. Phases 3 and 6 import them
-   from `backer.core.smb_browse`; without this move they would reintroduce into `backer.core` the
-   `backer.server` dependency that the `backends/s3.py` move already removed from `backends/`.
+   all four from `server/repositories.py` for the server's own callers. Phases 3 and 5 import them
+   from `backer.core.smb_browse`; Phase 6 reaches the same enumeration through `backer repo discover
+   --json` rather than by import (D8). Without this move they would reintroduce into `backer.core`
+   the `backer.server` dependency that the `backends/s3.py` move already removed from `backends/`.
 
 3. `src/backer/core/mounts.py` from `client/agent.py:497-732` and `agent/service.py:97-394`. Drop
    `self`, keep every body identical.
@@ -1013,6 +1154,11 @@ and hands Kopia the mount path (`client/agent.py:818-831`), Windows opens the se
 Kopia the UNC path (`_prepare_windows_smb`, `client/agent.py:1147-1158`) - and neither adds a
 binary. The spike therefore gates v2, not v1, and asks two questions that must not be conflated.
 
+**Status.** Not run, by design - it gates v2. What is on disk from this phase's v1 half is
+`core/smb_browse.py` and the `backer repo discover` command (share enumeration on one named host,
+`--json`), plus the `serverless-smb-linux` and `serverless-smb-windows` CI jobs. Arm D stays dropped
+for v2, as recorded below.
+
 The first is new and exists only because the product is Kopia. Kopia has a native rclone provider,
 `kopia repository create rclone --remote-path=REMOTE-PATH`, verified present in the pinned 0.23.1
 binary (`tools/manager.py:20-38`), so an on-the-fly `:smb,host=...:` remote can carry backup DATA.
@@ -1153,6 +1299,12 @@ core: `schedule.py` (due calculation), `retention.py` (policy and expiry plumbin
 subcommands this phase's Acceptance drives are written here, spelled exactly as the Phase 5 tree
 declares them; Phase 5 adds the wizard, the progress rendering, the no-TTY contract and the rest
 of the surface on top of them.
+
+**Status.** On disk and wider than this paragraph describes: `src/backer/core/keystore.py` exists,
+and `src/backer/serverless/` is the full module list given above - `cells.py`, `modes.py`,
+`repositories.py`, `runs.py`, `history.py`, `sidecar.py`, `s3_sidecar.py` and `scheduled_test.py`
+beside the `schedule.py`, `retention.py` and `store.py` this paragraph names. `keystore status
+--json` is a shipped command. Not verified here: the D6 unattended proof, which needs a Windows host.
 
 v1 repository types are `local`, `smb` and `s3` (D2). S3 is the cheapest of the three: nothing to
 mount, nothing to enumerate, no privilege story, and a validated credential boundary that already
@@ -1315,6 +1467,22 @@ ships at `backends/s3.py`.
      early return at `core/repo_metadata.py:585` has been replaced by the Phase 0 merge.
    - Print the discovered jobs - name, source path, schedule, last run, owning hostname - and let
      the user tick which to import; non-interactively `--job NAME` repeated, or `--all`.
+   - Adoption is per job, not all-or-nothing: `adopt_documents` collects a failure per job and
+     imports the rest, returning `AdoptOutcome(adopted, warnings, failures)`, so one legacy or
+     malformed document cannot block every good job. `--all` reads each job's document from
+     wherever `discover_all` found it, including the legacy `Agents/{job_subfolder}/.backer/`
+     trees, rather than assuming the root sidecar.
+   - Adoption refuses rather than guesses, because everything it gets wrong surfaces at 2am on an
+     unattended run: an unknown `schema_version` is refused by name (1 and 2 adopt; 1 warns that
+     schedule, retention and excludes were never recorded), and an existing local job of the same
+     name is refused unless `--replace-existing` is passed - overwriting it repoints a source, the
+     same mutation `job set --source` already warns about, and it is warned about here in the same
+     words. A source path that does not exist locally, or one recorded on a different platform,
+     adopts with a warning naming the required `--source "NAME=<local path>"`; adopting silently
+     would schedule a job that can only fail.
+   - `enabled` rides in the sidecar document and is honoured on adopt, so a disabled job does not
+     wake up on the adopting machine's schedule. `includes`, `pre_scripts` and `post_scripts` are
+     not carried and are not reconstructible from the sidecar.
    - Import rewrites machine-local fields only: `source_path`, offering the local equivalent when
      the original does not exist here, and the destination resolution. `job_name` is preserved, so
      the adopted job's sidecar resolves through `get_job_subfolder`
@@ -1349,7 +1517,7 @@ ships at `backends/s3.py`.
      and unit name distinct from the server agent's so both modes coexist (D5). This phase owns
      the due calculation, `schedule.json` and the lock.
    - Say what the Linux trigger actually delivers. `create_systemd_service`
-     (`client/windows_service.py:619-650`) writes a `--user` unit under `~/.config/systemd/user`,
+     (`client/windows_service.py`) writes a `--user` unit under `~/.config/systemd/user`,
      which systemd does not run while that user is logged out, so a desktop or headless box gets
      no run, no attempt record and nothing to notify about. Phase 5's `--mode local` install
      therefore enables lingering and refuses rather than leaving a timer that never fires; no step
@@ -1357,8 +1525,8 @@ ships at `backends/s3.py`.
 
 8. Windows unattended identity and storage credentials (D6).
    - The serverless trigger reuses the existing SYSTEM boot-task machinery under its own name:
-     `create_background_scheduled_task` (`client/windows_service.py:112`), the `S-1-5-18`
-     principal at `:180`, and `MultipleInstancesPolicy` of `IgnoreNew` at `:185`. The server
+     `create_background_scheduled_task` (`client/windows_service.py`), its `S-1-5-18`
+     principal and its `MultipleInstancesPolicy` of `IgnoreNew`. The server
      agent's own task is not edited.
    - That task sets `BACKER_DATA_DIR=%ProgramData%\Backer` so the scheduler and the interactive
      user resolve one data directory; without it every job can run twice and `backer job history`
@@ -1419,9 +1587,15 @@ ships at `backends/s3.py`.
      two-tag design that bought this property is deleted, not ported.
    - Two jobs on the same folder with different exclude sets are the one case source separation
      cannot cover, and that configuration is already broken for a different reason: the ignore
-     policy is per-path (`backends/kopia.py:287`, `--clear-ignore` then re-add, pinned by
-     `tests/test_backends.py:154-175`), so two such jobs overwrite each other's excludes every
-     run. `backer job create` refuses a second job on a source path another job already owns in
+     policy is per-path (`backends/kopia.py`, `--clear-ignore` then re-add), so two such jobs
+     overwrite each other's excludes every run. Note the clear and the re-add must be two separate
+     `kopia policy set` invocations: 0.23.1 applies `--clear-ignore` *after* the `--add-ignore`
+     values given in the same call, exits 0, and leaves the source with no ignore rules at all -
+     which is how 0.9 shipped for a while with every configured exclude silently discarded. Pinned
+     end to end by `tests/test_serverless_e2e.py`, which runs a real backup with an exclude and
+     asserts the excluded file is absent from the snapshot; argv-shape assertions cannot catch it,
+     because the broken form builds argv that looks correct.
+     `backer job create` refuses a second job on a source path another job already owns in
      the same repository, and names the owning job. Kopia tags exist and the backend has a dead
      hook for them (`backends/kopia.py:307-309`), but a tag cannot fix the policy collision, so
      the answer is refusal, not tags.
@@ -1478,14 +1652,49 @@ ships at `backends/s3.py`.
     - Progress is coarse and says so. Kopia's `--json` is a result document at completion, not a
       stream, so there is nothing to parse per second and `KopiaBackend.backup` accepts
       `progress_callback` (`backends/kopia.py:235`) without ever calling it. This phase writes
-      `<data_dir>/progress/{run_id}.json` at the transitions it actually knows - started, source
-      estimated, snapshot complete - through the temp-plus-`os.replace` helper, removed on exit,
-      so `backer status` and the GUI can see a run this process did not start. Phase 5 owns
-      whichever denominator it picks; this phase claims no percentage it cannot compute.
-    - Readers: `backer job history NAME`, the Phase 6 GUI job list, and `backer status
-      --exit-code`, which exits non-zero when any enabled job's newest attempt failed or its last
-      success is older than two of that job's own schedule intervals. That flag turns a silently
-      stopped nightly job into something a monitoring check can see.
+      `<data_dir>/progress/{run_id}.json` at the transitions it actually knows - the run starting,
+      the backend coming up, and each kopia stderr frame it can parse - through the
+      temp-plus-`os.replace` helper, removed on exit,
+      so `backer status` and the desktop client can see a run this process did not start. Phase 5
+      owns whichever denominator it picks; this phase claims no percentage it cannot compute.
+    - That file stops being a convenience and becomes a contract, because under D8 it is the only
+      way an out-of-process client observes an in-flight run. This is the shape the writer actually
+      emits (`serverless/runs.py::_write_progress`, fed by `core/runner.py`'s `progress_callback`
+      and `backends/kopia.py`'s frame parser), pinned as the contract:
+      - `run_id` is on every frame, and is the only key that is.
+      - `status`, not `phase`: `"started"` on the first frame, then `"running"` for the rest. There
+        is no terminal frame - the document is deleted when the run ends, and its absence is what a
+        reader treats as "not running". The four-value `phase` enum (`started`, `estimated`,
+        `complete`, `failed`) was never implemented and is not the contract.
+      - The `"started"` frame carries `started_at`, UTC ISO 8601 with a trailing `Z`.
+      - `"running"` frames carry `message` and `progress_percent` at the coarse transitions the
+        runner knows, and `current_file`, `bytes_processed`, `files_processed`, `total_bytes`,
+        `total_files`, `hashed_bytes`, `cached_bytes`, `hashed_files`, `cached_files` once kopia's
+        stderr frames start arriving. The key set is therefore not stable between frames: a reader
+        binds every field as optional and holds its last known value.
+      - There is no `job` key and no `updated_at`; the run id names the file and the file's mtime
+        is the update time.
+      - `total_bytes` is an *estimate*: the previous snapshot's `rootEntry.summ.size`. `null` means
+        "no denominator", and `_clamp_progress` (`serverless/runs.py`) sets both `total_bytes` and
+        `progress_percent` to `null` as soon as `bytes_processed` exceeds it, so a grown source
+        reports indeterminate progress instead of a false percentage; while the estimate still
+        holds, `progress_percent` is capped at 99 so a bar never sits full mid-run. `total_files`
+        is `0` rather than `null` when unknown, which is the one place the "null, never 0" rule is
+        not kept - a reader must treat `total_files == 0` as unknown.
+      - Writes are whole-file temp-plus-`os.replace`, so a reader polling it never sees a partial
+        document. Adding a field is backward compatible; renaming or repurposing one is a break and
+        belongs in CHANGELOG.md.
+      - Both halves are pinned by fixtures generated from the real writer:
+        `tests/test_metadata_fixtures.py` fails if the Python writer's bytes change, and
+        `desktop/Backer.Desktop.Tests/MetadataFixtureTests.cs` fails if the C# reader stops binding
+        them. The C# `ProgressFrame` deliberately does not bind `message`, `progress_percent` or
+        `current_file`: the desktop client composes its own status line and draws its bar from
+        `bytes_processed`/`total_bytes`, so binding them would add unread fields.
+    - Readers: `backer job history NAME`, `backer status --exit-code`, and the desktop client,
+      which reads the same on-disk records directly rather than importing `read_runs` (D8).
+      `--exit-code` exits non-zero when any enabled job's newest attempt failed or its last success
+      is older than two of that job's own schedule intervals. That flag turns a silently stopped
+      nightly job into something a monitoring check can see.
     - Fix the log path per A5 item 4: `setup_agent_logging` (`agent/service.py:55-59`) logs under
       `%ProgramData%\Backer\logs` when frozen or running as a service, granting Users read, and
       under `$XDG_STATE_HOME/backer/logs` on Linux. Today it writes `%APPDATA%` (`:57`), which
@@ -1583,6 +1792,15 @@ base dependencies (`pyproject.toml:29-36`). The interactive surface is a new
 uses; the non-interactive surface is `src/backer/cli.py`. New tests land in
 `tests/test_cli_serverless.py` unless a bullet names another file.
 
+**Status.** Mostly on disk. `backer --help` lists `init`, `repo`, `job`, `schedule`, `keystore`,
+`snapshots`, `status`, `prune`, `verify`, `restore` beside the pre-existing `agent`, `server`,
+`setup`, `backup` and `tools`; `src/backer/client/serverless_wizard.py` is the `init` wizard;
+`agent install --mode local|server`, `agent uninstall --service-only`, `agent test-schedule`,
+`job set`, `schedule pause --until|resume|show|status` and `keystore status --json` all resolve.
+Tests live in `tests/test_cli_serverless.py`, `tests/test_serverless_wizard.py`,
+`tests/test_serverless_modes.py` and `tests/test_serverless_unattended.py`. Not verified here: the
+`--json` completeness audit in step 2, and the Windows-only legs of the acceptance bullets.
+
 1. Extend the existing groups. There is no `backer standalone` group: D5 makes the mode a flag, and
    a parallel group makes it a product boundary. `backer job` already takes `--server` on every
    subcommand (`cli.py:1377`, `:1433`, `:1480`), so that flag is the mode selector - `--repo NAME`
@@ -1597,11 +1815,21 @@ uses; the non-interactive surface is `src/backer/cli.py`. New tests land in
      Choice at `cli.py:756`. Under `--mode local` it skips the `BackerAgent.from_config()`
      registration check at `cli.py:783-787`, which today aborts with `Agent not registered` on a
      machine that has no server, and installs under a distinct name so both modes coexist (D5):
-     `create_background_scheduled_task` (`client/windows_service.py:112`) as `BackerLocalSchedule`,
-     `create_systemd_service` (`:619`) as `backer-local.timer`, both with an action of `backer job
-     run --due --no-progress`.
-   - `create_systemd_service` (`client/windows_service.py:619-650`) writes a `--user` unit under
-     `~/.config/systemd/user` (`:624`), which systemd does not run while that user is logged out.
+     `create_background_scheduled_task` (`client/windows_service.py`) as `BackerLocalSchedule`,
+     `create_systemd_service` (same file) as `backer-local.timer`, both with an action of `backer job
+     run --due --no-progress`. On a frozen install the task's action is `backer.exe`, not the
+     interpreter.
+   - `--mode local` routes through the full freeze-verify-rollback path rather than the no-rollback
+     subset it used to be. That sequence - freeze the running scheduler, re-scope every referenced
+     keystore entry to machine scope, write both the per-user and the machine-scoped `config.yaml`,
+     read every secret back at machine scope, and roll back the scheduler, the secrets and both
+     config files on any failure - lived in the deleted GUI and is the only implementation that was
+     ever correct. It moves into the CLI, because under D8 a UI cannot own an install transaction:
+     the process that performs it must also be the process that unwinds it, and that process is
+     `backer`. Phase 4 step 8's machine-scope enforcement is the middle of this sequence, not a
+     second copy of it.
+   - `create_systemd_service` (`client/windows_service.py`) writes a `--user` unit under
+     `~/.config/systemd/user`, which systemd does not run while that user is logged out.
      `--mode local` on Linux therefore also runs `loginctl enable-linger <user>`, verifies it with
      `loginctl show-user <user> --property=Linger`, and exits non-zero naming that command when it
      cannot be enabled - an installed timer that never fires is worse than a refused install. The
@@ -1619,15 +1847,19 @@ uses; the non-interactive surface is `src/backer/cli.py`. New tests land in
                                answers at that path)
                                --type local|smb|s3
                                local:  --path PATH
-                               smb:    --host --share --path --username --domain
-                                       --password-stdin | --password-file FILE
+                               smb:    --server/--host --share --path --username
+                                       --domain
+                                       --storage-stdin/--password-stdin |
+                                       --storage-file/--password-file FILE
                                s3:     --bucket --prefix --endpoint URL --region
-                                       --access-key-id
+                                       --path-style --access-key-id
                                        --secret-key-stdin | --secret-key-file FILE
+                                       (the same --storage-stdin/--storage-file
+                                       carry the S3 credentials JSON)
                                --generate-passphrase [--passphrase-out FILE |
                                --print-passphrase] | --passphrase-stdin |
-                               --passphrase-file FILE --update-password
-                               --update-passphrase --headless --yes
+                               --passphrase-file FILE
+                               --headless
    backer repo list            --json
    backer repo test|unlock NAME
    backer repo passphrase NAME reprints the words and the save options
@@ -1662,10 +1894,69 @@ uses; the non-interactive surface is `src/backer/cli.py`. New tests land in
    backer status [JOB]         --why --exit-code --json
    backer agent install        --mode local|server
                                --method service|task|startup|systemd
+   backer agent uninstall      --mode local|server --headless --keep-config --yes
+                               --service-only (removes only the installed
+                               service/task/unit; config, data, keystore and
+                               binaries are left in place - this is what the
+                               desktop client's Remove agent service shells)
+   backer agent test-schedule [NAME]
+                               runs one job the way the scheduler would, as
+                               SYSTEM, and prints what it saw; exit 0 or 1
+   backer job set NAME         --schedule CRON | --no-schedule
+                               --keep-last|-daily|-weekly|-monthly|-yearly N
+                               --exclude P (rep.) --clear-excludes
+                               --enable | --disable --source P --json
+   backer schedule pause       --until ISO8601
+   backer schedule resume
+   backer schedule show        --json
+   backer schedule status      --json
+   backer keystore status      --json
    ```
 
    - Exit codes are the scripting contract and are tested: 0 success, 1 the operation failed, 2
      configuration or usage error, 130 interrupted.
+   - The last block is the surface D8 needs and the CLI did not have. Each entry exists because a
+     screen would otherwise have had to mutate state itself, which D8 forbids.
+     - `job set` is edit. Without it the only way to change a schedule, a retention field, an
+       exclude list or an enabled flag was to rewrite `config.yaml` in place - which is exactly
+       what the deleted GUI did, and exactly the second writer D8 removes. It carries `--json` so
+       the client can read back what it wrote instead of guessing.
+     - `schedule pause|resume|show` own the tray's Pause backups control. State stays in
+       `<data_dir>/schedule-runtime.json` beside `schedule.json`; `show --json` emits
+       `{"paused": bool, "until": str|null}`. Pause suppresses `job run --due` and nothing else; it
+       never removes an OS trigger, because a trigger that stops existing is a trigger nobody
+       notices is gone.
+     - `schedule status --json` wraps `windows_service.snapshot_local_scheduler` plus
+       `local_schedule_configured` and reports honestly what those actually provide -
+       `configured`, `method`, `scope`, `enabled`, `active` - rather than a synthesised boolean. No
+       CLI could read scheduler state before this.
+     - `keystore status --json` returns `{"backend": str, "file_fallback": bool}`: a backend name,
+       never a secret, which is all a UI needs to say "stored in DPAPI (user)" or to repeat A1's
+       downgraded-store warning (D4).
+     - `backer agent test-schedule [NAME]` is the user-facing self-test and the one the desktop
+       client's "test a scheduled run now" control spawns. It runs the sequence the moved helpers in
+       `serverless/scheduled_test.py` already implement - `prepare_scheduled_test`, create the
+       transient SYSTEM task or systemd unit, `wait_for_scheduled_attempt`, `remove_scheduled_test`
+       with `retry_scheduled_test_cleanup` on failure - prints human output and exits 0 or 1.
+       Cleanup is fail-closed: the isolated machine-scope credentials are deleted only after removal
+       is verified, and a failed cleanup is reported rather than swallowed.
+     - `backer agent scheduled-test TOKEN` is hidden and takes the place of `python -m
+       backer.serverless.scheduled_test TOKEN` on a frozen install, where there is no interpreter
+       to invoke. It is the inner leg of D6's privileged self-test and is not a user-facing command.
+   - Confirmations gain non-TTY forms and stay fail-closed. `restore --into REPLACE --yes-replace`
+     works with no TTY because the flag itself carries the confirmation; without the flag, a
+     non-TTY invocation still refuses with exit 2. `repo rm --yes --confirm-name NAME` replaces the
+     typed-name prompt with the name supplied as a value that must match. `verify --repair-index
+     --yes`. Nothing here weakens the interactive default: on a TTY with no flag, every one of them
+     still prompts exactly as A1, A3 and A4 specify. This is D7's "every prompt is also a flag"
+     completed for the three prompts that had no flag, which is what lets D8's client drive them.
+   - `--json` completeness is a gate on this phase, not a nicety, because it is the client's only
+     read path for anything not on disk. Audit the whole table before the desktop work starts:
+     `repo list`, `repo adopt`, `repo discover`, `job list`, `job show`, `job history`, `prune`,
+     `snapshots` and `status` carry it today; `repo test`, `repo unlock`, `repo passphrase`,
+     `verify` and `restore` do not, and each either gains `--json` or is documented here as
+     human-output-only with the client showing that output verbatim. `job run NAME --json` is
+     special and is specified in step 6.
    - No secret is ever an argv value: `--password-stdin`/`--passphrase-stdin`/`--secret-key-stdin`,
      their `--*-file` forms, and the `$BACKER_SMB_PASSWORD` / `$BACKER_REPOSITORY_PASSWORD` /
      `$BACKER_S3_SECRET_KEY` fallbacks through the existing `envvar=` pattern (`cli.py:985-986`).
@@ -1789,6 +2080,28 @@ uses; the non-interactive surface is `src/backer/cli.py`. New tests land in
    - `--progress` forces Live, `--no-progress` forces one timestamped line per update, the default
      is Live only on a TTY. Ctrl-C sends SIGINT (CTRL_BREAK on Windows) to kopia, waits up to 30s
      for it to finish writing and disconnect, then exits 130.
+   - `backer job run NAME --json` is how an out-of-process client attaches to a run, and its output
+     contract is exact. The **first** stdout line is `{"run_id": "..."}`, written and flushed
+     **before** the run starts - before the keystore read, before prepare_destination, before kopia
+     is spawned - so a caller always has an id to correlate with even for a run that fails in its
+     first second. The final stdout line is one JSON result object. Under `--json` there is nothing
+     between them: the `[BACKUP]`/`[METADATA]` narration goes to stderr (`_json_only_stdout` in
+     `cli.py`), so stdout is exactly two JSON documents and `jq` on it succeeds. `--json` implies
+     `--no-progress`.
+   - Progress transport for the desktop client, and this is the whole of it: the client reads
+     `<data_dir>/progress/{run_id}.json` at about 4 Hz and tails `<data_dir>/logs/{run_id}.log`,
+     using the `run_id` from that first line. That is Phase 4's coarse document - one `started`
+     frame, then `running` frames - so the client's bar is coarse too, and Phase 6 step 8's rule
+     bites accordingly: with no per-frame data there is no percentage to draw, and the view says
+     what it is doing instead of inventing a number.
+   - **Per-frame NDJSON progress is deliberately deferred.** Adding `--progress-json` to `job run`,
+     emitting one NDJSON object per parsed kopia frame on stdout, is maybe fifty lines on top of the
+     stderr reader this step already builds - the frames are already parsed. It is deferred because
+     it buys a smoother bar and nothing else, and because a stream is a second output contract to
+     version. Trigger to build it: the coarse bar being the reported problem - users asking whether
+     a long first backup is stalled - or a Phase 6 view that needs a throughput figure it cannot
+     compute from three transitions. When that happens it is additive: the same first-line `run_id`
+     contract, the same result line, one new flag.
 
 7. The `Choice()` list is the support matrix. `--type` accepts `local|smb|s3` on both platforms, per
    D2, which is the six cells. Widening the matrix and widening a `Choice()` are the same commit as
@@ -1831,8 +2144,10 @@ uses; the non-interactive surface is `src/backer/cli.py`. New tests land in
      component, reject a drive letter - and test it directly. `backer
      status`, `job show` and `job history` read `backer.serverless.store.read_runs` - no new store,
      no daemon.
-   - Create `src/backer/core/messages.py`, the Appendix A catalogue plus A5's substring map; the CLI
-     imports it here and the Phase 6 GUI imports the same module.
+   - Create `src/backer/core/messages.py`, the Appendix A catalogue plus A5's substring map. The CLI
+     imports it here and it stays the only copy: the desktop client displays the CLI's stdout and
+     stderr verbatim rather than holding strings of its own (D8), so the no-drift guarantee holds by
+     construction rather than by an export step and a conformance test.
    - Implement A4's moved-aside copy: `client/agent.py:1398` renames to
      `<name>.replaced-<timestamp>` instead of `shutil.rmtree`, which survives only behind
      `--clean-up-replaced`.
@@ -1902,7 +2217,7 @@ Acceptance:
   code 2, that the output names `--share`, `--password-stdin` and `--path`, and that it contains no
   prompt text.
 - `test_generate_passphrase_no_tty_requires_an_output` asserts `repo add r1 --init --type local
-  --path DIR --generate-passphrase --yes` off a TTY exits 2 naming both `--passphrase-out` and
+  --path DIR --generate-passphrase --headless` off a TTY exits 2 naming both `--passphrase-out` and
   `--print-passphrase`, and that the same command plus `--print-passphrase` exits 0 and prints six
   words.
 - `test_every_command_in_the_plan_exists` extracts every `backer <command>` string from
@@ -1925,7 +2240,8 @@ Acceptance:
   and the Phase 4 status probe returning "invalid repository password" the command prints that
   message and exits 1, and that `KopiaBackend.test_connection` is never called on this path.
 - `printf 'aardvark-basil-cobweb-dulcet-ember-fjord' | backer repo add r1 --init --type local --path
-  TMP --passphrase-stdin --yes` exits 0, and then `backer job create t1 --repo r1 --source TMP2
+  TMP --passphrase-stdin --headless` exits 0 (`--headless` is required off a TTY: it is the opt-in
+  to the protected local-file secret fallback), and then `backer job create t1 --repo r1 --source TMP2
   --no-schedule && backer job run t1 --no-progress && backer snapshots t1 --json` exits 0 with stdin
   from `/dev/null` on Linux and from `NUL` on Windows, the last command emitting one snapshot
   object, proving every remaining prompt is reachable by flag with no TTY. The passphrase is
@@ -1940,32 +2256,49 @@ Acceptance:
   isolates, because a kopia connection abandoned mid-run is a stale config entry, not a repository
   lock.
 
-## Phase 6 - desktop GUI
+## Phase 6 - the Avalonia desktop client
 
-Do this after Phases 1, 2, 4 and 5. The GUI is a view over the unified config and
-`backer.core.runner`, never a second implementation of either. No new dependencies: `tkinter`,
-`ttk`, `tkinter.filedialog` (stdlib, not imported today), `tkinter.messagebox`, `secrets`,
-`collections.deque`, plus `croniter` and the win32 `pystray`/`pillow` extras
-(`pyproject.toml:50-53`).
+Do this after Phases 1, 2, 4 and 5. The client is a view over `config.yaml` and the `backer` CLI,
+never a second implementation of either (D8).
 
-Today `agent/gui/app.py:92` is a 450x460 pack-only window holding a server-URL box, two status
-labels, three buttons and a menubar. The file contains no `Notebook`, `Toplevel`, `Treeview`,
-`Progressbar`, `filedialog` or `grid` call at all, so there is no job, repository, file-picker,
-progress or run-history surface, and `foreground='black'` at `:309`, `:472` and `:528` makes it
-unreadable under a dark theme. The last 24 commits touched one line of this file, at `:32`, so every
-line number below is the same one the previous draft cited.
+**Status, stated honestly.** The Tk implementation of this phase was built and is now deleted:
+`src/backer/agent/gui/` and `tests/test_gui_serverless.py` are gone from the tree, and every step
+below that used to prescribe a Tk API prescribes an Avalonia one instead. The replacement is a
+rebuild in progress on this branch at `desktop/`, not shipped work: `desktop/Backer.Desktop.sln`,
+`desktop/Backer.Desktop/` (Avalonia + Fluent theme + CommunityToolkit.Mvvm + YamlDotNet, version
+0.9.0) and `desktop/Backer.Desktop.Tests/` (xunit, plain). Nothing in this phase may be described
+as done until its acceptance bullet is green. What has landed since that sentence was written, each
+verified against the tree: `agent install --mode local` passes a per-platform `--method`
+(`task` on Windows, `systemd` elsewhere) instead of relying on a default the CLI rejects; Edit is a
+real `backer job set` spawn; recovery-record export runs `repo passphrase NAME --passphrase-out
+FILE`; Settings has a Test-scheduled-run button (`agent test-schedule`), repository remove and
+export, and a service-only Remove agent service; pause durations go through `schedule pause --until`
+with an ISO 8601 local-offset value; `Services/NotificationService.cs` delivers notifications under
+the A5 policy; the Run view carries a stalled label; and Cancel is cooperative on Linux
+(`Services/CliRunner.cs`). None of these is on a dropped or deferred list. What did carry over is
+the behaviour: the view list,
+the five-confirmations rule, the passphrase step, the no-percentage-without-data rule, the
+notification policy and the no-engine-control guard were framework-neutral and are restated here
+unchanged in substance.
 
-1. One container, one navigation function. `_show(name)` calls `pack_forget()` on the current view
-   frame and `pack(fill=BOTH, expand=True)` on the next, sets the window subtitle and focuses that
-   view's primary control; views are built lazily on first show and retained. Grow the window to
-   760x560 with a 700x480 minimum and size every view to that minimum, so only Treeviews scroll.
-   - No `ttk.Notebook` (tabs imply peers; this is a hub with flows), no `Toplevel` (a second window
-     is a second sizing, centring, icon and theming story), no modeless children. Every non-Home
-     view carries Back on Escape; Enter fires the primary button.
-   - Split into `gui/theme.py`, `gui/views.py` and `gui/wizard.py`. `app.py` keeps the root window,
-     `_show`, the status strip, the tray, the notify helper and the menubar; it loses the
-     `%APPDATA%\Backer\config.json` constants at `app.py:50-51`, and `load_config`/`save_config`
-     (`app.py:157-169`) move to `gui/views.py` as the Phase 1 wrappers, unchanged.
+Dependencies, stated rather than boasted about. The previous draft's "no new dependencies" is false
+now and should not be pretended away: this phase adds a second toolchain. The client publishes
+self-contained per platform (`dotnet publish -c Release -r win-x64|linux-x64 --self-contained
+-p:PublishSingleFile=true`), so the installed machine needs no .NET runtime of its own and the
+installer carries the cost as payload size. Against that, `pystray` and `pillow` leave
+`pyproject.toml`'s win32 extras, and `tkinter` leaves the frozen build's `hiddenimports`.
+
+1. One container, one navigation function. A single `ContentControl` in the main window swaps the
+   current view's ViewModel; views are constructed lazily on first show and retained, the window
+   subtitle is set from the view, and focus moves to that view's primary control. Window 760x560
+   with a 700x480 minimum, every view laid out to that minimum, so only lists scroll.
+   - No `TabControl` (tabs imply peers; this is a hub with flows), no second top-level app window (a
+     second one is a second sizing, centring, icon and theming story), no modeless children. Modal
+     confirmation dialogs are the one exception and are capped at the five in step 5. Every
+     non-Home view carries Back on Escape; Enter fires the primary button.
+   - One project. Views and their ViewModels are separated from the shell - the shell owns the
+     window, navigation, the status strip, the tray and notifications - and every process launch
+     goes through one `BackerCli` service so no view spawns `backer` on its own.
 
 2. Ship exactly these views. Anything outside the D2 six-cell matrix has no control at all: not
    greyed out, not "coming soon", absent.
@@ -1973,168 +2306,210 @@ line number below is the same one the previous draft cited.
      serverless or join a server, with a footer stating that both can coexist (D5). Never seen again
      once either exists.
    - Home, the job list (step 3).
-   - Add repository, step 1 Choose storage: a network share, a drive on this computer (which calls
-     `filedialog.askdirectory()` and jumps to step 4), or S3-compatible storage (six fields, then
-     step 4). There is no engine control anywhere in this wizard - Kopia is the only backend, and a
-     radio group with one member is a question with no answer.
+   - Add repository, step 1 Choose storage: a network share, a drive on this computer (which opens
+     `IStorageProvider.OpenFolderPickerAsync` and jumps to step 4), or S3-compatible storage (six
+     fields, then step 4). There is no engine control anywhere in this wizard - Kopia is the only
+     backend, and a radio group with one member is a question with no answer.
    - Step 2 Name the file server: a hostname or UNC field with previously-used hosts listed beneath
-     it, and no network scan (see Not building, item 2). Step 3 Pick the share and folder: a share
-     pane and a lazily expanded folder tree over `backer.core.smb_browse`, a New folder action, the
+     it, and no network scan (see Not building, item 2). Step 3 Pick the share and folder: the share
+     list from `backer repo discover --json`, then the folder typed as a path under it, with the
      resolved full path echoed before Continue. Step 4 Passphrase (step 6 below).
+   - **The lazily expanded folder tree and the New folder action are deliberately deferred**, and
+     recorded here rather than quietly dropped alongside the other two reductions (per-frame NDJSON
+     progress in Phase 5 step 6, `Avalonia.Headless` in this phase's acceptance). Neither can be
+     built against the CLI that exists: `repo discover` enumerates shares on one named host and
+     nothing below them, and there is no create-directory command at all, so a tree would mean the
+     client walking SMB itself - a second implementation of `core/smb_browse.py` in a second
+     language, which is exactly what D8 forbids. Trigger to build it: a `repo discover`-style
+     directory listing on the CLI surface - one command that lists the children of a share path as
+     JSON, plus a create-directory action behind the same confirmation rules - at which point the
+     tree is a view over its output and the New folder action is one more spawn.
    - Step 5 Source and schedule: job name prefilled from the folder name,
-     `filedialog.askdirectory()` for the source, a collapsed exclusion list, four schedule radios
-     compiling to cron with a live plain-English sentence, and a disclosure for a raw expression
-     validated per keystroke with `croniter.is_valid`.
+     `OpenFolderPickerAsync` for the source, a collapsed exclusion list, four schedule radios
+     compiling to cron with a plain-English sentence, and a disclosure for a raw expression. Cron
+     validation is not reimplemented in C#: the four radios generate expressions the client knows
+     are valid by construction, and a hand-typed expression is validated by the write itself -
+     `job create`/`job set` rejects it with exit 2 and the CLI's own message, shown verbatim. A
+     second cron parser in a second language is a drift risk for a field the user rarely touches.
    - Step 6 Review: the whole decision on one screen, each line clickable back to the step that set
-     it. This is the wizard's only write; on failure nothing is left half-written, the job row is
-     removed and the status strip carries the error.
+     it. This is the wizard's only write, and it is one `backer repo add` followed by one `backer
+     job create`; on failure nothing is left half-written, the job row is removed and the status
+     strip carries the CLI's error text.
    - Run: live progress (step 8). Restore: three stacked panels in one view rather than a second
      wizard - the snapshot table, everything or one folder, and A4's three destinations. Settings:
      mode toggles (both may be on), repository and passphrase, unattended identity, appearance,
-     logs, updates, and a "test a scheduled run now" control that runs the job through the scheduled
-     identity, which is the only way to reproduce the D6 failure before 2am does.
+     logs, updates, a "test a scheduled run now" control, which spawns `backer agent test-schedule`
+     (the command drives the hidden `agent scheduled-test TOKEN` leg through the scheduled identity)
+     - the only way to reproduce the D6 failure before 2am does - repository remove and recovery-
+     record export, and the "Remove agent service" control, which shells `backer agent uninstall
+     --mode server --service-only --yes` and therefore cannot delete config, data or the keystore.
 
 3. Home is the job list, not a connection form. Rows carry job, source, repository, schedule and
    last-run state; selection enables Back up now, Restore, Edit, Remove, and double-click backs up.
-   - Rows render instantly from the unified config. Last-run state and size come from `read_runs`
-     locally and `RepositoryMetadata.get_job_runs` (`core/repo_metadata.py:489`) on a daemon thread
-     at view entry and every 60s after, so those cells read an ellipsis until the thread posts back,
-     never 0 and never blank.
-   - The empty state replaces the table body with one sentence and one centred add button, and
+   Edit is `backer job set` (Phase 5 step 2); Remove is `backer job rm --yes`.
+   - Rows render instantly from `config.yaml`, read directly. Last-run state and size come from
+     `<data_dir>/last_attempt/` and `runs/` on a background task at view entry and every 60s after,
+     so those cells read an ellipsis until it completes, never 0 and never blank.
+   - The empty state replaces the list body with one sentence and one centred add button, and
      disables rather than hides the row actions so the layout does not jump when the first job
      appears.
-   - Draw a server-coexistence strip only when the config holds a server, stating that
-     server-managed jobs are not listed here. Never call the server from this view; the existing
-     `_do_connect` urllib flow (`app.py:352-410`) moves into Settings unchanged.
+   - Draw a server-coexistence strip only when the config holds a `server:` block, stating that
+     server-managed jobs are not listed here. Never call the server from this view.
 
-4. Replace every colour literal with a computed token set. `gui/theme.py` reads the active ttk
-   theme's own background, measures its luminance and selects a light or dark token set; tokens
-   become named styles (`Body`, `Muted`, `Success`, `Danger`, `Mono`) applied by name, and no widget
-   receives a literal colour.
-   - Delete `foreground='black'` at `app.py:309`, `:472` and `:528` and every `'gray'`, `'green'`,
-     `'red'` and `'blue'` beside them. Delete the placeholder-text hack outright -
-     `on_entry_focus_in`/`on_entry_focus_out` (`app.py:305-315`) and the `cget('foreground') ==
-     'gray'` emptiness test at `:323` - replacing it with a static hint label. This makes the file
-     shorter, not longer.
+4. No colour literals; theme by variant. Avalonia's `FluentTheme` plus `ThemeVariant` already
+   resolves light and dark from the OS, so the luminance-probing mechanism the Tk draft needed does
+   not exist here and is not recreated. Colours come from theme resources referenced by name
+   (`Body`, `Muted`, `Success`, `Danger`, `Mono`); no control carries a hex literal, in `.axaml` or
+   in code-behind.
+   - Every foreground/background pair meets 4.5:1 in both variants, and the pairs are asserted, not
+     eyeballed.
    - Status is never colour-only: every state cell carries a word (OK, Failed, Running, Never run).
-     Settings offers an explicit Light/Dark override for systems where the theme cannot be read.
+     Settings offers an explicit Light/Dark override, which sets `RequestedThemeVariant`.
 
-5. Replace the modal dialogs with a persistent status strip along the bottom of the window. `app.py`
-   has 34 `messagebox.` call sites today; keep `messagebox` for exactly five irreversible actions -
-   restore over original files, remove job, remove repository, quit during a run, reveal passphrase
-   - each behind a named confirmation function. Everything else, connected, saved, started, failed,
-   updated, is a strip line.
+5. Modal dialogs are rationed to five. A persistent status strip along the bottom of the window
+   carries connected, saved, started, failed, updated. A modal confirmation exists for exactly five
+   irreversible actions - restore over original files, remove job, remove repository, quit during a
+   run, reveal passphrase - each behind one named confirmation method, and nowhere else. The count
+   is the rule; the Tk draft's "34 down to 5" was a description of the file being replaced.
+   - Each of the five maps to a CLI flag that carries the same confirmation non-interactively
+     (Phase 5 step 2), which is why the client can perform them at all: `--yes-replace`,
+     `--yes`, `--confirm-name NAME`. The dialog is the confirmation; the flag is how it is
+     transmitted. The client never passes a confirmation flag the user did not just click.
    - Errors never live only in the strip: every error also lands in the Run view's Details pane and
      in the log file, so a line that auto-clears is never the only record. Inline errors attach to
      the control that caused them - a rejected file-server password clears and refocuses that field,
      an unwritable folder puts a line under the tree and leaves Continue disabled - rather than a
      dialog that must be dismissed before the user can act.
-   - The error-1219 panel is A2's copy, with the conflicting connection named from
-     `_find_existing_connection` (`agent/service.py:222-241`). Never tear down the user's own
-     Explorer session silently.
+   - The error-1219 panel shows the CLI's A2 output verbatim, including the conflicting connection
+     the CLI names from `_find_existing_connection` (`agent/service.py:222-241`). The client does
+     not compose that text and does not tear down the user's own Explorer session silently.
 
 6. Build the passphrase step to be completed rather than clicked past (D4). Generation, display and
-   the position confirmation are A1; this step is the tkinter rendering of them, two `ttk.Frame`s
-   swapped inside the step 4 view with Back disabled until it completes, not a `Toplevel` (step 1).
-   Copy uses `root.clipboard_clear()`/`clipboard_append()`; do not add `pyperclip`. Continue stays
-   disabled until the confirmation matches and the "I have saved this somewhere other than this
-   computer" checkbox is ticked. Name the actual keystore backend at runtime in the closing
-   paragraph, and repeat that line in Settings when no store is available so it cannot become a
-   forgotten default. When step 3 lands on a folder that already holds a repository, this becomes
-   one masked field verified live against it - the second-machine path and the shortest route
-   through the wizard.
+   the position confirmation are A1, unchanged. The client never generates the words: it spawns
+   `backer repo add ... --generate-passphrase --print-passphrase` and displays what comes back, so
+   the EFF wordlist and `secrets.choice` stay in one place (D4). Two panels swapped inside the step
+   4 view with Back disabled until it completes - not a second window (step 1). Copy uses Avalonia's
+   `IClipboard`. Continue stays disabled until the position confirmation matches and the "I have
+   saved this somewhere other than this computer" checkbox is ticked. Name the actual keystore
+   backend in the closing paragraph from `backer keystore status --json`, and repeat that line in
+   Settings when `file_fallback` is true so a downgraded store cannot become a forgotten default.
+   When step 3 lands on a folder that already holds a repository, this becomes one masked field
+   passed to `repo add --attach --passphrase-stdin` and verified by that command - the
+   second-machine path and the shortest route through the wizard.
 
-7. State the threading rule once and apply it everywhere. Anything touching the network, the
-   filesystem at depth or a subprocess runs on `threading.Thread(daemon=True)` and returns through
-   `self.root.after(0, ...)`, the pattern already at `app.py:348-350` and `:403-410`. No Tk call
-   ever happens off the main thread, and no network read may block the UI thread - including the
-   startup health probe at `app.py:124-125`.
-   - Each async surface holds a generation counter. Workers capture it on entry and every marshalled
-     callback returns early when it no longer matches; Back, Cancel and Stop bump the counter and
-     set a `threading.Event` the workers poll, so a cancelled listing is discarded rather than
-     repainted. Threads are never killed. Cancelling a run terminates the kopia subprocess, not the
-     thread, and records the partial run as cancelled.
-   - Kopia is connection-oriented, so a cancelled or crashed run must still disconnect. Every GUI
-     worker that starts a kopia operation registers its repository with the Phase 0 lifecycle owner,
-     and quit-during-a-run is one of the five `messagebox` confirmations precisely because the
-     window closing is the one path that can otherwise leave a connection behind.
+7. State the concurrency rule once and apply it everywhere. Anything touching the network, the
+   filesystem at depth or a child process is `async`/`await` off the UI thread; results reach the UI
+   through `Dispatcher.UIThread`. No UI object is touched from a background thread, and no read
+   blocks the UI thread - including the startup health probe.
+   - Each async surface holds a generation counter and a `CancellationToken`. Work captures the
+     generation on entry and every continuation returns early when it no longer matches; Back,
+     Cancel and Stop bump the counter and cancel the token, so a cancelled listing is discarded
+     rather than painted.
+   - Cancel is stopping the child process, and that is now the whole story. The CLI owns the kopia
+     connection and its own `finally` disconnects, so there is no cross-language lifecycle
+     registration to build and no repository the client has to remember to release. The stop is
+     per-platform and the status text is generated from the platform rather than hard-coded:
+     SIGINT plus a five-second grace then a tree kill on Linux, an immediate tree kill on Windows
+     (`Services/CliRunner.cs`, `StopWording`). Quit-during-a-run
+     stays one of the five confirmations, because stopping a backup mid-snapshot is still a decision
+     the user should make deliberately, and the client stops the child rather than orphaning it.
+   - The client holds no engine state across process boundaries. Everything it knows about a run it
+     re-reads from disk, which is also what lets it show a run the SYSTEM task started.
 
-8. Feed the Run view from the same kopia `--progress` frames the CLI consumes (Phase 5 step 6), and
-   never draw a percentage that did not come from one.
-   - Do not marshal per frame: the reader thread assigns the newest parsed frame to one attribute
-     and appends log lines to a `deque(maxlen=500)`; one `root.after(200, self._tick)` repaint reads
-     both, and throughput is computed by the UI from successive byte samples. Kopia emits a frame
-     roughly every three seconds, so this costs almost nothing today and stays correct if that rate
-     changes.
-   - With no frame for five seconds the bar goes indeterminate and the label says scanning. A
-     synthetic percentage is never drawn and a determinate bar is never shown without a frame behind
-     it. A first-ever backup of a source has no previous snapshot to size against and therefore no
-     denominator, so it runs indeterminate from start to finish with a live byte count and no bar -
-     say that in the label rather than letting it read as a hang.
-   - Restore is determinate from kopia's own `Processed N (X) of M (Y).` line and shows a real bar.
-   - The Restore view calls the Phase 4 status probe on an empty snapshot list and shows its message
-     in the panel, exactly as the CLI does (Phase 5 step 8), never a blank table and never
-     `test_connection`. After a failure the Run view gains copy-error and open-log-folder actions
-     beside the Details pane.
+8. Feed the Run view from the coarse progress document, and never draw a percentage that did not
+   come from data.
+   - The transport is Phase 5 step 6's: spawn `backer job run NAME --json`, take the `run_id` from
+     the first stdout line, poll `<data_dir>/progress/{run_id}.json` at about 4 Hz and tail
+     `<data_dir>/logs/{run_id}.log` for the Details pane. Poll on a timer, not per line; the
+     document is whole-file replaced so a read is always a complete state.
+   - What that yields is three transitions, not a frame rate, so the bar is indeterminate for the
+     whole of a backup and the label says what phase it is in and how many bytes have been recorded.
+     A synthetic percentage is never drawn. This is a real reduction against the Tk draft's
+     per-frame bar and is recorded as such: per-frame NDJSON is deferred with its trigger condition
+     in Phase 5 step 6, and when it lands this view gains a determinate bar with no other change.
+   - With no update for five seconds the label says so and keeps the last figures, so a stalled
+     transfer looks different from a slow one.
+   - The Restore view shows the CLI's output on an empty snapshot list - which is the Phase 4 status
+     probe's verdict (Phase 5 step 8) - never a blank table. After a failure the Run view gains
+     copy-error and open-log-folder actions beside the Details pane.
 
 9. Make the tray the product's face while the window is closed, and add the notifications that do
    not exist today.
-   - Create the tray icon at launch rather than only inside `_start_agent_success` (`app.py:588`),
-     so close-to-tray at `app.py:1019-1023` stops depending on whether an agent happened to start.
-   - `pystray.Icon.notify()` is imported and has zero call sites. Add one `notify(title, body)`
-     helper: pystray on Windows, `notify-send` on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set,
-     the status strip otherwise. No new dependency either way. On Linux `TRAY_AVAILABLE` is False
-     because pystray and pillow are win32-only extras, so there the window is the only surface and
-     closing it states that scheduled runs continue from the systemd timer.
-   - Policy: failures at most once per job per day (A5), the first success of each job once,
-     anything needing user input, nothing else. A nightly success toast is how a backup tool teaches
-     people to mute it.
-   - Extend the menu at `app.py:664-671` with Back up now per job, Pause backups (an hour, until
-     tomorrow, until turned back on) with a greyed icon and a Paused header, and open-to-that-run on
-     a failure notification click.
+   - Avalonia's `TrayIcon` works on **both** Windows and Linux, so the Tk draft's limitation - no
+     tray on Linux, because `pystray` and `pillow` were win32-only extras, leaving the window as the
+     only surface - is removed rather than worked around. Claim it: close-to-tray, per-job Back up
+     now, and Pause backups behave identically on both platforms.
+   - Create the tray icon at launch, not on the first successful agent start, so close-to-tray never
+     depends on what happened earlier in the session.
+   - One notification helper (`Services/NotificationService.cs`, shipped): `notify-send` on Linux
+     when it is installed, and the in-window status strip everywhere else - including Windows,
+     because no maintained toast library targets this Avalonia version and a second one is not worth
+     a dependency for a banner. Every path falls back to the strip; the helper never fails a run.
+     Trigger to add real Windows toasts: a toast library that builds against the pinned Avalonia.
+   - Policy, unchanged and the important half: failures at most once per job per day (A5), the first
+     success of each job once, anything needing user input, nothing else. A nightly success toast is
+     how a backup tool teaches people to mute it.
+   - Tray menu: Back up now per job, Pause backups (an hour, until tomorrow, until turned back on)
+     with a greyed icon and a Paused header, and open-to-that-run on a failure notification click.
+     Pause is `backer schedule pause [--until]`, resume is `backer schedule resume`, and the menu's
+     state is read from `backer schedule show --json` rather than remembered in the client - the
+     scheduler runs whether or not this process does.
 
-10. Ship no GUI surface before the CLI path behind it passes an end-to-end test. Each view maps to a
-    Phase 5 command and a Phase 7 matrix cell; a view whose command has no passing job on that
-    platform is not built and not linked. Adding a cell later is one radio and one combobox entry,
+10. Ship no client surface before the CLI path behind it passes an end-to-end test. Each view maps
+    to a Phase 5 command and a Phase 7 matrix cell; a view whose command has no passing job on that
+    platform is not built and not linked. This rule is stronger under D8 than it was: "the CLI path
+    behind it" is now literally the mechanism, not merely the gate, so a view with no green command
+    behind it is a view that cannot function. Adding a cell later is one radio and one list entry,
     which is the right amount of work for a cell that has just earned its test.
 
 Acceptance:
 
-- `tests/test_gui_serverless.py::test_no_colour_literals_and_tokens_meet_contrast` asserts by source
-  scan that no `foreground=`, `background=` or `bg=` colour literal remains under
-  `src/backer/agent/gui/`, and that the resolver returns the dark token set for a synthetic dark ttk
-  background and the light set for a light one, with every foreground/background pair at 4.5:1 or
-  better.
-- `::test_show_leaves_one_child_and_constructs_no_toplevel` asserts `_show` leaves exactly one child
-  packed in the container, that no `Toplevel` and no `ttk.Notebook` is ever constructed, and that
-  Escape returns to Home from every non-Home view.
-- `::test_share_listing_does_not_block_the_event_loop` stubs a share listing that sleeps three
-  seconds, drives `root.update()` on a 100ms cadence, asserts at least 25 serviced iterations during
-  the call, and asserts that a generation bump before the stub returns discards its result rather
-  than painting it.
-- `::test_passphrase_step_requires_confirmation` asserts Continue is disabled until the A1 position
-  confirmation matches and the checkbox is ticked.
-- `::test_no_percentage_without_a_frame` asserts a fed kopia progress frame reaches the view with
-  its hashed and cached byte counts intact, that with a previous-snapshot denominator the bar is
-  determinate, that with none it is indeterminate and exposes no numeric percentage, and that after
-  five seconds with no frame the bar goes indeterminate again.
-- `::test_1219_panel_names_the_conflicting_connection` asserts the rendered text contains the share
-  and username returned by a stubbed `_find_existing_connection` and never the bare code 1219 alone.
-- `::test_messagebox_sites_are_the_five_irreversible_actions` asserts at most five `messagebox.`
-  call sites under `src/backer/agent/gui/`, down from 34, each inside one of the five named
-  confirmation functions.
-- `::test_no_engine_control_exists` asserts no widget under `src/backer/agent/gui/` is constructed
-  with the string `kopia` as a user-visible label or option value, so the one-backend decision
-  cannot leak back in as a disabled radio.
-- Settings' unattended control creates the scheduled task from a GUI-only setup:
-  `create_background_scheduled_task` (`client/windows_service.py:112`), reached from
-  `gui/app.py:948`, succeeds where `_prepare_service_config` previously raised `FileNotFoundError`
-  at `windows_service.py:44-46`. That is the falsifiable D5 proof.
-- `xvfb-run -a python -m pytest -q tests/test_gui_serverless.py` exits 0 on Linux and
-  `::test_gui_tests_actually_ran` fails if the `tk.Tk()` guard skipped, so a skipped GUI suite is a
-  failure rather than a pass. This phase requires Phase 7 step 1 to add that command as a second
-  step of the `serverless-local (ubuntu-latest)` job, on the `ubuntu-latest` leg only; until it
-  does, the bullet is checked by running the command locally.
+- `desktop/Backer.Desktop.Tests::ThemeTests.NoColourLiteralsAndTokensMeetContrast` asserts by source
+  scan that no `#RRGGBB` literal and no `Color="..."` appears in any `.axaml` or `.cs` under
+  `desktop/Backer.Desktop/`, and that every named foreground/background token pair meets 4.5:1 in
+  both `ThemeVariant.Light` and `ThemeVariant.Dark`.
+- `::NavigationTests.OneContainerAndNoSecondWindow` asserts by source scan that `desktop/` declares
+  no `TabControl` and constructs no second top-level app window. Modal dialogs are the sanctioned
+  exception - `Views/ConfirmDialog.cs` constructs a `Window` and shows it modally, which is how step
+  5's confirmations are drawn - and they are bounded by the five-confirmations rule and its own
+  acceptance bullet below, not by this one. And by ViewModel test that
+  navigating leaves exactly one active view and that Escape returns to Home from every non-Home
+  view.
+- `::DialogTests.ConfirmationsAreTheFiveIrreversibleActions` asserts at most five modal-dialog
+  construction sites under `desktop/`, each inside one of the five named confirmation methods, and
+  that each passes its matching non-interactive flag (`--yes-replace`, `--yes`, `--confirm-name`)
+  only on a positive result.
+- `::EngineTests.NoEngineControlExists` asserts the string `kopia` appears in no `.axaml` and in no
+  user-visible string under `desktop/`, so the one-backend decision cannot leak back in as a
+  disabled radio. This is the "one backend" guard and is worth keeping in exactly this form.
+- `::PassphraseTests.ContinueRequiresConfirmationAndCheckbox` asserts Continue stays disabled until
+  the A1 position confirmation matches and the checkbox is ticked, and that the ViewModel generates
+  no words of its own - the passphrase reaches it only from a stubbed CLI result.
+- `::ProgressTests.NoPercentageWithoutData` feeds progress documents through the ViewModel and
+  asserts that a document with `total_bytes` null yields an indeterminate bar and exposes no numeric
+  percentage, that byte counts render as they arrive, and that five seconds with no update sets the
+  stalled label while keeping the last figures.
+- `::CliTests.EveryMutationIsASpawnAndNoSecretOnArgv` asserts the ViewModel layer contains no write
+  to `config.yaml`, no keystore call and no `kopia` invocation, and that every argument list the
+  `BackerCli` service builds is free of a sentinel secret which is instead written to the child's
+  stdin. This is D8 enforced rather than described.
+- `::MessagesTests.NoFailureMessageLiterals` asserts no string literal under `desktop/` matches the
+  Appendix A catalogue's failure vocabulary, so the client cannot grow a second copy of text
+  `backer.core.messages` owns.
+- D5 proof, restated identically to Phase 1's acceptance bullet: **the desktop client's install
+  action shells `backer agent install --mode server`, which produces a scheduled task whose run
+  leads to a heartbeat within 90 seconds.** Settings' unattended control is the same shell-out under
+  `--mode local`. `create_background_scheduled_task` (`client/windows_service.py`) succeeds
+  where `_prepare_service_config` (same file) previously raised `FileNotFoundError`. That is the
+  falsifiable D5 proof, and the full form of the check -
+  `schtasks /run`, the service log line, `GET /api/v1/clients/{id}` - is Phase 1's bullet, not a
+  second version of it.
+- `dotnet build -c Release desktop/Backer.Desktop.sln` and `dotnet test desktop/` both exit 0 on
+  Linux and Windows, driven by the dedicated CI job Phase 7 step 2 adds. There is no UI-automation
+  harness in v1: `Avalonia.Headless` is the intended future home for interaction tests and is
+  **explicitly deferred**, so every bullet above is either a source scan or a plain ViewModel test.
+  Trigger to adopt it: a regression that a ViewModel test structurally cannot catch, meaning one in
+  layout, focus order or input routing.
 
 ## Phase 7 - CI and the honest support matrix
 
@@ -2144,6 +2519,16 @@ that drives the serverless path end to end - non-interactive flags, keystore wri
 `run_restore`, sidecar read-back - and no cell is named in README, in `backer --help`, or in a CLI
 `Choice()` until its job is green and mandatory. Two of the six need no new infrastructure at all:
 CI is further along than the rest of this document assumes.
+
+**Status.** Substantially on disk. `.gitea/workflows/release-validation.yml` defines
+`serverless-local`, `serverless-smb-linux`, `serverless-smb-windows` and a `desktop-client` job that
+runs `dotnet build`/`dotnet test` on the solution, and `SERVERLESS_LOCAL_RESULT`,
+`SERVERLESS_SMB_LINUX_RESULT`, `SERVERLESS_SMB_WINDOWS_RESULT` and `DESKTOP_CLIENT_RESULT` all
+appear in the mandatory result loop. `tests/test_serverless_e2e.py` is the end-to-end suite those
+jobs drive, `scripts/bump_version.py` exists and all five version sites read `0.9.0`,
+`backer-agent.spec` is at the repo root, and `tests/test_serverless_modes.py` pins
+`desktop/Backer.Desktop/Services/Cells.cs` against `backer.serverless.cells`. Not verified here:
+whether those jobs are green on a release tag, and the README rewrite in step 9.
 
 1. S3 needs no new job and no new infrastructure, only a rename and a repair. `s3-contract`
    (`release-validation.yml:77-114`) already starts MinIO, installs the pinned kopia with `backer
@@ -2174,9 +2559,21 @@ CI is further along than the rest of this document assumes.
    [ubuntu-latest, windows-latest]`, copying the `protocol-contract` shape at
    `release-validation.yml:49-75`: checkout with `ref: ${{ inputs.release_tag || github.ref }}`,
    `setup-python` 3.11, `pip install -e ".[dev]"`, `backer setup --quiet`, then `python -m pytest -q
-   tests/test_serverless_e2e.py -k local`. On the `ubuntu-latest` leg only, a second step runs
-   `xvfb-run -a python -m pytest -q tests/test_gui_serverless.py`, which is what Phase 6's last
-   acceptance bullet checks.
+   tests/test_serverless_e2e.py -k local`. This job is Python only: the `xvfb-run -a python -m
+   pytest -q tests/test_gui_serverless.py` second step an earlier draft put on the `ubuntu-latest`
+   leg is deleted along with the Tk suite it ran, and no `xvfb` or display server is needed by
+   anything in the Python tree any more.
+   - The desktop client gets its own job, `desktop-client`, rather than a step inside this one.
+     Mixing `actions/setup-dotnet` into a pytest job to run one command buys nothing and makes a
+     Python failure and a C# failure share one red X. `strategy.matrix.os: [ubuntu-latest,
+     windows-latest]`, `actions/setup-dotnet` at the pinned SDK the csproj targets, then `dotnet
+     build -c Release desktop/Backer.Desktop.sln` and `dotnet test desktop/`. It uploads no
+     artifacts, for the reason step 7 gives.
+   - `desktop-client` is mandatory, not optional, and that follows from this phase's own rule rather
+     than from taste: an optional leg cannot support an advertised cell, and the client advertises
+     repository types. It joins `needs:` (`:315-321`), the `env:` block (`:328-333`) as
+     `DESKTOP_CLIENT_RESULT`, and the mandatory loop (`:336-342`) alongside the three serverless
+     names in step 5.
    - The repository is a directory under the runner's temp path, so this leg is also D3's "Linux
      unprivileged, the user pre-mounts and it is a `local` repository" branch by construction and
      needs no job of its own.
@@ -2226,20 +2623,32 @@ CI is further along than the rest of this document assumes.
    `SERVERLESS_SMB_LINUX_RESULT` and `SERVERLESS_SMB_WINDOWS_RESULT`, and into the mandatory loop at
    `:336-342`, which today holds only `PYTHON_CI_RESULT`, `PROTOCOL_CONTRACT_RESULT`,
    `S3_CONTRACT_RESULT` and `DOCKER_BUILD_RESULT`. `S3_CONTRACT_RESULT` is already there and now
-   covers two legs instead of one. None of the three new names joins the permissive loop, which
-   accepts `skipped`. Add `VERIFY_VERSION_RESULT` while there: `verify-version` sits in `needs:` at
-   `:315` and is checked by neither loop. If this forge has no Windows runner, the three Windows
-   cells come out of README, `--help` and the `Choice()` in the same commit - there is no third
-   option where a cell stays advertised and its leg stays optional.
+   covers two legs instead of one. `DESKTOP_CLIENT_RESULT` joins them for the reason step 2 gives.
+   None of the four new names joins the permissive loop, which accepts `skipped`. Add
+   `VERIFY_VERSION_RESULT` while there: `verify-version` sits in `needs:` at `:315` and is checked
+   by neither loop. If this forge has no Windows runner, the three Windows cells come out of README,
+   `--help` and the `Choice()` in the same commit - there is no third option where a cell stays
+   advertised and its leg stays optional.
+   - **Open task, named rather than dropped: the cells-advertisement gate is now CLI-only.**
+     `test_cli_choices_match_ci_jobs` (step 9's acceptance) parses the Python `click.Choice` and
+     cannot see the desktop client, so a repository type could be offered in the client's storage
+     picker with no green job behind it and nothing would fail. The fix is a second assertion in the
+     same test, scanning `desktop/` for the type list and requiring it to equal
+     `backer.serverless.cells.supported_repository_types`; the client should read that list from
+     `backer repo list`-adjacent output or hold it in exactly one place a scan can find. Until that
+     assertion exists the gate is half-enforced, and this bullet is the record of it.
 6. Fix the version bump before editing any workflow. The version is duplicated across
-   `pyproject.toml:7`, `src/backer/_version.py:3`, `installer/backer-agent.iss:13` and
-   `android/app/build.gradle.kts:19`, with the derived Android `versionCode` at `:18` computed as
+   `pyproject.toml:7`, `src/backer/_version.py:3`, `installer/backer-agent.iss:13`,
+   `android/app/build.gradle.kts:19` and now a fifth file, `desktop/Backer.Desktop/`'s csproj
+   `<Version>`, with the derived Android `versionCode` at `:18` computed as
    `major * 10000 + minor * 100 + patch`, while `make release` seds only `pyproject.toml`
    (`Makefile:92`). A release cut by the documented command therefore fails `verify-version` and
    `tests/test_workflow_sanity.py::test_release_version_files_match` (`:32-49`).
-   - Add `scripts/bump_version.py`, writing all four files and computing `versionCode` with the same
+   - Add `scripts/bump_version.py`, writing all five files and computing `versionCode` with the same
      arithmetic the test uses at `test_workflow_sanity.py:25-29`; make the `release` target at
-     `Makefile:87-98` call it instead of the inline `sed`.
+     `Makefile:87-98` call it instead of the inline `sed`. Extend
+     `test_release_version_files_match` to the csproj in the same commit - a version file the test
+     does not read is a version file that drifts, which is the defect this step exists to fix.
    - It refuses to run when `CHANGELOG.md` has no `## <new version>` section, so the bump and the
      notes cannot diverge.
 7. Treat workflow YAML as tested source. `tests/test_workflow_sanity.py` hard-pins the exact ordered
@@ -2277,6 +2686,36 @@ CI is further along than the rest of this document assumes.
      describes only the first.
    - Say plainly what two machines writing one repository get: kopia's own concurrent-writer model,
      one designated maintenance owner per repository, and no cross-machine lease from Backer.
+   - Rewrite the Windows install section for one installer carrying two payloads, and state the
+     unsigned warning once for both: neither `backer.exe` nor `backer-desktop.exe` is code-signed,
+     so SmartScreen will warn, and that stays true until the signing step in step 10 exists.
+
+10. Repackage Windows, which this plan previously never mentioned and which the rebuild forces.
+    - `backer-agent.spec` (at the repo root, which is where `Makefile`, `scripts/build_agent.py` and
+      `release-validation.yml` all invoke it from) is **rewritten in place**, keeping its filename, and stops
+      building a GUI. Its target is a console CLI, `backer.exe`, entry point the `backer` CLI main,
+      `console=True`. `tkinter`, `tkinter.ttk` and `tkinter.messagebox` leave `hiddenimports`; the
+      EFF wordlist stays in `datas`, or A1 item 1 raises `FileNotFoundError` on the first frozen
+      run; `backer.serverless.scheduled_test` stays importable, because the hidden `backer agent
+      scheduled-test` leg is the only way a frozen install runs D6's self-test with no interpreter
+      present. `backer-agent-service.exe` is unchanged.
+    - The Inno installer built from `installer/backer-agent.iss` ships three binaries where it
+      shipped two: `backer.exe`, `backer-agent-service.exe` and the self-contained
+      `backer-desktop.exe`. `OutputBaseFilename` stays `backer-agent-setup` - the update path
+      downloads that exact name and an installed client must keep finding it. Add
+      `CloseApplicationsFilter=backer-desktop.exe,backer-agent-service.exe,backer.exe`, or an
+      in-place update over a running client fails on a locked file.
+    - Payload size grows by the self-contained .NET publish. That is the price of D8 and is recorded
+      here rather than discovered at release; no framework-dependent variant ships, because "install
+      .NET first" is a support burden a backup tool does not need.
+    - Update-check ownership moves to the desktop client. It checks the same release-main
+      `backer-agent-setup.exe` URL the deleted GUI used, downloads it, and runs it with
+      `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` - Inno's flags, not NSIS's `/S`, which is the
+      defect in the risk table below and was already fixed before the port. `tests/test_agent_gui_release_urls.py`
+      is deleted with the Python GUI; the URL and the flag list are asserted in the client's own
+      test project instead, so the same two mistakes stay covered.
+    - Signing is still absent and is still the largest packaging risk. It now covers two unsigned
+      binaries plus the installer rather than one, which makes it more urgent, not less.
 
 Acceptance:
 
@@ -2286,9 +2725,9 @@ Acceptance:
 - `grep -n "BACKER_TEST_S3_BUCKET" .gitea/workflows/release-validation.yml` matches, and the
   `s3-contract` run log reports `1 passed` rather than `1 skipped`, on both legs.
 - `grep -n "Restic" .gitea/workflows/release-validation.yml` returns nothing.
-- `SERVERLESS_LOCAL_RESULT`, `SERVERLESS_SMB_LINUX_RESULT`, `SERVERLESS_SMB_WINDOWS_RESULT` and
-  `VERIFY_VERSION_RESULT` appear in the mandatory loop at `release-validation.yml:336-342` and none
-  appears in the optional loop at `:343-349`; NEW
+- `SERVERLESS_LOCAL_RESULT`, `SERVERLESS_SMB_LINUX_RESULT`, `SERVERLESS_SMB_WINDOWS_RESULT`,
+  `DESKTOP_CLIENT_RESULT` and `VERIFY_VERSION_RESULT` appear in the mandatory loop at
+  `release-validation.yml:336-342` and none appears in the optional loop at `:343-349`; NEW
   `tests/test_workflow_sanity.py::test_every_needed_job_is_checked` asserts every job in
   `release-artifacts-ready`'s `needs:` (`:315-321`) is checked by one of the two loops.
 - `python -m pytest -q tests/test_serverless_e2e.py` passes on a machine with no SMB share, no Samba
@@ -2297,15 +2736,23 @@ Acceptance:
   use` to `\\localhost\Backups`, then a second connection under a different local account returning
   error 1219, then that the SYSTEM branch issues `net use <existing> /delete` and reconnects while
   the interactive branch exits non-zero without deleting.
-- All four version sites read `0.8.0` today (`pyproject.toml:7`, `src/backer/_version.py:3`,
-  `installer/backer-agent.iss:13`, `android/app/build.gradle.kts:19` with `versionCode = 800` at
-  `:18`), so the gate bumps to a version that differs or `git diff` reports nothing: with a
-  `## 0.9.0` section added to `CHANGELOG.md`, `python scripts/bump_version.py 0.9.0` exits 0, `git
-  diff --name-only` lists all four of those files, `build.gradle.kts` reads `versionCode = 900`, and
+- `desktop-client (ubuntu-latest)` and `desktop-client (windows-latest)` are both green: `dotnet
+  build -c Release desktop/Backer.Desktop.sln` and `dotnet test desktop/` exit 0 on each, and the
+  job appears in `needs:` and in the mandatory loop, never the permissive one.
+- `grep -rn "tkinter\|pystray\|xvfb" .gitea/workflows/ .github/workflows/ installer/ pyproject.toml`
+  returns nothing, and `grep -n "backer-desktop.exe" installer/backer-agent.iss` matches both the
+  file entry and `CloseApplicationsFilter`.
+- All five version sites read `0.9.0` today (`pyproject.toml`, `src/backer/_version.py`,
+  `installer/backer-agent.iss`'s `MyAppVersion`, `android/app/build.gradle.kts` with
+  `versionCode = 900`, and `desktop/Backer.Desktop/Backer.Desktop.csproj`'s `<Version>`), so the
+  gate is stated against that baseline - bumping to 0.9.0 would produce an empty diff and prove
+  nothing. With a `## 0.9.1` section added to `CHANGELOG.md`, `python scripts/bump_version.py 0.9.1`
+  exits 0, `git diff --name-only` lists all five of those files, `build.gradle.kts` reads
+  `versionCode = 901`, the csproj reads `<Version>0.9.1</Version>`, and
   `python -m pytest -q tests/test_workflow_sanity.py::test_release_version_files_match
   tests/test_workflow_sanity.py::test_changelog_follows_the_documented_format` passes; `python
-  scripts/bump_version.py 0.9.1` against a CHANGELOG with no `## 0.9.1` section exits non-zero
-  naming it and leaves all four files unchanged.
+  scripts/bump_version.py 0.9.2` against a CHANGELOG with no `## 0.9.2` section exits non-zero
+  naming it and leaves all five files unchanged.
 - `python scripts/check_changelog.py` exits 0, and the full `python -m pytest -q
   tests/test_workflow_sanity.py` passes in the same commit as every workflow edit.
 - `grep -n "server-relay-only" README.md` matches the Mobile entry, and NEW
@@ -2319,7 +2766,11 @@ Acceptance:
 ## Appendix A - safety and failure UX
 
 Every user-facing string lives here and in one module, `backer.core.messages`, created by Phase 5
-step 8, so the click+rich CLI and the tkinter GUI cannot drift and one test can lint the catalogue.
+step 8, so one test can lint the catalogue. There is exactly one copy and no export: the desktop
+client shows the CLI's own output verbatim (D8), so the no-drift guarantee holds by construction
+rather than by keeping two catalogues honest. The linting tests below keep covering Python, and the
+only rule the client carries is a negative one - no failure-message literal may appear under
+`desktop/` - which is a scan, not a synchronisation mechanism.
 Phases 4-6 reference these subsections and never restate the strings. Commands quoted here are
 spelled exactly as in the Phase 5 tree.
 
@@ -2330,8 +2781,9 @@ Copy rules for every string below:
    different one seconds earlier.
 2. State the machine's constraint, then the ways out, with the non-destructive one first. Never
    attribute the failure to the user.
-3. No exclamation marks, no "Oops", no "Something went wrong". Rewrite the two existing offenders in
-   place: `gui/app.py:606` and `:615` both end in `now running!`.
+3. No exclamation marks, no "Oops", no "Something went wrong". The two known offenders both ended in
+   `now running!` and died with the Tk GUI; the rule outlives them and is enforced by a scan, so it
+   applies to every string written since.
 4. Report what was checked and name what was not. A green result that implies more than it proved is
    the failure mode of a backup product.
 5. Every prompt and confirmation here has a flag (D7). Nothing is reachable only by answering a
@@ -2343,7 +2795,10 @@ Copy rules for every string below:
 
 1. Generate six words with `secrets.choice` over a bundled EFF short wordlist (~8KB `.txt`) loaded
    through `importlib.resources`; add it to `[tool.setuptools.package-data]` and to the PyInstaller
-   spec's `datas`, or the first frozen build raises `FileNotFoundError` here. Six words survive
+   spec's `datas`, or the first frozen build raises `FileNotFoundError` here. This is the only copy
+   of the wordlist that ships: the desktop client shells `--generate-passphrase` rather than
+   carrying a second one (D4), because a security-relevant wordlist duplicated across two build
+   systems is a wordlist that will eventually differ. Six words survive
    being written on paper and make the position confirmation below possible; `token_urlsafe` does
    neither.
 2. Display all six numbered left to right, consequence first: "Backer encrypts everything it writes
@@ -2453,11 +2908,14 @@ Copy rules for every string below:
    to create files in the backup folder." For a local repository under the SYSTEM task: "Backer
    cannot write to D:\Backups. In the background it runs as SYSTEM, which may not have access to
    that folder."
-6. Linux, unprivileged (D3): the backup engine has no SMB provider, so a share must be a mounted
-   filesystem path (`client/agent.py:818-831`), and mounting needs root. "Backer needs administrator
-   access to connect to a file server on Linux. If you cannot use sudo, mount the share yourself and
-   point Backer at the mounted folder as a local repository, or use S3-compatible storage, which
-   needs no mount and no administrator."
+6. Linux, unprivileged with no gvfs (D3): the backup engine has no SMB provider, so a share must be
+   a mounted filesystem path (`client/agent.py:818-831`), and with neither an existing mount nor
+   `gio` there is no way to get one without root. "Backer can connect to a file server as you,
+   without a password prompt, once gvfs is installed - `sudo apt install gvfs gvfs-backends` or
+   `sudo pacman -S gvfs gvfs-smb`. Otherwise mount the share yourself and point Backer at the
+   mounted folder as a local repository, or use S3-compatible storage, which needs no mount and no
+   administrator." With gvfs present this message does not appear: a wrong password reports as a
+   sign-in failure instead.
 
 ### A3 - The first prune
 
@@ -2584,17 +3042,21 @@ nobody. Build three layers, because a toast at 2am is also seen by nobody.
    sidecar stays the cross-machine copy. This relies on the Phase 0 fix to the `if result.success:`
    gate.
 2. Notify, at most once per job per day: "Backer / Documents backup did not run / Could not reach
-   \\nas.local\backups. Open Backer for details." A failure with no GUI running sets a pending flag
-   on the run record, shown when the GUI next starts.
+   \\nas.local\backups. Open Backer for details." A failure with no client running sets a pending
+   flag on the run record, shown when the client next starts - which is clean either way, because
+   the flag is on disk and the writer is the CLI.
 3. Change persistent state as well as toasting. The tray tooltip becomes "Backer - 1 backup needs
-   attention", and Home and `backer status` read entirely from the local records, so both render
+   attention", on both platforms now that the tray exists on Linux too (Phase 6 step 9), and Home
+   and `backer status` read entirely from the local records, so both render
    fully with the share offline: "Documents / Home NAS / last successful backup 2 days ago (26 Aug
    02:14) / not working", then "Documents: 3 failed attempts, most recently today at 02:14. Could
    not reach \\nas.local\backups. backer status Documents --why".
 4. Fix the log path, or "check the log file" is not an instruction anyone can follow.
    `setup_agent_logging` resolves `%APPDATA%/Backer/logs` (`agent/service.py:55-59`), which under
    the SYSTEM task is `C:\Windows\System32\config\systemprofile\AppData\Roaming\Backer\logs`, while
-   the GUI's Open logs button points at the interactive user's directory (`gui/app.py:52`). When
+   an Open logs button points at the interactive user's directory. One resolved path is the whole
+   point: the client opens whatever `get_data_dir()`-derived directory the CLI reports, never a path
+   of its own. When
    frozen or running as a service, log under `%ProgramData%\Backer\logs` and grant Users read on
    that subfolder, because the `icacls` call at `client/windows_service.py:61-62` strips Users
    entirely. On Linux use `$XDG_STATE_HOME/backer/logs`, else `~/.local/state/backer/logs`, and
@@ -2659,9 +3121,11 @@ nobody. Build three layers, because a toast at 2am is also seen by nobody.
    (`backends/kopia.py:775`), and a multi-terabyte repository over SMB will exceed an hour and
    surface as a bare `TimeoutExpired`: "The check ran out of time after 1 hour. This does not mean
    the repository is damaged. Large repositories take longer; run it again with --timeout 14400."
-7. In the GUI this is one line per job on Home - "Home NAS - checked 3 days ago" - plus a Check this
-   repository button that warns it can take several minutes and whose Cancel kills the subprocess
-   rather than orphaning it. After 20 seconds any spinner gains an elapsed timer and one line:
+7. In the desktop client this is one line per job on Home - "Home NAS - checked 3 days ago" - plus a
+   Check this repository button that spawns `backer verify JOB` and warns it can take several
+   minutes, and whose Cancel kills that child process rather than orphaning it. Under D8 that is the
+   ordinary case rather than a special effort: the client owns the `Process` it started, and the
+   CLI's own `finally` disconnects. After 20 seconds any spinner gains an elapsed timer and one line:
    "Large repositories take a while. This is safe to leave running." Elapsed time only, never a
    fabricated percentage.
 
@@ -2705,20 +3169,27 @@ are hitting this now, so the copy ships whether or not the rest of serverless mo
 
 Acceptance:
 
+- These three tests lint Python and stay Python's, which is the whole of what the catalogue needs
+  now that there is one copy of it.
 - `tests/test_messages.py::test_no_exclamation_marks` passes over every string in
-  `backer.core.messages` and asserts no string literal ending in an exclamation mark remains under
-  `src/backer/agent/gui/` or in `src/backer/cli.py`.
+  `backer.core.messages` and asserts no string literal ending in an exclamation mark remains in
+  `src/backer/cli.py` or anywhere under `src/backer/`. The Tk path it also scanned is deleted.
 - `tests/test_messages.py::test_secret_mentions_are_qualified` asserts every displayed catalogue
   string containing `password`, `passphrase` or `sign-in` also contains one of the three exact
   qualifiers `Windows sign-in`, `file-server sign-in` or `repository passphrase`, skipping the A5
   error-matcher keys, which are the engine's and Windows' own text and are matched against, never
-  displayed.
+  displayed. It proves what the user sees because the user sees this text unmodified (D8).
 - `tests/test_messages.py::test_unmatched_error_falls_back_to_raw_output` asserts the nine
   substrings in A5 map to their sentences and that anything else yields the fallback sentence plus
   the raw engine output.
 - `tests/test_messages.py::test_engine_is_never_named_outside_a_quote` asserts no displayed
   catalogue string contains `kopia` or `restic` except the three A5 matcher keys, which are quoted
   engine output.
+- The client's half is one negative rule and lives in its own project:
+  `desktop/Backer.Desktop.Tests::MessagesTests.NoFailureMessageLiterals` (Phase 6 acceptance)
+  asserts `desktop/` holds no failure-message literal, so the catalogue cannot acquire a second copy
+  by accident. That replaces the earlier draft's "the GUI imports the same module", which a
+  non-Python client cannot do.
 - `tests/test_cli_serverless.py::test_repo_recover_probes_before_storing` asserts a wrong passphrase
   leaves the keystore untouched and prints A1 item 6's wording, and that a probe result of
   `repository not initialized in the provided storage` refuses rather than creating a repository.
@@ -2728,10 +3199,16 @@ Acceptance:
 ### B1 - the unified client config file
 
 One YAML file, `config.yaml`, replaces all four surfaces: `agent.yaml` (`client/agent.py:174-191`),
-the GUI's `config.json` (`agent/gui/app.py:50-51`), the `BackerConfig` schema nothing writes today
-(`core/config.py:76-106`), and the SYSTEM copy at `client/windows_service.py:40-51`. YAML because
-`pyyaml` is already a base dependency (`pyproject.toml:33`) and `BackerConfig.load`/`save` already
-round-trip it (`core/config.py:88-99`).
+the deleted Tk GUI's `config.json` (legacy, read by migration only), the `BackerConfig` schema
+nothing writes today (`core/config.py:76-106`), and the SYSTEM copy at
+`client/windows_service.py:40-51`. YAML because `pyyaml` is already a base dependency
+(`pyproject.toml:33`) and `BackerConfig.load`/`save` already round-trip it (`core/config.py:88-99`).
+
+This file is a published contract, not an internal detail, because the desktop client parses it
+directly (D8). Two rules follow and are enforced by there being no other implementation: `backer` is
+the only process that writes it, and the client reads it read-only. Adding a top-level key is a
+compatible change only in the direction of a newer writer and an older reader - and even that fails
+loudly, because unknown top-level keys raise rather than being dropped.
 
 | Install | Windows | Linux |
 | --- | --- | --- |
@@ -2835,7 +3312,7 @@ Acceptance:
   `ValidationError`, matching what `tests/test_protocol_contract.py:56-113` already enforces on the
   wire.
 - NEW `tests/test_config_unification.py::test_no_repository_secret_values_in_config` migrates a
-  fixture `agent.yaml` plus GUI `config.json` and asserts the emitted `config.yaml` holds no
+  fixture `agent.yaml` plus a legacy `config.json` and asserts the emitted `config.yaml` holds no
   repository passphrase, no SMB password and no S3 secret access key, and that the only inline
   secret is `server.client_secret`, which Phase 4 converts to a ref.
 - NEW `tests/test_config_unification.py::test_unknown_top_level_key_rejected` asserts a
@@ -2877,9 +3354,13 @@ settled locally, and progress is never written to the share.
    `backer.core.paths` and stays byte-identical to what `server/app.py:575` builds and
    `:600`/`:612`/`:621` concatenate, so the server's importer reads the job document unchanged; its
    substitution class is pinned by `tests/test_workflow_sanity.py:86-89`. Never name a sidecar job
-   directory with `RepositoryMetadata._safe_filename` (`core/repo_metadata.py:724-730`), which
-   differs on control characters - that is exactly the drift that would put a job's sidecar under
-   one name and the server's copy of it under another. The legacy
+   directory with `RepositoryMetadata._safe_filename` (`core/repo_metadata.py`), which used to
+   differ on control characters - that is exactly the drift that would put a job's sidecar under
+   one name and the server's copy of it under another, and 0.9 hit it: `config.json` was written
+   under `get_job_subfolder` while `runs/` was created under `_safe_filename`, splitting one job
+   across two directories. `_safe_filename` now delegates to `get_job_subfolder`, so there is one
+   naming function; `_job_dir` still *reads* a pre-0.9 directory when only the legacy name exists
+   (`legacy_job_subfolder`), because an existing repository must stay readable. The legacy
    `<repo>/Agents/{job_subfolder}/` trees are separate kopia repositories under the same storage
    root, written today by server-managed SMB and NFS runs only (S3 has no subfolder,
    `server/app.py:637`): read for discovery, never written by the serverless path.
@@ -2890,16 +3371,30 @@ settled locally, and progress is never written to the share.
    `jobs/{job_subfolder}/config.json` is written only by the agent named in `owner_agent_id`; an
    adopting agent copies the definition into its own `config.yaml` and never writes back.
    `jobs/{job_subfolder}/runs/{run_id}.json` is write-once. `snapshots/{short_id}.json` is
-   content-addressed (`core/repo_metadata.py:534-536`), so two writers produce identical bytes; the
-   12-character name is a filename, and the full 32-hex manifest id stays inside the document
-   (`core/repo_metadata.py:538`).
+   *addressed* by content - the 12-character name is the manifest id's prefix, and the full 32-hex
+   id stays inside the document (`core/repo_metadata.py::save_snapshot`) - but it is **not**
+   content-addressed in the strong sense: the record also carries `run_id`, `hostname` and
+   `recorded_at`, which are specific to the writer, so two agents recording the same snapshot do
+   not produce identical bytes. It is last-writer-wins, and harmless because a kopia manifest id is
+   unique per snapshot creation, so in practice only one agent ever writes a given name. No safety
+   property rests on the byte equality this paragraph once claimed.
 3. Every write is same-directory temp plus `os.replace`, the temp named `<name>.<agent8>.tmp` so two
-   agents cannot collide on the temp file either. Timestamps are UTC ISO 8601 with a trailing `Z`;
-   `save_job_run` injects naive local time today (`core/repo_metadata.py:483-485`), which is
-   unreadable across two machines in different zones.
+   agents cannot collide on the temp file either. Timestamps are UTC ISO 8601 with a trailing `Z`,
+   written through the single `core/repo_metadata.py::utc_iso` helper by `initialize`, `save_agent`,
+   `save_job`, `save_job_run` and `save_snapshot`, and by the runner's `started_at`/`finished_at`.
+   Before 0.9 these were naive local time, unreadable across two machines in different zones;
+   records written then are still readable, and `timestamp_key` reads a naive value as UTC so
+   ordering between an old and a new record is approximate by up to the old writer's UTC offset.
 4. `run_id` is `{utc_compact}-{agent8}`: `%Y%m%dT%H%M%SZ` in UTC, then `agent_id[:8]`. Example
    `20260828T140233Z-3f9a2c11`. It sorts chronologically as a plain string, is unique across
-   machines with no allocator, and names a file no other agent can write. Today
+   machines with no allocator, and names a file no other agent can write. An optional third
+   component `-{attempt_token}` is appended when `BACKER_ATTEMPT_TOKEN` is set in the environment
+   (`serverless/runs.py`): the scheduled-test path sets it and then matches the resulting run by
+   `run_id.endswith(token)` (`serverless/scheduled_test.py`), which is the only reason it exists.
+   That path regex-validates the token it generates, but an externally set `BACKER_ATTEMPT_TOKEN`
+   is not validated and lands verbatim in the `runs/`, `progress/` and `logs/` filenames, so it is
+   a developer/test hook rather than a supported knob. Readers must tolerate a run id with two or
+   three components. Today
    `client/agent.py:871` falls back to a bare local-time `%Y%m%d_%H%M%S`, so two agents starting
    inside the same second overwrite each other's run record and a DST fold makes two runs an hour
    apart sort identically. A server-supplied `run_id` still wins, which `:871` already prefers.
@@ -2981,7 +3476,24 @@ Run record, written on success and on failure - here the failure case:
 `metadata`, so a pre-flight failure is distinguishable from a backend failure without parsing prose.
 `connect` is its own stage because kopia's connect is where wrong-passphrase, unreachable-endpoint
 and absent-repository all surface, and today all three are collapsed into an auto-init
-(`backends/kopia.py:252-257`). `snapshot_id` is kopia's full 32-hex manifest id, the value
+(`backends/kopia.py:252-257`).
+
+**Known gap - `error_stage` granularity, and no run record for restores.** The stage list above is
+what a reader may encounter, not what every writer can produce. The runner's own sidecar write
+(`core/runner.py::_write_repo_metadata`) is reached only after `backend.backup` has returned, so the
+stage it records is `backup` or `null` and nothing else. Failures before that point are covered by
+`serverless/runs.py::_write_preflight_sidecar_run`, which writes the record from the `finally` block
+with the stage it was actually tracking, so `keystore`, `prepare_destination` and `connect` do
+appear - best effort, and only where the sidecar is reachable and already initialised (a wrong
+passphrase against a local repository writes it; an unreachable share by definition cannot).
+`retention` and `metadata` are in the vocabulary but no writer emits them today: a retention failure
+lands inside the backup stage's errors, and a metadata failure is the write itself. Restores write
+no sidecar record at all, and no local run record either - `backer restore` is not in run history in
+any form. Trigger to close this: the first time an operator has to answer "was this data restored,
+by whom, from which snapshot" from the repository alone. Until then the plan promises a stage
+vocabulary a reader must tolerate, not a guarantee that every stage is reachable.
+
+`snapshot_id` is kopia's full 32-hex manifest id, the value
 `backends/kopia.py:342-343` parses from `snapshot create --json` and returns at `:362`.
 `bytes_transferred` and `files_transferred` keep the names `client/agent.py:1597-1598` already
 writes; both come from `rootEntry.summ` (`backends/kopia.py:336-341`). The run is always recorded
@@ -3038,16 +3550,20 @@ Each refusal is a decision, not an omission. The trigger line states what would 
      WS-Discovery for names, not a sweep for addresses.
 3. No TUI framework (D7). Base dependencies are click, pydantic, rich, pyyaml, croniter, requests
    and tenacity (`pyproject.toml:29-37`) and nothing else. Adding textual is a new runtime
-   dependency inside a PyInstaller onefile build and a third UI surface beside the CLI and the Tk
-   GUI. The share picker is a numbered `rich` table with an "up one level" entry, and every step has
-   a flag equivalent.
+   dependency inside the frozen `backer.exe` build and a third UI surface beside the CLI and the
+   desktop client - and the conclusion is stronger now, not weaker: the CLI is what the desktop
+   client drives (D8), so every hour spent on a second terminal UI is an hour not spent on the
+   surface both front ends depend on. The share picker is a numbered `rich` table with an "up one
+   level" entry, and every step has a flag equivalent.
    - Trigger: measured abandonment at the browse step, not a preference for tree widgets.
-4. No FUSE or userspace mount layer. Kopia reaches an SMB share only as a filesystem path -
-   `_get_repo_type` returns `("filesystem", ["--path", path])` (`backends/kopia.py:129-133`) and
-   kopia has no SMB provider - which is why D3 settles transport as `net use` plus a UNC path on
-   Windows, `mount -t cifs` on privileged Linux (`client/agent.py:608`), and a pre-mounted path as a
-   plain local repository otherwise. A userspace mount adds process lifecycle management, a WinFsp
-   prerequisite, and a mount that can die mid-run while the backup keeps writing.
+4. No FUSE or userspace mount layer of Backer's own. Kopia reaches an SMB share only as a filesystem
+   path - `_get_repo_type` returns `("filesystem", ["--path", path])` (`backends/kopia.py:129-133`)
+   and kopia has no SMB provider - which is why D3 settles transport as `net use` plus a UNC path on
+   Windows, `mount -t cifs` on privileged Linux (`client/agent.py:608`), and, on unprivileged Linux,
+   the OS's own gvfs mount driven by `gio` (`core/mounts.py`). Shipping a mount layer is what is
+   refused: it adds process lifecycle management, a WinFsp prerequisite, and a mount that can die
+   mid-run while the backup keeps writing. gvfs adds none of that - it is already installed on every
+   desktop, its lifecycle belongs to the session, and Backer neither bundles nor supervises it.
    - Trigger: a matrix cell whose repository has no native filesystem path. By D2 none exists: S3 is
      a kopia provider, not a mount.
 5. No rclone in the v1 tool manager (D3). Kopia does have a native rclone provider - `kopia
@@ -3129,9 +3645,9 @@ Each refusal is a decision, not an omission. The trigger line states what would 
 | Repositories created before 0.8.0 are already unopenable. This is not a forward risk; it shipped. | The default-password fallback was removed with no migration and no recovery surface. `_build_backup_command_payload` raises when no password is stored (`server/app.py:585-587`); creation requires one for every type (`server/app.py:4612`, helper at `:545-548`); `get_repository_password` has no legacy fallback (`server/storage.py:918-924`, `legacy=False`); the one schema migration promotes `password_encrypted` to `repository_password_encrypted` for `local` and `nfs` only and correctly refuses to for `smb`, where that column held the share credential (`server/storage.py:278-286`); and `Storage.set_repository_password` (`server/storage.py:926`) has test callers only - no endpoint, no CLI, no UI. The literal that opens those repositories appears nowhere under `src/` at HEAD and is documented in neither README nor CHANGELOG. | Ship a way to set the encryption password on an existing repository record - `set_repository_password` gets a production caller - plus the documented store-then-verify-then-rotate procedure from refusal 10, and a CHANGELOG Major Feature bullet naming the affected releases. README quotes the literal verbatim: it shipped in every release before 0.8.0, it is not a secret, and it is the only key to that data. This outranks every other item in this table. |
 | Retention is the first code in this product that will delete real backup bytes, and it will do it to snapshots users believe have been pruned for years. | Retention currently deletes nothing at all. `prune` builds `["snapshot", "expire", "--all"]` with no `--delete` (`backends/kopia.py:696`), so kopia only reports, and `prune` returns `success=True`; the server's own local path passes `--delete` (`server/app.py:12705`), so the asymmetry is in-repo evidence. `prune(dry_run=True)` appends a `--dry-run` that is not a flag on `snapshot expire` (`:697-698`) and always errors. `RetentionPolicy` has only ever deleted database rows - `server/retention.py:193` says so. So the fix turns a silent no-op into real deletion against a repository that has accumulated every snapshot ever taken. Worse, the only caller passes no keep arguments (`server/app.py:12717`), so no keep flags are emitted and kopia's built-in global defaults stand: latest 10, hourly 48, daily 7, weekly 4, monthly 24, annual 3. The first run with `--delete` would apply those, not the user's policy, to every source in the repository. | Land the scoping before the deletion, never after: `policy set <user@host:path>` in place of `--global` (`backends/kopia.py:664`) and `snapshot expire <path> --delete` in place of `--all`, in the same commit. Retention defaults to OFF, deleting requires an explicit apply, and the first run of any policy is a preview built from kopia's own `retentionReason` field rather than from a `--dry-run` flag that does not exist. `keep_yearly` is offered nowhere until `KopiaBackend.prune` (`backends/kopia.py:626-634`) takes the parameter and emits `--keep-annual`. |
 | Secrets move from one server to N devices. | Today one encrypted server database holds every repository credential. Serverless puts a kopia passphrase, an SMB password and an S3 secret key in a keystore on each desktop, and a dead machine takes its only copy of the key with it with no server to fall back on. Kopia makes a second copy without being asked: `--persist-credentials` defaults on in 0.23.1 and the code passes neither it nor `--no-persist-credentials`, so on Windows a connect can write the passphrase into Credential Manager outside the keystore this plan manages. | OS keystore only, never the config file, scoped `user` or `machine` per repository. Pass `--no-persist-credentials` explicitly on every kopia invocation so there is exactly one copy. Display the passphrase in full once with copy-to-clipboard, require an explicit save confirmation, and verify by reading the secret back out of the keystore before declaring the repository created. |
-| Config surface proliferation (D5). | Four client config surfaces already exist and the split causes a live bug: `agent/gui/app.py:50-51` writes only `config.json` while `client/windows_service.py:44` looks for `agent.yaml` and raises `FileNotFoundError`. A fifth surface makes failure modes combinatorial. | Phase 1 unifies first, with migration, and uses the now-working "Install as Service" flow as its falsifiable proof. No serverless field is added to any config before that lands. |
+| Config surface proliferation (D5). | Four client config surfaces exist on disk and the split caused a live bug: the deleted GUI wrote only `config.json` while `_prepare_service_config` (`client/windows_service.py`) looks for `agent.yaml` and raises `FileNotFoundError`. A fifth surface makes failure modes combinatorial, and a second *writer* is worse than a fifth file - which is why D8 gives the desktop client read-only access and routes every mutation through the CLI. | Phase 1 unifies first, with migration. The proof: **the desktop client's install action shells `backer agent install --mode server`, which produces a scheduled task whose run leads to a heartbeat within 90 seconds.** No serverless field is added to any config before that lands. |
 | Advertising a matrix cell with no test behind it. | This is not hypothetical: `s3-contract` is mandatory, green, and skipping its only test today, because `tests/test_s3.py:227-234` requires four `BACKER_TEST_S3_*` variables and `release-validation.yml:110-113` supplies three. Windows plus SMB has no leg at all, and the obvious design - a Samba container reached from a `windows-latest` runner - cannot work, because they are different machines. | Phase 7 step 1 repairs the S3 job before anything is built on it, and adds an acceptance bullet asserting `1 passed` rather than `1 skipped`. `New-SmbShare` on the Windows runner itself (Phase 7 step 4), and every new leg in the mandatory loop. If a leg cannot be made green, the cell comes out of README, `--help` and the `Choice()`. |
-| Windows packaging: unsigned installer plus a self-updater passing the wrong silent flag. | No signing step exists in any workflow, and `agent/gui/app.py:806` passes `/S` - an NSIS flag - to the Inno Setup installer built from `installer/backer-agent.iss`, so the "silent" update pops UI and can sit unattended forever. Both are still true at HEAD. | Change the flag to `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`. Add code signing before serverless is promoted as the recommended install; until then README says plainly that the installer is unsigned. |
+| Windows packaging: an unsigned installer now carrying two unsigned executables, plus a self-updater that must not repeat the wrong-silent-flag mistake. | No signing step exists in any workflow. The update path previously passed `/S` - an NSIS flag - to an Inno Setup installer, so the "silent" update popped UI and could sit unattended forever; that was fixed to `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` before the port, and the port moves the whole update-check into the desktop client, where the same mistake is one line away from being made again in a new language. The installer now ships `backer.exe`, `backer-agent-service.exe` and `backer-desktop.exe`, so the unsigned warning covers three binaries. Worse than unsigned-at-rest: the shipped update check in `desktop/Backer.Desktop/ViewModels/SettingsViewModel.cs` downloads that installer over HTTPS into `Path.GetTempPath()` and runs it `/VERYSILENT` with no Authenticode check and no pinned hash, so anything that can write `%TEMP%` between the write and the exec gets a silent elevated install. TLS authenticates the host, not the bytes on disk afterwards. | The client uses the same release-main `backer-agent-setup.exe` URL and the same three Inno flags, both asserted in its own test project now that `tests/test_agent_gui_release_urls.py` is deleted (Phase 7 step 10). The update path additionally downloads to a per-user directory with restrictive ACLs and verifies the file before executing it - the Authenticode signature once signing exists, and until then a SHA-256 published with the release - refusing to run on a mismatch, which is the fail-closed default this product uses everywhere else. Add code signing before serverless is promoted as the recommended install; until then README says plainly that neither the installer nor any of the three binaries is signed. |
 
 ## Test plan and release gate
 
@@ -3159,10 +3675,13 @@ costs.
    concurrent operations never share a config file. `tests/test_repo_metadata.py`: `discover_all()`
    on a repository holding both a root sidecar and `Agents/*/` sidecars returns both, deduped by
    `job_name`.
-2. Phase 1 - a migration test: a tree containing `config.json` and `agent.yaml` produces one
-   `config.yaml` with every field preserved, `windows_service.py` locates it, and "Install as
-   Service" completes without `FileNotFoundError`; `tests/test_windows_packaging.py:79-140` extended
-   for the new filename.
+2. Phase 1 - a migration test: a tree containing a legacy `config.json` and `agent.yaml` produces
+   one `config.yaml` with every field preserved, `windows_service.py` locates it, and `backer agent
+   install --mode server` completes without `FileNotFoundError`. That command is the D5 proof's
+   first half: **the desktop client's install action shells `backer agent install --mode server`,
+   which produces a scheduled task whose run leads to a heartbeat within 90 seconds** - the test
+   covers the command, the Phase 1 acceptance bullet covers the heartbeat.
+   `tests/test_windows_packaging.py:79-140` extended for the new filename.
 3. Phase 2 - the twelve clean-restore rollback tests at `tests/test_agent_protocol.py:198-546` pass
    against the extracted `backer.core.runner`. Four of them (`:198`, `:229`, `:258`, `:285`)
    currently assert the destination is deleted and the run reported green, which is what
@@ -3180,8 +3699,13 @@ costs.
 6. Phase 5 - every prompt reachable by flag with stdin closed: a full non-interactive repository
    add, job create and job run under `subprocess` with no TTY, stdin from `/dev/null` on Linux and
    `NUL` on Windows.
-7. Phase 6 - the GUI suite runs under `xvfb-run -a` inside `serverless-local (ubuntu-latest)`, and a
-   test fails if the Tk guard skipped, so a skipped GUI suite is a red leg rather than a green one.
+7. Phase 6 - `dotnet test desktop/` runs in its own mandatory `desktop-client` job on both
+   platforms: source scans for colour literals, dialog count, the `kopia` string and
+   failure-message literals, plus ViewModel tests for navigation, the passphrase step and progress
+   rendering. No display server is involved and no `xvfb` step exists anywhere any more. UI
+   interaction tests under `Avalonia.Headless` are deferred (Phase 6 acceptance), so a green job
+   here proves structure and logic, not layout - say so rather than letting the job read as full UI
+   coverage.
 8. Phase 7 - `tests/test_serverless_e2e.py`, the six D2 cells end to end: init, first backup,
    changed-and-deleted-file backup, snapshot list, restore, failed-restore safety, retention preview
    and `snapshot verify`. Driven by `serverless-local` (matrix `ubuntu-latest`, `windows-latest`),

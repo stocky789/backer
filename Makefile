@@ -1,4 +1,4 @@
-.PHONY: install install-dev setup test test-quick lint format type-check clean build build-agent run-server demo release docker-build docker-up docker-down docker-logs help
+.PHONY: install install-dev setup test test-desktop test-quick lint format type-check clean build build-agent run-server demo release docker-build docker-up docker-down docker-logs help
 
 # Default target
 help:
@@ -10,7 +10,8 @@ help:
 	@echo "  make setup        Install backer and download backup tools"
 	@echo ""
 	@echo "Development:"
-	@echo "  make test         Run all tests"
+	@echo "  make test         Run all tests (Python + desktop client if dotnet is installed)"
+	@echo "  make test-desktop Build and test the C# desktop client"
 	@echo "  make test-quick   Run quick tests (no integration)"
 	@echo "  make lint         Run linter"
 	@echo "  make format       Format code"
@@ -18,7 +19,7 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  make build        Build Python distribution packages"
-	@echo "  make build-agent  Build Windows agent executable (requires PyInstaller)"
+	@echo "  make build-agent  Build the Windows CLI + desktop client (PyInstaller + dotnet)"
 	@echo "  make clean        Remove build artifacts"
 	@echo ""
 	@echo "Run:"
@@ -46,8 +47,14 @@ setup: install
 	backer setup
 
 # Testing
-test:
+test: test-desktop
 	pytest tests/ -v --cov=src/backer --cov-report=term-missing
+
+# Desktop client (C#). Skipped with a note when the .NET SDK is not installed,
+# so Python-only contributors are never blocked by it.
+test-desktop:
+	@command -v dotnet >/dev/null 2>&1 || { echo "dotnet not on PATH - skipping desktop client tests"; exit 0; }; \
+	dotnet build desktop/Backer.Desktop.sln -c Release && dotnet test desktop/Backer.Desktop.sln
 
 test-quick:
 	pytest tests/ -v -m "not integration" --ignore=tests/integration/
@@ -67,11 +74,12 @@ type-check:
 build: clean
 	python -m build
 
+# The build script is the only thing that produces an installable dist/ tree
+# (CLI + desktop + service exe staged where the Inno script expects them).
 build-agent:
-	@echo "Building Windows agent..."
-	@echo "Note: For full Windows build, run on Windows with PyInstaller"
+	@echo "Building Windows agent (run on Windows with PyInstaller and the .NET 8 SDK)..."
 	pip install pyinstaller
-	pyinstaller --clean backer-agent.spec
+	python scripts/build_agent.py
 
 clean:
 	rm -rf build/ dist/ *.egg-info src/*.egg-info
@@ -90,7 +98,7 @@ ifndef VERSION
 endif
 	@echo "Creating release v$(VERSION)..."
 	@python scripts/bump_version.py $(VERSION)
-	git add pyproject.toml src/backer/_version.py installer/backer-agent.iss android/app/build.gradle.kts CHANGELOG.md
+	git add pyproject.toml src/backer/_version.py installer/backer-agent.iss android/app/build.gradle.kts desktop/Backer.Desktop/Backer.Desktop.csproj CHANGELOG.md
 	git commit -m "Release v$(VERSION)"
 	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"
 	@echo ""

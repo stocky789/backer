@@ -96,8 +96,8 @@ def _prepare_smb_destination(
     smb_password = job.get("smb_password")
     smb_domain = job.get("smb_domain")
 
-    if backend_name == "kopia":
-        # Kopia uses a mounted filesystem path for SMB on Linux.
+    if backend_name in {"kopia", "files"}:
+        # Repository backends use a mounted filesystem path for SMB on Linux.
         print(f"[SMB] Mounting share for {backend_name} backend")
         ctx = smb_mount(
             server=server,
@@ -122,6 +122,8 @@ def _prepare_nfs_destination(
     """Prepare NFS destination path for the backend."""
     server, export_path, subpath = parse_nfs_path(dest_path)
 
+    if backend_name == "files":
+        raise RuntimeError("Files repositories do not support NFS storage")
     if backend_name == "kopia":
         # Kopia needs a mounted filesystem path.
         print(f"[NFS] Mounting NFS export for {backend_name} backend")
@@ -249,8 +251,8 @@ def _prepare_smb_source(
     smb_password = job.get("smb_password")
     smb_domain = job.get("smb_domain")
 
-    if backend_name == "kopia":
-        # Kopia needs a mounted filesystem path.
+    if backend_name in {"kopia", "files"}:
+        # Repository backends need a mounted filesystem path.
         print(f"[RESTORE] Mounting SMB share for {backend_name} backend")
         ctx = smb_mount(
             server=server,
@@ -275,6 +277,8 @@ def _prepare_nfs_source(
     server, export_path, subpath = parse_nfs_path(source_path)
 
     # All backends need mounted path for NFS
+    if backend_name == "files":
+        raise RuntimeError("Files repositories do not support NFS storage")
     print(f"[RESTORE] Mounting NFS export {server}:{export_path} for {backend_name} backend")
     ctx = nfs_mount(server=server, export_path=export_path)
     mount_path = ctx.__enter__()

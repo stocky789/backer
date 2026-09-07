@@ -17,11 +17,13 @@ import com.backer.android.data.api.models.BackupResult
 import com.backer.android.data.api.models.ProgressReport
 import com.backer.android.data.repository.BackerApiRepository
 import com.backer.android.data.repository.CredentialRepository
+import com.backer.android.data.repository.StorageAccess
 import com.backer.android.di.ApiServiceFactory
 import com.backer.android.util.TarArchiveCreator
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -42,7 +44,8 @@ class BackupWorker @AssistedInject constructor(
     private val credentialRepository: CredentialRepository,
     private val apiRepository: BackerApiRepository,
     private val apiServiceFactory: ApiServiceFactory,
-    private val tarArchiveCreator: TarArchiveCreator
+    private val tarArchiveCreator: TarArchiveCreator,
+    private val storageAccess: StorageAccess
 ) : CoroutineWorker(context, params) {
 
     private val notificationManager =
@@ -68,6 +71,7 @@ class BackupWorker @AssistedInject constructor(
         var filesTransferred = 0
         val errors = mutableListOf<String>()
         var output = ""
+        var snapshotId: String? = null
 
         try {
             requireNotNull(proxyCapability) { "Android proxy backup missing required proxy_capability" }
@@ -80,6 +84,8 @@ class BackupWorker @AssistedInject constructor(
 
             // Parse excludes
             val excludes = parseExcludes(excludesJson)
+
+            require(storageAccess.hasUserFileAccess()) { storageAccess.denialMessage() }
 
             // Verify source exists
             val sourceDir = File(sourcePath)
@@ -114,7 +120,7 @@ class BackupWorker @AssistedInject constructor(
                     }
                 }
 
-                if (!archiveResult.success) {
+                if (!archiveResult.isComplete) {
                     errors.addAll(archiveResult.errors)
                     throw RuntimeException("Archive creation failed: ${archiveResult.errors.firstOrNull()}")
                 }
@@ -152,12 +158,14 @@ class BackupWorker @AssistedInject constructor(
                     body = requestBody
                 )
 
-                if (response.isSuccessful) {
+                val upload = response.body()
+                if (response.isSuccessful && upload?.success == true) {
                     success = true
-                    output = "Backup completed successfully"
+                    snapshotId = upload.snapshotId
+                    output = upload.message ?: "Backup completed successfully"
                     Log.d(TAG, "Backup upload successful")
                 } else {
-                    val errorBody = response.errorBody()?.string() ?: "Unknown error"
+                    val errorBody = upload?.error ?: upload?.message ?: response.errorBody()?.string() ?: "Unknown error"
                     errors.add("Upload failed: ${response.code()} - $errorBody")
                     output = errorBody
                     Log.e(TAG, "Backup upload failed: ${response.code()} - $errorBody")
@@ -170,6 +178,8 @@ class BackupWorker @AssistedInject constructor(
                 tempFile.delete()
             }
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Backup failed", e)
             errors.add(e.message ?: "Backup failed")
@@ -190,7 +200,8 @@ class BackupWorker @AssistedInject constructor(
             bytesTransferred = bytesTransferred,
             filesTransferred = filesTransferred,
             errors = errors,
-            output = output.take(5000)
+            output = output.take(5000),
+            snapshotId = snapshotId
         )
 
         apiRepository.reportResult(result)

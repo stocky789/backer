@@ -8,6 +8,7 @@ import com.backer.android.data.api.models.HealthResponse
 import com.backer.android.data.api.models.HeartbeatRequest
 import com.backer.android.data.api.models.HeartbeatResponse
 import com.backer.android.data.api.models.ProgressReport
+import com.backer.android.data.api.models.ProxyBackupResponse
 import com.backer.android.data.api.models.RegisterRequest
 import com.backer.android.data.api.models.RegisterResponse
 import okhttp3.RequestBody
@@ -103,7 +104,7 @@ interface BackerApiService {
         @Header("X-Source-Path") sourcePath: String,
         @Header("X-Backer-Capability") capability: String,
         @Body body: RequestBody
-    ): Response<ResponseBody>
+    ): Response<ProxyBackupResponse>
 
     /**
      * Download restore data from the server (proxy backend).
@@ -115,6 +116,7 @@ interface BackerApiService {
      * - X-Backer-Capability: required proxy operation capability
      * Query parameters:
      * - snapshot: snapshot identifier (optional, defaults to latest)
+     * - include: subfolder within the snapshot to restore (optional)
      */
     @GET("/api/repo/{repoId}/restore")
     @Streaming
@@ -122,6 +124,7 @@ interface BackerApiService {
         @Path("repoId") repoId: String,
         @Header("X-Restore-Subfolder") subfolder: String,
         @Header("X-Backer-Capability") capability: String,
-        @Query("snapshot") snapshot: String? = null
+        @Query("snapshot") snapshot: String? = null,
+        @Query("include") include: String? = null
     ): Response<ResponseBody>
 }

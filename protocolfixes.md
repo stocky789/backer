@@ -82,12 +82,14 @@ Acceptance:
 ## Phase 2 — one agent execution protocol
 
 1. Choose one implementation as the execution authority. The practical path
-   is to move platform/mount helpers into shared code and have GUI/service use
+   is to move platform/mount helpers into shared code and have the desktop
+   client and service use
    `BackerAgent` plus that shared executor; delete duplicate per-backend
    runners once behavior is identical.
-2. Build a true unattended Windows service entry point. Do not schedule the
-   Tk GUI executable; package a dedicated service/CLI runner and verify it
-   starts without an interactive desktop.
+2. Build a true unattended Windows service entry point. Do not schedule a
+   windowed executable; package a dedicated service/CLI runner and verify it
+   starts without an interactive desktop. (Superseded: the Tk GUI was removed
+   in 0.9.0 and the frozen Windows artifact is the console `backer.exe`.)
 3. Make backend readiness lazy and job-specific. A rclone-only job must not
    fail because Kopia cannot download.
 4. Apply SMB/NFS preparation consistently to backup and restore on Linux and
@@ -102,7 +104,7 @@ Acceptance:
 
 Acceptance:
 
-- CLI/Linux, GUI/Windows, and installed Windows service run the same backup and
+- CLI/Linux, the desktop client, and the installed Windows service run the same backup and
   restore scenario for every supported backend/destination combination.
 - Protected SMB backup and restore work from a fresh Windows session.
 - The service starts at boot/lock screen and completes a queued rclone-only job
@@ -125,7 +127,7 @@ Acceptance:
 
 Acceptance:
 
-- Fresh Linux, Windows GUI, Windows service, and Docker installs can obtain the
+- Fresh Linux, Windows desktop client, Windows service, and Docker installs can obtain the
   selected tool without elevated interactive repair.
 - Bad checksum, invalid TLS, missing asset, and extraction failure fail closed
   and produce a non-zero installer/setup result.

@@ -59,6 +59,7 @@ def test_agents_page_links_windows_download_to_installer(tmp_path: Path) -> None
         'href="https://git.stockhome.com.au/stocky789/backer/releases/download/'
         'release-main/backer-agent-setup.exe"'
     ) in response.text
+    assert "Backer desktop client" in response.text
 
 
 def test_agents_page_uses_configured_public_url(tmp_path: Path) -> None:

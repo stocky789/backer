@@ -31,3 +31,20 @@ def test_dpapi_acl_failure_prevents_blob_write(monkeypatch, tmp_path: Path) -> N
     else:
         raise AssertionError("DPAPI write unexpectedly continued after ACL failure")
     assert not path.exists()
+
+
+def test_secret_tool_delete_reports_failure(monkeypatch) -> None:
+    monkeypatch.setattr(keystore.os, "name", "posix")
+    monkeypatch.setattr(keystore, "_secret_tool_available", lambda: True)
+    monkeypatch.setattr(
+        keystore,
+        "_secret_tool",
+        lambda *_args: CompletedProcess([], 1, "", "keyring unavailable"),
+    )
+
+    try:
+        keystore.delete("backer/repo/home/passphrase")
+    except RuntimeError as error:
+        assert "keyring unavailable" in str(error)
+    else:
+        raise AssertionError("secret-tool deletion failure was ignored")

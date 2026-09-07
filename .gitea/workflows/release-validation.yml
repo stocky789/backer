@@ -74,6 +74,31 @@ jobs:
       - name: Run protocol release gates
         run: python -m pytest -q tests/test_protocol_contract.py tests/test_tools.py
 
+  desktop-client:
+    name: Desktop Client (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build desktop client
+        run: dotnet build desktop/Backer.Desktop.sln -c Release
+
+      - name: Test desktop client
+        run: dotnet test desktop/Backer.Desktop.sln -c Release --no-build
+
   s3-contract:
     name: Kopia S3 Contract (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -174,10 +199,6 @@ jobs:
 
       - name: Run local serverless end-to-end contract
         run: python -m pytest -q tests/test_serverless_e2e.py -k local
-
-      - name: Run GUI serverless contract
-        if: matrix.os == 'ubuntu-latest'
-        run: xvfb-run -a python -m pytest -q tests/test_gui_serverless.py
 
   serverless-smb-linux:
     name: Serverless SMB (ubuntu-latest)
@@ -332,6 +353,16 @@ jobs:
           if installer_version != expected:
               raise SystemExit(f"installer/backer-agent.iss version {installer_version!r} does not match tag {tag!r}")
 
+          csproj_version = find_required(
+              r"<Version>([^<]+)</Version>",
+              read_text("desktop/Backer.Desktop/Backer.Desktop.csproj"),
+              "desktop/Backer.Desktop/Backer.Desktop.csproj",
+          )
+          if csproj_version != expected:
+              raise SystemExit(
+                  f"desktop/Backer.Desktop/Backer.Desktop.csproj version {csproj_version!r} does not match tag {tag!r}"
+              )
+
           android_gradle = read_text("android/app/build.gradle.kts")
           android_version = find_required(r'versionName\s*=\s*"([^"]+)"', android_gradle, "android/app/build.gradle.kts")
           if android_version != expected:
@@ -436,8 +467,13 @@ jobs:
       - name: Install package and PyInstaller
         run: python -m pip install -e ".[dev]" pyinstaller
 
-      - name: Build Windows agent
-        run: pyinstaller backer-agent.spec --noconfirm
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build Windows agent package
+        run: python scripts/build_agent.py
 
       - name: Upload Windows agent artifact
         uses: actions/upload-artifact@v3
@@ -453,6 +489,7 @@ jobs:
       - verify-version
       - python-ci
       - protocol-contract
+      - desktop-client
       - s3-contract
       - serverless-local
       - serverless-smb-linux
@@ -469,6 +506,7 @@ jobs:
           VERIFY_VERSION_RESULT: ${{ needs.verify-version.result }}
           PYTHON_CI_RESULT: ${{ needs.python-ci.result }}
           PROTOCOL_CONTRACT_RESULT: ${{ needs.protocol-contract.result }}
+          DESKTOP_CLIENT_RESULT: ${{ needs.desktop-client.result }}
           S3_CONTRACT_RESULT: ${{ needs.s3-contract.result }}
           SERVERLESS_LOCAL_RESULT: ${{ needs.serverless-local.result }}
           SERVERLESS_SMB_LINUX_RESULT: ${{ needs.serverless-smb-linux.result }}
@@ -478,7 +516,7 @@ jobs:
           WINDOWS_AGENT_PACKAGE_RESULT: ${{ needs.windows-agent-package.result }}
         run: |
           set -euo pipefail
-          for job in VERIFY_VERSION_RESULT PYTHON_CI_RESULT PROTOCOL_CONTRACT_RESULT S3_CONTRACT_RESULT SERVERLESS_LOCAL_RESULT SERVERLESS_SMB_LINUX_RESULT SERVERLESS_SMB_WINDOWS_RESULT DOCKER_BUILD_RESULT; do
+          for job in VERIFY_VERSION_RESULT PYTHON_CI_RESULT PROTOCOL_CONTRACT_RESULT DESKTOP_CLIENT_RESULT S3_CONTRACT_RESULT SERVERLESS_LOCAL_RESULT SERVERLESS_SMB_LINUX_RESULT SERVERLESS_SMB_WINDOWS_RESULT DOCKER_BUILD_RESULT; do
             result="${!job}"
             if [ "$result" != "success" ]; then
               echo "$job finished with $result"

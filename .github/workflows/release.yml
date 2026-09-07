@@ -149,7 +149,10 @@ jobs:
           python-version: "3.11"
       - name: Install package and PyInstaller
         run: python -m pip install -e ".[dev]" pyinstaller
-      - name: Build portable Windows agent
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build portable Windows agent (backer.exe, service exe, desktop client)
         run: python scripts/build_agent.py
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y

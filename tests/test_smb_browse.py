@@ -11,6 +11,200 @@ import pytest
 from backer.core.smb_browse import SMBBrowser
 
 
+def _ls_line(name: str, is_dir: bool, size: int = 0) -> str:
+    attrs = "D" if is_dir else ""
+    return f"  {name:<34}{attrs:<4}{size:>8}  Wed Dec  3 10:15:30 2025"
+
+
+ROOT_LS = "\n".join(
+    [
+        _ls_line(".", True),
+        _ls_line("..", True),
+        _ls_line("Alpha", True),
+        _ls_line("repo1", True),
+        _ls_line("notes.txt", False, 12),
+    ]
+)
+REPO_LS = "\n".join([_ls_line(".", True), _ls_line("kopia.repository", False, 37)])
+
+
+def test_linux_list_directory_returns_dirs_only_with_repository_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backer.core import smb_browse
+
+    monkeypatch.setattr(smb_browse.sys, "platform", "linux")
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        script = command[-1]  # the smbclient -c command
+        if script == "ls":
+            return subprocess.CompletedProcess(command, 0, ROOT_LS, "")
+        if 'cd "/repo1"' in script:
+            return subprocess.CompletedProcess(command, 0, REPO_LS, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    success, entries = SMBBrowser.list_directory(
+        "nas", "Backups", username="u", password="p", directories_only=True
+    )
+
+    assert success
+    assert [(e.name, e.is_dir, e.is_repository) for e in entries] == [
+        ("Alpha", True, False),
+        ("repo1", True, True),
+    ]
+
+
+def test_linux_list_directory_includes_files_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backer.core import smb_browse
+
+    monkeypatch.setattr(smb_browse.sys, "platform", "linux")
+    monkeypatch.setattr(
+        subprocess, "run", lambda command, **_k: subprocess.CompletedProcess(command, 0, ROOT_LS, "")
+    )
+
+    success, entries = SMBBrowser.list_directory("nas", "Backups", username="u", password="p")
+
+    assert success
+    names = [(e.name, e.is_dir) for e in entries]
+    assert ("notes.txt", False) in names  # files are listed for the default (browser) callers
+    assert ("Alpha", True) in names
+
+
+def test_linux_list_directory_maps_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backer.core import smb_browse
+
+    monkeypatch.setattr(smb_browse.sys, "platform", "linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_k: subprocess.CompletedProcess(command, 1, "", "NT_STATUS_ACCESS_DENIED"),
+    )
+
+    assert SMBBrowser.list_directory("nas", "Backups", username="u", password="p") == (
+        False,
+        "Access denied to this directory",
+    )
+
+
+class _FakeUNC:
+    """Minimal Path stand-in for the win32 iterdir/marker checks."""
+
+    def __init__(self, name: str, children: dict[str, dict] | None = None, markers: set[str] | None = None):
+        self.name = name
+        self._children = children or {}
+        self._markers = markers or set()
+
+    def __truediv__(self, other: str) -> _FakeUNC:
+        if other in self._children:
+            return _FakeUNC(other, **self._children[other])
+        # marker probe: exists() only true for declared markers
+        node = _FakeUNC(other)
+        node._exists = other in self._markers
+        return node
+
+    def iterdir(self):
+        for child_name, spec in self._children.items():
+            yield _FakeUNC(child_name, **spec)
+
+    def is_dir(self) -> bool:
+        return bool(self._children) or self.name in {"Alpha", "repo1"}
+
+    def exists(self) -> bool:
+        return getattr(self, "_exists", False)
+
+
+def test_windows_list_directory_pins_argv_and_flags_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backer.core import smb_browse
+
+    tree = {
+        "Alpha": {"children": {}, "markers": set()},
+        "repo1": {"children": {}, "markers": {"kopia.repository"}},
+    }
+    monkeypatch.setattr(smb_browse, "Path", lambda *_a: _FakeUNC("root", children=tree))
+
+    commands = _win32_runs(monkeypatch, {})
+
+    success, entries = SMBBrowser.list_directory(
+        "nas", "backup", username="backup", password="sentinel-password", domain="CORP", directories_only=True
+    )
+
+    assert success
+    assert [(e.name, e.is_repository) for e in entries] == [("Alpha", False), ("repo1", True)]
+    assert commands == [
+        ["net", "use", r"\\nas\IPC$", r"/user:CORP\backup", "*", "/persistent:no"],
+        ["net", "use", r"\\nas\IPC$", "/delete", "/y"],
+    ]
+    assert all("sentinel-password" not in argument for command in commands for argument in command)
+
+
+def test_windows_list_directory_maps_connection_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _win32_runs(
+        monkeypatch,
+        {"use": subprocess.CompletedProcess(["net", "use"], 2, "", "System error 1326 has occurred.")},
+    )
+
+    assert SMBBrowser.list_directory("nas", "backup", username="u", password="p") == (
+        False,
+        "Login failed - invalid username or password",
+    )
+
+
+def test_cli_repo_browse_emits_contract_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from backer.cli import main
+
+    def fake_list(server, share, path, username, password, domain, directories_only=False):
+        assert password == "sentinel-password"
+        assert directories_only is True
+        from backer.core.smb_browse import DirectoryEntry
+
+        return True, [
+            DirectoryEntry(name="Alpha", is_dir=True),
+            DirectoryEntry(name="repo1", is_dir=True, is_repository=True),
+        ]
+
+    monkeypatch.setattr("backer.core.smb_browse.SMBBrowser.list_directory", staticmethod(fake_list))
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "browse", "--host", "nas", "--share", "backup", "--path", "/sub/", "--username", "u",
+         "--password-stdin", "--json"],
+        input="sentinel-password\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    import json as _json
+
+    assert _json.loads(result.output) == {
+        "path": "sub",
+        "entries": [
+            {"name": "Alpha", "is_dir": True, "is_repository": False},
+            {"name": "repo1", "is_dir": True, "is_repository": True},
+        ],
+    }
+
+
+def test_cli_repo_browse_maps_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from backer.cli import main
+
+    monkeypatch.setattr(
+        "backer.core.smb_browse.SMBBrowser.list_directory",
+        staticmethod(lambda *a, **k: (False, "Login failed - invalid username or password")),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "browse", "--host", "nas", "--share", "backup", "--username", "u", "--password-stdin"],
+        input="pw\n",
+    )
+
+    assert result.exit_code != 0
+    assert "Login failed" in result.output
+
+
 def test_no_password_on_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     commands: list[list[str]] = []
 
@@ -38,6 +232,111 @@ def test_create_directory_keeps_password_off_argv(monkeypatch: pytest.MonkeyPatc
 
     assert SMBBrowser.make_directory("nas", "backup", "laptops/matt", "user", "sentinel-password")
     assert all("sentinel-password" not in argument for command in commands for argument in command)
+
+
+NET_VIEW_OUTPUT = """Shared resources at \\\\nas
+
+
+Share name  Type  Used as  Comment
+
+-------------------------------------------------------------------------------
+Backups     Disk           Nightly backup target
+Media       Disk  Z:       Movies and TV
+Public      Disk
+Virtual Machines  Disk     Hyper-V exports
+ADMIN$      Disk           Remote Admin
+HPLaser     Print          Office printer
+The command completed successfully.
+
+"""
+
+
+def _win32_runs(monkeypatch: pytest.MonkeyPatch, results: dict[str, subprocess.CompletedProcess[str]]):
+    """Pretend to be Windows and record every argv, returning canned results per verb."""
+    from backer.core import smb_browse
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(smb_browse.sys, "platform", "win32")
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return results.get(command[1], subprocess.CompletedProcess(command, 0, "", ""))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return commands
+
+
+def test_windows_list_shares_parses_net_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = _win32_runs(
+        monkeypatch, {"view": subprocess.CompletedProcess(["net", "view"], 0, NET_VIEW_OUTPUT, "")}
+    )
+
+    success, shares = SMBBrowser.list_shares("nas", "backup", "sentinel-password", "CORP")
+
+    assert success
+    assert [(share.name, share.comment) for share in shares] == [
+        ("Backups", "Nightly backup target"),
+        ("Media", "Movies and TV"),
+        ("Public", ""),
+        # Share names can contain spaces; the columns, not the first token, delimit them.
+        ("Virtual Machines", "Hyper-V exports"),
+    ]
+    assert commands == [
+        ["net", "use", r"\\nas\IPC$", r"/user:CORP\backup", "*", "/persistent:no"],
+        ["net", "view", r"\\nas"],
+        ["net", "use", r"\\nas\IPC$", "/delete", "/y"],
+    ]
+    assert all("sentinel-password" not in argument for command in commands for argument in command)
+
+
+def test_windows_list_shares_tears_down_session_when_net_view_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = _win32_runs(
+        monkeypatch,
+        {"view": subprocess.CompletedProcess(["net", "view"], 2, "", "System error 5 has occurred.")},
+    )
+
+    success, error = SMBBrowser.list_shares("nas", "backup", "sentinel-password")
+
+    assert (success, error) == (False, "Access denied - check credentials")
+    assert commands[-1] == ["net", "use", r"\\nas\IPC$", "/delete", "/y"]
+
+
+def test_windows_list_shares_maps_connection_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = _win32_runs(
+        monkeypatch,
+        {
+            "use": subprocess.CompletedProcess(
+                ["net", "use"], 2, "", "System error 1326 has occurred.\nThe user name or password is incorrect."
+            )
+        },
+    )
+
+    success, error = SMBBrowser.list_shares("nas", "backup", "sentinel-password")
+
+    assert (success, error) == (False, "Login failed - invalid username or password")
+    # Nothing was created, so nothing is torn down and no enumeration is attempted.
+    assert commands == [["net", "use", r"\\nas\IPC$", "/user:backup", "*", "/persistent:no"]]
+
+
+def test_windows_error_mapping_covers_missing_server_and_conflict() -> None:
+    from backer.core.smb_browse import windows_smb_error
+
+    assert windows_smb_error("System error 53 has occurred.") == "Server not found or not accessible"
+    assert "different credentials" in windows_smb_error("System error 1219 has occurred.")
+    assert windows_smb_error("") == "Unknown error connecting to server"
+
+
+def test_missing_host_smb_conf_gets_null_configfile(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backer.core import smb_browse
+
+    monkeypatch.setattr(smb_browse.sys, "platform", "linux")
+    monkeypatch.setattr(smb_browse.os.path, "exists", lambda path: False)
+    command = smb_browse.smbclient_command("-L", "//nas")
+    assert command[0] == "smbclient"
+    assert "--configfile=/dev/null" in command
+
+    monkeypatch.setattr(smb_browse.os.path, "exists", lambda path: True)
+    assert "--configfile=/dev/null" not in smb_browse.smbclient_command("-L", "//nas")
 
 
 def _spike_module():

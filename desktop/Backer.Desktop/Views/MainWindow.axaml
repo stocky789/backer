@@ -1,0 +1,61 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+        mc:Ignorable="d"
+        x:Class="Backer.Desktop.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/backer.ico"
+        Title="Backer"
+        Background="{DynamicResource BgBase}"
+        Width="1040" Height="680"
+        MinWidth="820" MinHeight="520">
+
+  <DockPanel>
+    <!-- Header band: identity on the left, where you are on the right. Nothing else. -->
+    <Border DockPanel.Dock="Top" Height="52" Padding="16,0" BorderThickness="0,0,0,1"
+            Background="{DynamicResource Surface}"
+            BorderBrush="{DynamicResource Hairline}">
+      <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Image Source="/Assets/backer-logo.png" Width="22" Height="22" />
+          <TextBlock Text="Backer" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+        </StackPanel>
+        <TextBlock Grid.Column="2" Classes="muted" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" Text="{Binding Status.Subtitle}" />
+      </Grid>
+    </Border>
+
+    <Border DockPanel.Dock="Bottom" Padding="16,8" BorderThickness="0,1,0,0"
+            Background="{DynamicResource Surface}"
+            BorderBrush="{DynamicResource Hairline}">
+      <Grid ColumnDefinitions="*,Auto,Auto">
+        <TextBlock Grid.Column="0" Classes="muted caption" VerticalAlignment="Center"
+                   Classes.failed="{Binding Status.IsFailed}"
+                   TextTrimming="CharacterEllipsis" Text="{Binding Status.Status}" />
+        <TextBlock Grid.Column="1" Classes="muted caption" Margin="12,0" VerticalAlignment="Center"
+                   Text="{Binding Status.PauseState}" />
+        <Button Grid.Column="2" Classes="link" Content="Details" VerticalAlignment="Center">
+          <Button.Flyout>
+            <Flyout>
+              <TextBox Classes="log" Width="520" Height="260" IsReadOnly="True" AcceptsReturn="True"
+                       TextWrapping="NoWrap" Text="{Binding Status.Detail}" />
+            </Flyout>
+          </Button.Flyout>
+        </Button>
+      </Grid>
+    </Border>
+
+    <Border DockPanel.Dock="Top" Classes="banner attention" Margin="24,16,24,0"
+            IsVisible="{Binding Status.Attention, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+        <TextBlock Grid.Column="0" TextWrapping="Wrap" VerticalAlignment="Center"
+                   Text="{Binding Status.Attention}" />
+        <Button Grid.Column="1" Content="Dismiss" Command="{Binding DismissAttentionCommand}" />
+      </Grid>
+    </Border>
+
+    <ContentControl Content="{Binding CurrentView}" />
+  </DockPanel>
+</Window>

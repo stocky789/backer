@@ -87,6 +87,23 @@ class TestRepositoryMetadata:
 
         assert metadata["version"] == METADATA_VERSION
         assert metadata["server_id"] == "test-server"
+        assert metadata["format"] == "kopia"
+
+    def test_initialize_records_files_format(self, temp_repo):
+        metadata = RepositoryMetadata(temp_repo).initialize(repository_format="files")
+
+        assert metadata["format"] == "files"
+
+    def test_legacy_metadata_reads_as_kopia_without_rewrite(self, temp_repo):
+        repo = RepositoryMetadata(temp_repo)
+        repo.initialize()
+        path = temp_repo / BACKER_METADATA_DIR / "metadata.json"
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        legacy.pop("format")
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        assert repo.get_metadata()["format"] == "kopia"
+        assert "format" not in json.loads(path.read_text(encoding="utf-8"))
 
     def test_save_and_get_agent(self, temp_repo):
         """Test saving and retrieving agent metadata."""
@@ -401,3 +418,90 @@ class TestRepositoryMetadata:
         # Whatever ended up on disk must be complete, parseable JSON.
         data = json.loads(target.read_text(encoding="utf-8"))
         assert "writer" in data
+
+
+class TestSidecarTimestampsAndNaming:
+    """The sidecar is read by a replacement machine in another zone - the audit's [4]/[16]/[17] and [19]/[23]."""
+
+    def test_every_writer_stamps_utc_with_z(self, tmp_path):
+        repo = RepositoryMetadata(tmp_path)
+        repo.initialize()
+        repo.save_agent("agent8", {"hostname": "host"})
+        repo.save_job("Nightly", {"source_path": "/data"})
+        repo.save_job_run("Nightly", "20260101T000000Z-agent8", {"status": "success", "started_at": "x"})
+        repo.save_snapshot("a" * 32, {"time": "x"})
+
+        stamps = [
+            repo.get_metadata()["created_at"],
+            repo.get_metadata()["updated_at"],
+            repo.get_agent("agent8")["first_seen"],
+            repo.get_agent("agent8")["updated_at"],
+            repo.get_job("Nightly")["created_at"],
+            repo.get_job_runs("Nightly")[0]["recorded_at"],
+            repo.get_snapshot("a" * 32)["recorded_at"],
+        ]
+        assert all(stamp.endswith("Z") for stamp in stamps), stamps
+
+    def test_runs_and_snapshots_sort_across_naive_and_utc_records(self, tmp_path):
+        """A repository written by old code and by this code must still order correctly."""
+        repo = RepositoryMetadata(tmp_path)
+        repo.initialize()
+        runs = repo.metadata_dir / "jobs" / "Nightly" / "runs"
+        runs.mkdir(parents=True)
+        # Written by a +10 machine (00:00Z), a naive pre-0.9 record, then this machine.
+        # Sorted as plain strings the +10 record wins, which is exactly the reported bug.
+        (runs / "offset.json").write_text(json.dumps({"run_id": "offset", "started_at": "2026-01-01T10:00:00+10:00"}))
+        (runs / "naive.json").write_text(json.dumps({"run_id": "naive", "started_at": "2026-01-01T01:00:00"}))
+        (runs / "utc.json").write_text(json.dumps({"run_id": "utc", "started_at": "2026-01-01T02:00:00.1Z"}))
+
+        assert [run["run_id"] for run in repo.get_job_runs("Nightly")] == ["utc", "naive", "offset"]
+
+        snapshots = repo.metadata_dir / "snapshots"
+        (snapshots / "old.json").write_text(json.dumps({"snapshot_id": "old", "time": "2026-01-01T09:00:00"}))
+        (snapshots / "new.json").write_text(json.dumps({"snapshot_id": "new", "time": "2026-01-01T10:00:00Z"}))
+        (snapshots / "broken.json").write_text(json.dumps({"snapshot_id": "broken", "time": "not a time"}))
+
+        assert [item["snapshot_id"] for item in repo.list_snapshots()] == ["new", "old", "broken"]
+
+    def test_job_config_and_runs_share_one_directory_name(self, tmp_path):
+        """get_job_subfolder strips control characters and _safe_filename did not."""
+        from backer.core.paths import get_job_subfolder
+
+        name = "Docs\tArchive"
+        repo = RepositoryMetadata(tmp_path)
+        repo.initialize()
+        repo.save_job(name, {"source_path": "/data"})
+        repo.save_job_run(name, "20260101T000000Z-a1", {"status": "success"})
+
+        directory = repo.metadata_dir / "jobs" / get_job_subfolder(name)
+        assert (directory / "config.json").exists()
+        assert (directory / "runs" / "20260101T000000Z-a1.json").exists()
+        assert [entry.name for entry in (repo.metadata_dir / "jobs").iterdir()] == [get_job_subfolder(name)]
+        assert len(repo.get_job_runs(name)) == 1
+
+    def test_a_legacy_directory_name_stays_readable_and_writable(self, tmp_path):
+        """A sidecar written by pre-0.9 code must never become invisible."""
+        name = "Docs\tArchive"
+        repo = RepositoryMetadata(tmp_path)
+        repo.initialize()
+        legacy = repo.metadata_dir / "jobs" / name
+        (legacy / "runs").mkdir(parents=True)
+        (legacy / "config.json").write_text(json.dumps({"job_name": name, "config": {}}))
+        (legacy / "runs" / "old.json").write_text(json.dumps({"run_id": "old", "started_at": "2026-01-01T09:00:00"}))
+
+        assert repo.get_job(name)["job_name"] == name
+        repo.save_job_run(name, "new", {"status": "success", "started_at": "2026-01-01T10:00:00Z"})
+        assert [run["run_id"] for run in repo.get_job_runs(name)] == ["new", "old"]
+        assert (legacy / "runs" / "new.json").exists()
+
+    def test_an_unchanged_document_is_not_rewritten(self, tmp_path):
+        """Rewriting identical content churns mtime (and updated_at) for nothing."""
+        repo = RepositoryMetadata(tmp_path)
+        repo.initialize()
+        path = repo.metadata_dir / "metadata.json"
+        before = path.stat().st_mtime_ns
+        os.utime(path, ns=(before - 10_000_000_000, before - 10_000_000_000))
+        stale = path.stat().st_mtime_ns
+
+        assert repo._write_json(path, repo.get_metadata()) is True
+        assert path.stat().st_mtime_ns == stale

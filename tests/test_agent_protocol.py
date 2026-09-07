@@ -1,3 +1,4 @@
+import os
 import pathlib
 import threading
 from datetime import datetime
@@ -166,7 +167,10 @@ def test_windows_nfs_is_rejected_before_mounting(tmp_path: Path, monkeypatch: py
         )
 
 
-def test_windows_smb_is_prepared_for_backup_and_restore(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("backend_name", ["kopia", "files"])
+def test_windows_smb_is_prepared_for_backup_and_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str
+) -> None:
     agent = _agent(tmp_path)
     connections: list[tuple[str, str]] = []
 
@@ -176,12 +180,13 @@ def test_windows_smb_is_prepared_for_backup_and_restore(tmp_path: Path, monkeypa
             return True
 
     monkeypatch.setattr(client_agent.sys, "platform", "win32")
+    monkeypatch.setattr("backer.core.destination._smb_manager", None)
     from backer.agent import service as gui_service
     monkeypatch.setattr(gui_service, "SMBConnectionManager", SMBConnectionManager)
     job = {"smb_username": "user", "smb_password": "secret"}
 
-    agent._prepare_destination_for_backend({**job, "destination_path": "//nas/backups/repo"}, "kopia")
-    agent._prepare_source_for_backend({**job, "source_path": "//nas/backups/repo"}, "kopia")
+    agent._prepare_destination_for_backend({**job, "destination_path": "//nas/backups/repo"}, backend_name)
+    agent._prepare_source_for_backend({**job, "source_path": "//nas/backups/repo"}, backend_name)
 
     assert connections == [("nas", "backups"), ("nas", "backups")]
 
@@ -228,11 +233,12 @@ def test_windows_smb_connection_failure_keeps_unc_error_path(monkeypatch: pytest
 
 def test_agent_preparation_uses_mount_check_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent mount availability hooks remain effective after core extraction."""
-    from backer.core import destination
+    from backer.core import destination, mounts
 
     agent = _agent(tmp_path)
     checks: list[str] = []
     monkeypatch.setattr(destination.sys, "platform", "linux")
+    monkeypatch.setattr(mounts, "gvfs_available", lambda: False)
     monkeypatch.setattr(agent, "_check_cifs_available", lambda: checks.append("cifs") or False)
     monkeypatch.setattr(agent, "_check_nfs_available", lambda: checks.append("nfs") or False)
 
@@ -264,6 +270,7 @@ def test_linux_smb_password_uses_private_credentials_file(
         return MagicMock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(client_agent.subprocess, "run", run)
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
     context = agent._smb_mount_context("nas", "backups", "user", "secret", "domain")
     context.__enter__()
     context.__exit__(None, None, None)
@@ -723,7 +730,7 @@ def test_failed_backup_run_is_recorded_with_its_error(tmp_path: Path) -> None:
     assert runs[0]["status"] == "failed"
     assert runs[0]["errors"] == ["repository unavailable\nwith details"]
     assert runs[0]["return_code"] == 1
-    assert runs[0]["error"] == "repository unavailable with details"
+    assert runs[0]["error"] == "repository unavailable; with details"
     assert runs[0]["error_stage"] == "backup"
 
 
@@ -785,10 +792,17 @@ def test_repo_metadata_write_failure_is_logged_not_swallowed_silently(
 
 def _patch_etc_backer_exists(monkeypatch: pytest.MonkeyPatch, exists: bool) -> None:
     real_exists = pathlib.Path.exists
+    # The dev machine may hold a real ~/.config/backer/config.yaml; the /etc-vs-user
+    # resolution must be tested against a known state, so force the per-user file absent.
+    from backer.core import paths
+
+    user_config = paths._user_config_dir() / "config.yaml"
 
     def fake_exists(self: pathlib.Path) -> bool:
         if self == pathlib.Path("/etc/backer/config.yaml"):
             return exists
+        if self == user_config:
+            return False
         return real_exists(self)
 
     monkeypatch.setattr(pathlib.Path, "exists", fake_exists)

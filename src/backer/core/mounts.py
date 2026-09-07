@@ -2,6 +2,8 @@
 
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -503,6 +505,14 @@ def check_cifs_available() -> bool:
         return False
 
 
+def sudo_available() -> bool:
+    """Whether the current user can run the mount commands without a prompt."""
+    try:
+        return subprocess.run(["sudo", "-n", "true"], capture_output=True, text=True, timeout=5).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def check_nfs_available() -> bool:
     """Check if NFS mount tools are installed."""
     try:
@@ -521,6 +531,120 @@ def check_nfs_available() -> bool:
         return shutil.which("mount.nfs") is not None
 
 
+def _unescape_mount_field(field: str) -> str:
+    """/proc/mounts escapes space, tab, newline and backslash as octal."""
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), field)
+
+
+def find_existing_cifs_mount(server: str, share: str, proc_mounts: str = "/proc/mounts") -> Path | None:
+    """Return the mount point of an existing kernel cifs mount of //server/share."""
+    wanted = f"//{server}/{share}".casefold()
+    try:
+        lines = Path(proc_mounts).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3 or parts[2] not in ("cifs", "smb3"):
+            continue
+        device = _unescape_mount_field(parts[0]).replace("\\", "/").casefold()
+        if device.rstrip("/") == wanted.rstrip("/"):
+            return Path(_unescape_mount_field(parts[1]))
+    return None
+
+
+def gvfs_dir() -> Path:
+    """Where gvfsd-fuse exposes user mounts."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(runtime) / "gvfs"
+
+
+def gvfs_available() -> bool:
+    """gio plus a session bus is all gvfsd needs; no TTY and no desktop session."""
+    if not shutil.which("gio"):
+        return False
+    if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return True
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    return bool(runtime) and Path(runtime, "bus").exists()
+
+
+def find_gvfs_mount(server: str, share: str) -> Path | None:
+    """Find the gvfs FUSE entry for //server/share, matching fields case-insensitively."""
+    root = gvfs_dir()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.name.startswith("smb-share:"):
+            continue
+        fields = dict(
+            part.split("=", 1) for part in entry.name[len("smb-share:") :].split(",") if "=" in part
+        )
+        if (
+            fields.get("server", "").casefold() == server.casefold()
+            and fields.get("share", "").casefold() == share.casefold()
+        ):
+            return entry
+    # gvfs normalises the share to lower case; fall back to the canonical name in
+    # case the FUSE directory refuses to be listed.
+    canonical = root / f"smb-share:server={server.lower()},share={share.lower()}"
+    return canonical if canonical.exists() else None
+
+
+def gvfs_smb_error(text: str) -> str:
+    """Map `gio mount` failure text onto the wording the other SMB paths use."""
+    lowered = text.lower()
+    if any(token in lowered for token in ("connection refused", "host is down", "unreachable", "timed out")):
+        return "Host unreachable - check network connection"
+    if "no such file or directory" in lowered or "not found" in lowered or "does not exist" in lowered:
+        return "Server not found or not accessible"
+    if "authentication required" in lowered or "permission denied" in lowered or "access denied" in lowered:
+        return "Login failed - invalid username or password"
+    return text.strip() or "Unknown error mounting the share"
+
+
+def gvfs_mount(
+    server: str,
+    share: str,
+    username: str | None,
+    password: str | None,
+    domain: str | None,
+) -> Path:
+    """Mount //server/share through gvfs as the current user and return the FUSE path.
+
+    The mount is session-scoped and is deliberately left mounted, exactly as a file
+    manager leaves it. Credentials go on stdin: gio prompts for user, domain and
+    password in that order, and an empty domain line accepts its default.
+    """
+    existing = find_gvfs_mount(server, share)
+    if existing:
+        return existing
+
+    answers = f"{username or ''}\n{domain or ''}\n{password or ''}\n"
+    try:
+        result = subprocess.run(
+            ["gio", "mount", f"smb://{server}/{share}"],
+            input=answers,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+    except subprocess.TimeoutExpired:
+        output = "timed out"
+
+    # gio exits 0 after a failed authentication in some versions, so the entry
+    # appearing is the only trustworthy proof that the share is mounted.
+    mounted = find_gvfs_mount(server, share)
+    if mounted:
+        return mounted
+    if password:
+        output = output.replace(password, "***")
+    raise RuntimeError(f"Failed to mount //{server}/{share}: {gvfs_smb_error(output)}")
+
+
 @contextmanager
 def smb_mount_context(
     server: str,
@@ -531,13 +655,34 @@ def smb_mount_context(
     *,
     cifs_check: Callable[[], bool] = check_cifs_available,
 ) -> Generator[Path, None, None]:
-    """Context manager that mounts an SMB share and yields the mount path.
+    """Context manager that yields a local filesystem path for //server/share.
 
-    Used by Kopia on Linux, which needs a local filesystem path.
-    Requires cifs-utils to be installed.
+    Kopia on Linux needs a path, and there are four ways to get one, tried in order:
+    an existing kernel mount, a passwordless-sudo or root `mount -t cifs`, an
+    unprivileged gvfs mount, or a refusal that explains how to get one of the first three.
     """
-    # Check if cifs-utils is available
-    if not cifs_check():
+    # 1. Someone already mounted it - use it, and never unmount what is not ours.
+    existing = find_existing_cifs_mount(server, share)
+    if existing:
+        print(f"[SMB] Reusing existing mount of //{server}/{share} at {existing}")
+        yield existing
+        return
+
+    is_root = not hasattr(os, "geteuid") or os.geteuid() == 0
+    cifs_available = cifs_check()
+    use_sudo = not is_root and cifs_available and sudo_available()
+
+    # Prefer the kernel client whenever it can run without prompting. Unlike gvfs,
+    # it gives Kopia normal filesystem semantics for its pack-file writes.
+    if not is_root and not use_sudo and gvfs_available():
+        mount_point = gvfs_mount(server, share, username, password, domain)
+        print(f"[SMB] Mounted //{server}/{share} through gvfs at {mount_point}")
+        yield mount_point
+        # Deliberately left mounted: it is session-scoped and shared with the
+        # file manager, so unmounting would pull it out from under the user.
+        return
+
+    if not cifs_available:
         raise RuntimeError(
             "cifs-utils not installed. Install it with:\n"
             "  Debian/Ubuntu: sudo apt install cifs-utils\n"
@@ -545,6 +690,19 @@ def smb_mount_context(
             "  Arch: sudo pacman -S cifs-utils"
         )
 
+    # 4. mount -t cifs needs elevation; without it mount.cifs fails with a misleading
+    # fstab message, so refuse up front with the supported alternatives.
+    if not is_root and not use_sudo:
+        raise RuntimeError(
+            "Mounting an SMB share needs root privileges on Linux. Install gvfs to "
+            "mount it as your own user with no password prompt (Debian/Ubuntu: "
+            "sudo apt install gvfs gvfs-backends; RHEL/Fedora: sudo dnf install gvfs "
+            "gvfs-smb; Arch: sudo pacman -S gvfs gvfs-smb). Otherwise mount the share "
+            "yourself first (through your file manager or /etc/fstab) and add the "
+            "mounted folder as a local repository, or run this command as root."
+        )
+
+    # 2. The kernel cifs mount, owned by us and unmounted on the way out.
     mount_point = Path(tempfile.mkdtemp(prefix="backer_smb_"))
     credentials_path: Path | None = None
     mounted = False
@@ -553,10 +711,11 @@ def smb_mount_context(
     try:
         # Build mount command
         smb_url = f"//{server}/{share}"
-        cmd = ["mount", "-t", "cifs", smb_url, str(mount_point)]
+        privilege = ["sudo", "-n"] if use_sudo else []
+        cmd = [*privilege, "mount", "-t", "cifs", smb_url, str(mount_point)]
 
         # Build mount options
-        opts = ["rw"]
+        opts = ["rw", f"uid={os.getuid()}", f"gid={os.getgid()}"]
         if username or password or domain:
             fd, credentials_name = tempfile.mkstemp(prefix="backer_smb_credentials_")
             os.close(fd)
@@ -587,6 +746,8 @@ def smb_mount_context(
 
         if result.returncode != 0:
             error_msg = result.stderr.strip()
+            if password:
+                error_msg = error_msg.replace(password, "***")
             if "Permission denied" in error_msg:
                 raise RuntimeError(f"SMB mount permission denied. Check credentials for //{server}/{share}")
             elif "No such file or directory" in error_msg:
@@ -609,7 +770,9 @@ def smb_mount_context(
         if mounted:
             print(f"[SMB] Unmounting {mount_point}")
             try:
-                result = subprocess.run(["umount", str(mount_point)], capture_output=True, text=True, timeout=30)
+                result = subprocess.run(
+                    [*privilege, "umount", str(mount_point)], capture_output=True, text=True, timeout=30
+                )
                 if result.returncode != 0:
                     cleanup_error = RuntimeError(f"Failed to unmount SMB share: {result.stderr.strip()}")
             except Exception as error:

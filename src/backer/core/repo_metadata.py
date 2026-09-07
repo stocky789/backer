@@ -26,10 +26,12 @@ import os
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
-from datetime import datetime
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from backer.core.paths import get_job_subfolder
 
 # Cross-platform file locking
 if sys.platform == "win32":
@@ -42,6 +44,36 @@ logger = logging.getLogger(__name__)
 # Backer metadata directory name
 BACKER_METADATA_DIR = ".backer"
 METADATA_VERSION = "1.0"
+
+
+def utc_iso(value: datetime | None = None) -> str:
+    """UTC ISO 8601 with a trailing Z - the only timestamp form written to a sidecar.
+
+    A naive value is this process's own local time, so it is converted, not relabelled.
+    """
+    return (value or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def timestamp_key(value: Any) -> datetime:
+    """Best-effort ordering key over both timestamp forms a sidecar can contain.
+
+    Records written before 0.9 carry naive timestamps in the writing machine's local
+    zone, which cannot be recovered from the record - they are read as UTC, so ordering
+    between an old and a new record is approximate by up to the old writer's offset.
+    Anything unparseable sorts last.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def legacy_job_subfolder(name: str) -> str:
+    """The pre-0.9 sidecar job directory name, kept so old sidecars stay readable."""
+    safe = name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    safe = safe.replace("<", "_").replace(">", "_").replace("|", "_")
+    return safe.replace("?", "_").replace("*", "_").replace('"', "_")
 
 
 @contextmanager
@@ -262,6 +294,12 @@ class RepositoryMetadata:
         """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(data, indent=2, default=str)
+            # An identical rewrite is pure churn (it moves mtime and, for job configs,
+            # updated_at) and costs a round trip on a share - skip it.
+            with suppress(OSError):
+                if path.exists() and path.read_text(encoding="utf-8") == payload:
+                    return True
             fd, tmp_path = tempfile.mkstemp(
                 dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
             )
@@ -304,25 +342,31 @@ class RepositoryMetadata:
             logger.debug(f"  metadata_dir exists: {self.metadata_dir.exists() if self.metadata_dir else False}")
         return exists
 
-    def initialize(self, server_id: str | None = None) -> dict[str, Any]:
+    def initialize(
+        self, server_id: str | None = None, *, repository_format: Literal["kopia", "files"] = "kopia"
+    ) -> dict[str, Any]:
         """Initialize metadata in the repository.
 
         Creates the metadata directory structure and writes initial metadata.
 
         Args:
             server_id: Optional server identifier
+            repository_format: Durable repository storage format.
 
         Returns:
             The created metadata dict
         """
+        if repository_format not in {"kopia", "files"}:
+            raise ValueError(f"Unsupported repository format: {repository_format}")
         self._ensure_dirs()
 
         metadata = {
             "schema_version": "2",
             "version": METADATA_VERSION,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_at": utc_iso(),
+            "updated_at": utc_iso(),
             "repo_type": self.repo_type,
+            "format": repository_format,
             "server_id": server_id,
             "backer_version": self._get_backer_version(),
         }
@@ -341,14 +385,19 @@ class RepositoryMetadata:
 
     def get_metadata(self) -> dict[str, Any] | None:
         """Get repository metadata."""
-        return self._read_json(self.metadata_dir / "metadata.json")
+        metadata = self._read_json(self.metadata_dir / "metadata.json")
+        if metadata is not None:
+            # Legacy sidecars predate explicit repository formats.  Treating them
+            # as Kopia is compatibility-only and intentionally does not rewrite.
+            metadata.setdefault("format", "kopia")
+        return metadata
 
     def update_metadata(self, **kwargs: Any) -> bool:
         """Update repository metadata fields."""
         metadata = self.get_metadata() or {}
         metadata.update(kwargs)
         metadata["schema_version"] = "2"
-        metadata["updated_at"] = datetime.now().isoformat()
+        metadata["updated_at"] = utc_iso()
         return self._write_json(self.metadata_dir / "metadata.json", metadata)
 
     # Agent metadata methods
@@ -366,7 +415,7 @@ class RepositoryMetadata:
         try:
             existing = self._read_json(agent_path) or {}
             existing.update(agent_data)
-            now = datetime.now().isoformat()
+            now = utc_iso()
             existing["agent_id"] = agent_id
             existing["schema_version"] = "2"
             existing["backer_version"] = self._get_backer_version()
@@ -410,7 +459,7 @@ class RepositoryMetadata:
         """
         self._ensure_dirs()
 
-        job_dir = self.metadata_dir / "jobs" / self._safe_filename(job_name)
+        job_dir = self._job_dir(job_name)
         job_dir.mkdir(parents=True, exist_ok=True)
         (job_dir / "runs").mkdir(exist_ok=True)
 
@@ -418,7 +467,7 @@ class RepositoryMetadata:
 
         try:
             existing = self._read_json(config_path) or {}
-            now = datetime.now().isoformat()
+            now = utc_iso()
             return self._write_json(
                 config_path,
                 {
@@ -435,7 +484,7 @@ class RepositoryMetadata:
 
     def get_job(self, job_name: str) -> dict[str, Any] | None:
         """Get job configuration from repository."""
-        job_dir = self.metadata_dir / "jobs" / self._safe_filename(job_name)
+        job_dir = self._job_dir(job_name)
         return self._read_json(job_dir / "config.json")
 
     def list_jobs(self) -> list[dict[str, Any]]:
@@ -488,15 +537,15 @@ class RepositoryMetadata:
         """
         self._ensure_dirs()
 
-        runs_dir = self.metadata_dir / "jobs" / self._safe_filename(job_name) / "runs"
+        runs_dir = self._job_dir(job_name) / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
 
-        run_path = runs_dir / f"{self._safe_filename(run_id)}.json"
+        run_path = runs_dir / f"{get_job_subfolder(run_id)}.json"
 
         run_data["run_id"] = run_id
         run_data["job_name"] = job_name
         run_data["schema_version"] = "2"
-        run_data["recorded_at"] = datetime.now().isoformat()
+        run_data["recorded_at"] = utc_iso()
 
         return self._write_json(run_path, run_data)
 
@@ -510,7 +559,7 @@ class RepositoryMetadata:
         Returns:
             List of run records, most recent first
         """
-        runs_dir = self.metadata_dir / "jobs" / self._safe_filename(job_name) / "runs"
+        runs_dir = self._job_dir(job_name) / "runs"
         if not runs_dir.exists():
             return []
 
@@ -521,10 +570,11 @@ class RepositoryMetadata:
             if run_data:
                 runs.append(run_data)
 
-        # Sort by started_at timestamp (falling back to recorded_at, then empty string)
-        # This ensures correct chronological order regardless of file modification time
+        # Sort by parsed started_at (falling back to recorded_at). Parsing rather than
+        # comparing strings is what keeps a repository written by two machines - one
+        # with old naive stamps, one with UTC-Z - in the right order.
         runs.sort(
-            key=lambda r: r.get("started_at") or r.get("recorded_at") or "",
+            key=lambda r: timestamp_key(r.get("started_at") or r.get("recorded_at")),
             reverse=True
         )
 
@@ -551,7 +601,7 @@ class RepositoryMetadata:
 
         snapshot_data["snapshot_id"] = snapshot_id
         snapshot_data["schema_version"] = "2"
-        snapshot_data["recorded_at"] = datetime.now().isoformat()
+        snapshot_data["recorded_at"] = utc_iso()
 
         return self._write_json(snapshot_path, snapshot_data)
 
@@ -578,7 +628,7 @@ class RepositoryMetadata:
 
         # Sort by time, newest first
         snapshots.sort(
-            key=lambda s: s.get("time") or s.get("recorded_at") or "",
+            key=lambda s: timestamp_key(s.get("time") or s.get("recorded_at")),
             reverse=True
         )
 
@@ -739,10 +789,21 @@ class RepositoryMetadata:
             result["metadata"] = root_metadata
         return result
 
+    def _job_dir(self, job_name: str) -> Path:
+        """The sidecar directory for one job - one name for config.json and runs/.
+
+        Writers and readers both use core.paths.get_job_subfolder, the same name the
+        serverless sidecar uses, so a job can never end up split across two spellings.
+        A directory written by pre-0.9 code (which did not strip control characters)
+        is still used when it is the one that exists.
+        """
+        jobs = self.metadata_dir / "jobs"
+        canonical = jobs / get_job_subfolder(job_name)
+        legacy = jobs / legacy_job_subfolder(job_name)
+        if legacy != canonical and not canonical.exists() and legacy.exists():
+            return legacy
+        return canonical
+
     def _safe_filename(self, name: str) -> str:
-        """Convert a name to a safe filename."""
-        # Replace problematic characters
-        safe = name.replace("/", "_").replace("\\", "_").replace(":", "_")
-        safe = safe.replace("<", "_").replace(">", "_").replace("|", "_")
-        safe = safe.replace("?", "_").replace("*", "_").replace('"', "_")
-        return safe
+        """Deprecated: kept for callers outside this module. Use get_job_subfolder."""
+        return get_job_subfolder(name)

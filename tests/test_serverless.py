@@ -1,4 +1,5 @@
 import os
+import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,39 @@ from backer.backends.kopia import KopiaBackend
 from backer.cli import main
 from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, RetentionConfig, SourceConfig
 from backer.core.job import JobRun, JobStatus
+
+
+def _mock_smb_session(
+    monkeypatch,
+    order: list[str],
+    *,
+    mount_point: Path | None = None,
+    serverless_session_created: bool = True,
+) -> None:
+    if sys.platform == "win32":
+
+        class Manager:
+            serverless_session_created = serverless_session_created
+
+            def connect_serverless(self, *_args, **_kwargs) -> bool:
+                order.append("connect")
+                return True
+
+            def disconnect_serverless(self, *_args) -> None:
+                order.append("disconnect")
+
+        monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    else:
+
+        @contextmanager
+        def smb_mount(*_args):
+            order.append("connect")
+            try:
+                yield mount_point or Path("/tmp/mounted")
+            finally:
+                order.append("disconnect")
+
+        monkeypatch.setattr("backer.core.mounts.smb_mount_context", smb_mount)
 
 
 def test_probe_distinguishes_absent_unreachable_and_wrong_passphrase(monkeypatch) -> None:
@@ -34,22 +68,41 @@ def test_probe_distinguishes_absent_unreachable_and_wrong_passphrase(monkeypatch
     assert backend.repository_probe("wrong")[0] == "wrong_passphrase"
 
 
-def test_serverless_connect_resets_connection_and_never_persists_credentials(monkeypatch) -> None:
+def test_serverless_connect_resets_connection_and_never_persists_credentials(monkeypatch, tmp_path: Path) -> None:
     backend = KopiaBackend({"repository_password": "secret"})
     calls = []
     monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+    monkeypatch.setattr(
+        backend,
+        "_repo_env",
+        lambda _path: {"KOPIA_CACHE_DIRECTORY": str(tmp_path)},
+    )
 
-    def run(command, **_):
+    def run(command, **kwargs):
         calls.append(command)
-        if command[1:3] == ["repository", "status"]:
-            return CompletedProcess(command, 0, '{"uniqueIDHex":"abc"}', "")
+        if command[1:3] == ["repository", "connect"]:
+            (tmp_path / "kopia.repository").write_text('{"uniqueID":"q80="}')
+            assert kwargs["timeout"] == 300
         return CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
-    assert backend.repository_probe("repo") == ("present", "abc")
+    assert backend.repository_probe("repo") == ("present", "abcd")
     assert calls[0][1:3] == ["repository", "disconnect"]
     assert "--no-persist-credentials" in calls[1]
+    assert all(call[1:3] != ["repository", "status"] for call in calls)
     assert all("--use-credential-manager" not in call for call in calls)
+
+
+def test_probe_never_trusts_a_stale_cached_repository_id(monkeypatch, tmp_path: Path) -> None:
+    backend = KopiaBackend({"repository_password": "secret"})
+    cache = tmp_path / "kopia.repository"
+    cache.write_text('{"uniqueID":"q80="}', encoding="utf-8")
+    monkeypatch.setattr(backend, "_repo_env", lambda _path: {"KOPIA_CACHE_DIRECTORY": str(tmp_path)})
+    monkeypatch.setattr(backend, "_connect_repo", lambda _path: (True, "Connected"))
+    monkeypatch.setattr(backend, "_disconnect_repo", lambda _path: None)
+
+    assert backend.repository_probe("repo")[0] == "unreachable"
+    assert not cache.exists()
 
 
 def test_init_resets_and_disconnects_even_after_create_failure(monkeypatch, tmp_path: Path) -> None:
@@ -72,17 +125,14 @@ def test_init_resets_and_disconnects_even_after_create_failure(monkeypatch, tmp_
     assert calls[-1][1:3] == ["repository", "disconnect"]
 
 
-@pytest.mark.parametrize("failure_at", ["connect", "status"])
-def test_probe_preserves_kopia_error_text(monkeypatch, failure_at: str) -> None:
+def test_probe_preserves_kopia_error_text(monkeypatch) -> None:
     backend = KopiaBackend({"repository_password": "secret"})
     monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
 
     def run(command, **_):
         if command[1:3] == ["repository", "disconnect"]:
             return CompletedProcess(command, 0, "", "")
-        if failure_at == "connect" or command[1:3] == ["repository", "status"]:
-            return CompletedProcess(command, 1, "", "cannot access storage path: offline\n")
-        return CompletedProcess(command, 0, "", "")
+        return CompletedProcess(command, 1, "", "cannot access storage path: offline\n")
 
     monkeypatch.setattr("backer.backends.kopia.subprocess.run", run)
 
@@ -108,6 +158,61 @@ def test_repo_attach_refuses_absent_without_create(monkeypatch, tmp_path: Path) 
     assert "nothing" in result.output.lower()
 
 
+def test_repo_init_onto_existing_repository_says_it_already_exists(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: ("present", "abc", ""))
+    (tmp_path / "repo").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin", "--headless"],
+        input="secret\n",
+    )
+
+    assert result.exit_code != 0
+    assert "already exists at this location" in result.output
+
+
+def test_repo_init_onto_existing_repository_with_wrong_passphrase_is_explained(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        "backer.serverless.repositories.probe",
+        lambda *_: ("wrong_passphrase", None, "invalid repository password"),
+    )
+    (tmp_path / "repo").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin", "--headless"],
+        input="wrong\n",
+    )
+
+    assert result.exit_code != 0
+    assert "passphrase entered does not open it" in result.output
+    assert "invalid repository password" not in result.output
+
+
+def test_repo_attach_with_wrong_passphrase_is_explained(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        "backer.serverless.repositories.probe",
+        lambda *_: ("wrong_passphrase", None, "invalid repository password"),
+    )
+    (tmp_path / "repo").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--attach", "--path", str(tmp_path / "repo"), "--passphrase-stdin", "--headless"],
+        input="wrong\n",
+    )
+
+    assert result.exit_code != 0
+    assert "passphrase entered does not open it" in result.output
+
+
 def test_repo_init_stores_only_verified_passphrase(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
@@ -127,6 +232,64 @@ def test_repo_init_stores_only_verified_passphrase(monkeypatch, tmp_path: Path) 
     saved = (tmp_path / "config.yaml").read_text()
     assert "secret" not in saved
     assert "unique_id: unique" in saved
+
+
+def test_repo_init_creates_the_missing_repository_folder(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    states = iter([("absent", None, ""), ("present", "unique", "")])
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: next(states))
+    monkeypatch.setattr("backer.serverless.repositories.create", lambda *_: (True, ""))
+    monkeypatch.setattr("backer.serverless.repositories.set_maintenance_owner", lambda *_: (True, ""))
+    monkeypatch.setattr("backer.serverless.repositories.keystore.put", lambda *args, **_: "file")
+    target = tmp_path / "share" / "nested" / "repo"
+    (tmp_path / "share").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--init", "--path", str(target), "--passphrase-stdin", "--headless"],
+        input="secret\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert target.is_dir()
+
+
+def test_repo_init_reports_a_denied_repository_folder_plainly(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+
+    def deny(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("backer.serverless.repositories.os.makedirs", deny)
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--init", "--path", str(tmp_path / "repo"), "--passphrase-stdin", "--headless"],
+        input="secret\n",
+    )
+
+    assert result.exit_code != 0
+    assert "denied creating the repository folder" in result.output
+    assert "write access" in result.output
+
+
+def test_repo_attach_never_creates_the_missing_folder(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BACKER_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: ("unreachable", None, "cannot access"))
+    target = tmp_path / "missing" / "repo"
+
+    result = CliRunner().invoke(
+        main,
+        ["repo", "add", "Home", "--attach", "--path", str(target), "--passphrase-stdin", "--headless"],
+        input="secret\n",
+    )
+
+    assert result.exit_code != 0
+    assert not target.exists()
+    assert not target.parent.exists()
 
 
 def test_repo_add_requires_headless_for_file_keystore(monkeypatch, tmp_path: Path) -> None:
@@ -274,8 +437,7 @@ def test_local_job_create_refuses_duplicate_source(monkeypatch, tmp_path: Path) 
     )
 
     assert result.exit_code != 0
-    assert "already owned" in result.output
-    assert "first" in result.output
+    assert "Source '/data' is already owned by job 'first'" in result.output
 
 
 def test_local_attempt_is_atomic_and_utc(tmp_path: Path, monkeypatch) -> None:
@@ -343,16 +505,7 @@ def test_smb_preflight_authenticates_before_probe_and_records_failure(monkeypatc
 
     monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
     order: list[str] = []
-
-    class Manager:
-        def connect_serverless(self, *_args, **_kwargs) -> bool:
-            order.append("connect")
-            return True
-
-        def disconnect_serverless(self, *_args) -> None:
-            order.append("disconnect")
-
-    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    _mock_smb_session(monkeypatch, order, mount_point=tmp_path / "mounted")
     monkeypatch.setattr("backer.serverless.runs.keystore.get", lambda key, **_: "pass" if key == "pass" else "smb")
 
     def offline(*_args):
@@ -472,18 +625,7 @@ def test_smb_repository_add_authenticates_before_every_probe(
     from backer.serverless.repositories import add_repository
 
     order: list[str] = []
-
-    class Manager:
-        serverless_session_created = True
-
-        def connect_serverless(self, *_args, **_kwargs) -> bool:
-            order.append("connect")
-            return True
-
-        def disconnect_serverless(self, *_args) -> None:
-            order.append("disconnect")
-
-    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    _mock_smb_session(monkeypatch, order)
     monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
     monkeypatch.setattr("backer.serverless.repositories.keystore.put", lambda *_args, **_kwargs: "file")
 
@@ -543,17 +685,7 @@ def test_new_repository_sets_maintenance_owner_before_persisting_secrets(
         region="us-east-1" if repo_type == "s3" else None,
     )
     if repo_type == "smb":
-
-        class Manager:
-            serverless_session_created = True
-
-            def connect_serverless(self, *_args, **_kwargs):
-                return True
-
-            def disconnect_serverless(self, *_args):
-                pass
-
-        monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+        _mock_smb_session(monkeypatch, [])
 
     add_repository(
         BackerConfig(agent_id="agent"),
@@ -604,18 +736,7 @@ def test_smb_repository_add_disconnects_after_probe_failure(monkeypatch, tmp_pat
     from backer.serverless.repositories import add_repository
 
     order: list[str] = []
-
-    class Manager:
-        serverless_session_created = True
-
-        def connect_serverless(self, *_args, **_kwargs) -> bool:
-            order.append("connect")
-            return True
-
-        def disconnect_serverless(self, *_args) -> None:
-            order.append("disconnect")
-
-    monkeypatch.setattr("backer.core.mounts.SMBConnectionManager", Manager)
+    _mock_smb_session(monkeypatch, order)
     monkeypatch.setattr("backer.serverless.repositories.file_fallback_required", lambda: False)
     monkeypatch.setattr(
         "backer.serverless.repositories.probe", lambda *_args: order.append("probe") or ("unreachable", None, "offline")
@@ -640,7 +761,9 @@ def test_smb_repository_add_disconnects_after_probe_failure(monkeypatch, tmp_pat
 
 def test_smb_attach_reuses_a_verified_windows_connection_without_tearing_it_down(monkeypatch, tmp_path: Path) -> None:
     from backer.core.config import BackerConfig, RepositoryConfig
-    from backer.serverless.repositories import add_repository
+    from backer.serverless import repositories
+
+    monkeypatch.setattr(repositories.sys, "platform", "win32", raising=False)
 
     order = []
 
@@ -665,7 +788,7 @@ def test_smb_attach_reuses_a_verified_windows_connection_without_tearing_it_down
     )
 
     config = BackerConfig()
-    repository_id, _ = add_repository(
+    repository_id, _ = repositories.add_repository(
         config,
         tmp_path / "config.yaml",
         "NAS",
@@ -833,9 +956,43 @@ def test_windows_smb_repository_context_authenticates_before_yield_and_only_disc
     assert order == expected
 
 
+def test_smb_operation_context_always_mounts_and_never_selects_rclone(monkeypatch, tmp_path: Path) -> None:
+    """SMB has one data path: a mounted filesystem. The context yields a local mounted
+    record (no rclone provider bypass, no unchanged UNC record), so this decision cannot
+    silently regress."""
+    from backer.serverless import repositories
+
+    monkeypatch.setattr(repositories.sys, "platform", "linux", raising=False)
+
+    @contextmanager
+    def mount(*_args):
+        yield tmp_path / "mounted"
+
+    monkeypatch.setattr("backer.core.mounts.smb_mount_context", mount)
+    record = RepositoryConfig(name="NAS", type="smb", server="nas", share="share", username="user", path="sub/dir")
+
+    with repositories.repository_operation_context(record, "smb-pass") as operation_record:
+        # Mounted: Kopia sees a local path under the mount, not the raw UNC SMB record.
+        assert operation_record.type == "local"
+        assert operation_record.path == str(tmp_path / "mounted" / "sub" / "dir")
+
+
+def test_smb_mount_context_refuses_without_root(monkeypatch) -> None:
+    from backer.core import mounts
+
+    monkeypatch.setattr(mounts.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(mounts, "find_existing_cifs_mount", lambda *_: None)
+    monkeypatch.setattr(mounts, "gvfs_available", lambda: False)
+    monkeypatch.setattr(mounts, "sudo_available", lambda: False)
+    with pytest.raises(RuntimeError, match="root privileges"):
+        with mounts.smb_mount_context("nas", "share", "user", "secret", cifs_check=lambda: True):
+            pass
+
+
 def test_smb_mount_context_fails_when_unmount_fails_and_removes_credentials(monkeypatch, tmp_path: Path) -> None:
     from backer.core import mounts
 
+    monkeypatch.setattr(mounts.os, "geteuid", lambda: 0, raising=False)
     mount_point = tmp_path / "mount"
     credentials = tmp_path / "credentials"
     monkeypatch.setattr(mounts.tempfile, "mkdtemp", lambda **_: str(mount_point))
@@ -856,9 +1013,36 @@ def test_smb_mount_context_fails_when_unmount_fails_and_removes_credentials(monk
     assert not credentials.exists()
 
 
+def test_smb_mount_context_uses_passwordless_sudo_kernel_mount_for_nonroot(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    monkeypatch.setattr(mounts.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(mounts.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(mounts.os, "getgid", lambda: 1000, raising=False)
+    monkeypatch.setattr(mounts, "find_existing_cifs_mount", lambda *_: None)
+    monkeypatch.setattr(mounts, "sudo_available", lambda: True)
+    monkeypatch.setattr(mounts, "gvfs_available", lambda: True)
+    commands: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(mounts.subprocess, "run", run)
+    with mounts.smb_mount_context("nas", "share", "user", "secret", cifs_check=lambda: True) as mount_point:
+        assert mount_point.exists()
+
+    assert commands[0][:3] == ["sudo", "-n", "mount"]
+    assert commands[1][:3] == ["sudo", "-n", "umount"]
+    assert "uid=1000" in commands[0][-1] and "gid=1000" in commands[0][-1]
+    assert all("secret" not in " ".join(command) for command in commands)
+
+
 def test_system_run_refuses_interactive_only_smb_repository(monkeypatch, tmp_path: Path) -> None:
     from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
     from backer.serverless import runs
+
+    monkeypatch.setattr(runs.sys, "platform", "win32", raising=False)
 
     config = BackerConfig(
         repositories={
@@ -881,3 +1065,280 @@ def test_system_run_refuses_interactive_only_smb_repository(monkeypatch, tmp_pat
 
     assert not result["success"]
     assert "interactive-only" in result["errors"][0]
+
+
+def _gvfs_env(monkeypatch, tmp_path: Path) -> Path:
+    """Point the gvfs helpers at a fake FUSE directory with a session bus present."""
+    from backer.core import mounts
+
+    runtime = tmp_path / "runtime"
+    gvfs = runtime / "gvfs"
+    gvfs.mkdir(parents=True)
+    (runtime / "bus").touch()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    monkeypatch.setattr(mounts.shutil, "which", lambda name: "/usr/bin/gio" if name == "gio" else None)
+    monkeypatch.setattr(mounts.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(mounts, "find_existing_cifs_mount", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mounts, "sudo_available", lambda: False)
+    return gvfs
+
+
+def test_find_existing_cifs_mount_matches_case_and_octal_escapes(tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    proc_mounts = tmp_path / "mounts"
+    proc_mounts.write_text(
+        "tmpfs /tmp tmpfs rw 0 0\n"
+        "//OtherNas/share /mnt/other cifs rw 0 0\n"
+        "//NAS/Backups /mnt/my\\040share cifs rw,username=user 0 0\n",
+        encoding="utf-8",
+    )
+
+    assert mounts.find_existing_cifs_mount("nas", "backups", str(proc_mounts)) == Path("/mnt/my share")
+    assert mounts.find_existing_cifs_mount("nas", "missing", str(proc_mounts)) is None
+
+
+def test_smb_mount_context_reuses_existing_mount_without_unmounting(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    existing = tmp_path / "already"
+    existing.mkdir()
+    monkeypatch.setattr(mounts, "find_existing_cifs_mount", lambda *_args, **_kwargs: existing)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(mounts.subprocess, "run", lambda command, **_: calls.append(command))
+
+    with mounts.smb_mount_context("nas", "share", "user", "secret", cifs_check=lambda: True) as mount_point:
+        assert mount_point == existing
+
+    assert calls == []
+    assert existing.exists()
+
+
+def test_smb_mount_context_mounts_through_gvfs_when_not_root(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    gvfs = _gvfs_env(monkeypatch, tmp_path)
+    entry = gvfs / "smb-share:domain=WORKGROUP,server=nas,share=backups"
+    commands: list[list[str]] = []
+    stdin: list[str] = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        stdin.append(kwargs["input"])
+        entry.mkdir()
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(mounts.subprocess, "run", run)
+
+    with mounts.smb_mount_context("NAS", "Backups", "user", "secret", "corp", cifs_check=lambda: False) as path:
+        assert path == entry
+
+    assert commands == [["gio", "mount", "smb://NAS/Backups"]]
+    assert stdin == ["user\ncorp\nsecret\n"]
+    assert "secret" not in " ".join(commands[0])
+    # Session-scoped: the gvfs mount is left in place, exactly like a file manager.
+    assert entry.exists()
+
+
+def test_gvfs_mount_writes_empty_domain_line_and_reuses_existing_entry(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    gvfs = _gvfs_env(monkeypatch, tmp_path)
+    stdin: list[str] = []
+
+    def run(command, **kwargs):
+        stdin.append(kwargs["input"])
+        (gvfs / "smb-share:server=nas,share=backups").mkdir()
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(mounts.subprocess, "run", run)
+    assert mounts.gvfs_mount("nas", "backups", "user", "secret", None).name.endswith("share=backups")
+    assert stdin == ["user\n\nsecret\n"]
+
+    # Already mounted: no second gio invocation.
+    monkeypatch.setattr(mounts.subprocess, "run", lambda *a, **k: pytest.fail("gio ran for a mounted share"))
+    assert mounts.gvfs_mount("NAS", "BACKUPS", "user", "secret", None).name.endswith("share=backups")
+
+
+def test_gvfs_mount_failure_ignores_exit_code_and_hides_password(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    _gvfs_env(monkeypatch, tmp_path)
+
+    def run(command, **_kwargs):
+        # gio exits 0 even though authentication failed and nothing was mounted.
+        return CompletedProcess(command, 0, "Authentication Required\nUser: Password: secret", "")
+
+    monkeypatch.setattr(mounts.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="Login failed - invalid username or password") as error:
+        with mounts.smb_mount_context("nas", "backups", "user", "secret", cifs_check=lambda: True):
+            pytest.fail("a failed gvfs mount must not yield a path")
+    assert "secret" not in str(error.value)
+
+
+def test_smb_mount_context_refuses_when_gio_or_bus_missing(monkeypatch, tmp_path: Path) -> None:
+    from backer.core import mounts
+
+    _gvfs_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(mounts.shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="Install gvfs"):
+        with mounts.smb_mount_context("nas", "backups", "user", "secret", cifs_check=lambda: True):
+            pytest.fail("no transport available")
+
+    monkeypatch.setattr(mounts.shutil, "which", lambda name: "/usr/bin/gio" if name == "gio" else None)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "no-bus"))
+    with pytest.raises(RuntimeError, match="Install gvfs"):
+        with mounts.smb_mount_context("nas", "backups", "user", "secret", cifs_check=lambda: True):
+            pytest.fail("no session bus, no gvfs")
+
+
+def _local_run_config(tmp_path: Path) -> BackerConfig:
+    return BackerConfig(
+        agent_id="agent-one",
+        repositories={
+            "repo": RepositoryConfig(name="Repo", type="local", path=str(tmp_path / "repo"), passphrase_ref="pass")
+        },
+        jobs={"nightly": JobConfig(repository="repo", source=SourceConfig(path=str(tmp_path / "src")))},
+    )
+
+
+def _stub_preflight(monkeypatch, status: str = "present", unique_id: str = "uid", message: str = "") -> None:
+    monkeypatch.setattr("backer.core.keystore.get", lambda *_args, **_kwargs: "repo-pass")
+    monkeypatch.setattr("backer.serverless.runs.probe", lambda *_args: (status, unique_id, message))
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_local_run_record_carries_the_backend_result(monkeypatch, tmp_path: Path, success: bool) -> None:
+    """bytes/files/errors must live in the local record; the GUI and job history read nothing else."""
+    import json
+
+    from backer.serverless.runs import run_local_job
+    from backer.serverless.store import read_runs
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    _stub_preflight(monkeypatch)
+    monkeypatch.setattr(
+        "backer.serverless.runs.run_backup",
+        lambda *_args, **_kwargs: {
+            "run_id": "ignored",
+            "job_name": "nightly",
+            "success": success,
+            "bytes_transferred": 75012 if success else 0,
+            "files_transferred": 5 if success else 0,
+            "errors": [] if success else ["failed to prepare source: no such file or directory"],
+            "output": "kopia output",
+        },
+    )
+
+    report = run_local_job(_local_run_config(tmp_path), "nightly")
+    assert report["success"] is success
+    run = read_runs(tmp_path, "nightly", 1)[0]
+    assert run.result is not None
+    assert run.result.success is success
+    assert run.result.bytes_transferred == (75012 if success else 0)
+    assert run.result.files_transferred == (5 if success else 0)
+    assert run.result.duration_seconds >= 0
+    assert run.result.errors == ([] if success else ["failed to prepare source: no such file or directory"])
+    stored = json.loads((tmp_path / "last_attempt" / "nightly.json").read_text(encoding="utf-8"))["result"]
+    assert stored["bytes_transferred"] == (75012 if success else 0)
+
+
+def test_progress_never_claims_more_than_the_estimate(monkeypatch, tmp_path: Path) -> None:
+    """total_bytes is the previous snapshot's size, so a grown source must not report 95% of a lie."""
+    import json
+
+    from backer.serverless import runs
+
+    runs._write_progress(tmp_path, "run-1", bytes_processed=4274834636, total_bytes=800000000, progress_percent=95)
+    grown = json.loads((tmp_path / "progress" / "run-1.json").read_text(encoding="utf-8"))
+    assert grown["total_bytes"] is None and grown["progress_percent"] is None
+
+    runs._write_progress(tmp_path, "run-1", bytes_processed=400000000, total_bytes=800000000, progress_percent=100)
+    within = json.loads((tmp_path / "progress" / "run-1.json").read_text(encoding="utf-8"))
+    assert within["total_bytes"] == 800000000 and within["progress_percent"] == 99
+
+
+def test_unique_id_mismatch_names_the_repointed_repository(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless.runs import run_local_job
+    from backer.serverless.store import read_runs
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    _stub_preflight(monkeypatch, unique_id="found-id")
+    config = _local_run_config(tmp_path)
+    config.repositories["repo"].unique_id = "expected-id"
+
+    report = run_local_job(config, "nightly")
+    message = "; ".join(report["errors"])
+    assert "is not the one job 'nightly' was configured against" in message
+    assert "expected-id" in message and "found-id" in message
+    assert str(tmp_path / "repo") in message
+    assert read_runs(tmp_path, "nightly", 1)[0].error_stage == "prepare_destination"
+    assert not (tmp_path / "repo").exists()
+
+
+def test_preflight_failure_reaches_a_reachable_sidecar(monkeypatch, tmp_path: Path) -> None:
+    """A wrong passphrase must still land in the sidecar a replacement machine reads."""
+    from backer.core.repo_metadata import RepositoryMetadata
+    from backer.serverless.runs import run_local_job
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    RepositoryMetadata(tmp_path / "repo").initialize()
+    _stub_preflight(monkeypatch, status="wrong_passphrase", unique_id="", message="invalid repository password")
+
+    report = run_local_job(_local_run_config(tmp_path), "nightly")
+    assert not report["success"]
+    records = RepositoryMetadata(tmp_path / "repo").get_job_runs("nightly")
+    assert len(records) == 1
+    assert records[0]["status"] == "failed"
+    assert records[0]["error_stage"] == "connect"
+    assert records[0]["error"] == "invalid repository password"
+    assert records[0]["started_at"].endswith("Z")
+
+
+def test_preflight_failure_never_creates_a_sidecar_in_an_unknown_destination(monkeypatch, tmp_path: Path) -> None:
+    from backer.serverless.runs import run_local_job
+
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path))
+    _stub_preflight(monkeypatch, status="absent", unique_id="", message="repository not found")
+
+    assert not run_local_job(_local_run_config(tmp_path), "nightly")["success"]
+    assert not (tmp_path / "repo").exists()
+
+
+def test_live_log_frame_writes_readable_lines_while_the_run_proceeds(tmp_path: Path) -> None:
+    from backer.serverless import runs
+
+    state: dict[str, object] = {"bytes": 0, "files": None}
+    # First frame writes; a tiny follow-up frame is throttled; a big jump writes again.
+    runs._live_log_frame(tmp_path, "r1", {"hashed_bytes": 100 * 1024 * 1024, "hashed_files": 3}, state)
+    runs._live_log_frame(tmp_path, "r1", {"hashed_bytes": 101 * 1024 * 1024, "hashed_files": 3}, state)
+    runs._live_log_frame(tmp_path, "r1", {"hashed_bytes": 300 * 1024 * 1024, "hashed_files": 9}, state)
+
+    lines = (tmp_path / "logs" / "r1.log").read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 2
+    assert "3 files" in lines[0] and "MiB" in lines[0]
+    assert "9 files" in lines[1]
+
+
+def test_run_log_keeps_the_tail_and_rotates_per_job(tmp_path: Path) -> None:
+    """Kopia puts the cause at the end of the output, and one busy job must not evict another's logs."""
+    from backer.serverless import runs
+    from backer.serverless.store import append_run
+
+    runs._write_log(tmp_path, "run-long", "nightly", "HEAD" + ("x" * 20000) + "the real kopia error", [])
+    written = (tmp_path / "logs" / "run-long.log").read_text(encoding="utf-8")
+    assert written.startswith("HEAD")
+    assert written.endswith("the real kopia error")
+    assert len(written) < 6000
+
+    for index in range(25):
+        run_id = f"run-{index:02d}"
+        append_run(tmp_path, JobRun("nightly", run_id, JobStatus.SUCCESS, datetime(2026, 9, 1, tzinfo=UTC)))
+        runs._write_log(tmp_path, run_id, "nightly", "output", [])
+    runs._write_log(tmp_path, "other-job-run", "weekly", "output", [])
+    runs._write_log(tmp_path, "run-25", "nightly", "output", [])
+
+    logs = {path.stem for path in (tmp_path / "logs").glob("*.log")}
+    assert "other-job-run" in logs
+    assert len([name for name in logs if name.startswith("run-")]) == runs.LOGS_KEPT_PER_JOB + 1

@@ -3,10 +3,11 @@
 import os
 import signal
 import subprocess
+import tarfile
 import threading
 import time
 from datetime import datetime
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -39,7 +40,7 @@ class TestBackendRegistry:
     def test_available_backends(self) -> None:
         """Test listing available backends."""
         backends = BackendRegistry.available_backends()
-        assert set(backends) == {BackendType.KOPIA, BackendType.PROXY}
+        assert set(backends) == {BackendType.KOPIA, BackendType.FILES, BackendType.PROXY}
 
 
 class TestProxyBackend:
@@ -74,6 +75,63 @@ class TestProxyBackend:
             ["No retention policy configured - refusing to prune. Nothing was deleted."],
             ["Proxy backend integrity checks are not supported by agent proxy capabilities"],
         ]
+
+    def test_proxy_restore_url_encodes_include_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = ProxyBackend({"location": "proxy://backer.example.com/repo/repo-123"})
+        archive = BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            item = tarfile.TarInfo("restored.txt")
+            item.size = 2
+            tar.addfile(item, BytesIO(b"ok"))
+        requested: list[str] = []
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def iter_content(self, chunk_size):
+                yield archive.getvalue()
+
+        def fake_request(_method, path, **_kwargs):
+            requested.append(path)
+            return Response()
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        result = backend.restore(
+            BackupDestination("proxy://backer.example.com/repo/repo-123/Agents/photos"),
+            tmp_path / "restore",
+            snapshot="snapshot-1",
+            include_path="albums & 2026/cat",
+        )
+
+        assert result.success is True
+        assert requested == ["/restore?snapshot=snapshot-1&include=albums+%26+2026%2Fcat"]
+
+    def test_proxy_restore_refuses_path_traversal_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ProxyBackend({"location": "proxy://backer.example.com/repo/repo-123"})
+        archive = BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            item = tarfile.TarInfo("../outside.txt")
+            item.size = 3
+            tar.addfile(item, BytesIO(b"bad"))
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def iter_content(self, chunk_size):
+                yield archive.getvalue()
+
+        monkeypatch.setattr(backend, "_request", lambda *_args, **_kwargs: Response())
+        result = backend.restore(
+            BackupDestination("proxy://backer.example.com/repo/repo-123/Agents/photos"), tmp_path / "restore"
+        )
+
+        assert result.success is False
+        assert "path traversal" in result.errors[0]
+        assert not (tmp_path / "outside.txt").exists()
 
 
 class TestBackendResult:
@@ -168,7 +226,31 @@ class TestKopiaBackend:
             "cached_bytes": 8 * 1024 * 1024,
             "hashed_files": 60,
             "cached_files": 4,
+            "uploaded_bytes": int(713.2 * 1024 * 1024),
         }
+
+    def test_snapshot_progress_captures_uploaded_bytes(self) -> None:
+        """During the upload phase the hashed counters plateau; 'uploaded' is what keeps moving."""
+        event = _parse_snapshot_progress(
+            " * 0 hashing, 60 hashed (720 MB), 4 cached (8 MB), uploaded 512.0 MB, estimating...",
+            800 * 1024 * 1024,
+        )
+        assert event is not None
+        assert event["uploaded_bytes"] == 512 * 1024 * 1024
+
+        no_upload = _parse_snapshot_progress(" 60 hashed (720 MB), 4 cached (8 MB)", None)
+        assert no_upload is not None
+        assert no_upload["uploaded_bytes"] == 0
+
+    def test_estimate_source_size_sums_the_tree(self, tmp_path) -> None:
+        """A first backup has no prior snapshot, so the source's own size is the denominator."""
+        (tmp_path / "a.bin").write_bytes(b"x" * 1000)
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.bin").write_bytes(b"y" * 2000)
+
+        assert KopiaBackend._estimate_source_size(str(tmp_path)) == 3000
+        assert KopiaBackend._estimate_source_size(str(tmp_path / "missing")) is None
 
     def test_snapshot_progress_without_previous_snapshot_stays_indeterminate(self) -> None:
         """Removing the prior snapshot size must not manufacture a denominator."""
@@ -184,6 +266,7 @@ class TestKopiaBackend:
             "cached_bytes": 0,
             "hashed_files": 60,
             "cached_files": 0,
+            "uploaded_bytes": int(713.2 * 1024 * 1024),
         }
 
     def test_restore_progress_uses_kopias_processed_denominator(self) -> None:
@@ -248,6 +331,7 @@ class TestKopiaBackend:
                 "cached_bytes": 0,
                 "hashed_files": 1,
                 "cached_files": 0,
+                "uploaded_bytes": 0,
             }
         ]
 
@@ -375,10 +459,14 @@ class TestKopiaBackend:
         for excludes in (["*.one"], ["*.two"], []):
             assert backend.backup(BackupSource(tmp_path, excludes=excludes), BackupDestination("repo")).success
 
+        # kopia 0.23.1 applies --clear-ignore after --add-ignore inside one `policy set`,
+        # so the clear and the adds must stay separate invocations.
         policies = [call for call in calls if call[1:3] == ["policy", "set"]]
         assert policies == [
-            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore", "--add-ignore", "*.one"],
-            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore", "--add-ignore", "*.two"],
+            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore"],
+            ["kopia", "policy", "set", str(tmp_path), "--add-ignore", "*.one"],
+            ["kopia", "policy", "set", str(tmp_path), "--clear-ignore"],
+            ["kopia", "policy", "set", str(tmp_path), "--add-ignore", "*.two"],
             ["kopia", "policy", "set", str(tmp_path), "--clear-ignore"],
         ]
         assert progress_calls == [
@@ -440,6 +528,12 @@ class TestKopiaBackend:
         repo_type, args = backend._get_repo_type("sftp://server/path")
         assert repo_type == "sftp"
         assert "--path" in args
+
+    def test_get_repo_type_mounted_smb_path_is_filesystem(self) -> None:
+        """An SMB share is reached only as a mounted path, so it resolves to the filesystem branch."""
+        backend = KopiaBackend()
+        repo_type, args = backend._get_repo_type("/mnt/smb/share")
+        assert repo_type == "filesystem"
 
     def test_get_repo_type_invalid_s3_path(self) -> None:
         """S3 locations require managed S3 configuration."""

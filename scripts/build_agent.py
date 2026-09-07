@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Build script for Backer Windows Agent executable.
+"""Build script for the Backer Windows agent artifacts.
 
 This script:
 1. Downloads Kopia for Windows
-2. Builds GUI and unattended service executables
-3. Creates a zip package with everything needed
+2. Builds the console CLI (backer.exe) and the unattended service executable
+3. Publishes the Avalonia desktop client (backer-desktop.exe)
+4. Creates a zip package with everything needed
 
 Usage:
     python scripts/build_agent.py
 
 Requirements:
     pip install pyinstaller
+    .NET 8 SDK (for the desktop client)
 """
 
 import platform
@@ -27,6 +29,9 @@ DIST_DIR = Path("dist")
 TOOLS_DIR = BUILD_DIR / "tools"
 DIST_TOOLS_DIR = DIST_DIR / "tools"
 VERSION_FILE = BUILD_DIR / "backer-agent-version.txt"
+DESKTOP_PROJECT = Path("desktop") / "Backer.Desktop"
+DESKTOP_PUBLISH_DIR = DIST_DIR / "desktop"
+DESKTOP_EXE = "backer-desktop.exe"
 
 
 def _version_parts(version: str) -> tuple[int, int, int, int]:
@@ -62,8 +67,8 @@ VSVersionInfo(
           StringStruct('CompanyName', 'Backer'),
           StringStruct('FileDescription', 'Backer Agent'),
           StringStruct('FileVersion', '{__version__}'),
-          StringStruct('InternalName', 'backer-agent'),
-          StringStruct('OriginalFilename', 'backer-agent.exe'),
+          StringStruct('InternalName', 'backer'),
+          StringStruct('OriginalFilename', 'backer.exe'),
           StringStruct('ProductName', 'Backer Agent'),
           StringStruct('ProductVersion', '{__version__}')
         ]
@@ -89,8 +94,8 @@ def download_windows_tool(tool: str) -> Path:
 
 
 def build_pyinstaller() -> Path:
-    """Build the PyInstaller executable."""
-    print("Building executable with PyInstaller...")
+    """Build the console CLI executable every mutation goes through."""
+    print("Building backer.exe with PyInstaller...")
 
     write_pyinstaller_version_file()
 
@@ -99,7 +104,33 @@ def build_pyinstaller() -> Path:
         check=True,
     )
 
-    return DIST_DIR / "backer-agent.exe"
+    return DIST_DIR / "backer.exe"
+
+
+def staged_desktop_files() -> list[Path]:
+    """Publish output the installer ships: everything except debug symbols."""
+    return sorted(
+        path for path in DESKTOP_PUBLISH_DIR.iterdir() if path.is_file() and path.suffix != ".pdb"
+    )
+
+
+def build_desktop() -> Path:
+    """Publish the Avalonia desktop client that drives the CLI."""
+    print("Publishing the desktop client with dotnet...")
+
+    subprocess.run(
+        ["dotnet", "publish", str(DESKTOP_PROJECT), "-c", "Release", "-r", "win-x64",
+         "--self-contained", "-p:PublishSingleFile=true",
+         "-p:IncludeNativeLibrariesForSelfExtract=true",
+         "-p:EnableCompressionInSingleFile=true", "-o", str(DESKTOP_PUBLISH_DIR)],
+        check=True,
+    )
+
+    # Native libraries are bundled into the exe, but stage anything else the
+    # publish leaves behind so the installer never ships a partial client.
+    for path in staged_desktop_files():
+        shutil.copy(path, DIST_DIR / path.name)
+    return DIST_DIR / DESKTOP_EXE
 
 
 def build_service_executable() -> Path:
@@ -120,9 +151,11 @@ def create_package() -> Path:
     package_dir.mkdir(parents=True, exist_ok=True)
     DIST_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Copy executable
-    shutil.copy(DIST_DIR / "backer-agent.exe", package_dir / "backer-agent.exe")
+    # Copy executables
+    shutil.copy(DIST_DIR / "backer.exe", package_dir / "backer.exe")
     shutil.copy(DIST_DIR / "backer-agent-service.exe", package_dir / "backer-agent-service.exe")
+    for path in staged_desktop_files():
+        shutil.copy(DIST_DIR / path.name, package_dir / path.name)
 
     # Copy tools if on Windows and they exist
     tools_subdir = package_dir / "tools"
@@ -140,9 +173,11 @@ def create_package() -> Path:
 echo Backer Agent
 echo.
 echo Usage:
-echo   backer-agent.exe register --server http://your-server:8420
-echo   backer-agent.exe start
-echo   backer-agent.exe install
+echo   backer.exe agent register --server http://your-server:8420
+echo   backer.exe agent install
+echo   backer.exe agent start
+echo.
+echo Or launch the desktop client: backer-desktop.exe
 echo.
 pause
 ''')
@@ -155,13 +190,16 @@ pause
 Quick Start:
 1. Open Command Prompt as Administrator
 2. Register with your server:
-   backer-agent.exe register --server http://your-server:8420
+   backer.exe agent register --server http://your-server:8420
 
 3. Install as Windows service:
-   backer-agent.exe install
+   backer.exe agent install
 
 4. Or run manually:
-   backer-agent.exe start
+   backer.exe agent start
+
+Prefer a window? Run backer-desktop.exe - the desktop client reads the same
+configuration and performs every action by calling backer.exe.
 
 The agent will:
 - Connect to your Backer server
@@ -210,6 +248,7 @@ def main():
     # Build
     build_pyinstaller()
     build_service_executable()
+    build_desktop()
 
     # Package
     if platform.system() == "Windows":
@@ -221,7 +260,7 @@ def main():
     else:
         print()
         print("=" * 50)
-        print(f"Build complete: {DIST_DIR / 'backer-agent.exe'}")
+        print(f"Build complete: {DIST_DIR / 'backer.exe'}")
         print("Note: Run on Windows for full package with tools")
         print("=" * 50)
 

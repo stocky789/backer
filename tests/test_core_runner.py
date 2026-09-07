@@ -1,3 +1,4 @@
+import json
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,43 @@ def test_backup_passes_progress_callback_without_inspecting_backend_signature(tm
     runner.run_backup({"job_name": "job", "source_path": str(tmp_path), "destination_path": str(tmp_path / "repo")})
 
     assert len(received) == 1
+
+
+def test_direct_backend_uses_explicit_repository_format(monkeypatch):
+    selected = []
+    monkeypatch.setattr(runner, "get_backend", lambda name, options: selected.append((name, options)) or _Backend())
+
+    runner._backend_for_location("/backup", {"format": "files"})
+
+    assert selected == [("files", {"format": "files"})]
+
+
+def test_files_backend_rejects_object_storage_before_writes():
+    with pytest.raises(RuntimeError, match="do not support S3"):
+        runner._backend_for_location("s3://bucket", {"format": "files"})
+
+
+def test_backup_forwards_include_and_exclude_patterns(tmp_path: Path, monkeypatch):
+    received = []
+
+    class Backend(_Backend):
+        def backup(self, **kwargs):
+            received.append(kwargs["source"])
+            return super().backup(**kwargs)
+
+    monkeypatch.setattr(runner, "get_backend", lambda *_: Backend())
+    runner.run_backup(
+        {
+            "job_name": "job",
+            "source_path": str(tmp_path),
+            "destination_path": str(tmp_path / "repo"),
+            "includes": ["*.txt"],
+            "excludes": ["tmp/*"],
+        }
+    )
+
+    assert received[0].includes == ["*.txt"]
+    assert received[0].excludes == ["tmp/*"]
 
 
 def test_proxy_restore_passes_both_agent_credentials(tmp_path: Path, monkeypatch):
@@ -188,24 +226,8 @@ def test_one_backend_instance_per_run_and_agent_forwards_credentials(tmp_path: P
     ]
 
 
-def test_serverless_metadata_identifies_the_agent_mode(tmp_path: Path, monkeypatch) -> None:
-    saved = []
-
-    class Metadata:
-        def __init__(self, _path):
-            pass
-
-        def is_initialized(self):
-            return True
-
-        def save_agent(self, **kwargs):
-            saved.append(kwargs)
-
-        def save_job_run(self, *_args, **_kwargs):
-            return True
-
+def test_serverless_metadata_identifies_the_agent_mode(tmp_path: Path) -> None:
     result = BackendResult(True, OperationType.BACKUP, datetime.now(), datetime.now())
-    monkeypatch.setattr(runner, "RepositoryMetadata", Metadata)
 
     runner._write_metadata_to_path(
         tmp_path,
@@ -221,6 +243,114 @@ def test_serverless_metadata_identifies_the_agent_mode(tmp_path: Path, monkeypat
         {"serverless": True},
     )
 
-    assert len(saved) == 1
-    assert saved[0]["agent_id"] == "agent"
-    assert saved[0]["agent_data"]["modes"] == ["serverless"]
+    agent = json.loads((tmp_path / ".backer" / "agents" / "agent.json").read_text(encoding="utf-8"))
+    assert agent["agent_id"] == "agent"
+    assert agent["modes"] == ["serverless"]
+
+
+def test_sidecar_records_files_repository_format(tmp_path: Path) -> None:
+    result = BackendResult(True, OperationType.BACKUP, datetime.now(), datetime.now())
+
+    runner._write_metadata_to_path(
+        tmp_path, "nightly", "run", "/data", "files", result, datetime.now(), datetime.now(), "run", "agent"
+    )
+
+    metadata = json.loads((tmp_path / ".backer" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["format"] == "files"
+
+
+def test_sidecar_records_the_cause_not_kopias_progress_banner(tmp_path: Path) -> None:
+    """`error` is what a UI shows; kopia's first error line is its 'Snapshotting ...' banner."""
+    result = BackendResult(
+        False,
+        OperationType.BACKUP,
+        datetime.now(),
+        datetime.now(),
+        errors=[
+            "Snapshotting matt@host:/data ...",
+            "encountered 2 errors:",
+            "failed to prepare source: no such file or directory",
+            "upload error: unsupported source",
+        ],
+        return_code=1,
+    )
+
+    runner._write_metadata_to_path(
+        tmp_path, "nightly", "run", "/data", "kopia", result, datetime.now(), datetime.now(), None, "agent", None
+    )
+
+    record = json.loads((tmp_path / ".backer" / "jobs" / "nightly" / "runs" / "run.json").read_text(encoding="utf-8"))
+    assert record["error"] == (
+        "failed to prepare source: no such file or directory; upload error: unsupported source"
+    )
+    assert record["error_stage"] == "backup"
+
+
+def _fake_s3(stored: dict[str, bytes]):
+    class Sidecar:
+        def __init__(self, *_: object) -> None:
+            pass
+
+        def get(self, key: str) -> bytes | None:
+            return stored.get(key)
+
+        def put_atomic(self, key: str, data: bytes) -> None:
+            stored[key] = data
+
+    return Sidecar
+
+
+def test_s3_and_filesystem_sidecars_write_the_same_documents(tmp_path: Path, monkeypatch) -> None:
+    """One run must produce one document set; the repository type only decides transport."""
+    stored: dict[str, bytes] = {}
+    monkeypatch.setattr("backer.serverless.s3_sidecar.S3Sidecar", _fake_s3(stored))
+    result = BackendResult(True, OperationType.BACKUP, datetime.now(), datetime.now())
+    result.bytes_transferred, result.files_transferred = 12, 3
+    common = {
+        "serverless": True,
+        "run_id": "20260101T000000Z-agent123",
+        "job_name": "nightly",
+        "source_path": "/data",
+        "excludes": ["*.tmp"],
+        "schedule": {"cron": "0 2 * * *"},
+        "retention": {"keep_latest": 3},
+    }
+
+    runner._write_repo_metadata(
+        {**common, "repository_hint": {"type": "local"}},
+        str(tmp_path),
+        "kopia",
+        result,
+        datetime.now(),
+        datetime.now(),
+        "0123456789abcdef",
+        "agent123",
+    )
+    runner._write_repo_metadata(
+        {
+            **common,
+            "repository_hint": {"type": "s3", "bucket": "bucket", "endpoint": "https://s3.example"},
+            "repository_options": {"s3": {"access_key_id": "a", "secret_access_key": "s"}},
+        },
+        "s3://bucket",
+        "kopia",
+        result,
+        datetime.now(),
+        datetime.now(),
+        "0123456789abcdef",
+        "agent123",
+    )
+
+    on_disk = {
+        str(path.relative_to(tmp_path)).replace("\\", "/"): json.loads(path.read_text(encoding="utf-8"))
+        for path in (tmp_path / ".backer").rglob("*.json")
+    }
+    from_s3 = {key: json.loads(value) for key, value in stored.items()}
+    assert set(on_disk) == set(from_s3)
+    for key, document in on_disk.items():
+        assert set(document) == set(from_s3[key]), key
+    run_key = ".backer/jobs/nightly/runs/20260101T000000Z-agent123.json"
+    assert from_s3[run_key]["bytes_transferred"] == 12
+    assert from_s3[run_key]["files_transferred"] == 3
+    assert from_s3[run_key]["snapshot_id"] == "0123456789abcdef"
+    assert from_s3[".backer/jobs/nightly/config.json"]["config"]["excludes"] == ["*.tmp"]

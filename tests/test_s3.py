@@ -117,6 +117,7 @@ def test_s3_api_encrypts_credentials_and_builds_kopia_agent_payload(tmp_path, mo
     repo = storage.get_repository(repo_id)
     assert repo is not None
     assert repo["config"] == {
+        "format": "kopia",
         "s3": {
             "bucket": "backer-test",
             "prefix": "agents/host-one",
@@ -142,6 +143,7 @@ def test_s3_api_encrypts_credentials_and_builds_kopia_agent_payload(tmp_path, mo
     )
     assert payload["destination_path"] == "s3://backer-test/agents/host-one"
     assert payload["repository_options"] == {
+        "format": "kopia",
         "repository_password": "repo-password",
         "s3": {
             "bucket": "backer-test",

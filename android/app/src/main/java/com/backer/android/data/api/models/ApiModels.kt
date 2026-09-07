@@ -100,6 +100,15 @@ data class BackupResult(
     @SerialName("snapshot_id") val snapshotId: String? = null
 )
 
+/** Existing proxy-backup response; repository format remains server-side. */
+@Serializable
+data class ProxyBackupResponse(
+    val success: Boolean,
+    @SerialName("snapshot_id") val snapshotId: String? = null,
+    val message: String? = null,
+    val error: String? = null
+)
+
 /**
  * Browse filesystem results.
  */

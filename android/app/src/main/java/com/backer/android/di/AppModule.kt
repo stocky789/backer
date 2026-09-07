@@ -1,5 +1,6 @@
 package com.backer.android.di
 
+import com.backer.android.BuildConfig
 import com.backer.android.data.api.AuthInterceptor
 import com.backer.android.data.api.BackerApiService
 import com.backer.android.data.repository.CredentialRepository
@@ -33,8 +34,13 @@ object AppModule {
     fun provideOkHttpClient(
         authInterceptor: AuthInterceptor
     ): OkHttpClient {
+        // BODY logging prints request/response bodies AND headers, which would leak the
+        // Basic-Auth Authorization header (client_id:client_secret) and register payloads
+        // to logcat. Only enable it in debug builds, and never log the auth header.
         val loggingInterceptor = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
+            level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BODY
+            else HttpLoggingInterceptor.Level.NONE
+            redactHeader("Authorization")
         }
 
         return OkHttpClient.Builder()

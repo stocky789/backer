@@ -1,0 +1,331 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!--
+    The only file in the app allowed to contain a colour literal (ScanForHexLiteralsTests
+    enforces it). Everything else consumes these tokens with {DynamicResource}.
+
+    One blue carries interaction. Green is semantic only: it means "protected / verified".
+    Amber means "needs attention", red means "failed" or a destructive confirmation.
+
+    Contrast was computed, not eyeballed. Every text-on-surface pairing used by a view is
+    >= 4.5:1 against BgBase, Surface and SurfaceHover in both variants. Three light tokens
+    were darkened from the first draft to get there (Accent, Success, Warning) — as text on
+    SurfaceHover they measured 4.38, 3.96 and 4.37.
+  -->
+
+  <ResourceDictionary.ThemeDictionaries>
+
+    <ResourceDictionary x:Key="Dark">
+      <Color x:Key="BgBaseColor">#0D1117</Color>
+      <Color x:Key="SurfaceColor">#161B22</Color>
+      <Color x:Key="SurfaceHoverColor">#1C2330</Color>
+      <Color x:Key="HairlineColor">#2A3140</Color>
+      <Color x:Key="TextColor">#E6EDF3</Color>
+      <Color x:Key="TextMutedColor">#8B98A9</Color>
+      <Color x:Key="AccentColor">#58A6FF</Color>
+      <Color x:Key="AccentPressedColor">#4090E8</Color>
+      <Color x:Key="OnAccentColor">#0B1220</Color>
+      <Color x:Key="SuccessColor">#3FB950</Color>
+      <Color x:Key="SuccessTintColor">#12261A</Color>
+      <Color x:Key="WarningColor">#D29922</Color>
+      <Color x:Key="WarningTintColor">#2A2113</Color>
+      <Color x:Key="DangerColor">#F85149</Color>
+      <Color x:Key="DangerTintColor">#2C1517</Color>
+
+      <SolidColorBrush x:Key="BgBase" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="Surface" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="SurfaceHover" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="Hairline" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="Text" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextMuted" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="AccentPressed" Color="{StaticResource AccentPressedColor}" />
+      <SolidColorBrush x:Key="OnAccent" Color="{StaticResource OnAccentColor}" />
+      <SolidColorBrush x:Key="Success" Color="{StaticResource SuccessColor}" />
+      <SolidColorBrush x:Key="SuccessTint" Color="{StaticResource SuccessTintColor}" />
+      <SolidColorBrush x:Key="Warning" Color="{StaticResource WarningColor}" />
+      <SolidColorBrush x:Key="WarningTint" Color="{StaticResource WarningTintColor}" />
+      <SolidColorBrush x:Key="Danger" Color="{StaticResource DangerColor}" />
+      <SolidColorBrush x:Key="DangerTint" Color="{StaticResource DangerTintColor}" />
+      <SolidColorBrush x:Key="AccentSelection" Color="{StaticResource AccentColor}" Opacity="0.22" />
+      <SolidColorBrush x:Key="Transparent" Color="#00000000" />
+
+      <!-- Fluent's own keys, aliased to the tokens above so stock controls follow the theme. -->
+      <SolidColorBrush x:Key="SystemControlBackgroundAltHighBrush" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="ThemeBackgroundBrush" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="ThemeForegroundBrush" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ThemeAccentBrush" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="ThemeBorderLowBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ThemeBorderMidBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="SystemControlForegroundBaseHighBrush" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="SystemControlForegroundBaseMediumBrush" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="SystemControlForegroundBaseLowBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="SystemControlFocusVisualSecondaryBrush" Color="{StaticResource BgBaseColor}" />
+      <Color x:Key="SystemAccentColor">#58A6FF</Color>
+      <Color x:Key="SystemAccentColorLight1">#79B8FF</Color>
+      <Color x:Key="SystemAccentColorLight2">#9CCBFF</Color>
+      <Color x:Key="SystemAccentColorLight3">#C2DEFF</Color>
+      <Color x:Key="SystemAccentColorDark1">#4090E8</Color>
+      <Color x:Key="SystemAccentColorDark2">#2F79C7</Color>
+      <Color x:Key="SystemAccentColorDark3">#22619F</Color>
+      <Color x:Key="FocusStrokeColorOuter">#58A6FF</Color>
+      <Color x:Key="FocusStrokeColorInner">#0D1117</Color>
+
+      <SolidColorBrush x:Key="ButtonBackground" Color="#00000000" />
+      <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#00000000" />
+      <SolidColorBrush x:Key="ButtonForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ButtonForegroundPressed" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="{StaticResource HairlineColor}" />
+
+      <SolidColorBrush x:Key="TextControlBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="TextControlForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextControlForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextControlForegroundFocused" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextControlForegroundDisabled" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlPlaceholderForeground" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlPlaceholderForegroundPointerOver" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlPlaceholderForegroundFocused" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlSelectionHighlightColor" Color="{StaticResource AccentColor}" Opacity="0.35" />
+
+      <SolidColorBrush x:Key="ComboBoxBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="ComboBoxBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ComboBoxBackgroundPressed" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ComboBoxBackgroundDisabled" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="ComboBoxBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ComboBoxBorderBrushPointerOver" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ComboBoxBorderBrushPressed" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="ComboBoxForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxForegroundPressed" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxForegroundDisabled" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownGlyphForeground" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="ComboBoxItemBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ComboBoxItemBackgroundSelected" Color="{StaticResource AccentColor}" Opacity="0.22" />
+      <SolidColorBrush x:Key="ComboBoxItemBackgroundSelectedPointerOver" Color="{StaticResource AccentColor}" Opacity="0.3" />
+      <SolidColorBrush x:Key="ComboBoxItemForeground" Color="{StaticResource TextColor}" />
+
+      <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxForegroundChecked" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxForegroundCheckedPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUnchecked" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUnchecked" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPointerOver" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="{StaticResource AccentPressedColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="{StaticResource AccentPressedColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundChecked" Color="{StaticResource OnAccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPointerOver" Color="{StaticResource OnAccentColor}" />
+
+      <SolidColorBrush x:Key="RadioButtonForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="RadioButtonForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseFill" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseStroke" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseStrokePointerOver" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseCheckedFill" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseCheckedStroke" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonCheckGlyphFill" Color="{StaticResource OnAccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonCheckGlyphStroke" Color="{StaticResource OnAccentColor}" />
+
+      <SolidColorBrush x:Key="ListBoxItemForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundSelected" Color="{StaticResource AccentColor}" Opacity="0.22" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundSelectedPointerOver" Color="{StaticResource AccentColor}" Opacity="0.3" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundSelectedPressed" Color="{StaticResource AccentColor}" Opacity="0.3" />
+
+      <SolidColorBrush x:Key="ProgressBarForeground" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="ProgressBarBackground" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ProgressBarBorderBrush" Color="#00000000" />
+
+      <SolidColorBrush x:Key="FlyoutPresenterBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="FlyoutBorderThemeBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutItemForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ScrollBarThumbFill" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="{StaticResource TextMutedColor}" />
+    </ResourceDictionary>
+
+    <ResourceDictionary x:Key="Light">
+      <Color x:Key="BgBaseColor">#F6F8FA</Color>
+      <Color x:Key="SurfaceColor">#FFFFFF</Color>
+      <Color x:Key="SurfaceHoverColor">#EFF3F8</Color>
+      <Color x:Key="HairlineColor">#D7DEE8</Color>
+      <Color x:Key="TextColor">#1A2332</Color>
+      <Color x:Key="TextMutedColor">#5B6878</Color>
+      <Color x:Key="AccentColor">#2C68C6</Color>
+      <Color x:Key="AccentPressedColor">#2558A8</Color>
+      <Color x:Key="OnAccentColor">#FFFFFF</Color>
+      <Color x:Key="SuccessColor">#1A7C34</Color>
+      <Color x:Key="SuccessTintColor">#E4F3E9</Color>
+      <Color x:Key="WarningColor">#8F6000</Color>
+      <Color x:Key="WarningTintColor">#F7EFD8</Color>
+      <Color x:Key="DangerColor">#C93C37</Color>
+      <Color x:Key="DangerTintColor">#F9E4E3</Color>
+
+      <SolidColorBrush x:Key="BgBase" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="Surface" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="SurfaceHover" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="Hairline" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="Text" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextMuted" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="AccentPressed" Color="{StaticResource AccentPressedColor}" />
+      <SolidColorBrush x:Key="OnAccent" Color="{StaticResource OnAccentColor}" />
+      <SolidColorBrush x:Key="Success" Color="{StaticResource SuccessColor}" />
+      <SolidColorBrush x:Key="SuccessTint" Color="{StaticResource SuccessTintColor}" />
+      <SolidColorBrush x:Key="Warning" Color="{StaticResource WarningColor}" />
+      <SolidColorBrush x:Key="WarningTint" Color="{StaticResource WarningTintColor}" />
+      <SolidColorBrush x:Key="Danger" Color="{StaticResource DangerColor}" />
+      <SolidColorBrush x:Key="DangerTint" Color="{StaticResource DangerTintColor}" />
+      <SolidColorBrush x:Key="AccentSelection" Color="{StaticResource AccentColor}" Opacity="0.16" />
+      <SolidColorBrush x:Key="Transparent" Color="#00000000" />
+
+      <SolidColorBrush x:Key="SystemControlBackgroundAltHighBrush" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="ThemeBackgroundBrush" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="ThemeForegroundBrush" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ThemeAccentBrush" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="ThemeBorderLowBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ThemeBorderMidBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="SystemControlForegroundBaseHighBrush" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="SystemControlForegroundBaseMediumBrush" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="SystemControlForegroundBaseLowBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="SystemControlFocusVisualSecondaryBrush" Color="{StaticResource SurfaceColor}" />
+      <Color x:Key="SystemAccentColor">#2C68C6</Color>
+      <Color x:Key="SystemAccentColorLight1">#4E85D8</Color>
+      <Color x:Key="SystemAccentColorLight2">#7BA5E4</Color>
+      <Color x:Key="SystemAccentColorLight3">#A9C4EF</Color>
+      <Color x:Key="SystemAccentColorDark1">#2558A8</Color>
+      <Color x:Key="SystemAccentColorDark2">#1E488A</Color>
+      <Color x:Key="SystemAccentColorDark3">#17386C</Color>
+      <Color x:Key="FocusStrokeColorOuter">#2C68C6</Color>
+      <Color x:Key="FocusStrokeColorInner">#FFFFFF</Color>
+
+      <SolidColorBrush x:Key="ButtonBackground" Color="#00000000" />
+      <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#00000000" />
+      <SolidColorBrush x:Key="ButtonForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ButtonForegroundPressed" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="{StaticResource HairlineColor}" />
+
+      <SolidColorBrush x:Key="TextControlBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="TextControlForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextControlForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextControlForegroundFocused" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="TextControlForegroundDisabled" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlPlaceholderForeground" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlPlaceholderForegroundPointerOver" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlPlaceholderForegroundFocused" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="TextControlSelectionHighlightColor" Color="{StaticResource AccentColor}" Opacity="0.28" />
+
+      <SolidColorBrush x:Key="ComboBoxBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="ComboBoxBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ComboBoxBackgroundPressed" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ComboBoxBackgroundDisabled" Color="{StaticResource BgBaseColor}" />
+      <SolidColorBrush x:Key="ComboBoxBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ComboBoxBorderBrushPointerOver" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ComboBoxBorderBrushPressed" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="ComboBoxForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxForegroundPressed" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxForegroundDisabled" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ComboBoxDropDownGlyphForeground" Color="{StaticResource TextMutedColor}" />
+      <SolidColorBrush x:Key="ComboBoxItemBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ComboBoxItemBackgroundSelected" Color="{StaticResource AccentColor}" Opacity="0.16" />
+      <SolidColorBrush x:Key="ComboBoxItemBackgroundSelectedPointerOver" Color="{StaticResource AccentColor}" Opacity="0.24" />
+      <SolidColorBrush x:Key="ComboBoxItemForeground" Color="{StaticResource TextColor}" />
+
+      <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxForegroundChecked" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxForegroundCheckedPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUnchecked" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUnchecked" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPointerOver" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="{StaticResource AccentPressedColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="{StaticResource AccentPressedColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundChecked" Color="{StaticResource OnAccentColor}" />
+      <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPointerOver" Color="{StaticResource OnAccentColor}" />
+
+      <SolidColorBrush x:Key="RadioButtonForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="RadioButtonForegroundPointerOver" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseFill" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseStroke" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseStrokePointerOver" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseCheckedFill" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonOuterEllipseCheckedStroke" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonCheckGlyphFill" Color="{StaticResource OnAccentColor}" />
+      <SolidColorBrush x:Key="RadioButtonCheckGlyphStroke" Color="{StaticResource OnAccentColor}" />
+
+      <SolidColorBrush x:Key="ListBoxItemForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundSelected" Color="{StaticResource AccentColor}" Opacity="0.16" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundSelectedPointerOver" Color="{StaticResource AccentColor}" Opacity="0.24" />
+      <SolidColorBrush x:Key="ListBoxItemBackgroundSelectedPressed" Color="{StaticResource AccentColor}" Opacity="0.24" />
+
+      <SolidColorBrush x:Key="ProgressBarForeground" Color="{StaticResource AccentColor}" />
+      <SolidColorBrush x:Key="ProgressBarBackground" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ProgressBarBorderBrush" Color="#00000000" />
+
+      <SolidColorBrush x:Key="FlyoutPresenterBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="FlyoutBorderThemeBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="{StaticResource SurfaceColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutItemForeground" Color="{StaticResource TextColor}" />
+      <SolidColorBrush x:Key="MenuFlyoutItemBackgroundPointerOver" Color="{StaticResource SurfaceHoverColor}" />
+      <SolidColorBrush x:Key="ScrollBarThumbFill" Color="{StaticResource HairlineColor}" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="{StaticResource TextMutedColor}" />
+    </ResourceDictionary>
+
+  </ResourceDictionary.ThemeDictionaries>
+
+  <!-- Variant-independent: geometry and the spacing scale (4/8/12/16/24/32). -->
+  <CornerRadius x:Key="ControlCornerRadius">6</CornerRadius>
+  <CornerRadius x:Key="OverlayCornerRadius">6</CornerRadius>
+  <CornerRadius x:Key="CardCornerRadius">6</CornerRadius>
+  <Thickness x:Key="ViewPadding">32</Thickness>
+  <Thickness x:Key="CardPadding">16</Thickness>
+  <x:Double x:Key="FormColumnWidth">560</x:Double>
+  <x:Double x:Key="ControlContentThemeFontSize">13.5</x:Double>
+</ResourceDictionary>

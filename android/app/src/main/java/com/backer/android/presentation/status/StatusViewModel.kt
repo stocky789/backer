@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.backer.android.data.repository.BackerApiRepository
 import com.backer.android.data.repository.CredentialRepository
+import com.backer.android.data.repository.StorageAccess
 import com.backer.android.domain.model.ConnectionStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +19,8 @@ import javax.inject.Inject
 @HiltViewModel
 class StatusViewModel @Inject constructor(
     private val credentialRepository: CredentialRepository,
-    private val apiRepository: BackerApiRepository
+    private val apiRepository: BackerApiRepository,
+    private val storageAccess: StorageAccess
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(StatusUiState())
@@ -38,8 +40,13 @@ class StatusViewModel @Inject constructor(
             serverUrl = credentials?.serverUrl,
             lastHeartbeat = lastHeartbeat?.let { formatTimestamp(it) },
             lastBackup = lastBackup?.let { formatTimestamp(it) },
+            hasAllFilesAccess = storageAccess.hasUserFileAccess(),
             connectionStatus = if (credentials != null) ConnectionStatus.CONNECTED else ConnectionStatus.DISCONNECTED
         )
+    }
+
+    fun refreshStorageAccess() {
+        _uiState.value = _uiState.value.copy(hasAllFilesAccess = storageAccess.hasUserFileAccess())
     }
 
     fun refreshStatus() {
@@ -77,6 +84,7 @@ data class StatusUiState(
     val serverUrl: String? = null,
     val lastHeartbeat: String? = null,
     val lastBackup: String? = null,
+    val hasAllFilesAccess: Boolean = false,
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val errorMessage: String? = null
 )

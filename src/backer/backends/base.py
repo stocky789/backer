@@ -16,6 +16,7 @@ class BackendType(str, Enum):
     """Supported backend types."""
 
     KOPIA = "kopia"
+    FILES = "files"
     PROXY = "proxy"  # Proxy to remote server (for local directory storage)
 
 

@@ -1,5 +1,7 @@
 """Kopia backend implementation."""
 
+import base64
+import binascii
 import hashlib
 import inspect
 import json
@@ -32,6 +34,10 @@ _SNAPSHOT_PROGRESS = re.compile(
     r"\b(?P<hashed_files>\d+) hashed \((?P<hashed_size>[\d.]+) (?P<hashed_unit>[KMGT]?B)\),\s*"
     r"(?P<cached_files>\d+) cached \((?P<cached_size>[\d.]+) (?P<cached_unit>[KMGT]?B)\)"
 )
+# Kopia appends "uploaded X" once it starts flushing packs to the repository. Over a slow
+# link the hashed/cached counters plateau while this keeps climbing, so it is the only field
+# that shows the backup is still working during the upload phase.
+_SNAPSHOT_UPLOADED = re.compile(r"uploaded (?P<uploaded_size>[\d.]+) (?P<uploaded_unit>[KMGT]?B)")
 _RESTORE_PROGRESS = re.compile(
     r"^Processed (?P<done_files>\d+) \((?P<done_size>[\d.]+) (?P<done_unit>[KMGT]?B)\) of "
     r"(?P<total_files>\d+) \((?P<total_size>[\d.]+) (?P<total_unit>[KMGT]?B)\)\.?$"
@@ -83,6 +89,8 @@ def _parse_snapshot_progress(frame: str, total_bytes: int | None) -> dict[str, i
     cached_bytes = _progress_bytes(match["cached_size"], match["cached_unit"])
     hashed_files = int(match["hashed_files"])
     cached_files = int(match["cached_files"])
+    uploaded = _SNAPSHOT_UPLOADED.search(frame)
+    uploaded_bytes = _progress_bytes(uploaded["uploaded_size"], uploaded["uploaded_unit"]) if uploaded else 0
     return {
         "bytes_done": hashed_bytes + cached_bytes,
         "total_bytes": total_bytes or 0,
@@ -91,6 +99,7 @@ def _parse_snapshot_progress(frame: str, total_bytes: int | None) -> dict[str, i
         "cached_bytes": cached_bytes,
         "hashed_files": hashed_files,
         "cached_files": cached_files,
+        "uploaded_bytes": uploaded_bytes,
     }
 
 
@@ -520,7 +529,7 @@ class KopiaBackend(BackendBase):
                 capture_output=True,
                 text=True,
                 env=self._repo_env(path),
-                timeout=60,
+                timeout=300,
             )
 
             if result.returncode == 0:
@@ -593,6 +602,12 @@ class KopiaBackend(BackendBase):
     def repository_probe(self, path: str) -> tuple[str, str | None]:
         """Safely distinguish a repository that is absent from one that cannot be opened."""
         self.last_repository_error = ""
+        cache_file = Path(self._repo_env(path)["KOPIA_CACHE_DIRECTORY"]) / "kopia.repository"
+        try:
+            cache_file.unlink(missing_ok=True)
+        except OSError as error:
+            self.last_repository_error = str(error)
+            return "unreachable", None
         connected, message = self._connect_repo(path)
         if not connected:
             self.last_repository_error = getattr(self, "_last_connect_stderr", message)
@@ -603,20 +618,11 @@ class KopiaBackend(BackendBase):
                 return "absent", None
             return "unreachable", None
         try:
-            result = subprocess.run(
-                [str(self._get_binary()), "repository", "status", "--json"],
-                capture_output=True,
-                text=True,
-                env=self._repo_env(path),
-                timeout=30,
-            )
-            if result.returncode:
-                self.last_repository_error = result.stderr
-                return "unreachable", None
-            payload = json.loads(result.stdout)
-            unique_id = payload.get("uniqueIDHex")
-            return ("present", str(unique_id)) if unique_id else ("unreachable", None)
-        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            unique_id = base64.b64decode(
+                json.loads(cache_file.read_text(encoding="utf-8"))["uniqueID"], validate=True
+            ).hex()
+            return ("present", unique_id) if unique_id else ("unreachable", None)
+        except (OSError, KeyError, TypeError, binascii.Error, json.JSONDecodeError) as error:
             self.last_repository_error = str(error)
             return "unreachable", None
         finally:
@@ -687,36 +693,46 @@ class KopiaBackend(BackendBase):
                 cmd.append("--dry-run")
 
             # Replace the source policy so changed or removed job excludes cannot leak into later runs.
-            policy_cmd = [str(binary), "policy", "set", str(source.path), "--clear-ignore"]
-            for exclude in source.excludes or []:
-                policy_cmd.extend(["--add-ignore", exclude])
-            policy = subprocess.run(
-                policy_cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=self.config.get("timeout", 86400),
-            )
-            if policy.returncode != 0:
-                return BackendResult(
-                    success=False,
-                    operation=OperationType.BACKUP,
-                    started_at=started_at,
-                    finished_at=datetime.now(),
-                    errors=[line for line in policy.stderr.split("\n") if line.strip()],
-                    return_code=policy.returncode,
+            # kopia 0.23.1 applies --clear-ignore AFTER --add-ignore within one `policy set`, so the
+            # two must be separate invocations or every exclude is silently discarded.
+            policy_commands = [[str(binary), "policy", "set", str(source.path), "--clear-ignore"]]
+            if source.excludes:
+                add_cmd = [str(binary), "policy", "set", str(source.path)]
+                for exclude in source.excludes:
+                    add_cmd.extend(["--add-ignore", exclude])
+                policy_commands.append(add_cmd)
+            for policy_cmd in policy_commands:
+                policy = subprocess.run(
+                    policy_cmd,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=self.config.get("timeout", 86400),
                 )
+                if policy.returncode != 0:
+                    return BackendResult(
+                        success=False,
+                        operation=OperationType.BACKUP,
+                        started_at=started_at,
+                        finished_at=datetime.now(),
+                        errors=[line for line in policy.stderr.split("\n") if line.strip()],
+                        return_code=policy.returncode,
+                    )
 
             # Add tags from config
             for tag in self.config.get("tags", []):
                 cmd.extend(["--tags", tag])
 
             cmd.append(str(source.path))
-            previous_size = self._previous_snapshot_size(destination.path, str(source.path))
+            # Prefer the last snapshot's exact size; on a first backup fall back to the
+            # source tree's own size so the progress bar shows a real percentage.
+            estimated_total = self._previous_snapshot_size(destination.path, str(source.path))
+            if not estimated_total:
+                estimated_total = self._estimate_source_size(str(source.path))
             result = _run_kopia_with_progress(
                 cmd,
                 env,
-                lambda frame: _parse_snapshot_progress(frame, previous_size),
+                lambda frame: _parse_snapshot_progress(frame, estimated_total),
                 progress_callback,
                 self.config.get("timeout", 86400),
                 self.config.get("process_owner"),
@@ -881,6 +897,27 @@ class KopiaBackend(BackendBase):
             return int(size) if size is not None else None
         except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
             return None
+
+    @staticmethod
+    def _estimate_source_size(source_path: str) -> int | None:
+        """Sum the source tree's file sizes as a progress denominator.
+
+        A first backup has no previous snapshot to size a percentage against, so
+        without this the bar has no meaning. Metadata-only walk, so it is quick even
+        for a large tree; it slightly over-counts when the job has excludes, which
+        only means the bar reaches 100% a little early - better than no percentage.
+        """
+        total = 0
+        try:
+            for root, _dirs, files in os.walk(source_path):
+                for name in files:
+                    try:
+                        total += os.lstat(os.path.join(root, name)).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        return total or None
 
     @_serialize_by_repo("source")
     def restore(

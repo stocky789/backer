@@ -3,11 +3,13 @@
 from typing import Any
 
 from backer.backends.base import BackendBase, BackendType
+from backer.backends.files import FilesBackend
 from backer.backends.kopia import KopiaBackend
 from backer.backends.proxy import ProxyBackend
 
 _BACKENDS: dict[BackendType, type[BackendBase]] = {
     BackendType.KOPIA: KopiaBackend,
+    BackendType.FILES: FilesBackend,
     BackendType.PROXY: ProxyBackend,
 }
 

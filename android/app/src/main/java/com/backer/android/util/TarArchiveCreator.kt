@@ -1,6 +1,7 @@
 package com.backer.android.util
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
@@ -69,12 +70,14 @@ class TarArchiveCreator @Inject constructor() {
             }
 
             ArchiveResult(
-                success = true,
+                success = errors.isEmpty(),
                 filesProcessed = filesProcessed,
                 bytesProcessed = bytesProcessed,
                 archiveSize = outputFile.length(),
                 errors = errors
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create archive", e)
             ArchiveResult(
@@ -95,7 +98,11 @@ class TarArchiveCreator @Inject constructor() {
         onFile: (String, Long) -> Unit,
         onError: (String) -> Unit
     ) {
-        val files = sourceDir.listFiles() ?: return
+        val files = sourceDir.listFiles()
+        if (files == null) {
+            onError("Cannot list directory: ${sourceDir.path}")
+            return
+        }
 
         for (file in files) {
             val relativePath = if (basePath.isEmpty()) file.name else "$basePath/${file.name}"
@@ -121,7 +128,11 @@ class TarArchiveCreator @Inject constructor() {
                         onFile = onFile,
                         onError = onError
                     )
-                } else if (file.isFile && file.canRead()) {
+                } else if (!file.isFile) {
+                    onError("Unsupported source entry: $relativePath")
+                } else if (!file.canRead()) {
+                    onError("Cannot read file: $relativePath")
+                } else {
                     // Add file entry
                     val entry = TarArchiveEntry(file, relativePath).apply {
                         size = file.length()
@@ -137,6 +148,8 @@ class TarArchiveCreator @Inject constructor() {
                     tarOut.closeArchiveEntry()
                     onFile(relativePath, file.length())
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 onError("Failed to add $relativePath: ${e.message}")
             }
@@ -169,4 +182,6 @@ data class ArchiveResult(
     val bytesProcessed: Long,
     val archiveSize: Long,
     val errors: List<String>
-)
+) {
+    val isComplete: Boolean get() = success && errors.isEmpty()
+}

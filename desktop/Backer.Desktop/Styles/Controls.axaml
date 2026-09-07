@@ -1,0 +1,255 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!--
+    Geometry and typography for the tokens in Theme.axaml. No colour literal lives here:
+    every brush is a {DynamicResource} token, so both theme variants and the runtime
+    App.ApplyTheme override keep working.
+
+    Type scale: view titles 22/SemiBold · section labels 12/Medium/muted/uppercase
+    · body 13.5 · captions 12/muted · logs monospace.
+    Spacing scale: 4 / 8 / 12 / 16 / 24 / 32. Corner radius 6. Buttons 34 high.
+  -->
+
+  <Style Selector="Window">
+    <Setter Property="Background" Value="{DynamicResource BgBase}" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+    <Setter Property="FontSize" Value="13.5" />
+  </Style>
+
+  <Style Selector="TextBlock, SelectableTextBlock">
+    <Setter Property="FontSize" Value="13.5" />
+    <Setter Property="Foreground" Value="{DynamicResource Text}" />
+  </Style>
+
+  <Style Selector="TextBlock.title, SelectableTextBlock.title">
+    <Setter Property="FontSize" Value="22" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.section">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="LetterSpacing" Value="0.5" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
+  </Style>
+
+  <Style Selector="TextBlock.column-header">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="0.6" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
+  </Style>
+
+  <Style Selector="TextBlock.caption, SelectableTextBlock.caption">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
+  </Style>
+
+  <Style Selector="TextBlock.muted, SelectableTextBlock.muted">
+    <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
+  </Style>
+
+  <Style Selector="TextBlock.ok">
+    <Setter Property="Foreground" Value="{DynamicResource Success}" />
+  </Style>
+
+  <Style Selector="TextBlock.warn">
+    <Setter Property="Foreground" Value="{DynamicResource Warning}" />
+  </Style>
+
+  <Style Selector="TextBlock.failed">
+    <Setter Property="Foreground" Value="{DynamicResource Danger}" />
+  </Style>
+
+  <Style Selector="TextBlock.mono, SelectableTextBlock.mono">
+    <Setter Property="FontFamily" Value="monospace" />
+  </Style>
+
+  <Style Selector="TextBox.mono">
+    <Setter Property="FontFamily" Value="monospace" />
+  </Style>
+
+  <!-- Sizes and dates in the job table line up column-wise. -->
+  <Style Selector="TextBlock.tabular">
+    <Setter Property="FontFeatures" Value="+tnum" />
+  </Style>
+
+  <Style Selector="Button">
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="Button.primary">
+    <Setter Property="Background" Value="{DynamicResource Accent}" />
+    <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Accent}" />
+  </Style>
+  <Style Selector="Button.primary /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Accent}" />
+    <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Accent}" />
+  </Style>
+  <Style Selector="Button.primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource AccentPressed}" />
+    <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource AccentPressed}" />
+  </Style>
+  <Style Selector="Button.primary:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource AccentPressed}" />
+    <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource AccentPressed}" />
+  </Style>
+  <Style Selector="Button.primary:disabled /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+  </Style>
+
+  <!-- Destructive confirmation only. Never decoration. -->
+  <Style Selector="Button.danger /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource DangerTint}" />
+    <Setter Property="Foreground" Value="{DynamicResource Danger}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Danger}" />
+  </Style>
+  <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Danger}" />
+    <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Danger}" />
+  </Style>
+
+  <Style Selector="Button.link">
+    <Setter Property="MinHeight" Value="24" />
+    <Setter Property="Padding" Value="4,0" />
+  </Style>
+  <Style Selector="Button.link /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+  </Style>
+  <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+  </Style>
+
+  <Style Selector="TextBox">
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Padding" Value="10,6" />
+  </Style>
+
+  <Style Selector="TextBox.log">
+    <Setter Property="FontFamily" Value="monospace" />
+    <Setter Property="Background" Value="{DynamicResource BgBase}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <Style Selector="ComboBox">
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Padding" Value="10,0" />
+  </Style>
+
+  <Style Selector="ListBox">
+    <Setter Property="Background" Value="{DynamicResource Surface}" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+
+  <!-- Rows read as a table: hairline separators, square corners, accent-tinted selection. -->
+  <Style Selector="ListBoxItem">
+    <Setter Property="Padding" Value="12,8" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+
+  <Style Selector="ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource AccentSelection}" />
+  </Style>
+
+  <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+  </Style>
+
+  <Style Selector="ProgressBar">
+    <Setter Property="Height" Value="6" />
+    <Setter Property="CornerRadius" Value="3" />
+  </Style>
+
+  <!-- Surfaces. A card is the quiet container; the banner variants are the one bold element. -->
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource Surface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="Border.table">
+    <Setter Property="Background" Value="{DynamicResource Surface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+
+  <Style Selector="Border.table-header">
+    <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="12,9" />
+  </Style>
+
+  <Style Selector="Border.property-row">
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="16,12" />
+  </Style>
+
+  <Style Selector="Border.table-footer">
+    <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+    <Setter Property="Padding" Value="12" />
+  </Style>
+
+  <Style Selector="Border.banner">
+    <Setter Property="Background" Value="{DynamicResource Surface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="4,0,0,0" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="Border.banner.protected">
+    <Setter Property="Background" Value="{DynamicResource SuccessTint}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Success}" />
+  </Style>
+
+  <Style Selector="Border.banner.attention">
+    <Setter Property="Background" Value="{DynamicResource WarningTint}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Warning}" />
+  </Style>
+
+  <!-- 8px status dot: green = protected, amber = needs attention, muted = never run. -->
+  <Style Selector="Border.dot">
+    <Setter Property="Width" Value="8" />
+    <Setter Property="Height" Value="8" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Background" Value="{DynamicResource TextMuted}" />
+  </Style>
+
+  <Style Selector="Border.dot.ok">
+    <Setter Property="Background" Value="{DynamicResource Success}" />
+  </Style>
+
+  <Style Selector="Border.dot.attention">
+    <Setter Property="Background" Value="{DynamicResource Warning}" />
+  </Style>
+
+  <Style Selector="Border.row">
+    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+</Styles>

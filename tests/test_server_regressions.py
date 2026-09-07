@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import tarfile
 import time
 from contextlib import contextmanager
@@ -125,6 +126,7 @@ def test_expired_proxy_capability_requires_its_pending_command(tmp_path: Path, m
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     storage.add_repository("repo-1", "local", "local", share=str(repo_path))
+    storage.set_repository_password("repo-1", "secret")
     secret = _client(storage)
     payload = {
         "job_name": "photos", "run_id": "run-1", "backend": "proxy",
@@ -317,9 +319,8 @@ def test_proxy_rollback_retains_previous_contents_when_restore_fails(tmp_path: P
         )
 
     assert response.json()["success"] is False
-    assert "CRITICAL" in response.json()["error"]
-    previous = next((repo_path / "Agents" / "photos").glob(".backer-previous-*"))
-    assert (previous / "old.txt").read_text() == "old"
+    assert response.json()["error"] == "nope"
+    assert (contents / "old.txt").read_text() == "old"
 
 
 def test_proxy_backup_succeeds_when_previous_cleanup_fails(tmp_path: Path, monkeypatch):
@@ -372,7 +373,7 @@ def test_proxy_backup_succeeds_when_previous_cleanup_fails(tmp_path: Path, monke
         )
 
     assert response.json()["success"] is True
-    assert (contents / "new.txt").read_text() == "new"
+    assert not contents.exists()  # encrypted proxy staging must not persist plaintext
 
 
 def test_job_secret_sentinel_preserves_stored_value(tmp_path: Path):
@@ -522,6 +523,108 @@ def test_android_local_job_uses_proxy_payload(tmp_path: Path):
     assert payload["repository_options"]["proxy_capability"]
 
 
+def test_android_restore_keeps_proxy_credentials_in_repository_options(tmp_path: Path):
+    app = create_app(tmp_path)
+    storage = app.state.storage
+    _client(storage, "android", "android", "Android 15")
+    storage.add_repository("local-1", "local", "local", share=str(tmp_path / "repo"))
+    storage.set_repository_password("local-1", "secret")
+    storage.save_job(
+        "photos", {"name": "photos", "source_path": "/photos", "repository_id": "local-1"}
+    )
+
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.post(
+            "/api/v1/restore",
+            json={"job_name": "photos", "client_id": "android", "source_subfolder": r"albums\\2026"},
+        )
+
+    assert response.status_code == 200
+    payload = storage.get_pending_commands("android")[0]["payload"]
+    assert payload["source_subfolder"] == "albums/2026"
+    assert set(payload["repository_options"]) == {"format", "repository_password", "proxy_capability"}
+    assert "proxy_capability" not in payload
+
+
+def test_restore_rejects_unsafe_snapshot_subfolder_before_queueing(tmp_path: Path):
+    app = create_app(tmp_path)
+    storage = app.state.storage
+    _client(storage)
+    storage.add_repository("local-1", "local", "local", share=str(tmp_path / "repo"))
+    storage.set_repository_password("local-1", "secret")
+    storage.save_job("photos", {"name": "photos", "source_path": "/photos", "repository_id": "local-1"})
+
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.post(
+            "/api/v1/restore",
+            json={"job_name": "photos", "client_id": "agent", "source_subfolder": "../outside"},
+        )
+
+    assert response.status_code == 400
+    assert storage.get_pending_commands("agent") == []
+    assert storage.get_job_runs("restore:photos") == []
+
+
+def test_proxy_restore_scopes_to_safe_subtree_and_own_job_snapshot(tmp_path: Path, monkeypatch):
+    import backer.server.app as app_module
+
+    restored: list[str] = []
+
+    class FakeKopia:
+        def __init__(self, *_):
+            pass
+
+        def ensure_repo(self, create_if_absent=False):
+            return True
+
+        def snapshot_list(self, job_name):
+            assert job_name == "photos"
+            return [{"id": "short-id", "full_id": "immutable-photo-snapshot"}]
+
+        def snapshot_restore(self, snapshot_id, destination):
+            restored.append(snapshot_id)
+            nested = Path(destination) / "only" / "nested"
+            nested.mkdir(parents=True)
+            (nested / "restored.txt").write_text("snapshot")
+            return {"success": True}
+
+    monkeypatch.setattr(app_module, "ServerKopia", FakeKopia)
+    app = create_app(tmp_path / "server")
+    storage = app.state.storage
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    storage.add_repository("repo-1", "local", "local", share=str(repo_path))
+    storage.set_repository_password("repo-1", "secret")
+    secret = _client(storage)
+    capability = generate_proxy_capability(
+        client_id="agent", repo_id="repo-1", job_name="photos", run_id="restore-1",
+        subfolder="Agents/photos", operation="restore",
+    )
+    headers = {"X-Restore-Subfolder": "Agents/photos", "X-Backer-Capability": capability}
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _setup(client)
+        unsafe = client.get(
+            "/api/repo/repo-1/restore?include=../outside", auth=("agent", secret), headers=headers
+        )
+        foreign = client.get(
+            "/api/repo/repo-1/restore?snapshot=other-job-snapshot", auth=("agent", secret), headers=headers
+        )
+        response = client.get(
+            "/api/repo/repo-1/restore?snapshot=short-id&include=only%5Cnested",
+            auth=("agent", secret), headers=headers,
+        )
+
+    assert unsafe.status_code == 400
+    assert foreign.status_code == 404
+    assert response.status_code == 200
+    assert restored == ["immutable-photo-snapshot/only/nested"]
+    with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as archive:
+        assert archive.getnames() == ["only/nested/restored.txt"]
+
+
 def test_imported_smb_restore_builds_repository_source_before_queueing(tmp_path: Path):
     app = create_app(tmp_path)
     storage = app.state.storage
@@ -536,3 +639,160 @@ def test_imported_smb_restore_builds_repository_source_before_queueing(tmp_path:
 
     assert response.status_code == 200
     assert storage.get_pending_commands("agent")[0]["payload"]["source_path"] == "//nas/backups/Agents/photos"
+
+
+def test_files_smb_creation_initializes_marker_before_saving(tmp_path: Path, monkeypatch):
+    mounted_share = tmp_path / "mounted"
+    mounted_share.mkdir()
+
+    @contextmanager
+    def mounted(*_args, **_kwargs):
+        yield mounted_share
+
+    monkeypatch.setattr("backer.core.mounts.smb_mount_context", mounted)
+    app = create_app(tmp_path / "server")
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.post(
+            "/api/v1/repositories",
+            json={
+                "name": "Plain SMB",
+                "format": "files",
+                "type": "smb",
+                "server": "nas",
+                "share": "backups",
+                "path": "backer",
+                "username": "user",
+                "storage_password": "secret",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    marker = mounted_share / "backer" / ".backer" / "repository.json"
+    assert marker.exists()
+    assert json.loads(marker.read_text())["repository_id"] == response.json()["id"]
+
+
+def test_files_proxy_backup_and_restore_use_immutable_snapshot(tmp_path: Path):
+    from backer.backends.base import BackupDestination
+    from backer.backends.files import FilesBackend
+
+    app = create_app(tmp_path / "server")
+    storage = app.state.storage
+    repository = tmp_path / "repository"
+    assert FilesBackend({"repository_id": "repo-1"}).init_repo(BackupDestination(str(repository))).success
+    storage.add_repository("repo-1", "Plain", "local", share=str(repository), config={"format": "files"})
+    secret = _client(storage)
+    backup_capability = generate_proxy_capability(
+        client_id="agent", repo_id="repo-1", job_name="photos", run_id="run-1",
+        subfolder="Agents/photos", operation="backup",
+    )
+    restore_capability = generate_proxy_capability(
+        client_id="agent", repo_id="repo-1", job_name="photos", run_id="restore-1",
+        subfolder="Agents/photos", operation="restore",
+    )
+
+    with TestClient(app) as client:
+        _setup(client)
+        uploaded = client.post(
+            "/api/repo/repo-1/backup",
+            content=_archive({"photo.txt": "snapshot"}),
+            auth=("agent", secret),
+            headers={"X-Backup-Subfolder": "Agents/photos", "X-Backer-Capability": backup_capability},
+        )
+        restored = client.get(
+            "/api/repo/repo-1/restore?snapshot=run-1",
+            auth=("agent", secret),
+            headers={"X-Restore-Subfolder": "Agents/photos", "X-Backer-Capability": restore_capability},
+        )
+
+    assert uploaded.status_code == 200 and uploaded.json()["snapshot_id"] == "run-1"
+    assert restored.status_code == 200
+    with tarfile.open(fileobj=io.BytesIO(restored.content), mode="r:gz") as archive:
+        assert archive.extractfile("photo.txt").read() == b"snapshot"
+    assert (repository / "Agents" / "photos" / "snapshots" / "run-1" / "manifest.json").exists()
+
+
+def test_files_smb_job_rejects_agent_without_files_capability(tmp_path: Path):
+    app = create_app(tmp_path)
+    storage = app.state.storage
+    _client(storage)
+    storage.add_repository(
+        "repo-1", "Plain SMB", "smb", server="nas", share="backups", path="backer", config={"format": "files"}
+    )
+
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.post(
+            "/api/v1/jobs",
+            json={"name": "photos", "source_path": "/photos", "repository_id": "repo-1", "client_id": "agent"},
+        )
+
+    assert response.status_code == 400
+    assert "does not support files repositories" in response.text
+    storage.update_client_capabilities("agent", ["files-repository-v1"])
+    payload = _build_backup_command_payload(
+        {"repository_id": "repo-1", "client_id": "agent", "source_path": "/photos"},
+        "photos",
+        "run-1",
+        storage=storage,
+    )
+    assert payload["destination_path"] == "//nas/backups/backer/Agents/photos"
+    assert payload["repository_options"]["repository_id"] == "repo-1"
+    assert payload["repository_options"]["job_name"] == "photos"
+
+
+def test_snapshot_capability_cannot_list_another_job(tmp_path: Path):
+    app = create_app(tmp_path / "server")
+    storage = app.state.storage
+    repository = tmp_path / "repository"
+    storage.add_repository(
+        "repo-1", "Plain", "local", share=str(repository), config={"format": "files"}
+    )
+    secret = _client(storage)
+    capability = generate_proxy_capability(
+        client_id="agent",
+        repo_id="repo-1",
+        job_name="photos",
+        run_id="run-1",
+        subfolder="Agents/photos",
+        operation="list",
+    )
+
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.get(
+            "/api/repo/repo-1/snapshots?job=documents",
+            auth=("agent", secret),
+            headers={"X-Backer-Capability": capability},
+        )
+
+    assert response.status_code == 403
+
+
+def test_proxy_backup_without_storage_path_is_not_reported_as_success(tmp_path: Path):
+    app = create_app(tmp_path / "server")
+    storage = app.state.storage
+    storage.add_repository("repo-1", "Broken", "local")
+    storage.set_repository_password("repo-1", "secret")
+    secret = _client(storage)
+    capability = generate_proxy_capability(
+        client_id="agent",
+        repo_id="repo-1",
+        job_name="photos",
+        run_id="run-1",
+        subfolder="Agents/photos",
+        operation="backup",
+    )
+
+    with TestClient(app) as client:
+        _setup(client)
+        response = client.post(
+            "/api/repo/repo-1/backup",
+            content=_archive({"photo.jpg": "data"}),
+            auth=("agent", secret),
+            headers={"X-Backup-Subfolder": "Agents/photos", "X-Backer-Capability": capability},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["success"] is False

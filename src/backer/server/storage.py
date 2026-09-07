@@ -41,6 +41,7 @@ class Storage:
                     version TEXT,
                     os_info TEXT,
                     tags TEXT DEFAULT '[]',
+                    capabilities TEXT DEFAULT '[]',
                     secret_hash TEXT
                 );
 
@@ -260,6 +261,10 @@ class Storage:
             if "provider_credentials_encrypted" not in columns:
                 conn.execute("ALTER TABLE repositories ADD COLUMN provider_credentials_encrypted TEXT")
 
+            client_columns = {row["name"] for row in conn.execute("PRAGMA table_info(clients)")}
+            if "capabilities" not in client_columns:
+                conn.execute("ALTER TABLE clients ADD COLUMN capabilities TEXT DEFAULT '[]'")
+
             # Migration: Add copies_to_keep column if it doesn't exist
             try:
                 conn.execute(
@@ -361,8 +366,8 @@ class Storage:
             conn.execute(
                 """
                 INSERT INTO clients (id, name, hostname, ip_address, status,
-                    last_seen, registered_at, version, os_info, tags, secret_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_seen, registered_at, version, os_info, tags, capabilities, secret_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     client.id,
@@ -375,6 +380,7 @@ class Storage:
                     client.version,
                     client.os_info,
                     json.dumps(client.tags),
+                    json.dumps(client.capabilities),
                     secret_hash,
                 ),
             )
@@ -471,7 +477,12 @@ class Storage:
             version=row["version"],
             os_info=row["os_info"],
             tags=json.loads(row["tags"]) if row["tags"] else [],
+            capabilities=json.loads(row["capabilities"]) if row["capabilities"] else [],
         )
+
+    def update_client_capabilities(self, client_id: str, capabilities: list[str]) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE clients SET capabilities = ? WHERE id = ?", (json.dumps(capabilities), client_id))
 
     # Job operations
     def save_job(self, name: str, config: dict[str, Any]) -> None:
@@ -766,6 +777,11 @@ class Storage:
         provider_credentials_encrypted: str | None = None,
     ) -> None:
         """Add a new storage repository."""
+        config = dict(config or {})
+        repository_format = config.get("format", "kopia")
+        if repository_format not in {"kopia", "files"}:
+            raise ValueError(f"Unsupported repository format: {repository_format}")
+        config["format"] = repository_format
         with self._connect() as conn:
             conn.execute(
                 """
@@ -787,7 +803,7 @@ class Storage:
                     repository_password_encrypted,
                     domain,
                     tz.get_now().isoformat(),
-                    json.dumps(config or {}),
+                    json.dumps(config),
                     provider_credentials_encrypted,
                 ),
             )
@@ -876,6 +892,9 @@ class Storage:
             "created_at": row["created_at"],
             "config": json.loads(row["config"]) if row["config"] else {},
         }
+        # Existing records predate explicit format selection and are Kopia by
+        # definition. Do not rewrite them while reading.
+        repo["format"] = repo["config"].get("format", "kopia")
 
         # Normalize local repository paths (cross-platform)
         if repo["repo_type"] == "local" and repo["share"]:

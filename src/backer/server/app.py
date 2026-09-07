@@ -499,63 +499,115 @@ def validate_name(name: str, field: str = "name") -> None:
         )
 
 
+def _safe_snapshot_subtree(value: Any, field: str = "include") -> str:
+    """Return a canonical relative path that cannot escape a snapshot."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{field} must be a relative snapshot path")
+    candidate = value.replace("\\", "/")
+    if (
+        "\x00" in candidate
+        or candidate.startswith("/")
+        or re.match(r"^[A-Za-z]:", candidate)
+        or any(part == ".." for part in candidate.split("/"))
+    ):
+        raise HTTPException(status_code=400, detail=f"{field} must be a relative snapshot path")
+    return "/".join(part for part in candidate.split("/") if part and part != ".")
+
+
 def safe_tar_extract(tar_path: str | Path, dest_path: str | Path) -> list[str]:
-    """Safely extract a tar archive with path traversal protection.
-
-    Validates each member before extraction to prevent:
-    - Absolute paths that could write outside dest_path
-    - Relative paths with .. that escape dest_path
-    - Symbolic links pointing outside dest_path
-
-    Args:
-        tar_path: Path to the tar archive
-        dest_path: Destination directory for extraction
-
-    Returns:
-        List of extracted member names
-
-    Raises:
-        ValueError: If archive contains unsafe paths
-    """
+    """Extract ordinary files without following archive or destination links."""
     import tarfile
 
-    dest = Path(dest_path).resolve()
-    members = []
+    destination = Path(dest_path).absolute()
+
+    def is_link(path: Path) -> bool:
+        return path.is_symlink() or bool(hasattr(path, "is_junction") and path.is_junction())
+
+    ancestor = destination
+    while True:
+        if is_link(ancestor):
+            raise ValueError("Tar destination must not contain symlink or junction ancestors")
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+    if destination.exists() and not destination.is_dir():
+        raise ValueError("Tar destination must be a non-symlink directory")
+    destination.mkdir(parents=True, exist_ok=True)
+    members: list[str] = []
+    seen: set[str] = set()
+    planned: list[tuple[Any, str, tuple[str, ...]]] = []
+
+    def prepare_parent(parts: tuple[str, ...], *, create: bool) -> Path:
+        current = destination
+        for part in parts:
+            current /= part
+            if is_link(current) or (current.exists() and not current.is_dir()):
+                raise ValueError(f"Tar member has an unsafe parent: {'/'.join(parts)}")
+            if create:
+                current.mkdir(exist_ok=True)
+        return current
 
     with tarfile.open(str(tar_path), "r:gz") as tar:
         for member in tar.getmembers():
-            # Check for absolute paths (both Unix and Windows style)
-            if member.name.startswith("/") or member.name.startswith("\\"):
+            name = member.name.replace("\\", "/")
+            parts = tuple(part for part in name.split("/") if part not in {"", "."})
+            if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
                 raise ValueError(f"Tar member has absolute path: {member.name}")
-
-            # Check for path traversal (both Unix and Windows separators)
-            if ".." in member.name.split("/") or ".." in member.name.split("\\"):
+            if ".." in parts:
                 raise ValueError(f"Tar member has path traversal: {member.name}")
-
-            # Resolve the final path and ensure it's within dest
-            # Use is_relative_to() for proper cross-platform comparison
-            # (handles case-insensitivity on Windows)
-            member_path = (dest / member.name).resolve()
-            try:
-                member_path.relative_to(dest)
-            except ValueError:
-                raise ValueError(f"Tar member escapes destination: {member.name}")
-
-            # Check symlinks don't point outside
             if member.issym() or member.islnk():
-                link_target = Path(member.linkname)
-                if link_target.is_absolute():
-                    raise ValueError(f"Tar symlink has absolute target: {member.name}")
-                resolved_link = (member_path.parent / link_target).resolve()
+                raise ValueError(f"Tar links are not supported: {member.name}")
+            if not (member.isdir() or member.isfile()):
+                raise ValueError(f"Tar member is not a regular file or directory: {member.name}")
+            canonical = "/".join(parts)
+            if not canonical:
+                continue
+            if canonical in seen:
+                raise ValueError(f"Tar member path is duplicated: {member.name}")
+            seen.add(canonical)
+            prepare_parent(parts[:-1], create=False)
+            output = destination.joinpath(*parts)
+            if is_link(output):
+                raise ValueError(f"Tar member targets a symlink: {member.name}")
+            if output.exists() and not (output.is_dir() if member.isdir() else output.is_file()):
+                raise ValueError(f"Tar member conflicts with the existing destination: {member.name}")
+            planned.append((member, canonical, parts))
+
+        file_paths = {canonical for member, canonical, _ in planned if member.isfile()}
+        for _member, canonical, parts in planned:
+            if any("/".join(parts[:index]) in file_paths for index in range(1, len(parts))):
+                raise ValueError(f"Tar member has a file as its parent: {canonical}")
+
+        for member, canonical, parts in planned:
+            parent = prepare_parent(parts[:-1], create=True)
+            output = parent / parts[-1]
+            if is_link(output):
+                raise ValueError(f"Tar member targets a symlink: {member.name}")
+            if member.isdir():
+                if output.exists() and not output.is_dir():
+                    raise ValueError(f"Tar directory conflicts with a file: {member.name}")
+                output.mkdir(exist_ok=True)
+            else:
+                if output.exists() and not output.is_file():
+                    raise ValueError(f"Tar file conflicts with a directory: {member.name}")
+                source = tar.extractfile(member)
+                if source is None:
+                    raise ValueError(f"Tar file could not be read: {member.name}")
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
                 try:
-                    resolved_link.relative_to(dest)
-                except ValueError:
-                    raise ValueError(f"Tar symlink escapes destination: {member.name}")
-
-            members.append(member.name)
-
-        # All members validated, now extract
-        tar.extractall(path=str(dest))
+                    descriptor = os.open(output, flags, member.mode & 0o777 or 0o600)
+                except OSError as error:
+                    raise ValueError(f"Tar file could not be created safely: {member.name}") from error
+                with source, os.fdopen(descriptor, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                try:
+                    os.chmod(output, member.mode & 0o777 or 0o600, follow_symlinks=False)
+                    os.utime(output, (member.mtime, member.mtime), follow_symlinks=False)
+                except (NotImplementedError, OSError):
+                    pass
+            members.append(canonical)
 
     return members
 
@@ -641,10 +693,19 @@ def _build_backup_command_payload(
     if not repo:
         raise ValueError("Repository not found")
     repo_type = repo.get("repo_type", "")
+    repository_format = repo.get("format", "kopia")
+    if repository_format not in {"kopia", "files"}:
+        raise ValueError("Unsupported repository format")
+    if repository_format == "files" and repo_type not in {"local", "smb"}:
+        raise ValueError("Files repositories support local and SMB storage only")
+    if repository_format == "files" and repo_type != "local" and client_id:
+        client = storage.get_client(client_id)
+        if not client or "files-repository-v1" not in client.capabilities:
+            raise ValueError("Agent does not support files repositories")
     if is_android_client and repo_type != "local":
         raise ValueError("Android agents support local repositories only")
-    repository_password = storage.get_repository_password(repository_id)
-    if not repository_password:
+    repository_password = storage.get_repository_password(repository_id) if repository_format == "kopia" else None
+    if repository_format == "kopia" and not repository_password:
         raise ValueError("Repository encryption password is required")
 
     payload: dict[str, Any] = {
@@ -652,13 +713,22 @@ def _build_backup_command_payload(
         "run_id": run_id,
         "source_path": job.get("source_path"),
         "excludes": job.get("excludes", []),
-        "repository_options": {"repository_password": repository_password},
+        "includes": job.get("includes", []),
+        "repository_options": {"format": repository_format},
         "dry_run": dry_run,
     }
+    if repository_format == "files":
+        payload["repository_options"]["repository_id"] = repository_id
+        payload["repository_options"]["job_name"] = job_name
+    if repository_password:
+        payload["repository_options"]["repository_password"] = repository_password
     if repo_type == "smb":
+        repository_root = f"//{repo.get('server')}/{repo.get('share')}"
+        if repo.get("path"):
+            repository_root += f"/{str(repo['path']).strip('/')}"
         payload.update(
             {
-                "destination_path": f"//{repo.get('server')}/{repo.get('share')}/Agents/{job_subfolder}",
+                "destination_path": f"{repository_root}/Agents/{job_subfolder}",
                 "smb_server": repo.get("server"),
                 "smb_share": repo.get("share"),
                 "smb_username": repo.get("username"),
@@ -706,6 +776,7 @@ def _build_backup_command_payload(
 def _validate_job_config(config: dict[str, Any], storage: Storage) -> None:
     """Reject unsupported repository types before persistence."""
     repo_type = None
+    repo = None
     if repo_id := config.get("repository_id"):
         repo = storage.get_repository(repo_id)
         if not repo:
@@ -713,11 +784,20 @@ def _validate_job_config(config: dict[str, Any], storage: Storage) -> None:
         repo_type = repo.get("repo_type")
     if repo_type and repo_type not in {"smb", "nfs", "local", "s3"}:
         raise HTTPException(status_code=400, detail=f"Unsupported repository type: {repo_type}")
+    if repo_id and (repo := storage.get_repository(repo_id)):
+        repository_format = repo.get("format", "kopia")
+        if repository_format not in {"kopia", "files"}:
+            raise HTTPException(status_code=400, detail="Unsupported repository format")
+        if repository_format == "files" and repo_type not in {"local", "smb"}:
+            raise HTTPException(status_code=400, detail="Files repositories support local and SMB storage only")
     if client_id := config.get("client_id"):
         client = storage.get_client(client_id)
         if client and (client.os_info or "").lower().startswith("android"):
             if repo_type != "local":
                 raise HTTPException(status_code=400, detail="Android agents support local repositories only")
+        if repo and repo.get("format", "kopia") == "files" and repo_type != "local":
+            if not client or "files-repository-v1" not in client.capabilities:
+                raise HTTPException(status_code=400, detail="Agent does not support files repositories")
 
 
 def _restore_redacted_secrets(value: Any, existing: Any) -> Any:
@@ -3294,6 +3374,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     ClientStatus.ONLINE,
                     ip_address=req.client.host if req.client else None,
                 )
+                storage.update_client_capabilities(existing_client.id, request.capabilities)
 
                 logger.info(f"Re-registered existing client: {existing_client.id} ({request.hostname})")
                 return ClientRegisterResponse(
@@ -3330,6 +3411,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             version=request.version,
             os_info=request.os_info,
             tags=request.tags,
+            capabilities=request.capabilities,
         )
 
         storage.add_client(client, secret_hash)
@@ -3579,6 +3661,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         import asyncio
 
         storage.update_client_status(client.id, ClientStatus.ONLINE, ip_address=req.client.host if req.client else None)
+        if heartbeat.capabilities is not None:
+            storage.update_client_capabilities(client.id, heartbeat.capabilities)
 
         # Check for pending commands immediately
         commands = storage.get_pending_commands(client.id)
@@ -4309,9 +4393,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         job_subfolder = _get_job_subfolder(job_name)
         backup_source = f"{backup_source.rstrip('/')}/Agents/{job_subfolder}"
 
-        source_subfolder = data.get("source_subfolder", "")
+        source_subfolder = _safe_snapshot_subtree(data.get("source_subfolder", ""), "source_subfolder")
         if data.get("clean_restore") and data.get("dry_run"):
             raise HTTPException(status_code=400, detail="clean_restore cannot be combined with dry_run")
+
+        repository_id = job.get("repository_id")
+        if not repository_id:
+            raise HTTPException(status_code=400, detail="A repository is required for restores")
+        repo = storage.get_repository(repository_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        repository_format = repo.get("format", "kopia")
+        if repository_format not in {"kopia", "files"}:
+            raise HTTPException(status_code=400, detail="Unsupported repository format")
+        repo_password = storage.get_repository_password(repository_id) if repository_format == "kopia" else None
+        if repository_format == "kopia" and not repo_password:
+            raise HTTPException(status_code=400, detail="Repository encryption password is required")
 
         now = tz.get_now()
         restore_id = now.strftime("%Y%m%d_%H%M%S_%f")
@@ -4356,75 +4453,70 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         }
 
         # Add repository credentials for SMB/NFS access
-        repository_id = job.get("repository_id")
-        if not repository_id:
-            raise HTTPException(status_code=400, detail="A repository is required for restores")
-        repo = storage.get_repository(repository_id)
-        if not repo:
-            raise HTTPException(status_code=404, detail="Repository not found")
-        if repo:
-            repo_type = repo.get("repo_type", "")
-            repo_password = storage.get_repository_password(repository_id)
-            if not repo_password:
-                raise HTTPException(status_code=400, detail="Repository encryption password is required")
-            command_payload["repository_options"] = {"repository_password": repo_password}
-            storage_password = storage.get_storage_password(repository_id)
+        repo_type = repo.get("repo_type", "")
+        command_payload["repository_options"] = {"format": repository_format}
+        if repository_format == "files":
+            command_payload["repository_options"]["repository_id"] = repository_id
+            command_payload["repository_options"]["job_name"] = job_name
+        if repo_password:
+            command_payload["repository_options"]["repository_password"] = repo_password
+        storage_password = storage.get_storage_password(repository_id)
 
-            if repo_type == "smb":
-                # Include SMB connection info for agents that can mount shares.
-                command_payload["smb_server"] = repo.get("server")
-                command_payload["smb_share"] = repo.get("share")
-                command_payload["smb_username"] = repo.get("username")
-                command_payload["smb_domain"] = repo.get("domain")
-                if storage_password:
-                    command_payload["smb_password"] = storage_password
+        if repo_type == "smb":
+            # Include SMB connection info for agents that can mount shares.
+            command_payload["smb_server"] = repo.get("server")
+            command_payload["smb_share"] = repo.get("share")
+            command_payload["smb_username"] = repo.get("username")
+            command_payload["smb_domain"] = repo.get("domain")
+            if storage_password:
+                command_payload["smb_password"] = storage_password
 
-            elif repo_type == "nfs":
-                # NFS info (no password needed typically)
-                command_payload["nfs_server"] = repo.get("server")
-                command_payload["nfs_export"] = repo.get("share")
+        elif repo_type == "nfs":
+            # NFS info (no password needed typically)
+            command_payload["nfs_server"] = repo.get("server")
+            command_payload["nfs_export"] = repo.get("share")
 
-            elif repo_type == "local":
-                # For local repositories, use proxy backend for restore
-                # The agent streams restore data FROM the server via HTTP/HTTPS
-                public_url = storage.get_setting("public_url", "http://localhost:8420")
+        elif repo_type == "local":
+            # For local repositories, use proxy backend for restore
+            # The agent streams restore data FROM the server via HTTP/HTTPS
+            public_url = storage.get_setting("public_url", "http://localhost:8420")
 
-                # Determine proxy scheme based on public_url protocol
-                if public_url.startswith("https://"):
-                    proxy_scheme = "proxys"
-                    host_part = public_url[8:]  # Remove "https://"
-                else:
-                    proxy_scheme = "proxy"
-                    host_part = public_url[7:]  # Remove "http://"
+            # Determine proxy scheme based on public_url protocol
+            if public_url.startswith("https://"):
+                proxy_scheme = "proxys"
+                host_part = public_url[8:]  # Remove "https://"
+            else:
+                proxy_scheme = "proxy"
+                host_part = public_url[7:]  # Remove "http://"
 
-                # Generate proxy URI with job subfolder
-                # Structure: proxy://host/repo/{id}/Agents/{job}
-                proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
+            # Generate proxy URI with job subfolder
+            # Structure: proxy://host/repo/{id}/Agents/{job}
+            proxy_uri = f"{proxy_scheme}://{host_part}/repo/{repository_id}/Agents/{job_subfolder}"
 
-                # Override source_path with proxy URI
-                command_payload["source_path"] = proxy_uri
+            # Override source_path with proxy URI
+            command_payload["source_path"] = proxy_uri
 
-                command_payload["repository_options"]["proxy_capability"] = generate_proxy_capability(
-                    client_id=client_id,
-                    repo_id=repository_id,
-                    job_name=job_name,
-                    run_id=f"restore_{restore_id}",
-                    subfolder=f"Agents/{job_subfolder}",
-                    operation="restore",
-                )
+            command_payload["repository_options"]["proxy_capability"] = generate_proxy_capability(
+                client_id=client_id,
+                repo_id=repository_id,
+                job_name=job_name,
+                run_id=f"restore_{restore_id}",
+                subfolder=f"Agents/{job_subfolder}",
+                operation="restore",
+            )
 
-                logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
+            logger.debug(f"[RESTORE] Using proxy for local repo: {proxy_uri}")
 
-            elif repo_type == "s3":
-                from backer.backends.s3 import kopia_s3_config
+        elif repo_type == "s3":
+            from backer.backends.s3 import kopia_s3_config
 
-                s3 = {
-                    **repo.get("config", {}).get("s3", {}),
-                    **(storage.get_repository_provider_credentials(repository_id) or {}),
-                }
-                s3_config = kopia_s3_config(s3)
-                command_payload["source_path"] = s3_config["repository"]
-                command_payload["repository_options"]["s3"] = s3
+            s3 = {
+                **repo.get("config", {}).get("s3", {}),
+                **(storage.get_repository_provider_credentials(repository_id) or {}),
+            }
+            s3_config = kopia_s3_config(s3)
+            command_payload["source_path"] = s3_config["repository"]
+            command_payload["repository_options"]["s3"] = s3
 
         storage.queue_command(
             client_id=client_id,
@@ -4670,10 +4762,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         repo_type = data.get("type", "smb")
         if repo_type not in {"smb", "nfs", "local", "s3"}:
             raise HTTPException(status_code=400, detail="Unsupported repository type")
-        repository_password = _repository_password_or_error(data.get("repository_password"))
+        repository_format = data.get("format", "kopia")
+        if repository_format not in {"kopia", "files"}:
+            raise HTTPException(status_code=400, detail="Unsupported repository format")
+        if repository_format == "files" and repo_type not in {"local", "smb"}:
+            raise HTTPException(status_code=400, detail="Files repositories support local and SMB storage only")
+        if repository_format == "files" and repo_type == "smb":
+            if not data.get("server") or not data.get("share"):
+                raise HTTPException(status_code=400, detail="Files SMB repositories require server and share")
+            subpath = str(data.get("path") or "").replace("\\", "/").strip("/")
+            if not subpath or any(part in {"", ".", ".."} for part in subpath.split("/")):
+                raise HTTPException(status_code=400, detail="Files SMB repositories require a safe subfolder path")
+            data["path"] = subpath
+        if repository_format == "files" and any(data.get(key) for key in ("repository_password", "passphrase")):
+            raise HTTPException(status_code=400, detail="Files repositories do not use a repository password")
+        repository_password = (
+            _repository_password_or_error(data.get("repository_password")) if repository_format == "kopia" else None
+        )
 
         repo_id = str(uuid4())[:8]
-        config: dict[str, Any] | None = None
+        config: dict[str, Any] | None = {"format": repository_format}
         provider_credentials_encrypted = None
         if repo_type == "s3":
             from backer.backends.s3 import S3ConfigError, kopia_s3_config
@@ -4683,7 +4791,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except S3ConfigError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             data["share"], data["path"] = s3["public_config"]["bucket"], s3["public_config"]["prefix"]
-            config = {"s3": s3["public_config"]}
+            config["s3"] = s3["public_config"]
             provider_credentials_encrypted = get_secrets_manager(storage.db_path.parent).encrypt(
                 json.dumps(
                     {
@@ -4756,7 +4864,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         storage_password_encrypted = repository_password_encrypted = None
         secrets_manager = get_secrets_manager(storage.db_path.parent)
         storage_password_encrypted = secrets_manager.encrypt(storage_password) if storage_password else None
-        repository_password_encrypted = secrets_manager.encrypt(repository_password)
+        repository_password_encrypted = secrets_manager.encrypt(repository_password) if repository_password else None
 
         storage.add_repository(
             repo_id=repo_id,
@@ -4773,19 +4881,59 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             provider_credentials_encrypted=provider_credentials_encrypted,
         )
 
-        # Initialize kopia repository for LOCAL repos
+        # Initialize the chosen repository format before exposing a usable record.
         if repo_type == "local":
             local_path = data.get("share")
-            kopia_password = _repository_password_or_error(repository_password)
             try:
-                kopia = ServerKopia(local_path, kopia_password)
-                if kopia.ensure_repo(create_if_absent=True):
-                    logger.info(f"[CREATE REPO] Kopia repository initialized at {local_path}")
+                if repository_format == "kopia":
+                    kopia = ServerKopia(local_path, _repository_password_or_error(repository_password))
+                    initialized = kopia.ensure_repo(create_if_absent=True)
                 else:
-                    logger.warning(f"[CREATE REPO] Failed to initialize kopia repository at {local_path}")
+                    from backer.backends.base import BackupDestination
+                    from backer.backends.registry import get_backend
+
+                    initialized = get_backend("files", {"repository_id": repo_id}).init_repo(
+                        BackupDestination(path=str(local_path))
+                    ).success
+                if initialized:
+                    logger.info("[CREATE REPO] Repository initialized at %s", local_path)
+                else:
+                    raise RuntimeError("Repository initialization failed")
             except Exception as kopia_err:
-                logger.warning(f"[CREATE REPO] Kopia initialization error: {kopia_err}")
-                # Don't fail - kopia will be initialized on first backup
+                # A files marker is its identity contract. Do not leave a
+                # usable record when it could not be created or verified.
+                if repository_format == "files":
+                    storage.delete_repository(repo_id)
+                    raise HTTPException(status_code=400, detail=f"Repository initialization failed: {kopia_err}")
+                logger.warning("[CREATE REPO] Kopia initialization error: %s", kopia_err)
+        elif repo_type == "smb" and repository_format == "files":
+            try:
+                from backer.backends.base import BackupDestination
+                from backer.backends.registry import get_backend
+
+                if sys.platform == "win32":
+                    repository_path = Path(f"//{data.get('server')}/{data.get('share')}") / data["path"]
+                    initialized = get_backend("files", {"repository_id": repo_id}).init_repo(
+                        BackupDestination(path=str(repository_path))
+                    ).success
+                else:
+                    from backer.core.mounts import smb_mount_context
+
+                    with smb_mount_context(
+                        data.get("server"),
+                        data.get("share"),
+                        data.get("username"),
+                        storage_password,
+                        data.get("domain"),
+                    ) as mount_point:
+                        initialized = get_backend("files", {"repository_id": repo_id}).init_repo(
+                            BackupDestination(path=str(mount_point / data["path"]))
+                        ).success
+                if not initialized:
+                    raise RuntimeError("Repository initialization failed")
+            except Exception as error:
+                storage.delete_repository(repo_id)
+                raise HTTPException(status_code=400, detail=f"Repository initialization failed: {error}") from error
 
         # Auto-trigger test and scan for better UX
         test_task_id = None
@@ -4805,6 +4953,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {
             "id": repo_id,
             "name": name,
+            "format": repository_format,
             "status": "created",
             "test_task_id": test_task_id,
             "scan_task_id": scan_task_id,
@@ -4877,7 +5026,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             message = ""
 
             try:
-                if repo_type == "smb":
+                if repo.get("format", "kopia") == "files" and repo_type == "local":
+                    from backer.backends.registry import get_backend
+
+                    state, marker_id = get_backend("files", {"repository_id": repo_id}).repository_probe(share)
+                    success = state == "present" and marker_id == repo_id
+                    message = (
+                        "Files repository marker validated"
+                        if success
+                        else "Files repository marker is missing or mismatched"
+                    )
+                elif repo_type == "smb":
                     task.message = f"Connecting to SMB share //{server}/{share}..."
                     task.progress = 40
                     success, message = SMBBrowser.test_connection(
@@ -4952,6 +5111,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         repo = storage.get_repository(repo_id)
         if not repo:
             raise HTTPException(status_code=404, detail="Repository not found")
+        if repo.get("format", "kopia") == "files":
+            raise HTTPException(status_code=400, detail="Files repositories do not use a repository password")
 
         data = await request.json()
         password = _repository_password_or_error(data.get("repository_password"))
@@ -5220,6 +5381,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     task.progress = 30
                     repo_meta = RepositoryMetadata(repo_path, repo_type)
                     discovery = repo_meta.discover_all()
+
+                    if repo.get("format", "kopia") == "files":
+                        from backer.backends.base import BackupDestination
+                        from backer.backends.registry import get_backend
+
+                        root = Path(repo_path)
+                        files = get_backend("files", {"repository_id": repo_id})
+                        if files.repository_probe(str(root))[0] != "present":
+                            raise RuntimeError("Files repository marker is missing or invalid")
+                        jobs, snapshots = [], []
+                        agents = root / "Agents"
+                        if agents.is_dir() and not agents.is_symlink():
+                            for job_dir in agents.iterdir():
+                                if not job_dir.is_dir() or job_dir.is_symlink():
+                                    continue
+                                rows = files.list_snapshots(BackupDestination(path=str(job_dir)))
+                                if rows:
+                                    jobs.append({"job_name": job_dir.name, "run_count": len(rows)})
+                                    snapshots.extend(
+                                        {
+                                            "snapshot_id": row["full_id"],
+                                            "short_id": row["id"],
+                                            "time": row["timestamp"],
+                                            "paths": row["paths"],
+                                        }
+                                        for row in rows
+                                    )
+                        discovery["jobs"] = jobs
+                        discovery["snapshots"] = snapshots
+                        discovery["initialized"] = True
+                        return format_result(discovery)
 
                     # For LOCAL repos, also scan Agents/ folder structure and kopia snapshots
                     if repo_type == "local":
@@ -12635,6 +12827,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not os.access(path, os.R_OK):
             return {"available": False, "error": f"Path is not readable: {local_path}"}
 
+        if repo.get("format", "kopia") == "files":
+            from backer.backends.registry import get_backend
+
+            state, marker_id = get_backend("files", {"repository_id": repo_id}).repository_probe(str(path))
+            if state != "present" or marker_id != repo_id:
+                return {
+                    "available": False,
+                    "error": "Files repository marker is missing or belongs to another repository",
+                }
+
         return {"available": True, "message": "OK"}
 
     @app.post("/api/repo/{repo_id}/init")
@@ -12654,7 +12856,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             operation="init",
             capability=request.headers.get("X-Backer-Capability"),
         )
-
         # Parse request body (password may be sent for verification)
         try:
             await request.json()  # Consume body but use repository password
@@ -12663,7 +12864,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         local_path = repo.get("share")
         if not local_path:
-            return {"success": False, "error": "No local path configured"}
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": "No local path configured"},
+            )
 
         path = Path(local_path)
 
@@ -12676,6 +12880,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return {"success": False, "error": f"Failed to create/access directory: {e}"}
 
         try:
+            if repo.get("format", "kopia") == "files":
+                from backer.backends.base import BackupDestination
+                from backer.backends.registry import get_backend
+
+                backend = get_backend("files", {"repository_id": repo_id})
+                state, marker_id = backend.repository_probe(str(path))
+                if state == "present":
+                    if marker_id != repo_id:
+                        return {"success": False, "error": "Files repository marker belongs to another repository"}
+                    return {"success": True, "integrity": "repository marker validation"}
+                if state != "absent":
+                    return {"success": False, "error": "Files repository marker is invalid or unreachable"}
+                result = backend.init_repo(BackupDestination(path=str(path)))
+                return {
+                    "success": result.success,
+                    "output": result.output,
+                    "error": result.errors[0] if result.errors else None,
+                }
             if repo.get("repo_type") == "local":
                 kopia = ServerKopia(str(path), _repository_password_or_error(repo_password))
                 return {
@@ -12727,9 +12949,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             operation="list",
             capability=request.headers.get("X-Backer-Capability"),
         )
+        claimed_job = _claims.get("job") if _claims else None
+        if claimed_job:
+            if job and job != claimed_job:
+                raise HTTPException(status_code=403, detail="Proxy capability does not allow this job")
+            job = claimed_job
 
         try:
             local_path = repo.get("share")
+            if repo.get("format", "kopia") == "files":
+                from backer.backends.base import BackupDestination
+                from backer.backends.registry import get_backend
+
+                if not job:
+                    return {"success": False, "error": "A job is required for files snapshots", "snapshots": []}
+                snapshots = get_backend("files", {"repository_id": repo_id, "job_name": job}).list_snapshots(
+                    BackupDestination(path=str(Path(local_path) / "Agents" / _get_job_subfolder(job)))
+                )
+                return {"success": True, "snapshots": snapshots, "count": len(snapshots)}
             repo_type = repo.get("repo_type", "").lower()
 
             # For LOCAL repos, use ServerKopia to list snapshots
@@ -12813,6 +13050,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         try:
             local_path = repo.get("share")
+            if repo.get("format", "kopia") == "files":
+                from backer.backends.base import BackupDestination
+                from backer.backends.registry import get_backend
+
+                job_name = capability_claims.get("job") if capability_claims else None
+                if not isinstance(job_name, str) or not job_name:
+                    return {"success": False, "error": "Invalid proxy capability job"}
+                result = get_backend("files", {"repository_id": repo_id, "job_name": job_name}).prune(
+                    BackupDestination(path=str(Path(local_path) / "Agents" / _get_job_subfolder(job_name))),
+                    dry_run=dry_run,
+                    **policy,
+                )
+                return {
+                    "success": result.success,
+                    "output": result.output,
+                    "error": result.errors[0] if result.errors else None,
+                }
             # _verify_repo_access already rejects any repo_type other than
             # "local" with a 400, so this is the only branch that ever runs.
             kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
@@ -12891,6 +13145,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         try:
             local_path = repo.get("share")
+            if repo.get("format", "kopia") == "files":
+                from backer.backends.base import BackupDestination
+                from backer.backends.registry import get_backend
+
+                job_name = _claims.get("job") if _claims else None
+                if not isinstance(job_name, str) or not job_name:
+                    return {"success": False, "error": "Invalid proxy capability job"}
+                result = get_backend("files", {"repository_id": repo_id, "job_name": job_name}).check(
+                    BackupDestination(path=str(Path(local_path) / "Agents" / _get_job_subfolder(job_name)))
+                )
+                return {
+                    "success": result.success,
+                    "output": result.output,
+                    "error": result.errors[0] if result.errors else None,
+                    "integrity": "full hash verification",
+                }
             # _verify_repo_access already rejects any repo_type other than
             # "local" with a 400, so this is the only branch that ever runs.
             kopia = ServerKopia(str(local_path), _repository_password_or_error(repo_password))
@@ -12918,15 +13188,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         credentials: HTTPBasicCredentials | None = Depends(security),
         storage: Storage = Depends(get_storage),
     ) -> dict[str, Any]:
-        """Receive backup data from agent and store in proper directory structure.
-
-        Flow:
-        1. Receive tar.gz stream from agent
-        2. Extract to {local_path}/Agents/{job_name}/contents/ (persistent storage)
-        3. Create kopia snapshot with job tags (for versioning/point-in-time restore)
-
-        Files remain accessible in the filesystem structure while kopia provides versioning.
-        """
+        """Receive an archive and commit it through the repository's stored format."""
         import tempfile
 
         auth_header = request.headers.get("authorization")
@@ -12943,33 +13205,56 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         local_path = repo.get("share")
         if not local_path:
-            return {"success": False, "error": "No local path configured"}
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": "No local path configured"},
+            )
 
-        # Get destination subfolder from headers (e.g., "Agents/testjob")
-        subfolder = request.headers.get("X-Backup-Subfolder", "")
         source_path = request.headers.get("X-Source-Path", "unknown")
-
-        # Extract job name from subfolder (e.g., "Agents/testjob" -> "testjob")
-        # Handle both forward slashes and backslashes for Windows compatibility
-        job_name = "unknown"
-        if subfolder:
-            subfolder = subfolder.strip("/\\")
-            # Normalize to forward slashes for consistent parsing
-            subfolder = subfolder.replace("\\", "/")
-            parts = subfolder.split("/")
-            if len(parts) >= 2 and parts[0] == "Agents":
-                job_name = parts[1]
-            elif parts:
-                job_name = parts[-1]
+        # The signed capability owns the namespace; the transport header is not
+        # trusted to choose where a snapshot is written.
+        job_name = _claims.get("job")
+        if not isinstance(job_name, str) or not job_name:
+            raise HTTPException(status_code=403, detail="Invalid proxy capability job")
+        safe_job_name = _get_job_subfolder(job_name)
 
         logger.info(f"[PROXY BACKUP] Receiving backup for job '{job_name}' from {source_path}")
 
-        # Build the proper backup directory structure: {local_path}/Agents/{job_name}/contents/
-        # This matches the structure used by SMB/NFS repositories for consistency
         local_base = Path(local_path)
-        backup_dir = local_base / "Agents" / job_name / "contents"
+        # Removed after a successful Kopia snapshot when upgrading a legacy repository.
+        backup_dir = local_base / "Agents" / safe_job_name / "contents"
         tmp_path = None
         staging_dir: Path | None = None
+
+        def write_metadata(snapshot_id: str, backend_name: str) -> None:
+            """Keep recovery sidecars without retaining extracted contents."""
+            from backer.backends.base import BackendResult, OperationType
+            from backer.core.runner import _write_metadata_to_path
+
+            try:
+                agent_id = _claims.get("sub") if isinstance(_claims.get("sub"), str) else None
+                finished_at = datetime.now()
+                _write_metadata_to_path(
+                    local_base,
+                    job_name,
+                    str(_claims.get("run") or snapshot_id),
+                    source_path,
+                    backend_name,
+                    BackendResult(
+                        success=True,
+                        operation=OperationType.BACKUP,
+                        started_at=finished_at,
+                        finished_at=finished_at,
+                        bytes_transferred=bytes_received,
+                        files_transferred=len(members),
+                    ),
+                    finished_at,
+                    finished_at,
+                    snapshot_id,
+                    agent_id,
+                )
+            except Exception as error:
+                logger.warning("[PROXY BACKUP] Snapshot succeeded but metadata write failed: %s", error)
 
         try:
             # Stream body to temp file
@@ -12982,184 +13267,73 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
             logger.info(f"[PROXY BACKUP] Received {bytes_received / 1024 / 1024:.1f}MB")
 
-            # Validate and extract into a sibling staging directory.  A failed
-            # upload must never leave a partly-updated live backup behind.
-            backup_dir.parent.mkdir(parents=True, exist_ok=True)
-            staging_dir = Path(tempfile.mkdtemp(prefix=".backer-stage-", dir=backup_dir.parent))
+            # Archive data is plaintext. Keep it outside the repository for
+            # both formats so a crash cannot leave an encrypted repository
+            # with a persistent live contents mirror.
+            staging_dir = Path(tempfile.mkdtemp(prefix="backer-proxy-stage-"))
             members = safe_tar_extract(tmp_path, staging_dir)
 
-            # The lock survives workers and process restarts, unlike an asyncio
-            # lock. It lives outside contents and rollback-directory globs.
-            transaction_lock = (
-                local_base / ".backer-locks" / (f"proxy-{hashlib.sha256(job_name.encode()).hexdigest()}.lock")
-            )
-            # One repository/job has one live contents directory. Keep the old
-            # tree until Kopia accepts the replacement, then discard it.
-            with file_lock(transaction_lock):
-                previous_dir = backup_dir.parent / f".backer-previous-{uuid4().hex}"
-                failed_dir = backup_dir.parent / f".backer-failed-{uuid4().hex}"
-                replaced = False
-                previous_moved = False
-                try:
-                    if backup_dir.exists():
-                        os.replace(backup_dir, previous_dir)
-                        previous_moved = True
-                    os.replace(staging_dir, backup_dir)
-                    staging_dir = None
-                    replaced = True
+            if repo.get("format", "kopia") == "files":
+                from backer.backends.base import BackupDestination, BackupSource
+                from backer.backends.registry import get_backend
 
-                    logger.info(f"[PROXY BACKUP] Extracted {len(members)} files to {backup_dir}")
-                    password = _repository_password_or_error(repo_password)
-                    kopia = ServerKopia(local_path, password)
-                    if not kopia.ensure_repo(create_if_absent=False):
-                        raise RuntimeError("Failed to initialize kopia repository")
-                    result = kopia.snapshot_create(
-                        source_dir=backup_dir,
-                        job_name=job_name,
-                        source_path=source_path,
-                    )
-                    if not result.get("success"):
-                        raise RuntimeError(result.get("error", "Snapshot creation failed"))
-                except Exception as snapshot_error:
-                    rollback_error = None
-                    if replaced:
-                        try:
-                            os.replace(backup_dir, failed_dir)
-                        except Exception as move_error:
-                            rollback_error = RuntimeError(
-                                "CRITICAL: rollback could not preserve rejected contents; "
-                                f"previous contents remain at {previous_dir}: {move_error}"
-                            )
-                        else:
-                            if previous_moved:
-                                try:
-                                    os.replace(previous_dir, backup_dir)
-                                except Exception as restore_error:
-                                    rollback_error = RuntimeError(
-                                        "CRITICAL: rollback could not restore previous contents; "
-                                        f"previous contents retained at {previous_dir}: {restore_error}"
-                                    )
-                            try:
-                                shutil.rmtree(failed_dir)
-                            except Exception as cleanup_error:
-                                logger.warning(
-                                    "[PROXY BACKUP] Failed to clean rejected contents %s: %s",
-                                    failed_dir,
-                                    cleanup_error,
-                                )
-                    elif previous_moved:
-                        try:
-                            os.replace(previous_dir, backup_dir)
-                        except Exception as restore_error:
-                            rollback_error = RuntimeError(
-                                "CRITICAL: rollback could not restore previous contents; "
-                                f"previous contents retained at {previous_dir}: {restore_error}"
-                            )
-                    if rollback_error:
-                        logger.critical("[PROXY BACKUP] %s", rollback_error)
-                        raise rollback_error from snapshot_error
-                    raise
-                else:
-                    if previous_dir.exists():
-                        try:
-                            shutil.rmtree(previous_dir)
-                        except Exception as cleanup_error:
-                            logger.warning(
-                                "[PROXY BACKUP] Snapshot committed but failed to clean previous contents %s: %s",
-                                previous_dir,
-                                cleanup_error,
-                            )
-
-            # Clean up tar file
-            try:
-                Path(tmp_path).unlink()
-            except Exception as cleanup_error:
-                logger.warning(
-                    "[PROXY BACKUP] Snapshot committed but failed to clean upload archive: %s",
-                    cleanup_error,
+                run_id = _claims.get("run")
+                if not isinstance(run_id, str) or not run_id:
+                    raise HTTPException(status_code=403, detail="Invalid proxy capability run")
+                result = get_backend(
+                    "files",
+                    {
+                        "repository_id": repo_id,
+                        "run_id": run_id,
+                        "source_path": source_path,
+                        "job_name": job_name,
+                    },
+                ).backup(
+                    BackupSource(path=staging_dir),
+                    BackupDestination(path=str(local_base / "Agents" / safe_job_name)),
                 )
-            tmp_path = None
-
-            snapshot_id = result.get("snapshot_id", "unknown")
-            logger.info(f"[PROXY BACKUP] Created kopia snapshot: {snapshot_id}")
-
-            # Write repository metadata for disaster recovery
-            # Metadata goes at job folder level: {local_path}/Agents/{job_name}/.backer/
-            try:
-                from backer.core.repo_metadata import RepositoryMetadata
-
-                job_folder = local_base / "Agents" / job_name
-                repo_meta = RepositoryMetadata(job_folder, repo_type="local")
-
-                # Initialize metadata if not already done
-                if not repo_meta.is_initialized():
-                    repo_meta.initialize()
-                    logger.info(f"[PROXY BACKUP] Initialized metadata at {job_folder}/.backer/")
-
-                # Extract client_id from auth for agent metadata
-                client_id = None
-                client = None
-                if auth_header and auth_header.startswith("Bearer "):
-                    token = auth_header[7:]
-                    claims = verify_agent_token(token)
-                    if claims:
-                        client_id = claims.get("sub")
-                elif credentials:
-                    client_id = credentials.username
-
-                # Save agent metadata if we have client info
-                if client_id:
-                    client = storage.get_client(client_id)
-                    if client:
-                        agent_data = {
-                            "hostname": client.hostname,
-                            "os_info": client.os_info,
-                            "version": client.version,
-                            "ip_address": client.ip_address,
-                            "name": client.name,
-                        }
-                        repo_meta.save_agent(client_id, agent_data)
-                        logger.debug(f"[PROXY BACKUP] Saved agent metadata for {client.hostname}")
-
-                # Save job configuration
-                job_config = {
-                    "source_path": source_path,
-                    "repo_id": repo_id,
-                    "client_id": client_id,
-                }
-                repo_meta.save_job(job_name, job_config)
-
-                # Save job run record
-                run_data = {
-                    "status": "completed",
-                    "started_at": datetime.now().isoformat(),
-                    "finished_at": datetime.now().isoformat(),
+                if not result.success:
+                    raise RuntimeError(result.errors[0] if result.errors else "Files snapshot creation failed")
+                snapshot_id = result.metadata.get("snapshot_id", run_id)
+                write_metadata(str(snapshot_id), "files")
+                return {
+                    "success": True,
+                    "message": f"Backup stored: {len(members)} files, {bytes_received / 1024 / 1024:.1f}MB",
+                    "files": len(members),
+                    "bytes": bytes_received,
                     "snapshot_id": snapshot_id,
-                    "bytes_transferred": bytes_received,
-                    "files_transferred": len(members),
-                    "client_id": client_id,
-                    "hostname": client.hostname if client else None,
                 }
-                run_id = f"{job_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                repo_meta.save_job_run(job_name, run_id, run_data)
 
-                logger.info(f"[PROXY BACKUP] Saved metadata for job '{job_name}'")
-            except Exception as meta_err:
-                # Log but don't fail the backup if metadata writing fails
-                logger.warning(f"[PROXY BACKUP] Failed to write metadata: {meta_err}")
-
+            password = _repository_password_or_error(repo_password)
+            kopia = ServerKopia(local_path, password)
+            if not kopia.ensure_repo(create_if_absent=False):
+                raise RuntimeError("Failed to initialize kopia repository")
+            result = kopia.snapshot_create(
+                source_dir=staging_dir,
+                job_name=job_name,
+                source_path=source_path,
+            )
+            if not result.get("success"):
+                raise RuntimeError(result.get("error", "Snapshot creation failed"))
+            snapshot_id = result.get("snapshot_id", "unknown")
+            # Remove a legacy live mirror only after the immutable Kopia
+            # snapshot succeeds; a failed upload leaves it untouched.
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+            write_metadata(str(snapshot_id), "kopia")
             return {
                 "success": True,
                 "message": f"Backup stored: {len(members)} files, {bytes_received / 1024 / 1024:.1f}MB",
                 "files": len(members),
                 "bytes": bytes_received,
                 "snapshot_id": snapshot_id,
-                "backup_path": str(backup_dir),
             }
 
         except Exception as e:
             logger.error(f"[PROXY BACKUP] Failed: {e}")
-            return {"success": False, "error": str(e)}
+            # Proxy agents treat a successful HTTP status as a completed
+            # upload. A failed archive/snapshot must therefore be non-2xx.
+            return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
         finally:
             if staging_dir:
@@ -13184,6 +13358,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         request: Request,
         background_tasks: BackgroundTasks,
         snapshot: str | None = None,
+        include: str | None = None,
         credentials: HTTPBasicCredentials | None = Depends(security),
         storage: Storage = Depends(get_storage),
     ):
@@ -13191,6 +13366,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         Query parameters:
             snapshot: Specific snapshot ID to restore (optional, defaults to latest)
+            include: Relative subtree within the selected snapshot to restore
 
         Headers:
             X-Restore-Subfolder: Job subfolder (e.g., "Agents/testjob")
@@ -13201,7 +13377,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         auth_header = request.headers.get("authorization")
         subfolder = request.headers.get("X-Restore-Subfolder", "").strip("/\\").replace("\\", "/")
-        repo, repo_password, _claims = _verify_repo_access(
+        include = _safe_snapshot_subtree(include)
+        repo, repo_password, claims = _verify_repo_access(
             repo_id,
             credentials,
             storage,
@@ -13218,23 +13395,55 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 content={"success": False, "error": "No local path configured"},
             )
 
-        # Get restore subfolder from headers (e.g., "Agents/testjob")
-        subfolder = request.headers.get("X-Restore-Subfolder", "")
-
-        # Extract job name from subfolder
-        # Handle both forward slashes and backslashes for Windows compatibility
-        job_name = "unknown"
-        if subfolder:
-            subfolder = subfolder.strip("/\\")
-            # Normalize to forward slashes for consistent parsing
-            subfolder = subfolder.replace("\\", "/")
-            parts = subfolder.split("/")
-            if len(parts) >= 2 and parts[0] == "Agents":
-                job_name = parts[1]
-            elif parts:
-                job_name = parts[-1]
+        # The signed capability, not an untrusted header, identifies the job.
+        job_name = claims.get("job")
+        if not isinstance(job_name, str) or not job_name:
+            raise HTTPException(status_code=403, detail="Invalid proxy capability job")
 
         logger.info(f"[PROXY RESTORE] Restoring job '{job_name}', snapshot={snapshot or 'latest'}")
+
+        if repo.get("format", "kopia") == "files":
+            import tarfile
+            import tempfile
+
+            from fastapi.responses import FileResponse
+
+            from backer.backends.base import BackupDestination
+            from backer.backends.registry import get_backend
+
+            staging_dir = Path(tempfile.mkdtemp(prefix="backer-files-restore-"))
+            archive_path: str | None = None
+            try:
+                result = get_backend("files", {"repository_id": repo_id, "job_name": job_name}).restore(
+                    BackupDestination(path=str(Path(local_path) / "Agents" / _get_job_subfolder(job_name))),
+                    staging_dir,
+                    snapshot=snapshot,
+                    include_path=include or None,
+                )
+                if not result.success:
+                    return JSONResponse(status_code=404, content={"success": False, "error": result.errors[0]})
+                with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as archive:
+                    archive_path = archive.name
+                with tarfile.open(archive_path, "w:gz") as tar:
+                    for item in staging_dir.rglob("*"):
+                        if item.is_file() and not item.is_symlink():
+                            tar.add(item, arcname=item.relative_to(staging_dir).as_posix(), recursive=False)
+                archive_size = Path(archive_path).stat().st_size
+                background_tasks.add_task(shutil.rmtree, staging_dir, True)
+                background_tasks.add_task(Path(archive_path).unlink, missing_ok=True)
+                return FileResponse(
+                    archive_path,
+                    media_type="application/gzip",
+                    filename=f"backup-{repo_id}-{str(snapshot or 'latest')[:8]}.tar.gz",
+                    headers={"Content-Length": str(archive_size)},
+                    background=background_tasks,
+                )
+            except Exception as error:
+                if archive_path:
+                    Path(archive_path).unlink(missing_ok=True)
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                logger.error("[PROXY RESTORE] Files restore failed: %s", error)
+                return JSONResponse(status_code=500, content={"success": False, "error": str(error)})
 
         # Get repository password
         password = _repository_password_or_error(repo_password)
@@ -13253,28 +13462,44 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 content={"success": False, "error": "Kopia repository not initialized"},
             )
 
-        # Determine snapshot to restore
-        snapshot_id = snapshot
-        if not snapshot_id or snapshot_id == "latest":
-            # Find the latest snapshot for this job
-            snapshot_id = kopia.find_latest_snapshot(job_name)
-            if not snapshot_id:
-                return JSONResponse(
-                    status_code=404,
-                    content={"success": False, "error": f"No snapshots found for job '{job_name}'"},
-                )
-            logger.info(f"[PROXY RESTORE] Using latest snapshot: {snapshot_id}")
+        # Resolve every restore to a listed immutable snapshot owned by this job.
+        snapshots = kopia.snapshot_list(job_name)
+        if not snapshots:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": f"No snapshots found for job '{job_name}'"},
+            )
+        if not snapshot or snapshot == "latest":
+            snapshot_id = snapshots[0].get("full_id")
+        else:
+            snapshot_id = next(
+                (
+                    item.get("full_id")
+                    for item in snapshots
+                    if snapshot in {item.get("id"), item.get("full_id")}
+                ),
+                None,
+            )
+        if not isinstance(snapshot_id, str) or not snapshot_id:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": f"Snapshot is not available for job '{job_name}'"},
+            )
+        logger.info(f"[PROXY RESTORE] Using immutable snapshot: {snapshot_id}")
 
         # Create staging directory for restore
         staging_dir = None
         tmp_path = None
 
         try:
-            staging_dir = tempfile.mkdtemp(prefix=f"backer-restore-{job_name}-")
+            staging_dir = tempfile.mkdtemp(prefix="backer-restore-")
             staging_path = Path(staging_dir)
 
             # Restore snapshot to staging
-            result = kopia.snapshot_restore(snapshot_id, staging_path)
+            result = kopia.snapshot_restore(
+                f"{snapshot_id}/{include}" if include else snapshot_id,
+                staging_path,
+            )
             if not result.get("success"):
                 return JSONResponse(
                     status_code=500,
@@ -13304,7 +13529,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 from backer.core.repo_metadata import RepositoryMetadata
 
                 local_base = Path(local_path)
-                job_folder = local_base / "Agents" / job_name
+                job_folder = local_base / "Agents" / _get_job_subfolder(job_name)
                 repo_meta = RepositoryMetadata(job_folder, repo_type="local")
 
                 if repo_meta.is_initialized():

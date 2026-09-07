@@ -106,6 +106,7 @@ class BackerAgent:
                 "version": __version__,
                 "os_info": f"{platform.system()} {platform.release()}",
                 "tags": [],
+                "capabilities": ["files-repository-v1"],
                 "enrollment_token": enrollment_token,
             },
         )
@@ -182,6 +183,7 @@ class BackerAgent:
             json={
                 "client_id": self.client_id,
                 "status": "online",
+                "capabilities": ["files-repository-v1"],
             },
         )
         response.raise_for_status()

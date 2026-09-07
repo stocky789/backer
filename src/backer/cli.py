@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -110,6 +110,45 @@ def _redact_error(error: BaseException, *secrets: str | None) -> str:
         if secret:
             text = text.replace(secret, "***")
     return text
+
+
+def _emit_run_id(run_id: str, stream: Any = None) -> None:
+    """Publish the run id before any work so a watcher can find progress/<run_id>.json."""
+    click.echo(json.dumps({"run_id": run_id}), file=stream)
+    (stream or sys.stdout).flush()
+
+
+@contextmanager
+def _json_only_stdout(active: bool):
+    """--json owns stdout: the run id line and the result line, nothing else. Narration goes to stderr."""
+    real = sys.stdout
+    if not active:
+        yield real
+        return
+    with redirect_stdout(sys.stderr):
+        yield real
+
+
+@contextmanager
+def _cancel_on_sigint():
+    """Ctrl-C sets the run's cancel event so the run is recorded as cancelled, not left unexplained."""
+    import signal
+
+    event = threading.Event()
+
+    def handler(signum: int, frame: Any) -> None:
+        event.set()
+        raise KeyboardInterrupt
+
+    try:
+        previous = signal.signal(signal.SIGINT, handler)
+    except ValueError:  # not the main thread (GUI, service host): keep the caller's handling
+        yield event
+        return
+    try:
+        yield event
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def _local_job_call(call: Callable[[], Any]) -> Any:
@@ -914,6 +953,10 @@ def backup(
 @click.option("--computer")
 @click.option("--yes-replace", is_flag=True)
 @click.option("--clean-up-replaced", is_flag=True)
+@click.option(
+    "--confirm-destination",
+    help="The destination path again, standing in for the protected-folder confirmation",
+)
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--progress/--no-progress", default=None)
 def restore(
@@ -943,6 +986,7 @@ def restore(
     computer: str | None,
     yes_replace: bool,
     clean_up_replaced: bool,
+    confirm_destination: str | None,
     dry_run: bool,
     progress: bool | None,
 ) -> None:
@@ -968,16 +1012,20 @@ def restore(
         if not record:
             raise click.ClickException(f"Job '{job}' names an unknown repository")
         destination = _restore_target(destination, into, Path(configured.source.path))
-        _restore_prepare_destination(destination, into, config=config, dry_run=dry_run)
+        _restore_prepare_destination(
+            destination, into, config=config, dry_run=dry_run, confirm_destination=confirm_destination
+        )
         from backer.serverless.repositories import repository_operation_context
 
         backend, passphrase, storage = _repository_backend(record)
+        if _repository_format(record) == "files":
+            getattr(backend, "config", {})["job_name"] = job
         with repository_operation_context(record, storage) as operation_record:
-            source_path = _repository_destination(operation_record)
+            source_path = _job_repository_destination(operation_record, job)
             snapshots = backend.list_snapshots(BackupDestination(source_path))
             selected, _ = _select_restore_snapshot(snapshots, snapshot, before, latest, computer)
             if into == "REPLACE" and not dry_run:
-                _confirm_replace(destination, selected)
+                _confirm_replace(destination, selected, yes_replace)
             if dry_run:
                 click.echo(
                     f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written"
@@ -1091,10 +1139,15 @@ def restore(
             empty_config = type("RestoreConfig", (), {"repositories": {}})()
             repository_paths = () if from_path.startswith(("\\\\", "//", "s3://")) else (Path(from_path),)
             _restore_prepare_destination(
-                destination, into, config=empty_config, dry_run=dry_run, repository_paths=repository_paths
+                destination,
+                into,
+                config=empty_config,
+                dry_run=dry_run,
+                repository_paths=repository_paths,
+                confirm_destination=confirm_destination,
             )
             if into == "REPLACE" and not dry_run:
-                _confirm_replace(destination, selected)
+                _confirm_replace(destination, selected, yes_replace)
             if dry_run:
                 click.echo(
                     f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written"
@@ -1506,6 +1559,7 @@ def _read_storage(stream: bool, file: Path | None) -> str | None:
 @click.argument("name")
 @click.option("--attach", is_flag=True, help="Attach an existing repository")
 @click.option("--init", "initialize", is_flag=True, help="Create a new repository")
+@click.option("--format", "repository_format", type=click.Choice(["kopia", "files"]), default="kopia")
 @click.option("--type", "repository_type", type=click.Choice(["local", "smb", "s3"]), default="local")
 @click.option("--path")
 @click.option("--server", "--host", "server")
@@ -1541,6 +1595,7 @@ def repo_add(
     name: str,
     attach: bool,
     initialize: bool,
+    repository_format: str,
     repository_type: str,
     path: str | None,
     server: str | None,
@@ -1573,11 +1628,15 @@ def repo_add(
     from backer.serverless.repositories import add_repository
 
     try:
-        if not _interactive() and not headless:
+        if not _interactive() and not headless and (repository_format == "kopia" or repository_type == "smb"):
             raise click.UsageError("--headless is required when repo add is not run from a terminal")
-        if passphrase_stdin and (storage_stdin or secret_key_stdin):
-            raise click.UsageError("Use --passphrase-file when --storage-stdin is used")
-        if generate_passphrase:
+        if repository_format == "files":
+            if repository_type == "s3":
+                raise click.UsageError("Files repositories do not support S3 storage")
+            if any((passphrase_stdin, passphrase_file, generate_passphrase, passphrase_out, print_passphrase)):
+                raise click.UsageError("Files repositories do not use passphrases or recovery exports")
+            passphrase = ""
+        elif generate_passphrase:
             if passphrase_stdin or passphrase_file:
                 raise click.UsageError("Choose one passphrase source")
             if (headless or not _interactive()) and not (passphrase_out or print_passphrase):
@@ -1587,6 +1646,8 @@ def repo_add(
                 console.print(passphrase)
         else:
             passphrase = _read_passphrase(passphrase_stdin, passphrase_file)
+        if passphrase_stdin and (storage_stdin or secret_key_stdin):
+            raise click.UsageError("Use --passphrase-file when --storage-stdin is used")
         raw_storage = storage_password if storage_password is not None else _read_storage(storage_stdin, storage_file)
         if raw_storage is None and repository_type == "smb":
             raw_storage = os.environ.get("BACKER_SMB_PASSWORD")
@@ -1648,6 +1709,7 @@ def repo_add(
         record = RepositoryConfig(
             id=uuid4().hex[:12],
             name=name,
+            format=repository_format,
             type=repository_type,
             path=path,
             server=server,
@@ -1677,7 +1739,7 @@ def repo_add(
         console.print(f"Repository '{name}' saved ({backend}, id {repo_id})")
         if backend == "file":
             console.print("Warning: secrets are stored in protected local files")
-    except (OSError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         raise click.ClickException(str(error)) from error
 
 
@@ -1686,10 +1748,17 @@ def repo_add(
 @click.option("--job", "jobs", multiple=True, help="Sidecar job name to import (repeatable)")
 @click.option("--all", "all_jobs", is_flag=True, help="Import every discovered sidecar job")
 @click.option("--source", "sources", multiple=True, help="NAME=local source path")
+@click.option("--replace-existing", is_flag=True, help="Overwrite local jobs of the same name")
 @click.option("--json", "as_json", is_flag=True)
 @click.pass_context
 def repo_adopt(
-    ctx: click.Context, name: str, jobs: tuple[str, ...], all_jobs: bool, sources: tuple[str, ...], as_json: bool
+    ctx: click.Context,
+    name: str,
+    jobs: tuple[str, ...],
+    all_jobs: bool,
+    sources: tuple[str, ...],
+    replace_existing: bool,
+    as_json: bool,
 ) -> None:
     """Copy existing repository sidecar jobs into this machine's config."""
     import json
@@ -1708,8 +1777,12 @@ def repo_adopt(
         raise click.ClickException(f"Repository '{name}' is not configured")
     record = config.repositories[repository_id]
     machine_scope = record.scope == "machine"
-    passphrase = keystore.get(record.passphrase_ref or "", machine_scope=machine_scope)
-    if not passphrase:
+    passphrase = (
+        keystore.get(record.passphrase_ref or "", machine_scope=machine_scope)
+        if _repository_format(record) == "kopia"
+        else ""
+    )
+    if _repository_format(record) == "kopia" and not passphrase:
         raise click.ClickException(f"Repository '{record.name}' passphrase is unavailable")
     raw_storage = keystore.get(record.storage_password_ref or "", machine_scope=machine_scope)
     storage = json.loads(raw_storage) if record.type == "s3" and raw_storage else None
@@ -1732,22 +1805,38 @@ def repo_adopt(
             documents = {}
             for key in sidecar.list(".backer/jobs/"):
                 if key.endswith("/config.json"):
-                    document = sidecar.get(key.removeprefix(f"{record.prefix.strip('/')}/"))
+                    document = sidecar.get(key.removeprefix(f"{(record.prefix or '').strip('/')}/"))
                     if document:
                         payload = json.loads(document)
                         documents[payload["job_name"]] = payload
             available = list(documents)
+            job_folders = {}
         else:
             discovery = RepositoryMetadata(root, operation_record.type).discover_all()
             available = [item.get("job_name") for item in discovery["jobs"] if item.get("job_name")]
+            job_folders = {
+                item["job_name"]: item["job_folder"]
+                for item in discovery["jobs"]
+                if item.get("job_name") and item.get("job_folder")
+            }
         selected = available if all_jobs else list(jobs)
         if not selected:
             raise click.ClickException("Choose --job NAME or --all")
         mapping = dict(item.split("=", 1) for item in sources if "=" in item)
-        adopted = (
-            adopt_documents(config, repository_id, documents, selected, source_paths=mapping)
+        outcome = (
+            adopt_documents(
+                config, repository_id, documents, selected, source_paths=mapping, replace_existing=replace_existing
+            )
             if documents is not None
-            else adopt_jobs(config, repository_id, root, selected, source_paths=mapping)
+            else adopt_jobs(
+                config,
+                repository_id,
+                root,
+                selected,
+                source_paths=mapping,
+                replace_existing=replace_existing,
+                job_folders=job_folders,
+            )
         )
         config.save(config_path)
     except ValueError as error:
@@ -1755,10 +1844,19 @@ def repo_adopt(
     finally:
         operation_context.close()
     if as_json:
-        click.echo(json.dumps(adopted))
+        click.echo(
+            json.dumps({"adopted": outcome.adopted, "warnings": outcome.warnings, "failures": outcome.failures})
+        )
     else:
-        for job_name in adopted:
+        for job_name in outcome.adopted:
             console.print(f"Adopted {job_name}")
+        for warning in outcome.warnings:
+            console.print(f"WARNING: {warning}")
+        for job_name, reason in outcome.failures.items():
+            console.print(f"Not adopted: {job_name}: {reason}")
+    if outcome.failures:
+        # The successes are already saved; exit non-zero so a script still sees the misses.
+        raise SystemExit(1)
 
 
 def _local_config(ctx: click.Context):
@@ -1776,21 +1874,27 @@ def _repository(config, name: str):
     return item
 
 
+def _repository_format(record) -> str:
+    return getattr(record, "format", "kopia")
+
+
 def _repository_backend(record, *, timeout: int | None = None):
     """Open one configured repository without ever placing a secret in argv."""
     from backer.core import keystore
     from backer.serverless.repositories import _backend
 
-    passphrase = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
-    if not passphrase:
-        raise click.ClickException("Repository passphrase is unavailable")
+    passphrase = None
+    if _repository_format(record) == "kopia":
+        passphrase = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
+        if not passphrase:
+            raise click.ClickException("Repository passphrase is unavailable")
     storage = None
     if record.storage_password_ref:
         raw = keystore.get(record.storage_password_ref, machine_scope=record.scope == "machine")
         if not raw:
             raise click.ClickException("Repository storage credential is unavailable")
         storage = json.loads(raw) if record.type == "s3" else raw
-    backend = _backend(record, passphrase, storage)
+    backend = _backend(record, passphrase or "", storage)
     if timeout:
         backend.config["timeout"] = timeout
     return backend, passphrase, storage
@@ -1802,15 +1906,36 @@ def _repository_destination(record) -> str:
     return _destination(record)
 
 
-def _restore_destination_allowed(destination: Path, config, repository_paths: tuple[Path, ...] = ()) -> None:
+def _job_repository_destination(record, job_name: str) -> str:
+    if _repository_format(record) != "files":
+        return _repository_destination(record)
+    from backer.core.paths import get_job_subfolder
+
+    return str(Path(_repository_destination(record)) / "Agents" / get_job_subfolder(job_name))
+
+
+def _restore_destination_allowed(
+    destination: Path,
+    config,
+    repository_paths: tuple[Path, ...] = (),
+    confirm_destination: str | None = None,
+) -> None:
     resolved = destination.expanduser().resolve()
-    system_roots = ({Path(os.environ.get("WINDIR", "C:/Windows")).resolve(),
-                     Path(os.environ.get("ProgramFiles", "C:/Program Files")).resolve()}
-                    if os.name == "nt" else {Path("/").resolve(), Path("/home").resolve(), Path("/usr").resolve()})
-    if resolved == Path.home().resolve():
-        raise click.ClickException(
-            f"Backer will not restore over {Path.home().resolve()}. Choose a folder inside it instead."
-        )
+    confirmed = False
+    if confirm_destination is not None:
+        if Path(confirm_destination).expanduser().resolve() != resolved:
+            raise click.ClickException(
+                "--confirm-destination does not match the restore destination; nothing was changed"
+            )
+        confirmed = True
+
+    # Absolute refusals, no override: the filesystem root, a drive root, and any configured
+    # repository path — restoring into the backup medium corrupts the thing restoring you.
+    if os.name == "nt":
+        if str(resolved) == resolved.anchor:
+            raise click.ClickException(f"Backer will not restore over {resolved}. Choose a folder inside it instead.")
+    elif resolved == Path("/"):
+        raise click.ClickException("Backer will not restore over /. Choose a folder inside it instead.")
     for record in config.repositories.values():
         if record.type == "local" and record.path:
             denied = Path(record.path).expanduser().resolve()
@@ -1820,9 +1945,41 @@ def _restore_destination_allowed(destination: Path, config, repository_paths: tu
         denied = denied.expanduser().resolve()
         if resolved == denied or denied in resolved.parents or resolved in denied.parents:
             raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
+
+    if confirmed:
+        return
+
+    # Guarded refusals: legitimate restore targets (restoring /etc/nginx or a whole home in
+    # place is what a backup product is for), refused by default against accidents and
+    # unlocked by an explicit, path-matching --confirm-destination.
+    hint = f' To restore here anyway, re-run with --confirm-destination "{resolved}".'
+    if os.name == "nt":
+        system_roots = {Path(os.environ.get("WINDIR", "C:/Windows")).resolve(),
+                        Path(os.environ.get("ProgramFiles", "C:/Program Files")).resolve(),
+                        Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")).resolve()}
+        exact_roots: set[Path] = set()
+        # <drive>\Users is the /home analogue: refused exactly, so children stay allowed.
+        if len(resolved.parts) == 2 and resolved.parts[1].lower() == "users":
+            raise click.ClickException(
+                f"Backer will not restore over {resolved}. Choose a folder inside it instead.{hint}"
+            )
+    else:
+        system_roots = {Path(root) for root in ("/usr", "/etc", "/bin", "/sbin", "/lib", "/boot", "/var")}
+        exact_roots = {Path("/home")}
+    if resolved == Path.home().resolve():
+        raise click.ClickException(
+            f"Backer will not restore over {Path.home().resolve()}. Choose a folder inside it instead.{hint}"
+        )
     for denied in system_roots:
-        if resolved == denied or denied in resolved.parents or resolved in denied.parents:
-            raise click.ClickException(f"Backer will not restore over {denied}. Choose a folder inside it instead.")
+        if resolved == denied or denied in resolved.parents:
+            raise click.ClickException(
+                f"Backer will not restore into {denied}. Choose a folder outside it instead.{hint}"
+            )
+    for denied in exact_roots:
+        if resolved == denied:
+            raise click.ClickException(
+                f"Backer will not restore over {denied}. Choose a folder inside it instead.{hint}"
+            )
 
 
 def _restore_target(destination: Path | None, into: str, original_source: Path | None = None) -> Path:
@@ -1841,16 +1998,24 @@ def _restore_target(destination: Path | None, into: str, original_source: Path |
 
 
 def _restore_prepare_destination(
-    destination: Path, into: str, *, config, dry_run: bool = False, repository_paths: tuple[Path, ...] = ()
+    destination: Path,
+    into: str,
+    *,
+    config,
+    dry_run: bool = False,
+    repository_paths: tuple[Path, ...] = (),
+    confirm_destination: str | None = None,
 ) -> Path | None:
     """Perform every non-destructive destination refusal before a restore starts."""
     destination = destination.expanduser()
-    _restore_destination_allowed(destination, config, repository_paths)
+    _restore_destination_allowed(destination, config, repository_paths, confirm_destination)
     if into == "NEW":
         if destination.exists():
             raise click.ClickException("A NEW restore destination must not exist; nothing was changed")
         return None
     if into == "MERGE":
+        if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+            raise click.ClickException("Restore destination must be a non-symlink directory")
         return None
     if into != "REPLACE":
         raise click.UsageError("--into must be NEW, MERGE, or REPLACE")
@@ -1861,16 +2026,18 @@ def _restore_prepare_destination(
     return destination
 
 
-def _confirm_replace(destination: Path, selected: str) -> None:
-    """REPLACE stays interactive even when callers supplied convenience flags."""
-    if not _interactive():
-        raise click.UsageError("REPLACE requires an interactive typed confirmation")
+def _confirm_replace(destination: Path, selected: str, yes_replace: bool = False) -> None:
+    """REPLACE always discloses the move; only --yes-replace can stand in for the typed confirmation."""
+    if not _interactive() and not yes_replace:
+        raise click.UsageError("REPLACE requires --yes-replace or an interactive typed confirmation")
     count = sum(1 for item in destination.rglob("*") if item.is_file())
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     click.echo(
         f"{destination} holds {count} files. They will move to {destination.name}.replaced-{stamp} "
         f"before snapshot {selected} is restored"
     )
+    if not _interactive():
+        return
     if click.prompt("Type REPLACE to continue", default="", show_default=False) != "REPLACE":
         raise click.ClickException("Stopped. Nothing was changed")
 
@@ -1990,8 +2157,11 @@ def repo_test(ctx: click.Context, name: str) -> None:
     _, config = _local_config(ctx)
     _, record = _repository(config, name)
     _, passphrase, storage = _repository_backend(record)
-    with repository_operation_context(record, storage) as operation_record:
-        status, _, message = probe(operation_record, passphrase, storage)
+    try:
+        with repository_operation_context(record, storage) as operation_record:
+            status, _, message = probe(operation_record, passphrase, storage)
+    except RuntimeError as error:
+        raise click.ClickException(str(error)) from error
     if status != "present":
         raise click.ClickException(message or f"Repository is {status}")
     click.echo("Repository connection succeeded")
@@ -2005,6 +2175,8 @@ def repo_unlock(ctx: click.Context, name: str) -> None:
     # The per-repository config is deliberately disposable; Kopia reconnects next operation.
     _, config = _local_config(ctx)
     _, record = _repository(config, name)
+    if _repository_format(record) == "files":
+        raise click.ClickException("Files repositories do not maintain a Kopia connection")
     backend, _, _ = _repository_backend(record)
     backend._disconnect_repo(_repository_destination(record))
     click.echo(f"Repository '{name}' disconnected and will reconnect on its next operation")
@@ -2021,6 +2193,8 @@ def repo_passphrase(ctx: click.Context, name: str, passphrase_out: Path | None, 
 
     _, config = _local_config(ctx)
     _, record = _repository(config, name)
+    if _repository_format(record) == "files":
+        raise click.ClickException("Files repositories do not have a passphrase")
     value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
     if not value:
         raise click.ClickException("Repository passphrase is unavailable")
@@ -2035,9 +2209,12 @@ def repo_passphrase(ctx: click.Context, name: str, passphrase_out: Path | None, 
 @repo.command("rm")
 @click.argument("name")
 @click.option("--yes", is_flag=True)
+@click.option("--confirm-name", help="Repository name, standing in for the interactive typed confirmation")
 @click.option("--passphrase-out", type=click.Path(path_type=Path))
 @click.pass_context
-def repo_rm(ctx: click.Context, name: str, yes: bool, passphrase_out: Path | None) -> None:
+def repo_rm(
+    ctx: click.Context, name: str, yes: bool, confirm_name: str | None, passphrase_out: Path | None
+) -> None:
     """Remove local access only; repository data is left untouched."""
     from backer.core import keystore
 
@@ -2045,16 +2222,19 @@ def repo_rm(ctx: click.Context, name: str, yes: bool, passphrase_out: Path | Non
     key, record = _repository(config, name)
     if not yes:
         raise click.UsageError("--yes acknowledges that backup data will be left unreadable on this computer")
-    if not _interactive():
-        raise click.UsageError("Repository removal requires an interactive typed repository name")
-    if click.prompt("Type the repository name to remove local access") != name:
+    if confirm_name is None and not _interactive():
+        raise click.UsageError("Repository removal requires --confirm-name NAME or an interactive typed name")
+    prompt = "Type the repository name to remove local access"
+    typed = confirm_name if confirm_name is not None else click.prompt(prompt)
+    if typed != name:
         raise click.ClickException("Repository name did not match; nothing was changed")
-    if not passphrase_out:
+    if _repository_format(record) == "kopia" and not passphrase_out:
         raise click.UsageError("--passphrase-out FILE is required before removing local access")
-    value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
-    if not value:
-        raise click.ClickException("Repository passphrase is unavailable")
-    _write_recovery_export(passphrase_out, record.name, record.id, _repository_destination(record), value)
+    if _repository_format(record) == "kopia":
+        value = keystore.get(record.passphrase_ref or "", machine_scope=record.scope == "machine")
+        if not value:
+            raise click.ClickException("Repository passphrase is unavailable")
+        _write_recovery_export(passphrase_out, record.name, record.id, _repository_destination(record), value)
     for reference in (record.passphrase_ref, record.storage_password_ref):
         if reference:
             keystore.delete(reference, machine_scope=record.scope == "machine")
@@ -2063,19 +2243,111 @@ def repo_rm(ctx: click.Context, name: str, yes: bool, passphrase_out: Path | Non
     click.echo(f"Repository '{name}' removed locally; backup data was not deleted")
 
 
+@repo.command("destroy")
+@click.argument("name")
+@click.option("--yes", is_flag=True)
+@click.option("--confirm-name", help="Exact 'DELETE NAME' confirmation for permanent storage deletion")
+@click.pass_context
+def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | None) -> None:
+    """Permanently delete an SMB repository directory, then remove local access."""
+    from backer.core import keystore
+    from backer.core.config import load_config
+    from backer.core.paths import get_data_dir, get_machine_config_dir
+    from backer.serverless.modes import local_schedule_configured
+    from backer.serverless.repositories import destroy_smb_repository
+    from backer.serverless.schedule import run_lock
+
+    path, config = _local_config(ctx)
+    key, record = _repository(config, name)
+    if _repository_format(record) == "files":
+        raise click.ClickException("Permanent storage deletion is not supported for files repositories")
+    expected = f"DELETE {name}"
+    if not yes:
+        raise click.UsageError("--yes acknowledges permanent deletion of every backup in this repository")
+    if confirm_name is None and not _interactive():
+        raise click.UsageError(f"Repository deletion requires --confirm-name '{expected}' or an interactive prompt")
+    typed = confirm_name if confirm_name is not None else click.prompt(f"Type {expected} to permanently delete storage")
+    if typed != expected:
+        raise click.ClickException("Confirmation did not match; nothing was deleted")
+    if record.type != "smb":
+        raise click.ClickException("Permanent storage deletion currently supports SMB repositories only")
+    headless_timer = sys.platform != "win32" and Path("/etc/systemd/system/backer-local.timer").exists()
+    if local_schedule_configured() or headless_timer:
+        raise click.ClickException("Turn off scheduled backups before deleting repository storage")
+
+    _, passphrase, storage = _repository_backend(record)
+    try:
+        configs = [(path, config, key)]
+        machine_path = get_machine_config_dir() / "config.yaml"
+        if machine_path.exists() and machine_path.resolve() != path.resolve():
+            machine = load_config(machine_path)
+            machine_item = next(
+                (
+                    (candidate_key, candidate)
+                    for candidate_key, candidate in machine.repositories.items()
+                    if candidate.unique_id and candidate.unique_id == record.unique_id
+                ),
+                None,
+            )
+            if machine_item:
+                configs.append((machine_path, machine, machine_item[0]))
+        for config_path, _, _ in configs:
+            probe_path = config_path.parent / f".backer-delete-probe-{uuid4().hex}"
+            try:
+                probe_path.touch(exist_ok=False)
+            finally:
+                probe_path.unlink(missing_ok=True)
+
+        lock_dirs = [get_data_dir()]
+        if sys.platform == "win32" and get_machine_config_dir() not in lock_dirs:
+            lock_dirs.append(get_machine_config_dir())
+        with ExitStack() as stack:
+            if not all(stack.enter_context(run_lock(directory)) for directory in lock_dirs):
+                raise click.ClickException("A backup or restore is running; nothing was deleted")
+            destroy_smb_repository(record, passphrase, storage if isinstance(storage, str) else None)
+            for config_path, saved, saved_key in configs:
+                saved.jobs = {
+                    job_name: job for job_name, job in saved.jobs.items() if job.repository != saved_key
+                }
+                del saved.repositories[saved_key]
+                saved.save(config_path)
+    except click.ClickException:
+        raise
+    except Exception as error:
+        secret = storage if isinstance(storage, str) else None
+        raise click.ClickException(_redact_error(error, passphrase, secret)) from error
+
+    warnings = []
+    secret_scopes = (False,) if keystore.backend_name() == "Secret Service" else (False, True)
+    for reference in (record.passphrase_ref, record.storage_password_ref):
+        if not reference:
+            continue
+        for machine_scope in secret_scopes:
+            try:
+                keystore.delete(reference, machine_scope=machine_scope)
+            except Exception as error:
+                warnings.append(_redact_error(error, passphrase, storage if isinstance(storage, str) else None))
+    click.echo(f"Repository '{name}' storage directory and local configuration were permanently deleted")
+    if warnings:
+        raise click.ClickException(
+            "Repository data was deleted, but saved secret cleanup failed: " + "; ".join(warnings)
+        )
+
+
 @repo.command("discover")
 @click.option("--host", required=True)
 @click.option("--username", required=True)
+@click.option("--domain", default=None, help="SMB domain or workgroup, when the file server expects one")
 @click.option("--password-stdin", is_flag=True)
 @click.option("--json", "as_json", is_flag=True)
-def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool) -> None:
+def repo_discover(host: str, username: str, domain: str | None, password_stdin: bool, as_json: bool) -> None:
     """Discover shares on one named SMB host; never scan a network."""
     password = sys.stdin.read().rstrip("\r\n") if password_stdin else os.environ.get("BACKER_SMB_PASSWORD", "")
     if not password:
         _missing_flags("repo discover", ["--password-stdin"])
     from backer.core.smb_browse import SMBBrowser
 
-    success, result = SMBBrowser.list_shares(host, username, password)
+    success, result = SMBBrowser.list_shares(host, username, password, domain)
     if not success:
         raise click.ClickException(str(result))
     rows = [{"name": share.name, "comment": share.comment} for share in result]
@@ -2084,6 +2356,44 @@ def repo_discover(host: str, username: str, password_stdin: bool, as_json: bool)
     else:
         for row in rows:
             click.echo(f"{row['name']}\t{row['comment']}")
+
+
+@repo.command("browse")
+@click.option("--host", required=True)
+@click.option("--share", required=True)
+@click.option("--path", default="", help="Share-relative path; empty lists the share root")
+@click.option("--username", required=True)
+@click.option("--domain", default=None, help="SMB domain or workgroup, when the file server expects one")
+@click.option("--password-stdin", is_flag=True)
+@click.option("--json", "as_json", is_flag=True)
+def repo_browse(
+    host: str,
+    share: str,
+    path: str,
+    username: str,
+    domain: str | None,
+    password_stdin: bool,
+    as_json: bool,
+) -> None:
+    """List the subdirectories of one path on an SMB share, flagging existing repositories."""
+    password = sys.stdin.read().rstrip("\r\n") if password_stdin else os.environ.get("BACKER_SMB_PASSWORD", "")
+    if not password:
+        _missing_flags("repo browse", ["--password-stdin"])
+    from backer.core.smb_browse import SMBBrowser
+
+    success, result = SMBBrowser.list_directory(
+        host, share, path, username, password, domain, directories_only=True
+    )
+    if not success:
+        raise click.ClickException(str(result))
+    entries = [
+        {"name": entry.name, "is_dir": True, "is_repository": entry.is_repository} for entry in result
+    ]
+    if as_json:
+        click.echo(json.dumps({"path": path.replace("\\", "/").strip("/"), "entries": entries}))
+    else:
+        for entry in entries:
+            click.echo(entry["name"])
 
 
 @repo.command("recover")
@@ -2100,6 +2410,8 @@ def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphra
         raise click.UsageError("Choose exactly one of --passphrase-stdin or --passphrase-file")
     path, config = _local_config(ctx)
     key, record = _repository(config, name)
+    if _repository_format(record) == "files":
+        raise click.ClickException("Files repositories do not have a passphrase to recover")
     passphrase = (
         sys.stdin.read().rstrip("\r\n")
         if passphrase_stdin
@@ -2126,6 +2438,69 @@ def repo_recover(ctx: click.Context, name: str, passphrase_stdin: bool, passphra
     config.repositories[key] = record.model_copy(update={"passphrase_ref": reference})
     config.save(path)
     click.echo(f"Repository '{record.name}' opened. Its passphrase is now stored on this computer")
+
+
+@agent.command("scheduled-test", hidden=True)
+@click.argument("token")
+def agent_scheduled_test(token: str) -> None:
+    """Run one prepared scheduled-test context; the privileged scheduler's only entry point."""
+    from backer.serverless.scheduled_test import run
+
+    raise SystemExit(run(token))
+
+
+@agent.command("test-schedule")
+@click.argument("name", required=False)
+def agent_test_schedule(name: str | None) -> None:
+    """Run one job now the way the scheduler would, as SYSTEM, and report what it sees."""
+    import secrets
+
+    from backer.client.windows_service import (
+        create_local_scheduled_test_task,
+        create_local_systemd_test_service,
+        is_windows,
+        remove_local_scheduled_test_task,
+        remove_local_systemd_test_service,
+    )
+    from backer.core.config import load_config
+    from backer.core.paths import get_config_dir
+    from backer.serverless import scheduled_test
+    from backer.serverless.store import read_runs
+
+    config = load_config(get_config_dir() / "config.yaml")
+    if name is None:
+        if len(config.jobs) != 1:
+            raise click.UsageError("Name the job to test")
+        name = next(iter(config.jobs))
+    if name not in config.jobs:
+        raise click.ClickException(f"Job '{name}' is not configured")
+    if stale := scheduled_test.retry_scheduled_test_cleanup():
+        raise click.ClickException("An earlier scheduled test is still installed: " + "; ".join(stale))
+
+    token = secrets.token_hex(6)
+    start = create_local_scheduled_test_task if is_windows() else create_local_systemd_test_service
+    stop = remove_local_scheduled_test_task if is_windows() else remove_local_systemd_test_service
+    console.print(f"Running '{name}' through a temporary scheduled task…")
+    directory, refs = scheduled_test.prepare_scheduled_test(config, name, token)
+    ok, message, cleanup_errors = False, "", []
+    try:
+        started, detail = start(token)
+        if not started:
+            raise click.ClickException(detail)
+        ok, message = scheduled_test.wait_for_scheduled_attempt(
+            None, lambda: [run.to_dict() for run in read_runs(directory / "data", name, 5)], token=token
+        )
+    finally:
+        # Fail closed: the isolated machine-scope secrets are only deleted once the stop is verified.
+        stopped, stop_detail = stop(token)
+        cleanup_errors = scheduled_test.remove_scheduled_test(directory, refs) if stopped else [stop_detail]
+        if cleanup_errors:
+            cleanup_errors = scheduled_test.retry_scheduled_test_cleanup()
+        for error in cleanup_errors:
+            console.print(f"[yellow]Scheduled test cleanup: {error}[/yellow]")
+
+    console.print(f"[green]✓[/green] {message}" if ok else f"[red]{message}[/red]")
+    raise SystemExit(0 if ok and not cleanup_errors else 1)
 
 
 @agent.command("setup")
@@ -2327,8 +2702,6 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
         backer agent install --method systemd # Linux systemd service
     """
     from backer.client.windows_service import (
-        create_local_scheduled_task,
-        create_local_systemd_timer,
         create_systemd_service,
         install_service,
         is_admin,
@@ -2342,25 +2715,18 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
             raise click.UsageError("--mode local on Linux requires --method systemd")
         from backer.core.config import load_config
         from backer.core.paths import get_config_dir, get_machine_config_dir
-        from backer.serverless.repositories import rescope_secrets_for_system
+        from backer.serverless.modes import apply_scheduled_modes
 
         config = load_config(get_config_dir() / "config.yaml")
-        try:
-            rescope_secrets_for_system(config)
-        except ValueError as error:
-            raise click.ClickException(str(error)) from error
         machine_config = get_machine_config_dir() / "config.yaml"
-        config.save(machine_config)
+        # The freeze/verify/rollback path is the only safe way to rescope secrets and swap schedulers.
+        result = apply_scheduled_modes(config, config, enable_local_schedule=True, headless=headless)
+        if not result.ok:
+            raise click.ClickException(result.message)
         if not is_windows():
-            success, message = create_local_systemd_timer(headless=headless)
-            if not success:
-                raise click.ClickException(message)
-            console.print(f"[green]✓[/green] {message} (backer-local.timer; config {machine_config})")
+            console.print(f"[green]✓[/green] {result.message} (backer-local.timer; config {machine_config})")
             return
-        success, message = create_local_scheduled_task()
-        if not success:
-            raise click.ClickException(message)
-        console.print(f"[green]✓[/green] {message} (BackerLocalSchedule as SYSTEM; config {machine_config})")
+        console.print(f"[green]✓[/green] {result.message} (BackerLocalSchedule as SYSTEM; config {machine_config})")
         return
 
     from backer.client.agent import BackerAgent
@@ -2401,12 +2767,48 @@ def agent_install(mode: str, headless: bool, method: str) -> None:
         raise SystemExit(1)
 
 
+def _remove_agent_systemd_units() -> list[str]:
+    """Remove the agent's systemd units only; config, data, keystore and binaries stay untouched."""
+    import subprocess
+
+    removed = []
+    system_service = Path("/etc/systemd/system/backer-agent.service")
+    user_service = Path.home() / ".config" / "systemd" / "user" / "backer-agent.service"
+    if system_service.exists():
+        subprocess.run(["systemctl", "stop", "backer-agent"], capture_output=True)
+        subprocess.run(["systemctl", "disable", "backer-agent"], capture_output=True)
+        try:
+            system_service.unlink(missing_ok=True)
+        except PermissionError:
+            subprocess.run(["sudo", "rm", "-f", str(system_service)], capture_output=True)
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+        removed.append("System service removed")
+    if user_service.exists():
+        subprocess.run(["systemctl", "--user", "stop", "backer-agent"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", "backer-agent"], capture_output=True)
+        user_service.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        removed.append("User service removed")
+    return removed
+
+
 @agent.command("uninstall")
 @click.option("--mode", type=click.Choice(["server", "local"]), default="server", show_default=True)
 @click.option("--headless", is_flag=True, help="Remove the machine local scheduler")
 @click.option("--keep-config", is_flag=True, help="Keep configuration files")
+@click.option(
+    "--service-only",
+    is_flag=True,
+    help="Remove only the installed service/task/unit; keep config, data, keystore and binaries",
+)
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
-def agent_uninstall(mode: str = "server", headless: bool = False, keep_config: bool = False, yes: bool = False) -> None:
+def agent_uninstall(
+    mode: str = "server",
+    headless: bool = False,
+    keep_config: bool = False,
+    service_only: bool = False,
+    yes: bool = False,
+) -> None:
     """Remove agent from system startup and optionally uninstall."""
     import shutil
     import subprocess
@@ -2426,6 +2828,19 @@ def agent_uninstall(mode: str = "server", headless: bool = False, keep_config: b
         else:
             remove_local_systemd_timer(headless=headless)
         console.print("[green]✓ Local scheduler removed[/green]")
+        return
+
+    if service_only:
+        if is_windows():
+            success, message = uninstall_service()
+            console.print(f"[green]✓ {message}[/green]" if success else f"[yellow]{message}[/yellow]")
+            return
+        removed = _remove_agent_systemd_units()
+        for item in removed:
+            console.print(f"[green]✓ {item}[/green]")
+        if not removed:
+            console.print("[yellow]No agent service was installed.[/yellow]")
+        console.print("Configuration, run history and stored secrets were left in place.")
         return
 
     if is_windows():
@@ -2481,27 +2896,8 @@ def agent_uninstall(mode: str = "server", headless: bool = False, keep_config: b
             console.print("Cancelled.")
             return
 
-    # Stop and disable system service (installed via install-agent.sh)
-    if has_system_service:
-        console.print("Stopping system service...")
-        subprocess.run(["systemctl", "stop", "backer-agent"], capture_output=True)
-        subprocess.run(["systemctl", "disable", "backer-agent"], capture_output=True)
-        try:
-            system_service.unlink(missing_ok=True)
-        except PermissionError:
-            # Try with sudo via shell
-            subprocess.run(["sudo", "rm", "-f", str(system_service)], capture_output=True)
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
-        console.print("[green]✓ System service removed[/green]")
-
-    # Stop and disable user systemd service (legacy/manual install)
-    if has_user_service:
-        console.print("Stopping user service...")
-        subprocess.run(["systemctl", "--user", "stop", "backer-agent"], capture_output=True)
-        subprocess.run(["systemctl", "--user", "disable", "backer-agent"], capture_output=True)
-        user_service.unlink(missing_ok=True)
-        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-        console.print("[green]✓ User service removed[/green]")
+    for item in _remove_agent_systemd_units():
+        console.print(f"[green]✓ {item}[/green]")
 
     # Remove user symlink (~/.local/bin/backer)
     if user_bin.exists() or user_bin.is_symlink():
@@ -2759,8 +3155,8 @@ def agent_update(dev: bool, yes: bool) -> None:
     from backer.client.windows_service import is_windows
 
     if is_windows():
-        console.print("[yellow]On Windows, please use the GUI to update:[/yellow]")
-        console.print("  Menu > Update")
+        console.print("[yellow]On Windows, the desktop client updates itself:[/yellow]")
+        console.print("  Backer desktop > Settings > Check for updates")
         console.print()
         console.print("Or download the latest installer from:")
         console.print("  https://git.stockhome.com.au/stocky789/backer/releases/tag/release-main")
@@ -3089,7 +3485,7 @@ def job_create(
             None,
         )
         if owner:
-            raise click.ClickException(f"Source '{source}' is already owned by job '{owner}'")
+            raise click.ClickException(f"Source '{source_path}' is already owned by job '{owner}'")
         retention = RetentionConfig(
             keep_last=keep_last,
             keep_daily=keep_daily,
@@ -3138,6 +3534,105 @@ def job_create(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise SystemExit(1)
+
+
+@job.command("set")
+@click.argument("name")
+@click.option("--source")
+@click.option("--schedule", "schedule_cron", help="Cron schedule (e.g., '0 2 * * *')")
+@click.option("--no-schedule", is_flag=True)
+@click.option("--exclude", "excludes", multiple=True, help="Replace the exclude list (repeatable)")
+@click.option("--clear-excludes", is_flag=True)
+@click.option("--keep-last", type=click.IntRange(min=1))
+@click.option("--keep-daily", type=click.IntRange(min=1))
+@click.option("--keep-weekly", type=click.IntRange(min=1))
+@click.option("--keep-monthly", type=click.IntRange(min=1))
+@click.option("--keep-yearly", type=click.IntRange(min=1))
+@click.option("--enable/--disable", "enabled", default=None)
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def job_set(
+    ctx: click.Context,
+    name: str,
+    source: str | None,
+    schedule_cron: str | None,
+    no_schedule: bool,
+    excludes: tuple[str, ...],
+    clear_excludes: bool,
+    keep_last: int | None,
+    keep_daily: int | None,
+    keep_weekly: int | None,
+    keep_monthly: int | None,
+    keep_yearly: int | None,
+    enabled: bool | None,
+    as_json: bool,
+) -> None:
+    """Change one configured local job in place."""
+    from backer.core.config import RetentionConfig, ScheduleConfig
+
+    keeps = {
+        "keep_last": keep_last,
+        "keep_daily": keep_daily,
+        "keep_weekly": keep_weekly,
+        "keep_monthly": keep_monthly,
+        "keep_yearly": keep_yearly,
+    }
+    if schedule_cron and no_schedule:
+        raise click.UsageError("Choose --schedule or --no-schedule, not both")
+    if excludes and clear_excludes:
+        raise click.UsageError("Choose --exclude or --clear-excludes, not both")
+    if not any(
+        (source, schedule_cron, no_schedule, excludes, clear_excludes, enabled is not None, *keeps.values())
+    ):
+        raise click.UsageError(
+            "Nothing to change. Pass at least one of --source, --schedule, --no-schedule, --exclude, "
+            "--clear-excludes, --keep-last/-daily/-weekly/-monthly/-yearly, --enable or --disable"
+        )
+    if schedule_cron and not _valid_schedule(schedule_cron):
+        raise click.UsageError("--schedule must be a valid cron expression")
+    path, config = _local_config(ctx)
+    configured = config.jobs.get(name)
+    if not configured:
+        raise click.ClickException(f"Job '{name}' is not configured")
+    updates: dict[str, Any] = {}
+    source_config = configured.source
+    if source:
+        owner = next(
+            (
+                other
+                for other, item in config.jobs.items()
+                if other != name and item.repository == configured.repository and item.source.path == source
+            ),
+            None,
+        )
+        if owner:
+            raise click.ClickException(f"Source '{source}' is already owned by job '{owner}'")
+        source_config = source_config.model_copy(update={"path": source})
+    if excludes or clear_excludes:
+        source_config = source_config.model_copy(update={"excludes": [] if clear_excludes else list(excludes)})
+    if source_config is not configured.source:
+        updates["source"] = source_config
+    if schedule_cron:
+        updates["schedule"] = ScheduleConfig(cron=schedule_cron)
+    elif no_schedule:
+        updates["schedule"] = None
+    if any(value is not None for value in keeps.values()):
+        retention = (configured.retention or RetentionConfig()).model_copy(
+            update={key: value for key, value in keeps.items() if value is not None}
+        )
+        updates["retention"] = retention if any(retention.model_dump().values()) else None
+    if enabled is not None:
+        updates["enabled"] = enabled
+    config.jobs[name] = configured.model_copy(update=updates)
+    config.save(path)
+    if source and source != configured.source.path:
+        click.echo(
+            f"Run history and retention stay scoped to the previous source {configured.source.path}; "
+            "snapshots taken from it are not pruned by this job any more",
+            err=True,
+        )
+    payload = config.jobs[name].model_dump(exclude_none=True)
+    click.echo(json.dumps(payload) if as_json else f"Job '{name}' updated")
 
 
 @job.command("history")
@@ -3293,10 +3788,21 @@ def snapshots(
 
     _, config = _local_config(ctx)
     repository_id = _resolve_job_repository(config, repo, job)
+    if job and job not in config.jobs:
+        raise click.ClickException(
+            f"No local job named '{job}'. JOB is a job name; for a repository use: backer snapshots --repo {job}"
+        )
     record = config.repositories[repository_id]
+    if _repository_format(record) == "files" and not job:
+        raise click.UsageError("Files snapshots are scoped to a job; supply JOB")
     backend, passphrase, storage = _repository_backend(record)
+    if _repository_format(record) == "files":
+        getattr(backend, "config", {})["job_name"] = job
     with repository_operation_context(record, storage) as operation_record:
-        rows = backend.list_snapshots(BackupDestination(_repository_destination(operation_record)))
+        destination = (
+            _job_repository_destination(operation_record, job) if job else _repository_destination(operation_record)
+        )
+        rows = backend.list_snapshots(BackupDestination(destination))
         if source:
             rows = [item for item in rows if item.get("paths") == [source]]
         if host:
@@ -3324,9 +3830,15 @@ def snapshots(
 @click.option("--restore-test", is_flag=True)
 @click.option("--verify-files-percent", type=click.FloatRange(min=0, max=100))
 @click.option("--repair-index", is_flag=True)
+@click.option("--yes", is_flag=True, help="Confirm the index recovery shown by the preview")
 @click.option("--timeout", type=click.IntRange(min=1))
 def verify(
-    job: str, restore_test: bool, verify_files_percent: float | None, repair_index: bool, timeout: int | None
+    job: str,
+    restore_test: bool,
+    verify_files_percent: float | None,
+    repair_index: bool,
+    yes: bool,
+    timeout: int | None,
 ) -> None:
     """Verify a local repository; index recovery is always explicit."""
     from backer.core.config import load_config
@@ -3341,8 +3853,16 @@ def verify(
     if not record:
         raise click.ClickException(f"Job '{job}' names an unknown repository")
     backend, passphrase, storage = _repository_backend(record, timeout=timeout)
+    if _repository_format(record) == "files":
+        getattr(backend, "config", {})["job_name"] = job
+    if _repository_format(record) == "files" and repair_index:
+        raise click.UsageError("--repair-index applies only to Kopia repositories")
+    if _repository_format(record) == "files" and verify_files_percent is not None:
+        raise click.UsageError("--verify-files-percent applies only to Kopia repositories")
+    if _repository_format(record) == "files" and restore_test:
+        raise click.UsageError("--restore-test applies only to Kopia repositories")
     with repository_operation_context(record, storage) as operation_record:
-        destination = BackupDestination(_repository_destination(operation_record))
+        destination = BackupDestination(_job_repository_destination(operation_record, job))
         if repair_index:
             preview = backend.repair_index(destination, commit=False)
             if not preview.success:
@@ -3350,13 +3870,15 @@ def verify(
                     _redact_error(RuntimeError(preview.output or "; ".join(preview.errors)), passphrase)
                 )
             click.echo(_redact_error(RuntimeError(preview.output), passphrase))
-            if not _interactive():
-                raise click.UsageError(
-                    "Index recovery preview completed; --repair-index requires an interactive confirmation"
-                )
-            if not click.confirm("Commit this index recovery", default=False):
-                click.echo("Index recovery was not committed")
-                return
+            if not yes:
+                if not _interactive():
+                    raise click.UsageError(
+                        "Index recovery preview completed; --repair-index requires --yes "
+                        "or an interactive confirmation"
+                    )
+                if not click.confirm("Commit this index recovery", default=False):
+                    click.echo("Index recovery was not committed")
+                    return
             result = backend.repair_index(destination, commit=True)
         else:
             if verify_files_percent is not None:
@@ -3364,7 +3886,9 @@ def verify(
                     f"Checking {verify_files_percent:g}% downloads and rehashes real file contents. "
                     "It may take longer on this connection."
                 )
-            result = backend.check(destination, verify_files_percent=verify_files_percent)
+            result = backend.check(destination) if _repository_format(record) == "files" else backend.check(
+                destination, verify_files_percent=verify_files_percent
+            )
     if not result.success:
         detail = _redact_error(RuntimeError(result.output or "; ".join(result.errors)), passphrase)
         timeout_detail = " ".join([result.output, *result.errors]).lower()
@@ -3381,6 +3905,9 @@ def verify(
             f"{explain_failure(detail)}\n{detail}\n"
             f"Do not run backer prune. Check the file server, then run: backer verify {job} --repair-index"
         )
+    if _repository_format(record) == "files":
+        click.echo("Repository check passed: completed snapshot manifests and contents verified")
+        return
     click.echo("Repository check passed: snapshot manifests are indexed and reachable")
     if verify_files_percent is None:
         click.echo(
@@ -3467,6 +3994,7 @@ def status(job: str | None, why: bool, exit_code: bool, as_json: bool) -> None:
 @click.option("--repo")
 @click.option("--dry-run", "-n", is_flag=True, help="Simulate without making changes")
 @click.option("--progress/--no-progress", default=None)
+@click.option("--json", "as_json", is_flag=True, help="Print the run id first, then one JSON result line")
 @click.option("--server", help="Server URL")
 @click.option("--username", envvar="BACKER_ADMIN_USERNAME", help="Backer admin username")
 @click.option("--password", envvar="BACKER_API_PASSWORD", help="Backer admin password")
@@ -3479,6 +4007,7 @@ def job_run(
     repo: str | None,
     dry_run: bool,
     progress: bool | None,
+    as_json: bool,
     server: str | None,
     username: str | None,
     password: str | None,
@@ -3489,6 +4018,8 @@ def job_run(
 
     if repo and server:
         raise click.UsageError("Choose --repo or --server, not both")
+    if as_json and (all_jobs or due or server or not name):
+        raise click.UsageError("--json reports one run and requires a local job NAME")
     local_config = load_config(ctx.obj.get("config_path") or get_config_dir() / "config.yaml")
     if all_jobs:
         names = (
@@ -3516,9 +4047,20 @@ def job_run(
             if due:
                 reports = _local_job_call(lambda: run_due_jobs(local_config, run_as_system=system_run))
             else:
-                with _local_progress(progress) as render:
+                with (
+                    _json_only_stdout(as_json) as out,
+                    _local_progress(False if as_json else progress) as render,
+                    _cancel_on_sigint() as cancel,
+                ):
                     reports = _local_job_call(
-                        lambda: run_local_job(local_config, name, run_as_system=system_run, on_progress=render)
+                        lambda: run_local_job(
+                            local_config,
+                            name,
+                            run_as_system=system_run,
+                            on_progress=render,
+                            on_run_id=(lambda run_id: _emit_run_id(run_id, out)) if as_json else None,
+                            cancel_event=cancel,
+                        )
                     )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
@@ -3526,7 +4068,20 @@ def job_run(
             if due:
                 console.print("Another local backup is running")
                 return
+            if as_json:
+                click.echo(json.dumps({"ok": False, "job_name": name, "errors": ["Another local backup is running"]}))
             raise click.ClickException("Another local backup is running")
+        if not due and reports.get("cancelled"):
+            if as_json:
+                click.echo(json.dumps({"ok": False, **reports}, default=str))
+            else:
+                console.print("Backup cancelled")
+            raise click.exceptions.Exit(130)
+        if as_json:
+            click.echo(json.dumps({"ok": bool(reports.get("success")), **reports}, default=str))
+            if not reports.get("success"):
+                raise click.ClickException("; ".join(reports.get("errors") or ["Backup failed"]))
+            return
         if due and not reports:
             console.print("No jobs due")
         for report in reports if due else [reports]:
@@ -3563,6 +4118,119 @@ def job_run(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise SystemExit(1)
+
+
+@main.group("schedule")
+def schedule_group() -> None:
+    """Inspect and pause the local serverless scheduler."""
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _set_pause(paused: bool, until: datetime | None) -> None:
+    """Write the pause selection through the snapshot helpers so a failed write rolls back."""
+    from backer.serverless.schedule import (
+        restore_schedule_pause,
+        save_schedule_pause,
+        schedule_pause_matches,
+        schedule_pause_snapshot,
+    )
+
+    snapshot = schedule_pause_snapshot()
+    try:
+        save_schedule_pause(paused, until)
+        if not schedule_pause_matches(paused, until):
+            raise click.ClickException("The scheduler pause state could not be verified; nothing was changed")
+    except BaseException:
+        restore_schedule_pause(snapshot)
+        raise
+
+
+@schedule_group.command("pause")
+@click.option("--until", help="ISO 8601 time to resume automatically; omit to pause until resumed")
+def schedule_pause_command(until: str | None) -> None:
+    """Stop the local scheduler from starting new backups."""
+    deadline = None
+    if until:
+        try:
+            deadline = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise click.UsageError("--until must be an ISO 8601 time") from error
+        if deadline.tzinfo is None:
+            deadline = deadline.astimezone()
+    _set_pause(True, deadline)
+    click.echo(f"Scheduled backups paused until {_iso_utc(deadline)}" if deadline else "Scheduled backups paused")
+
+
+@schedule_group.command("resume")
+def schedule_resume_command() -> None:
+    """Let the local scheduler start backups again."""
+    _set_pause(False, None)
+    click.echo("Scheduled backups resumed")
+
+
+@schedule_group.command("show")
+@click.option("--json", "as_json", is_flag=True)
+def schedule_show_command(as_json: bool) -> None:
+    """Report the durable pause selection."""
+    from backer.serverless.schedule import schedule_pause_consensus
+
+    paused, until = schedule_pause_consensus()
+    payload = {"paused": paused, "until": _iso_utc(until) if until else None}
+    click.echo(json.dumps(payload) if as_json else f"paused: {paused}, until: {payload['until'] or 'none'}")
+
+
+@schedule_group.command("status")
+@click.option("--json", "as_json", is_flag=True)
+def schedule_status_command(as_json: bool) -> None:
+    """Report the installed local scheduler trigger, as the platform reports it."""
+    from backer.client.windows_service import snapshot_local_scheduler
+    from backer.serverless.modes import local_schedule_configured
+
+    snapshot = snapshot_local_scheduler()
+    windows = snapshot.get("platform") == "windows"
+    if windows:
+        task = snapshot.get("task") if isinstance(snapshot.get("task"), dict) else {}
+        enabled, active = bool(task.get("enabled")), bool(task.get("running"))
+    else:
+        state = snapshot.get("state") if isinstance(snapshot.get("state"), dict) else {}
+        timer = state.get("backer-local.timer") if isinstance(state.get("backer-local.timer"), dict) else {}
+        enabled, active = bool(timer.get("enabled")), bool(timer.get("running"))
+    payload = {
+        "configured": local_schedule_configured(),
+        "platform": snapshot.get("platform"),
+        "method": "task" if windows else "systemd",
+        # The snapshot only inspects the SYSTEM task on Windows and the per-user units on Linux.
+        "scope": "machine" if windows else "user",
+        "enabled": enabled,
+        "active": active,
+    }
+    if as_json:
+        click.echo(json.dumps(payload))
+        return
+    for key, value in payload.items():
+        click.echo(f"{key}: {value}")
+
+
+@main.group("keystore")
+def keystore_group() -> None:
+    """Report where this computer stores repository secrets."""
+
+
+@keystore_group.command("status")
+@click.option("--json", "as_json", is_flag=True)
+def keystore_status(as_json: bool) -> None:
+    """Disclose the secret backend before a passphrase is written."""
+    from backer.core import keystore
+
+    payload = {"backend": keystore.backend_name(), "file_fallback": keystore.file_fallback_required()}
+    if as_json:
+        click.echo(json.dumps(payload))
+        return
+    click.echo(f"backend: {payload['backend']}")
+    click.echo(f"file fallback: {payload['file_fallback']}")
 
 
 if __name__ == "__main__":

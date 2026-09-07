@@ -24,12 +24,24 @@ def test_frozen_service_entry_uses_its_install_directory_for_tools() -> None:
 def test_installer_stops_both_agent_executables_and_cleans_up_task() -> None:
     source = (ROOT / "installer/backer-agent.iss").read_text()
 
-    assert "CloseApplicationsFilter=backer-agent.exe,backer-agent-service.exe" in source
+    assert (
+        "CloseApplicationsFilter=backer-desktop.exe,backer-agent-service.exe,backer.exe,backer-agent.exe"
+        in source
+    )
     assert "Exec('schtasks', '/end /tn BackerAgentService'" in source
     assert "Exec('taskkill', '/F /IM backer-agent-service.exe'" in source
     assert 'Parameters: "/end /tn BackerAgentService"' in source
     assert 'Parameters: "/delete /tn BackerAgentService /f"' in source
     assert 'Parameters: "/F /IM backer-agent-service.exe"' in source
+
+
+def test_installer_removes_the_legacy_tk_agent_executable() -> None:
+    source = (ROOT / "installer/backer-agent.iss").read_text()
+
+    assert "[InstallDelete]" in source
+    assert 'Type: files; Name: "{app}\\backer-agent.exe"' in source
+    assert "Exec('taskkill', '/F /IM backer-agent.exe'" in source
+    assert 'Parameters: "/F /IM backer-agent.exe"' in source
 
 
 def test_scheduled_task_xml_preserves_spaced_service_path(monkeypatch) -> None:

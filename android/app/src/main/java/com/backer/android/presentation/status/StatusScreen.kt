@@ -1,5 +1,9 @@
 package com.backer.android.presentation.status
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -30,14 +35,19 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.backer.android.R
 import com.backer.android.domain.model.ConnectionStatus
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +56,16 @@ fun StatusScreen(
     onNavigateToSettings: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshStorageAccess()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(
         topBar = {
@@ -166,6 +186,45 @@ fun StatusScreen(
                         label = stringResource(R.string.last_backup),
                         value = uiState.lastBackup ?: stringResource(R.string.never)
                     )
+                }
+            }
+
+            // Quick Actions Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (uiState.hasAllFilesAccess) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer
+                    }
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Storage access", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (uiState.hasAllFilesAccess) {
+                            "All files access is enabled."
+                        } else {
+                            "Enable All files access for unattended backup and restore of user files."
+                        },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (!uiState.hasAllFilesAccess) {
+                        Button(onClick = {
+                            val action = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION
+                            } else {
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                            }
+                            context.startActivity(Intent(action, Uri.parse("package:${context.packageName}")))
+                        }) {
+                            Text("Enable all files access")
+                        }
+                    }
                 }
             }
 

@@ -138,6 +138,128 @@ def test_local_serverless_first_and_changed_backup(monkeypatch: pytest.MonkeyPat
     _assert_lifecycle(runner, config, source, repository)
 
 
+def test_job_excludes_are_applied_by_the_real_kopia_binary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """kopia drops --add-ignore when --clear-ignore shares the invocation; excludes must still hold."""
+    import subprocess
+
+    from backer.backends.kopia import KopiaBackend
+
+    config = _environment(monkeypatch, tmp_path)
+    source, repository = tmp_path / "source", tmp_path / "repository"
+    (source / "cache").mkdir(parents=True)
+    repository.mkdir()
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    (source / "junk.tmp").write_text("junk", encoding="utf-8")
+    (source / "cache" / "blob.bin").write_text("cached", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config), "repo", "add", "repository", "--init", "--type", "local",
+            "--path", str(repository), "--passphrase-stdin", "--headless",
+        ],
+        input="serverless-test-passphrase\n",
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config), "job", "create", "backup", "--repo", "repository",
+            "--source", str(source), "--no-schedule", "--exclude", "**/cache/**", "--exclude", "*.tmp",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(main, ["--config", str(config), "job", "run", "backup", "--no-progress"])
+    assert result.exit_code == 0, result.output
+
+    backend = KopiaBackend({"repository_password": "serverless-test-passphrase"})
+    connected, message = backend._connect_repo(str(repository))
+    assert connected, message
+    policy = subprocess.run(
+        [str(backend._get_binary()), "policy", "show", str(source)],
+        capture_output=True,
+        text=True,
+        env=backend._repo_env(str(repository)),
+        timeout=120,
+    )
+    assert policy.returncode == 0, policy.stderr
+    assert "**/cache/**" in policy.stdout and "*.tmp" in policy.stdout, policy.stdout
+
+    restored = tmp_path / "restored"
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config), "restore", "--job", "backup", "--latest",
+            "--destination", str(restored), "--into", "NEW", "--no-progress",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (restored / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert not (restored / "junk.tmp").exists()
+    assert not (restored / "cache" / "blob.bin").exists()
+
+
+def test_adopted_job_still_records_run_history_in_the_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A replacement machine may not own the job document, but its runs must still be readable."""
+    config = _environment(monkeypatch, tmp_path)
+    source, repository = tmp_path / "source", tmp_path / "repository"
+    source.mkdir()
+    repository.mkdir()
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config), "repo", "add", "repository", "--init", "--type", "local",
+            "--path", str(repository), "--passphrase-stdin", "--headless",
+        ],
+        input="serverless-test-passphrase\n",
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config), "job", "create", "backup", "--repo", "repository",
+            "--source", str(source), "--no-schedule",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # The dead machine's job document: this agent adopted the job but does not own the record.
+    job_config = repository / ".backer" / "jobs" / "backup" / "config.json"
+    job_config.parent.mkdir(parents=True, exist_ok=True)
+    job_config.write_text(
+        json.dumps(
+            {
+                "schema_version": "2",
+                "job_name": "backup",
+                "owner_agent_id": "dead0000",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "config": {"source_path": "/old/source"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(main, ["--config", str(config), "job", "run", "backup", "--no-progress"])
+    assert result.exit_code == 0, result.output
+
+    kept = json.loads(job_config.read_text(encoding="utf-8"))
+    assert kept["owner_agent_id"] == "dead0000"
+    assert kept["config"]["source_path"] == "/old/source"
+    runs = list((repository / ".backer" / "jobs" / "backup" / "runs").glob("*.json"))
+    assert len(runs) == 1, runs
+    assert json.loads(runs[0].read_text(encoding="utf-8"))["status"] == "success"
+    assert list((repository / ".backer" / "snapshots").glob("*.json"))
+
+
 def test_s3_serverless_first_and_changed_backup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     names = (
         "BACKER_TEST_S3_ENDPOINT",

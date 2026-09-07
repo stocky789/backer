@@ -1,11 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file for Backer Windows Agent GUI.
+"""PyInstaller spec file for the Backer console CLI (backer.exe).
 
 Build with: pyinstaller backer-agent.spec
 
-This creates a single-file executable that includes:
-- The backer agent GUI
-- All Python dependencies
+This creates a single-file console executable that includes:
+- The backer CLI (backer.cli:main)
+- All Python dependencies the agent needs
+
+The desktop client is a separate C#/Avalonia app (desktop/) and is built with
+`dotnet publish`; it drives every mutation by spawning this executable.
 """
 
 import os
@@ -20,11 +23,11 @@ version_file = Path('build/backer-agent-version.txt')
 
 # Collect all backer modules
 a = Analysis(
-    ['src/backer/agent/gui/app.py'],
+    ['src/backer/cli.py'],
     pathex=['src'],
     binaries=[],
     datas=[
-        # Include icon file at root level (where GUI looks for it)
+        # Include icon file at root level (the installer and shortcuts use it)
         ('assets/backer.ico', '.'),
         # Include assets folder for other resources
         ('assets', 'assets') if os.path.exists('assets') else ('README.md', '.'),
@@ -33,9 +36,9 @@ a = Analysis(
     hiddenimports=[
         'backer',
         'backer.agent',
-        'backer.agent.gui',
-        'backer.agent.gui.app',
         'backer.agent.service',
+        'backer.cli',
+        'backer.serverless',
         'backer.serverless.scheduled_test',
         'backer.backends',
         'backer.backends.kopia',
@@ -66,9 +69,6 @@ a = Analysis(
         'backer.client.agent',
         'backer.tools',
         'backer.tools.manager',
-        'tkinter',
-        'tkinter.ttk',
-        'tkinter.messagebox',
         'httpx',
         'httpx._transports',
         'httpx._transports.default',
@@ -100,6 +100,10 @@ a = Analysis(
         'starlette',
         'jinja2',
         'multipart',
+        # No GUI toolkit in the frozen CLI
+        'tkinter',
+        'pystray',
+        'PIL',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -116,14 +120,14 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='backer-agent',
+    name='backer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # GUI app - no console window
+    console=True,  # console CLI
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

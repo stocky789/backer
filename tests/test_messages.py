@@ -59,10 +59,14 @@ def test_secret_copy_is_qualified_and_catalogue_is_not_engine_branded():
     assert "kopia" not in rendered
 
 
-def test_no_exclamation_marks_in_cli_or_gui_display_literals():
-    """An excited punctuation change would violate the shared failure-copy rule."""
+def test_no_exclamation_marks_in_cli_display_literals():
+    """An excited punctuation change would violate the shared failure-copy rule.
+
+    The CLI is the only display-copy source now; the desktop client shows the
+    CLI's own output verbatim.
+    """
     source_root = Path(__file__).parents[1] / "src" / "backer"
-    paths = [source_root / "cli.py", *(source_root / "agent" / "gui").rglob("*.py")]
+    paths = [source_root / "cli.py"]
     strings = [
         node.value
         for path in paths

@@ -1,0 +1,143 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+             x:Class="Backer.Desktop.Views.HomeView"
+             x:DataType="vm:HomeViewModel">
+  <DockPanel Margin="24">
+    <StackPanel DockPanel.Dock="Top" Spacing="12">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Spacing="2">
+          <TextBlock Classes="title" Text="Backup operations" />
+          <TextBlock Classes="caption" Text="Local jobs, repository targets and latest run state" />
+        </StackPanel>
+        <TextBlock Grid.Column="1" Classes="caption" VerticalAlignment="Bottom"
+                   IsVisible="{Binding ServerManaged}"
+                   Text="Server-managed jobs are not listed here" />
+      </Grid>
+      <Border Classes="banner"
+              Classes.protected="{Binding AllProtected}"
+              Classes.attention="{Binding NeedsAttention}">
+        <TextBlock FontSize="15" TextWrapping="Wrap" Text="{Binding ProtectionText}" />
+      </Border>
+    </StackPanel>
+
+    <ScrollViewer Margin="0,20,0,0" VerticalScrollBarVisibility="Auto">
+      <StackPanel Spacing="24">
+        <StackPanel Spacing="10">
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+              <TextBlock Classes="section" Text="BACKUP JOBS" />
+              <TextBlock Classes="caption" Text="Select a row to run, restore or change a job" />
+            </StackPanel>
+            <Button Grid.Column="1" Content="New backup job" IsEnabled="{Binding HasRepositories}"
+                    Command="{Binding NewJobCommand}" />
+          </Grid>
+
+          <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                        IsVisible="{Binding !IsEmpty}">
+            <Border Classes="table" MinWidth="900">
+              <StackPanel>
+                <Border Classes="table-header">
+                  <Grid ColumnDefinitions="16,1.1*,1.8*,1.1*,1*,1*,90" ColumnSpacing="12">
+                    <TextBlock Grid.Column="1" Classes="column-header" Text="JOB" />
+                    <TextBlock Grid.Column="2" Classes="column-header" Text="SOURCE" />
+                    <TextBlock Grid.Column="3" Classes="column-header" Text="REPOSITORY" />
+                    <TextBlock Grid.Column="4" Classes="column-header" Text="SCHEDULE" />
+                    <TextBlock Grid.Column="5" Classes="column-header" Text="LAST RUN" />
+                    <TextBlock Grid.Column="6" Classes="column-header" Text="SIZE" />
+                  </Grid>
+                </Border>
+                <ListBox AutomationProperties.Name="Backup jobs"
+                         ItemsSource="{Binding Jobs}"
+                         SelectedItem="{Binding SelectedJob}"
+                         DoubleTapped="OnRowDoubleTapped">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:JobRow">
+                      <Grid AutomationProperties.Name="{Binding Job, StringFormat='Backup job {0}'}"
+                            ColumnDefinitions="16,1.1*,1.8*,1.1*,1*,1*,90" ColumnSpacing="12">
+                        <Border Grid.Column="0" Classes="dot"
+                                Classes.ok="{Binding IsOk}"
+                                Classes.attention="{Binding NeedsAttention}" />
+                        <TextBlock Grid.Column="1" Text="{Binding Job}" TextTrimming="CharacterEllipsis"
+                                   ToolTip.Tip="{Binding Job}" />
+                        <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Source}"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Source}" />
+                        <TextBlock Grid.Column="3" Classes="muted" Text="{Binding Repository}"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Repository}" />
+                        <TextBlock Grid.Column="4" Classes="muted tabular" Text="{Binding Schedule}"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Schedule}" />
+                        <TextBlock Grid.Column="5" Classes="tabular" Text="{Binding Last}"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Last}" />
+                        <TextBlock Grid.Column="6" Classes="muted tabular" Text="{Binding Size}"
+                                   TextTrimming="CharacterEllipsis" />
+                      </Grid>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+              </StackPanel>
+            </Border>
+          </ScrollViewer>
+
+          <Border Classes="table" IsVisible="{Binding IsEmpty}">
+            <TextBlock Classes="muted" Margin="16" Text="No backup jobs yet." />
+          </Border>
+          <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Classes="primary" Content="Back up now" IsEnabled="{Binding HasSelection}"
+                    Command="{Binding BackUpNowCommand}" />
+            <Button Content="Restore" IsEnabled="{Binding HasSelection}" Command="{Binding RestoreCommand}" />
+            <Button Content="Edit" IsEnabled="{Binding HasSelection}" Command="{Binding EditCommand}" />
+            <Button Classes="danger" Content="Remove" IsEnabled="{Binding HasSelection}"
+                    Command="{Binding RemoveCommand}" />
+          </StackPanel>
+        </StackPanel>
+
+        <StackPanel Spacing="10">
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel Grid.Column="0" Spacing="2">
+              <TextBlock Classes="section" Text="REPOSITORIES" />
+              <TextBlock Classes="caption" Text="Storage destinations available to local jobs" />
+            </StackPanel>
+            <Button Grid.Column="1" Classes="primary" Content="Add repository"
+                    IsVisible="{Binding CanAddRepository}" Command="{Binding AddRepositoryCommand}" />
+          </Grid>
+
+          <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                        IsVisible="{Binding HasRepositories}">
+            <Border Classes="table" MinWidth="900">
+              <StackPanel>
+              <Border Classes="table-header">
+                <Grid ColumnDefinitions="1.1*,100,2.4*" ColumnSpacing="12">
+                  <TextBlock Grid.Column="0" Classes="column-header" Text="NAME" />
+                  <TextBlock Grid.Column="1" Classes="column-header" Text="TYPE" />
+                  <TextBlock Grid.Column="2" Classes="column-header" Text="LOCATION" />
+                </Grid>
+              </Border>
+              <ItemsControl AutomationProperties.Name="Repositories" ItemsSource="{Binding Repositories}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:HomeRepositoryRow">
+                    <Border Classes="row" Padding="12,9"
+                            AutomationProperties.Name="{Binding Name, StringFormat='Repository {0}'}">
+                      <Grid ColumnDefinitions="1.1*,100,2.4*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                   ToolTip.Tip="{Binding Name}" />
+                        <TextBlock Grid.Column="1" Classes="muted" Text="{Binding Type}" />
+                        <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Location}"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Location}" />
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              </StackPanel>
+            </Border>
+          </ScrollViewer>
+
+          <Border Classes="table" IsVisible="{Binding NoRepositories}">
+            <TextBlock Classes="muted" Margin="16"
+                       Text="No repositories yet. Add one to choose where backups are kept." />
+          </Border>
+        </StackPanel>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</UserControl>

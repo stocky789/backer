@@ -20,12 +20,14 @@ def load():
 def setup(root: Path, changelog: bytes = b"## 0.9.0\n") -> list[Path]:
     (root / "src/backer").mkdir(parents=True)
     (root / "installer").mkdir()
+    (root / "desktop/Backer.Desktop").mkdir(parents=True)
     (root / "android/app").mkdir(parents=True)
     (root / "CHANGELOG.md").write_bytes(changelog)
     files = {
         "pyproject.toml": b'[project]\nversion = "0.8.0"\n',
         "src/backer/_version.py": b'__version__ = "0.8.0"\n',
         "installer/backer-agent.iss": b'#define MyAppVersion "0.8.0"\n',
+        "desktop/Backer.Desktop/Backer.Desktop.csproj": b"<Project>\n  <Version>0.8.0</Version>\n</Project>\n",
         "android/app/build.gradle.kts": b'versionCode = 800\nversionName = "0.8.0"\n',
     }
     for name, data in files.items():
@@ -46,20 +48,21 @@ def test_bump_updates_every_version_site_and_android_code(tmp_path: Path) -> Non
     assert b'version = "2.34.5"' in files[0].read_bytes()
     assert b'__version__ = "2.34.5"' in files[1].read_bytes()
     assert b'#define MyAppVersion "2.34.5"' in files[2].read_bytes()
-    assert b"versionCode = 23405" in files[3].read_bytes()
-    assert b'versionName = "2.34.5"' in files[3].read_bytes()
+    assert b"<Version>2.34.5</Version>" in files[3].read_bytes()
+    assert b"versionCode = 23405" in files[4].read_bytes()
+    assert b'versionName = "2.34.5"' in files[4].read_bytes()
 
 
 def test_bump_preserves_crlf_and_non_version_bytes(tmp_path: Path) -> None:
     files = setup(tmp_path, b"intro\r\n## 0.9.0\r\n")
     files[0].write_bytes(b'# keep\r\n[project]\r\nversion = "0.8.0"\r\n')
-    files[3].write_bytes(b'// keep\r\nversionCode = 800\r\nversionName = "0.8.0"\r\n')
+    files[4].write_bytes(b'// keep\r\nversionCode = 800\r\nversionName = "0.8.0"\r\n')
     before = {path: path.read_bytes() for path in files}
 
     assert run(load(), tmp_path, "0.9.0") == 0
 
     assert files[0].read_bytes() == before[files[0]].replace(b"0.8.0", b"0.9.0")
-    assert files[3].read_bytes() == before[files[3]].replace(b"800", b"900").replace(b"0.8.0", b"0.9.0")
+    assert files[4].read_bytes() == before[files[4]].replace(b"800", b"900").replace(b"0.8.0", b"0.9.0")
 
 
 def test_invalid_version_or_missing_heading_writes_nothing(tmp_path: Path) -> None:

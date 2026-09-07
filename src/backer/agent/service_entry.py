@@ -1,4 +1,4 @@
-"""Unattended Windows agent entry point (no Tk GUI)."""
+"""Unattended Windows agent entry point (headless, no desktop client)."""
 
 import logging
 import os

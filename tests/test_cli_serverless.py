@@ -1,3 +1,4 @@
+import json
 import shlex
 from pathlib import Path
 
@@ -115,15 +116,17 @@ def test_noninteractive_first_run_uses_real_config_keystore_and_kopia_boundary(m
     commands = []
     created = False
 
-    def run(command, **_kwargs):
+    def run(command, **kwargs):
         nonlocal created
         commands.append(command)
-        if command[1:3] == ["repository", "connect"] and not created:
-            return CompletedProcess(command, 1, "", "repository not initialized in the provided storage")
+        if command[1:3] == ["repository", "connect"]:
+            if not created:
+                return CompletedProcess(command, 1, "", "repository not initialized in the provided storage")
+            cache = Path(kwargs["env"]["KOPIA_CACHE_DIRECTORY"])
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "kopia.repository").write_text('{"uniqueID":"dW5pcXVl"}', encoding="utf-8")
         if command[1:3] == ["repository", "create"]:
             created = True
-        if command[1:3] == ["repository", "status"]:
-            return CompletedProcess(command, 0, '{"uniqueIDHex":"unique"}', "")
         if command[1:3] == ["snapshot", "list"]:
             payload = [{"id": "snapshot-id", "startTime": "2026-09-01", "source": {"path": str(source)}}]
             return CompletedProcess(command, 0, __import__("json").dumps(payload), "")
@@ -295,6 +298,134 @@ def test_repo_add_does_not_advertise_unused_yes_flag():
     assert "--yes" not in result.output
 
 
+def test_repo_add_files_initializes_and_attaches_without_a_passphrase(monkeypatch, tmp_path):
+    from backer.core.config import BackerConfig
+
+    config_path = tmp_path / "config.yaml"
+    repository = tmp_path / "repository"
+    monkeypatch.setattr(
+        "backer.core.keystore.put", lambda *_args, **_kwargs: pytest.fail("files must not store a secret")
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config_path), "repo", "add", "files", "--init", "--format", "files", "--type", "local",
+            "--path", str(repository),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    first = next(iter(BackerConfig.load(config_path).repositories.values()))
+    marker = json.loads((repository / ".backer" / "repository.json").read_text(encoding="utf-8"))
+    assert first.format == "files"
+    assert first.passphrase_ref is None
+    assert first.unique_id == marker["repository_id"]
+
+    config = BackerConfig.load(config_path)
+    config.repositories.clear()
+    config.save(config_path)
+    result = runner.invoke(
+        main,
+        [
+            "--config", str(config_path), "repo", "add", "attached", "--attach", "--format", "files", "--type", "local",
+            "--path", str(repository), "--headless",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    attached = next(iter(BackerConfig.load(config_path).repositories.values()))
+    assert attached.unique_id == marker["repository_id"]
+    assert attached.passphrase_ref is None
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        (["--passphrase-stdin"], "do not use passphrases"),
+        (["--type", "s3"], "do not support S3"),
+    ],
+)
+def test_repo_add_files_rejects_passphrases_and_s3(tmp_path, arguments, message):
+    repository = tmp_path / "repository"
+    result = CliRunner().invoke(
+        main,
+        [
+            "repo", "add", "files", "--init", "--format", "files", "--type", "local", "--path", str(repository),
+            "--headless", *arguments,
+        ],
+        input="secret\n",
+    )
+    assert result.exit_code == 2
+    assert message in result.output
+    assert not (repository / ".backer" / "repository.json").exists()
+
+
+def test_files_cli_operations_use_the_job_snapshot_root(monkeypatch, tmp_path):
+    from datetime import datetime
+
+    from backer.backends.base import BackendResult, OperationType
+    from backer.core.config import BackerConfig, JobConfig, RepositoryConfig, SourceConfig
+
+    config_path = tmp_path / "config.yaml"
+    repository = tmp_path / "repository"
+    source = tmp_path / "source"
+    config = BackerConfig(
+        repositories={"repo": RepositoryConfig(name="files", format="files", type="local", path=str(repository))},
+        jobs={"photos": JobConfig(repository="repo", source=SourceConfig(path=str(source)))},
+    )
+    config.save(config_path)
+    destinations = []
+
+    class Backend:
+        def list_snapshots(self, destination):
+            destinations.append(destination.path)
+            return [{"id": "snap", "full_id": "snap", "timestamp": "2026-09-03T00:00:00Z", "paths": [str(source)]}]
+
+        def restore(self, **kwargs):
+            destinations.append(kwargs["source"].path)
+            return BackendResult(True, OperationType.RESTORE, datetime.now(), datetime.now())
+
+        def check(self, destination):
+            destinations.append(destination.path)
+            return BackendResult(True, OperationType.CHECK, datetime.now(), datetime.now())
+
+    monkeypatch.setattr("backer.cli._repository_backend", lambda *_args, **_kwargs: (Backend(), None, None))
+    monkeypatch.setattr("backer.core.paths.get_config_dir", lambda: tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(main, ["--config", str(config_path), "snapshots", "photos", "--json"]).exit_code == 0
+    restore = runner.invoke(
+        main,
+        [
+            "restore", "--job", "photos", "--snapshot", "snap", "--into", "NEW", "--destination",
+            str(tmp_path / "restore"),
+        ],
+    )
+    assert restore.exit_code == 0, restore.output
+    verify = runner.invoke(main, ["verify", "photos"])
+    assert verify.exit_code == 0, verify.output
+    assert destinations == [str(repository / "Agents" / "photos")] * 4
+    for option in ("--repair-index", "--restore-test", "--verify-files-percent=10"):
+        rejected = runner.invoke(main, ["verify", "photos", option])
+        assert rejected.exit_code == 2
+        assert "only to Kopia" in rejected.output
+
+
+@pytest.mark.parametrize("target_kind", ["file", "symlink"])
+def test_restore_merge_refuses_non_directory_and_symlink_targets(tmp_path, target_kind):
+    from backer.cli import _restore_prepare_destination
+
+    target = tmp_path / "target"
+    if target_kind == "file":
+        target.write_text("not a directory", encoding="utf-8")
+    else:
+        try:
+            target.symlink_to(tmp_path / "missing")
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+    with pytest.raises(click.ClickException, match="non-symlink directory"):
+        _restore_prepare_destination(target, "MERGE", config=type("Config", (), {"repositories": {}})())
+
+
 def test_generated_passphrase_uses_six_eff_words_and_recovery_record_is_private(tmp_path):
     from backer.cli import _generated_passphrase, _load_recovery_passphrase, _write_recovery_export
 
@@ -326,6 +457,9 @@ def test_agent_spec_packages_eff_wordlist():
     spec = (Path(__file__).parents[1] / "backer-agent.spec").read_text(encoding="utf-8")
     assert "src/backer/assets/eff_large_wordlist.txt" in spec
     assert "backer/assets" in spec
+    assert "['src/backer/cli.py']" in spec
+    assert "console=True" in spec
+    assert "name='backer'," in spec
 
 
 def test_s3_recovery_restore_is_memory_only(monkeypatch, tmp_path):
@@ -537,6 +671,25 @@ def test_repo_discover_reads_password_only_from_stdin_or_environment(monkeypatch
     )
     assert result.exit_code == 0
     assert "not-in-output" not in result.output
+
+
+def test_repo_discover_forwards_the_domain(monkeypatch):
+    from backer.core.smb_browse import ShareInfo
+
+    seen = []
+
+    def fake_list_shares(host, username, password, domain=None):
+        seen.append((host, username, password, domain))
+        return True, [ShareInfo("Backups", "Disk")]
+
+    monkeypatch.setattr("backer.core.smb_browse.SMBBrowser.list_shares", fake_list_shares)
+    result = CliRunner().invoke(
+        main,
+        ["repo", "discover", "--host", "nas", "--username", "svc", "--domain", "truenas", "--json"],
+        env={"BACKER_SMB_PASSWORD": "secret"},
+    )
+    assert result.exit_code == 0
+    assert seen == [("nas", "svc", "secret", "truenas")]
 
 
 def test_init_forwards_local_parameters_to_shared_commands(monkeypatch, tmp_path):
@@ -920,3 +1073,56 @@ def test_init_forwards_each_repository_type_to_shared_commands(
         assert parsed.exit_code == 0, parsed.output
         assert calls[0][1] == calls[2][1]
         assert calls[1][1] == calls[3][1]
+
+
+def test_repo_adopt_s3_without_a_prefix_reports_cleanly(monkeypatch, tmp_path: Path) -> None:
+    """prefix is optional, and a missing one used to escape as an AttributeError traceback."""
+    import json
+
+    from backer.core.config import BackerConfig, RepositoryConfig
+
+    config = BackerConfig(
+        agent_id="new-agent",
+        repositories={
+            "repo": RepositoryConfig(
+                id="repo",
+                name="Repo",
+                type="s3",
+                bucket="bucket",
+                endpoint="https://s3.example",
+                passphrase_ref="passphrase",
+                storage_password_ref="storage",
+            )
+        },
+    )
+    config.save(tmp_path / "config.yaml")
+    monkeypatch.setattr("backer.core.paths.get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "backer.core.keystore.get",
+        lambda key, **_: {
+            "passphrase": "repo-pass",
+            "storage": '{"access_key_id":"access","secret_access_key":"secret"}',
+        }[key],
+    )
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_: ("present", "unique", ""))
+    fetched: list[str] = []
+
+    class Sidecar:
+        def __init__(self, *_: object) -> None:
+            pass
+
+        def list(self, _prefix: str) -> list[str]:
+            return [".backer/jobs/nightly/config.json"]
+
+        def get(self, key: str) -> bytes:
+            fetched.append(key)
+            return b'{"schema_version":"2","job_name":"nightly","owner_agent_id":"old","config":{"source_path":"/old"}}'
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.S3Sidecar", Sidecar)
+
+    result = CliRunner().invoke(main, ["repo", "adopt", "Repo", "--all", "--source", "nightly=/new", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert result.exception is None
+    assert fetched == [".backer/jobs/nightly/config.json"]
+    assert json.loads(result.output) == {"adopted": ["nightly"], "warnings": [], "failures": {}}

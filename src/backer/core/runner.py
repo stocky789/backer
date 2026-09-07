@@ -3,6 +3,7 @@
 import json
 import logging
 import platform
+import re
 import shutil
 import socket
 import sys
@@ -18,9 +19,18 @@ from backer.backends.base import BackupDestination, BackupSource
 from backer.core import mounts
 from backer.core.destination import prepare_destination, prepare_source
 from backer.core.paths import get_job_subfolder
-from backer.core.repo_metadata import RepositoryMetadata
+from backer.core.repo_metadata import METADATA_VERSION, RepositoryMetadata, utc_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _backer_version() -> str:
+    try:
+        from backer import __version__
+
+        return __version__
+    except ImportError:
+        return "unknown"
 
 ProgressCallback = Callable[..., None]
 ResultCallback = Callable[[dict[str, Any]], None]
@@ -62,9 +72,14 @@ def _backend_for_location(location: str, options: dict[str, Any]):
     lowered = location.lower()
     if lowered.startswith(("proxy://", "proxys://")):
         return get_backend("proxy", {**options, "location": location})
+    repository_format = options.get("format", "kopia")
+    if repository_format not in {"kopia", "files"}:
+        raise RuntimeError(f"Unsupported repository format: {repository_format}")
+    if repository_format == "files" and lowered.startswith("s3://"):
+        raise RuntimeError("Files repositories do not support S3 storage")
     if "://" in location and not lowered.startswith("s3://"):
         raise RuntimeError(f"Unsupported repository location: {location}")
-    return get_backend("kopia", options)
+    return get_backend(repository_format, options)
 
 
 def _progress(callback: ProgressCallback | None, **kwargs: Any) -> None:
@@ -93,6 +108,9 @@ def run_backup(
     smb_cleanup_ctx = None
     try:
         repository_options = job.get("repository_options", {}).copy()
+        if repository_options.get("format") == "files":
+            repository_options.setdefault("snapshot_id", run_id)
+            repository_options.setdefault("job_name", job_name)
         cancel_event = repository_options.get("cancel_event")
         if cancel_event and cancel_event.is_set():
             raise KeyboardInterrupt
@@ -102,8 +120,9 @@ def run_backup(
             repository_options["client_secret"] = proxy_secret
         _log_repository_options("BACKUP", repository_options)
         backend = _backend_for_location(job.get("destination_path", ""), repository_options)
-        is_proxy = job.get("destination_path", "").lower().startswith(("proxy://", "proxys://"))
-        backend_name = "proxy" if is_proxy else "kopia"
+        backend_name = "proxy" if job.get("destination_path", "").lower().startswith(
+            ("proxy://", "proxys://")
+        ) else repository_options.get("format", "kopia")
         print("[BACKUP] Checking backend availability...")
         available, message = backend.check_available()
         if not available:
@@ -124,7 +143,11 @@ def run_backup(
             progress_percent=5,
             message="Backend ready, starting transfer...",
         )
-        source = BackupSource(path=Path(job["source_path"]).expanduser(), excludes=job.get("excludes", []))
+        source = BackupSource(
+            path=Path(job["source_path"]).expanduser(),
+            excludes=job.get("excludes", []),
+            includes=job.get("includes", []),
+        )
         destination = BackupDestination(path=dest_path)
 
         def progress_callback(
@@ -172,8 +195,8 @@ def run_backup(
             "job_name": job_name,
             "client_id": client_id,
             "success": result.success,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
+            "started_at": utc_iso(started_at),
+            "finished_at": utc_iso(finished_at),
             "bytes_transferred": result.bytes_transferred,
             "files_transferred": result.files_transferred,
             "errors": result.errors,
@@ -197,8 +220,8 @@ def run_backup(
             "job_name": job_name,
             "client_id": client_id,
             "success": False,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
+            "started_at": utc_iso(started_at),
+            "finished_at": utc_iso(finished_at),
             "bytes_transferred": 0,
             "files_transferred": 0,
             "errors": ["Backup interrupted"],
@@ -222,8 +245,8 @@ def run_backup(
             "job_name": job_name,
             "client_id": client_id,
             "success": False,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
+            "started_at": utc_iso(started_at),
+            "finished_at": utc_iso(finished_at),
             "bytes_transferred": 0,
             "files_transferred": 0,
             "errors": [error_msg],
@@ -273,6 +296,8 @@ def run_restore(
 
     try:
         repository_options = job.get("repository_options", {}).copy()
+        if repository_options.get("format") == "files":
+            repository_options.setdefault("job_name", job_name)
         cancel_event = repository_options.get("cancel_event")
         if cancel_event and cancel_event.is_set():
             return cancelled_report()
@@ -282,8 +307,9 @@ def run_restore(
             repository_options["client_secret"] = proxy_secret
         _log_repository_options("RESTORE", repository_options)
         backend = _backend_for_location(job.get("source_path", ""), repository_options)
-        is_proxy = job.get("source_path", "").lower().startswith(("proxy://", "proxys://"))
-        backend_name = "proxy" if is_proxy else "kopia"
+        backend_name = "proxy" if job.get("source_path", "").lower().startswith(
+            ("proxy://", "proxys://")
+        ) else repository_options.get("format", "kopia")
         print("[RESTORE] Checking backend availability...")
         available, message = backend.check_available()
         if not available:
@@ -486,8 +512,8 @@ def run_restore(
             "client_id": client_id,
             "success": result.success,
             "cancelled": was_cancelled,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
+            "started_at": utc_iso(started_at),
+            "finished_at": utc_iso(finished_at),
             "bytes_transferred": getattr(result, "bytes_transferred", 0),
             "files_transferred": result.files_transferred,
             "errors": result.errors,
@@ -516,8 +542,8 @@ def run_restore(
             "job_name": f"restore:{job_name}",
             "client_id": client_id,
             "success": False,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
+            "started_at": utc_iso(started_at),
+            "finished_at": utc_iso(finished_at),
             "bytes_transferred": 0,
             "files_transferred": 0,
             "errors": ["Restore interrupted"],
@@ -539,8 +565,8 @@ def run_restore(
             "job_name": f"restore:{job_name}",
             "client_id": client_id,
             "success": False,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
+            "started_at": utc_iso(started_at),
+            "finished_at": utc_iso(finished_at),
             "bytes_transferred": 0,
             "files_transferred": 0,
             "errors": [str(e)],
@@ -562,6 +588,143 @@ def run_restore(
                 print(f"[RESTORE] Cleanup error: {cleanup_err}")
 
 
+_ERROR_COUNT_BANNER = re.compile(r"^encountered \d+ errors?:$", re.IGNORECASE)
+
+
+def _run_error_message(result: Any) -> str | None:
+    """One-line cause for a failed run, matching the local record's joined errors.
+
+    kopia's first error line is its `Snapshotting ...` progress banner, so `errors[0]`
+    reads like progress rather than a cause.
+    """
+    if getattr(result, "success", False):
+        return None
+    lines = [
+        line.strip()
+        for entry in (getattr(result, "errors", None) or [])
+        for line in str(entry).splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return None
+    for index, line in enumerate(lines):
+        if _ERROR_COUNT_BANNER.match(line):
+            lines = lines[index + 1 :] or lines
+            break
+    else:
+        lines = [line for line in lines if not line.startswith("Snapshotting ")] or lines
+    return "; ".join(lines)
+
+
+def _sidecar_documents(
+    job_name: str,
+    run_id: str,
+    source_path: str,
+    backend_name: str,
+    result: Any,
+    started_at: datetime,
+    finished_at: datetime,
+    snapshot_id: str | None,
+    agent_id: str | None,
+    serverless_job: dict[str, Any] | None,
+    repo_type: str,
+    read: Callable[[str], dict[str, Any] | None],
+) -> dict[str, dict[str, Any]]:
+    """Build every sidecar document for one run, keyed by its path under `.backer/`.
+
+    Filesystem and S3 repositories differ only in transport; the document set and the
+    record shapes come from here so the two can never drift apart.
+    """
+    from backer.serverless.sidecar import build_serverless_job_document
+
+    hostname = socket.gethostname()
+    subfolder = get_job_subfolder(job_name)
+    documents: dict[str, dict[str, Any]] = {}
+
+    if read("metadata.json") is None:
+        now = utc_iso()
+        documents["metadata.json"] = {
+            "schema_version": "2",
+            "version": METADATA_VERSION,
+            "created_at": now,
+            "updated_at": now,
+            "repo_type": repo_type,
+            "format": backend_name if backend_name in {"kopia", "files"} else "kopia",
+            "server_id": None,
+            "backer_version": _backer_version(),
+        }
+
+    agent_key = f"agents/{agent_id}.json"
+    agent_now = utc_iso()
+    existing_agent = read(agent_key) or {}
+    documents[agent_key] = {
+        **existing_agent,
+        "hostname": hostname,
+        "platform": sys.platform,
+        "os_info": f"{platform.system()} {platform.release()}",
+        "modes": ["serverless"] if serverless_job else ["server"],
+        "agent_id": agent_id,
+        "schema_version": "2",
+        "backer_version": _backer_version(),
+        "updated_at": agent_now,
+        "first_seen": existing_agent.get("first_seen", agent_now),
+    }
+
+    job_key = f"jobs/{subfolder}/config.json"
+    current_job = read(job_key)
+    if serverless_job:
+        owner = (current_job or {}).get("owner_agent_id")
+        if current_job and owner != (agent_id or "unknown"):
+            # The job document is legitimately read-only for a machine that adopted the job;
+            # skipping it must never stop this run's history from reaching the repository.
+            print(f"[METADATA] Job document owned by agent {owner}; recording run history only")
+        else:
+            documents[job_key] = build_serverless_job_document(
+                serverless_job, job_name, source_path, agent_id, current_job
+            )
+    else:
+        job_now = utc_iso()
+        documents[job_key] = {
+            "schema_version": "2",
+            "job_name": job_name,
+            "config": {"source_path": source_path, "client_id": agent_id},
+            "created_at": (current_job or {}).get("created_at", job_now),
+            "updated_at": job_now,
+        }
+
+    documents[f"jobs/{subfolder}/runs/{run_id}.json"] = {
+        "status": "success" if result.success else "failed",
+        "started_at": utc_iso(started_at),
+        "finished_at": utc_iso(finished_at),
+        "bytes_transferred": getattr(result, "bytes_transferred", 0),
+        "files_transferred": getattr(result, "files_transferred", 0),
+        "errors": getattr(result, "errors", None) or [],
+        "return_code": getattr(result, "return_code", None),
+        "error": _run_error_message(result),
+        "error_stage": None if result.success else "backup",
+        "snapshot_id": snapshot_id,
+        "agent_id": agent_id,
+        "hostname": hostname,
+        "run_id": run_id,
+        "job_name": job_name,
+        "schema_version": "2",
+        "recorded_at": utc_iso(),
+    }
+
+    if snapshot_id and backend_name == "kopia":
+        documents[f"snapshots/{snapshot_id[:12]}.json"] = {
+            "job_name": job_name,
+            "run_id": run_id,
+            "hostname": hostname,
+            "paths": [source_path],
+            "time": utc_iso(finished_at),
+            "snapshot_id": snapshot_id,
+            "schema_version": "2",
+            "recorded_at": utc_iso(),
+        }
+    return documents
+
+
 def _write_repo_metadata(
     job: dict[str, Any],
     dest_path: str,
@@ -581,29 +744,31 @@ def _write_repo_metadata(
         )
         if job.get("serverless") and job.get("repository_hint", {}).get("type") == "s3":
             from backer.serverless.s3_sidecar import S3Sidecar
-            from backer.serverless.sidecar import build_serverless_job_document
 
             credentials = job.get("repository_options", {}).get("s3", {})
             sidecar = S3Sidecar(job["repository_hint"], credentials)
-            job_key = f".backer/jobs/{get_job_subfolder(job_name)}/config.json"
-            existing = sidecar.get(job_key)
-            current = json.loads(existing) if existing else {}
-            document = build_serverless_job_document(job, job_name, source_path, agent_id, current)
-            sidecar.put_atomic(job_key, json.dumps(document).encode())
-            run_key = f".backer/jobs/{get_job_subfolder(job_name)}/runs/{run_id}.json"
-            sidecar.put_atomic(
-                run_key,
-                json.dumps(
-                    {
-                        "run_id": run_id,
-                        "job_name": job_name,
-                        "status": "success" if result.success else "failed",
-                        "started_at": started_at.isoformat(),
-                        "finished_at": finished_at.isoformat(),
-                        "bytes_transferred": getattr(result, "bytes_transferred", 0),
-                    }
-                ).encode(),
+
+            def read_s3(key: str) -> dict[str, Any] | None:
+                body = sidecar.get(f".backer/{key}")
+                return json.loads(body) if body else None
+
+            documents = _sidecar_documents(
+                job_name,
+                run_id,
+                source_path,
+                backend_name,
+                result,
+                started_at,
+                finished_at,
+                snapshot_id,
+                agent_id,
+                job,
+                "s3",
+                read_s3,
             )
+            for key, document in documents.items():
+                sidecar.put_atomic(f".backer/{key}", json.dumps(document, indent=2, default=str).encode())
+            print(f"[METADATA] Successfully wrote metadata to: {dest_path}")
             return
         if sys.platform != "win32" and mounts.is_smb_path(dest_path):
             server, share, subpath = mounts.parse_smb_path(dest_path)
@@ -659,55 +824,30 @@ def _write_metadata_to_path(
     repo = RepositoryMetadata(repo_path)
     if not repo.is_initialized():
         print(f"[METADATA] Initializing metadata directory at {repo.metadata_dir}")
-        repo.initialize()
-    repo.save_agent(
-        agent_id=agent_id,
-        agent_data={
-            "hostname": socket.gethostname(),
-            "platform": sys.platform,
-            "os_info": f"{platform.system()} {platform.release()}",
-            "modes": ["serverless"] if serverless_job else ["server"],
-        },
-    )
-    if serverless_job:
-        from backer.serverless.sidecar import build_serverless_job_document
+    repo._ensure_dirs()
 
-        path = repo_path / ".backer" / "jobs" / get_job_subfolder(job_name) / "config.json"
-        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-        from backer.serverless.sidecar import _write_json
+    def read_local(key: str) -> dict[str, Any] | None:
+        path = repo.metadata_dir / key
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
-        _write_json(path, build_serverless_job_document(serverless_job, job_name, source_path, agent_id, current))
-    else:
-        repo.save_job(job_name=job_name, job_config={"source_path": source_path, "client_id": agent_id})
-    repo.save_job_run(
+    documents = _sidecar_documents(
         job_name,
         run_id,
-        {
-            "status": "success" if result.success else "failed",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "bytes_transferred": result.bytes_transferred,
-            "files_transferred": result.files_transferred,
-            "errors": result.errors,
-            "return_code": getattr(result, "return_code", None),
-            "error": None if result.success else " ".join(result.errors[0].splitlines()) if result.errors else None,
-            "error_stage": None if result.success else "backup",
-            "snapshot_id": snapshot_id,
-            "agent_id": agent_id,
-            "hostname": socket.gethostname(),
-        },
+        source_path,
+        backend_name,
+        result,
+        started_at,
+        finished_at,
+        snapshot_id,
+        agent_id,
+        serverless_job,
+        repo.repo_type,
+        read_local,
     )
-    if snapshot_id and backend_name == "kopia":
-        repo.save_snapshot(
-            snapshot_id=snapshot_id,
-            snapshot_data={
-                "job_name": job_name,
-                "run_id": run_id,
-                "hostname": socket.gethostname(),
-                "paths": [source_path],
-                "time": finished_at.isoformat(),
-            },
-        )
+    for key, document in documents.items():
+        # RepositoryMetadata's writer, not the sidecar's: it keeps the SMB/Windows
+        # os.replace retry that a repository on a share depends on.
+        repo._write_json(repo.metadata_dir / key, document)
 
 
 def _write_restore_metadata(

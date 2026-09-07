@@ -27,3 +27,22 @@ jobs:
 
       - name: Test
         run: python -m pytest -q
+
+  desktop-client:
+    name: Desktop Client Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build desktop client
+        run: dotnet build desktop/Backer.Desktop.sln -c Release
+
+      - name: Test desktop client
+        run: dotnet test desktop/Backer.Desktop.sln -c Release --no-build

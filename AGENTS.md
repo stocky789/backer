@@ -24,8 +24,8 @@ full breakdown.` Don't pre-emptively include it.
 
 ## Project
 
-Open-source backup tool. FastAPI + SQLite server, Python desktop agents
-(Windows/Linux), Kotlin Android client. Kopia is the only backup engine —
+Open-source backup tool. FastAPI + SQLite server, Avalonia desktop client
+(desktop/, C#) + headless Python agent, Kotlin Android client. Kopia is the only backup engine —
 restic, rclone and rsync were removed in `704bd8f`.
 
 - Tests: `./.venv/Scripts/python.exe -m pytest -q tests/`

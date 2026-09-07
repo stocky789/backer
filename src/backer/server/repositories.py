@@ -7,7 +7,7 @@ import tempfile
 from enum import Enum
 from pathlib import Path
 
-from backer.core.smb_browse import DirectoryEntry, ShareInfo, SMBBrowser, smb_auth_file
+from backer.core.smb_browse import DirectoryEntry, ShareInfo, SMBBrowser, smb_auth_file, smbclient_command
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +371,7 @@ def smb_read_file(
     remote_path = remote_path.replace("\\", "/").lstrip("/")
 
     with smb_auth_file(username, password, domain) as auth_path:
-        cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
+        cmd = smbclient_command(f"//{server}/{share}", "-t", "5")  # 5 second connection timeout
 
         if auth_path:
             cmd.extend(["-A", auth_path])
@@ -514,7 +514,7 @@ def smb_write_file(
 
         # Upload to SMB share
         with smb_auth_file(username, password, domain) as auth_path:
-            cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]
+            cmd = smbclient_command(f"//{server}/{share}", "-t", "5")
 
             if auth_path:
                 cmd.extend(["-A", auth_path])
@@ -574,7 +574,7 @@ def smb_delete_file(
     remote_path = remote_path.replace("\\", "/").strip("/")
 
     with smb_auth_file(username, password, domain) as auth_path:
-        cmd = ["smbclient", f"//{server}/{share}", "-t", "5"]  # 5 second connection timeout
+        cmd = smbclient_command(f"//{server}/{share}", "-t", "5")  # 5 second connection timeout
 
         if auth_path:
             cmd.extend(["-A", auth_path])
@@ -715,7 +715,7 @@ def smb_delete_directory(
     def run_smb_command(commands: str, timeout: int = 30) -> tuple[int, str, str]:
         """Run smbclient with given commands."""
         with smb_auth_file(username, password, domain) as auth_path:
-            cmd = ["smbclient", f"//{server}/{share}", "-t", "10"]
+            cmd = smbclient_command(f"//{server}/{share}", "-t", "10")
 
             if auth_path:
                 cmd.extend(["-A", auth_path])

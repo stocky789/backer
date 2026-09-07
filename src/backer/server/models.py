@@ -27,6 +27,7 @@ class Client(BaseModel):
     version: str | None = None
     os_info: str | None = None
     tags: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class JobCreate(BaseModel):
@@ -83,6 +84,7 @@ class ClientRegisterRequest(BaseModel):
     version: str
     os_info: str | None = None
     tags: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
     enrollment_token: str | None = None
 
 
@@ -102,6 +104,7 @@ class ClientHeartbeat(BaseModel):
     current_job: str | None = None
     jobs_completed: int = 0
     jobs_failed: int = 0
+    capabilities: list[str] | None = None
 
 
 class BackupResult(BaseModel):

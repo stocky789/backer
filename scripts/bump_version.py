@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update release versions in the four shipped metadata files."""
+"""Update release versions in the shipped metadata files."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ TARGETS = (
     (Path("pyproject.toml"), rb'(?m)^(version\s*=\s*")(' + VERSION + rb')(")(\r?)$'),
     (Path("src/backer/_version.py"), rb'(?m)^(__version__\s*=\s*")(' + VERSION + rb')(")(\r?)$'),
     (Path("installer/backer-agent.iss"), rb'(?m)^(#define\s+MyAppVersion\s+")(' + VERSION + rb')(")(\r?)$'),
+    (Path("desktop/Backer.Desktop/Backer.Desktop.csproj"),
+     rb"(?m)^(\s*<Version>)(" + VERSION + rb")(</Version>)(\r?)$"),
 )
 ANDROID = Path("android/app/build.gradle.kts")
 ANDROID_CODE = rb"(?m)^(versionCode\s*=\s*)(\d+)(\r?)$"

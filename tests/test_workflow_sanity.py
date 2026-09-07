@@ -58,10 +58,12 @@ def test_release_version_files_match() -> None:
     version_module = importlib.import_module("backer._version")
     installer_text = (ROOT / "installer" / "backer-agent.iss").read_text(encoding="utf-8")
     android_gradle = (ROOT / "android" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+    csproj = (ROOT / "desktop" / "Backer.Desktop" / "Backer.Desktop.csproj").read_text(encoding="utf-8")
 
     installer_match = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', installer_text)
     android_name_match = re.search(r'versionName\s*=\s*"([^"]+)"', android_gradle)
     android_code_match = re.search(r"versionCode\s*=\s*(\d+)", android_gradle)
+    csproj_match = re.search(r"<Version>([^<]+)</Version>", csproj)
 
     assert installer_match is not None
     assert android_name_match is not None
@@ -70,6 +72,8 @@ def test_release_version_files_match() -> None:
     assert installer_match.group(1) == project_version
     assert android_name_match.group(1) == project_version
     assert int(android_code_match.group(1)) == expected_android_version_code(project_version)
+    assert csproj_match is not None
+    assert csproj_match.group(1) == project_version
 
 
 def test_make_release_uses_the_atomic_version_bump_script() -> None:
@@ -77,6 +81,76 @@ def test_make_release_uses_the_atomic_version_bump_script() -> None:
 
     assert "python scripts/bump_version.py $(VERSION)" in makefile
     assert "sed -i 's/version" not in makefile
+
+
+def test_make_release_stages_every_file_the_version_bump_rewrites() -> None:
+    bump_script = (ROOT / "scripts" / "bump_version.py").read_text(encoding="utf-8")
+    staged = next(
+        line for line in (ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("git add ")
+    )
+
+    for target in re.findall(r'"([^"]+\.(?:toml|py|iss|kts|csproj))"', bump_script):
+        assert target in staged, target
+
+
+def test_desktop_publish_bundles_native_libraries_everywhere_it_runs() -> None:
+    build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
+    assert "-p:IncludeNativeLibrariesForSelfExtract=true" in build_script
+
+    # The Makefile must not carry a second, partial copy of the Windows build.
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "python scripts/build_agent.py" in makefile
+    assert "dotnet publish" not in makefile
+
+    # The whole publish output is staged, not just the exe.
+    assert "for path in staged_desktop_files():" in build_script
+    assert 'path.suffix != ".pdb"' in build_script
+    installer = (ROOT / "installer" / "backer-agent.iss").read_text(encoding="utf-8")
+    assert 'Source: "..\\dist\\*.dll"' in installer
+
+
+def test_release_validation_packages_windows_through_the_shipped_build_script() -> None:
+    workflow = yaml.safe_load((ROOT / ".gitea/workflows/release-validation.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["windows-agent-package"]["steps"]
+    runs = "\n".join(step.get("run", "") for step in steps)
+
+    assert "python scripts/build_agent.py" in runs
+    assert "dotnet publish" not in runs
+    assert "pyinstaller backer-agent.spec" not in runs
+
+
+def test_desktop_client_is_built_and_tested_by_ci() -> None:
+    validation = yaml.safe_load((ROOT / ".gitea/workflows/release-validation.yml").read_text(encoding="utf-8"))
+    push_ci = yaml.safe_load((ROOT / ".gitea/workflows/python-ci.yml").read_text(encoding="utf-8"))
+
+    for workflow in (validation, push_ci):
+        job = workflow["jobs"]["desktop-client"]
+        runs = "\n".join(step.get("run", "") for step in job["steps"])
+        assert any("actions/setup-dotnet" in step.get("uses", "") for step in job["steps"])
+        assert "dotnet build desktop/Backer.Desktop.sln -c Release" in runs
+        assert "dotnet test desktop/Backer.Desktop.sln" in runs
+
+    release = validation["jobs"]["release-artifacts-ready"]
+    gate = next(step for step in release["steps"] if step.get("name") == "Check release jobs")
+    mandatory = set(re.search(r"for job in ([A-Z0-9_ ]+); do", gate["run"]).group(1).split())
+    optional = set(re.search(r"for optional_job in ([A-Z0-9_ ]+); do", gate["run"]).group(1).split())
+
+    assert "desktop-client" in release["needs"]
+    assert gate["env"]["DESKTOP_CLIENT_RESULT"] == "${{ needs.desktop-client.result }}"
+    assert "DESKTOP_CLIENT_RESULT" in mandatory
+    assert "DESKTOP_CLIENT_RESULT" not in optional
+
+
+def test_contributors_are_told_how_to_test_the_desktop_client() -> None:
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "dotnet test desktop/Backer.Desktop.sln" in contributing
+    assert "test-desktop:" in makefile
+    assert "test: test-desktop" in makefile
+    # Python-only contributors must not be blocked by a missing .NET SDK.
+    assert "command -v dotnet" in makefile
 
 
 def test_android_release_proguard_handles_optional_archive_dependencies() -> None:
@@ -123,7 +197,7 @@ def test_expected_backend_names_are_registered() -> None:
     from backer.backends.base import BackendType
     from backer.backends.registry import BackendRegistry
 
-    assert set(BackendRegistry.available_backends()) == {BackendType.KOPIA, BackendType.PROXY}
+    assert set(BackendRegistry.available_backends()) == {BackendType.KOPIA, BackendType.FILES, BackendType.PROXY}
 
 
 def test_server_route_modules_import_without_creating_app() -> None:
@@ -447,6 +521,18 @@ def test_windows_agent_build_stages_installer_tool_files() -> None:
     assert "shutil.copy(src, DIST_TOOLS_DIR / tool)" in build_script
 
 
+def test_windows_agent_jobs_install_dotnet_for_the_desktop_client() -> None:
+    for path in (
+        ".gitea/workflows/main-release.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/gitea-release.yml",
+        ".gitea/workflows/release-validation.yml",
+    ):
+        workflow = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["windows-agent-package"]["steps"]
+        assert any("actions/setup-dotnet" in step.get("uses", "") for step in steps), path
+
+
 def test_windows_agent_executable_has_version_resource() -> None:
     build_script = (ROOT / "scripts" / "build_agent.py").read_text(encoding="utf-8")
     spec_file = (ROOT / "backer-agent.spec").read_text(encoding="utf-8")
@@ -456,6 +542,7 @@ def test_windows_agent_executable_has_version_resource() -> None:
     assert "StringStruct('ProductVersion', '{__version__}')" in build_script
     assert "write_pyinstaller_version_file()" in build_script
     assert "version=str(version_file) if version_file.exists() else None" in spec_file
+    assert "StringStruct('OriginalFilename', 'backer.exe')" in build_script
 
 
 def test_release_workflow_checks_all_release_versions_and_manual_tag_ref() -> None:
@@ -492,8 +579,6 @@ def test_serverless_validation_jobs_have_the_required_gates() -> None:
         jobs[name] for name in ("serverless-local", "serverless-smb-linux", "serverless-smb-windows", "s3-contract")
     )
     assert local["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
-    gui = next(step for step in local["steps"] if "xvfb-run" in step.get("run", ""))
-    assert gui["if"] == "matrix.os == 'ubuntu-latest'"
     assert "cifs-utils" in "\n".join(step.get("run", "") for step in linux_smb["steps"])
     assert "445" in "\n".join(step.get("run", "") for step in linux_smb["steps"])
     linux_test = next(step for step in linux_smb["steps"] if "test_serverless_e2e.py" in step.get("run", ""))
@@ -549,8 +634,8 @@ def test_every_needed_job_is_checked() -> None:
 
 
 def test_cli_choices_match_ci_jobs() -> None:
-    from backer.agent.gui.support import PROVEN_SERVERLESS_CELLS
     from backer.cli import main
+    from backer.serverless.cells import PROVEN_SERVERLESS_CELLS
 
     jobs = yaml.safe_load((ROOT / ".gitea/workflows/release-validation.yml").read_text(encoding="utf-8"))["jobs"]
     release = jobs["release-artifacts-ready"]

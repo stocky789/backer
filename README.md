@@ -96,8 +96,24 @@ docker run -d --name backer \
 ### Windows Agent
 
 Download `backer-agent-setup.exe` from [Releases](https://git.stockhome.com.au/stocky789/backer/releases/tag/release-main).
+It installs the Backer desktop client, the `backer.exe` command line, and the
+unattended agent service.
 
-The Windows installer is currently unsigned.
+The Windows installer is currently unsigned. Neither `backer.exe` nor
+`backer-desktop.exe` is code-signed either, so SmartScreen will warn on first
+run.
+
+### Linux Desktop Client
+
+The desktop client is the same cross-platform app (`desktop/`, C#/Avalonia).
+Build it from a checkout with the .NET 8 SDK:
+
+```bash
+dotnet publish desktop/Backer.Desktop -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true
+```
+
+It reads your existing agent configuration and runs every action through the
+`backer` CLI, so it needs no extra setup.
 
 ### Linux Agent
 
@@ -139,7 +155,20 @@ backer restore /backup /destination
 
 ## Storage Repositories
 
-Serverless v1 supports these tested client-to-repository combinations:
+Repositories have an explicit, immutable format. Existing records with no format are Kopia repositories.
+
+| Format | Local directory | SMB/CIFS | S3-compatible | Encryption and snapshots |
+| --- | --- | --- | --- | --- |
+| `kopia` (default) | Supported | Supported | Supported | Encrypted, compressed, deduplicated Kopia snapshots |
+| `files` | Supported | Supported | Not supported | Unencrypted, browsable immutable full-copy snapshots |
+
+`files` repositories are plaintext: anyone who can read the storage can read backup contents. They do not preserve ACLs, ADS, xattrs, sparse files, hard-link identity, or crash consistency; symlinks and unreadable files fail the snapshot. Android can use files repositories only through server-managed proxy storage; it cannot attach a direct local or SMB files repository.
+
+Restore always selects one completed immutable snapshot. It never restores from a partial snapshot, and it refuses destinations that overlap the repository. A files snapshot is stored at `Agents/<job>/snapshots/<snapshot-id>/contents/` with its `manifest.json`, so it can also be inspected directly during disaster recovery.
+
+There is no in-place conversion between formats. Create a new repository with the desired format and run a fresh backup. Kopia remains the only packaged external backup binary; files mode uses the Python standard library and adds no dependency or installer payload.
+
+Serverless Kopia supports these tested client-to-repository combinations:
 
 | Repository | Serverless Linux | Serverless Windows | Server-managed mode only |
 | --- | --- | --- | --- |

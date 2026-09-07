@@ -36,3 +36,15 @@ def test_readme_discloses_the_unsigned_windows_installer_at_its_download_link() 
     assert readme.index("The Windows installer is currently unsigned.") > readme.index(
         "Download `backer-agent-setup.exe`"
     )
+    # Both installed executables are unsigned too, not just the installer.
+    warning = readme[readme.index("The Windows installer is currently unsigned.") :][:400]
+    assert "`backer.exe`" in warning
+    assert "`backer-desktop.exe`" in warning
+    assert "code-signed" in warning
+
+
+def test_readme_documents_the_cross_platform_desktop_client() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "### Linux Desktop Client" in readme
+    assert "dotnet publish desktop/Backer.Desktop" in readme

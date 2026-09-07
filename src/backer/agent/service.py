@@ -28,7 +28,7 @@ from backer.core.mounts import SMBConnectionManager, get_subprocess_flags  # noq
 # These imports ensure the backends are registered before the registry is used
 # Import each individually so one failure doesn't prevent others from loading
 _backend_logger = logging.getLogger(__name__)
-for _backend in ["kopia", "proxy"]:
+for _backend in ["kopia", "files", "proxy"]:
     try:
         __import__(f"backer.backends.{_backend}")
         _backend_logger.info(f"Backend '{_backend}' loaded successfully")
@@ -334,6 +334,7 @@ class AgentService:
                 data={
                     "client_id": self.client_id,
                     "status": "online",
+                    "capabilities": ["files-repository-v1"],
                 },
                 timeout=35,  # Server waits up to 25s, so we need longer timeout
             )
@@ -474,7 +475,7 @@ class AgentService:
         raise RuntimeError(f"Backup failed after {max_retries} attempts. Last error: {last_error}")
 
     def _execute_with_shared_agent(self, payload: dict[str, Any], restore: bool) -> Any:
-        """Use the CLI agent executor for GUI/service commands too."""
+        """Use the CLI agent executor for service commands too."""
         from backer.client.agent import BackerAgent
 
         executor = BackerAgent(self.server_url, self.client_id, self.client_secret)

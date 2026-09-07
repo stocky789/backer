@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from backer.agent.service import AgentService
 from backer.core.repo_metadata import RepositoryMetadata
-from backer.server.app import ServerKopia, _build_backup_command_payload, create_app
+from backer.server.app import ServerKopia, _build_backup_command_payload, create_app, safe_tar_extract
 from backer.server.auth import generate_proxy_capability
 from backer.server.models import Client, ClientStatus, JobCreate
 from backer.server.web.auth import get_setup_token
@@ -34,6 +34,37 @@ def _archive(files: dict[str, str]) -> bytes:
             member.size = len(payload)
             archive.addfile(member, io.BytesIO(payload))
     return data.getvalue()
+
+
+def test_safe_tar_extract_refuses_existing_destination_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    destination = tmp_path / "restore"
+    outside.mkdir()
+    destination.mkdir()
+    try:
+        (destination / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    archive = tmp_path / "payload.tar.gz"
+    archive.write_bytes(_archive({"link/escaped.txt": "unsafe"}))
+
+    with pytest.raises(ValueError, match="unsafe parent"):
+        safe_tar_extract(archive, destination)
+
+    assert not (outside / "escaped.txt").exists()
+
+
+@pytest.mark.parametrize("link_type", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_safe_tar_extract_refuses_archive_links(tmp_path: Path, link_type: bytes) -> None:
+    archive_path = tmp_path / "links.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        link = tarfile.TarInfo("link")
+        link.type = link_type
+        link.linkname = "target"
+        archive.addfile(link)
+
+    with pytest.raises(ValueError, match="links are not supported"):
+        safe_tar_extract(archive_path, tmp_path / "restore")
 
 
 def _complete_setup(client: TestClient) -> None:
@@ -290,7 +321,7 @@ def test_proxy_availability_check_accepts_queued_operation_capability(
 def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, monkeypatch) -> None:
     import backer.server.app as server_app
 
-    snapshots: list[Path] = []
+    snapshots: list[dict[str, str]] = []
 
     class FakeKopia:
         def __init__(self, repo_path: str, password: str):
@@ -300,7 +331,13 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
             return True
 
         def snapshot_create(self, source_dir: Path, **_: str) -> dict[str, str | bool]:
-            snapshots.append(source_dir)
+            snapshots.append(
+                {
+                    item.relative_to(source_dir).as_posix(): item.read_text()
+                    for item in source_dir.rglob("*")
+                    if item.is_file()
+                }
+            )
             return {"success": True, "snapshot_id": "snapshot-1"}
 
     monkeypatch.setattr(server_app, "ServerKopia", FakeKopia)
@@ -346,11 +383,12 @@ def test_proxy_backup_replaces_deleted_files_before_snapshot(tmp_path: Path, mon
         {"keep.txt": "new"},
     )
 
-    contents = storage_path / "Agents" / "photos" / "contents"
-    assert (contents / "keep.txt").read_text() == "new"
-    assert not (contents / "deleted.txt").exists()
-    assert snapshots == [contents, contents]
-    metadata = RepositoryMetadata(storage_path / "Agents" / "photos")
+    assert snapshots == [
+        {"deleted.txt": "remove me", "keep.txt": "old"},
+        {"keep.txt": "new"},
+    ]
+    assert not (storage_path / "Agents" / "photos" / "contents").exists()
+    metadata = RepositoryMetadata(storage_path)
     assert "backend_type" not in metadata.get_job("photos")["config"]
 
 
@@ -431,7 +469,7 @@ def test_proxy_backup_cannot_auto_create_missing_local_repository(tmp_path: Path
             headers={"X-Backup-Subfolder": "Agents/photos", "X-Backer-Capability": token},
         )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 500, response.text
     body = response.json()
     assert body["success"] is False
     assert not any(c[:2] == ["repository", "create"] for c in calls)

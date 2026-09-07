@@ -23,10 +23,11 @@ Key Features:
 import base64
 import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 from tenacity import (
@@ -515,7 +516,6 @@ class ProxyBackend(BackendBase):
 
         Retrieves the backup from the server via tar.gz and extracts to destination.
         """
-        import tarfile
         import tempfile
 
         started_at = datetime.now()
@@ -559,16 +559,18 @@ class ProxyBackend(BackendBase):
 
             logger.debug(f"[PROXY] Using restore subfolder: {source_subfolder}")
 
-            # Build restore request with optional snapshot
-            path = "/restore"
-            if snapshot:
-                path += f"?snapshot={snapshot}"
-            if dry_run:
-                sep = "&" if snapshot else "?"
-                path += f"{sep}dry_run=true"
-            if original_source_path:
-                sep = "&" if (snapshot or dry_run) else "?"
-                path += f"{sep}original_source_path={original_source_path}"
+            # The server validates the subtree; encode it so path characters
+            # remain data rather than becoming a second query parameter.
+            query = {
+                key: value
+                for key, value in {
+                    "snapshot": snapshot,
+                    "include": include_path,
+                    "original_source_path": original_source_path,
+                }.items()
+                if value
+            }
+            path = "/restore" + (f"?{urlencode(query)}" if query else "")
 
             logger.info(f"[PROXY] Requesting restore from {self.server_url}/api/repo/{self.repo_id}{path}")
 
@@ -591,41 +593,71 @@ class ProxyBackend(BackendBase):
                 error_detail = response.text[:500] if response.text else "No response body"
                 raise RuntimeError(f"Restore failed (HTTP {response.status_code}): {error_detail}")
 
-            # Create destination directory
+            destination = destination.absolute()
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists() and (destination.is_symlink() or not destination.is_dir()):
+                raise ValueError(f"Restore destination must be a non-symlink directory: {destination}")
 
-            # Stream to temp file
-            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-                tmp_path = tmp.name
-                bytes_transferred = 0
-
-                for chunk in response.iter_content(chunk_size=self.chunk_size):
-                    if chunk:
-                        tmp.write(chunk)
-                        bytes_transferred += len(chunk)
-
-                        # Progress callback every 5MB
-                        if progress_callback and bytes_transferred % (5 * 1024 * 1024) == 0:
-                            try:
-                                progress_callback(
-                                    bytes_done=bytes_transferred,
-                                    files_done=0,
-                                    current_file="Downloading archive",
-                                )
-                            except Exception:
-                                pass
-
-            logger.info(f"[PROXY] Downloaded {bytes_transferred / 1024 / 1024:.1f}MB")
-
-            # Extract tar archive to destination
+            # Download and validate outside the live destination.  For a merge,
+            # build the complete post-restore tree before swapping it into place.
+            staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.restore-", dir=destination.parent))
+            archive = staging / "restore.tar.gz"
+            payload = staging / "payload"
+            candidate: Path | None = None
+            previous: Path | None = None
+            committed = False
             try:
-                with tarfile.open(tmp_path, "r:gz") as tar:
-                    tar.extractall(path=str(destination))
-                    members = tar.getnames()
-                    files_transferred = len(members)
+                with archive.open("wb") as tmp:
+                    for chunk in response.iter_content(chunk_size=self.chunk_size):
+                        if chunk:
+                            tmp.write(chunk)
+                            bytes_transferred += len(chunk)
+                            if progress_callback and bytes_transferred % (5 * 1024 * 1024) == 0:
+                                try:
+                                    progress_callback(
+                                        bytes_done=bytes_transferred,
+                                        files_done=0,
+                                        current_file="Downloading archive",
+                                    )
+                                except Exception:
+                                    pass
+
+                logger.info(f"[PROXY] Downloaded {bytes_transferred / 1024 / 1024:.1f}MB")
+                from backer.server.app import safe_tar_extract
+
+                if destination.exists():
+                    # Never clone a destination containing links: a restore must
+                    # not preserve a path that can redirect subsequent writes.
+                    for entry in destination.rglob("*"):
+                        if entry.is_symlink() or bool(hasattr(entry, "is_junction") and entry.is_junction()):
+                            raise ValueError(f"Restore destination contains a symlink or junction: {entry}")
+                    candidate = Path(tempfile.mkdtemp(prefix=f".{destination.name}.merge-", dir=destination.parent))
+                    candidate.rmdir()
+                    shutil.copytree(destination, candidate, copy_function=shutil.copy2)
+                    members = safe_tar_extract(archive, candidate)
+                else:
+                    members = safe_tar_extract(archive, payload)
+                    candidate = payload
+                files_transferred = len(members)
+
+                # os.replace is atomic within the destination's parent. Keep the
+                # old tree until the new one is installed so every failure rolls back.
+                if destination.exists():
+                    previous = Path(tempfile.mkdtemp(prefix=f".{destination.name}.previous-", dir=destination.parent))
+                    previous.rmdir()
+                    destination.replace(previous)
+                try:
+                    candidate.replace(destination)
+                except BaseException:
+                    if previous is not None and not destination.exists():
+                        previous.replace(destination)
+                    raise
+                committed = True
+                if previous is not None:
+                    shutil.rmtree(previous)
+                    previous = None
 
                 logger.info(f"[PROXY] Extracted {files_transferred} files to {destination}")
-
                 return BackendResult(
                     success=True,
                     operation=OperationType.RESTORE,
@@ -636,13 +668,12 @@ class ProxyBackend(BackendBase):
                     files_transferred=files_transferred,
                     return_code=0,
                 )
-
             finally:
-                # Clean up temp file
-                try:
-                    Path(tmp_path).unlink()
-                except Exception:
-                    pass
+                if previous is not None and not committed and not destination.exists():
+                    previous.replace(destination)
+                if not committed and candidate is not None and candidate.exists():
+                    shutil.rmtree(candidate, ignore_errors=True)
+                shutil.rmtree(staging, ignore_errors=True)
 
         except Exception as e:
             logger.error(f"[PROXY] Restore failed: {e}")

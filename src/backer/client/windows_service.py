@@ -16,6 +16,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, NamedTuple
+from xml.etree import ElementTree  # noqa: S405 - input is our own schtasks output, not untrusted
 from xml.sax.saxutils import escape
 
 
@@ -268,7 +269,8 @@ def create_local_scheduled_task() -> tuple[bool, str]:
     if not is_admin():
         return False, "Administrator privileges required. Run as Administrator."
     data_dir = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
-    command = get_service_executable_path() if getattr(sys, "frozen", False) else get_python_path()
+    # The console backer.exe owns "job run"; backer-agent-service.exe ignores argv entirely.
+    command = sys.executable if getattr(sys, "frozen", False) else get_python_path()
     arguments = (
         "job run --due --no-progress" if getattr(sys, "frozen", False) else "-m backer job run --due --no-progress"
     )
@@ -313,12 +315,14 @@ def create_local_scheduled_test_task(token: str) -> tuple[bool, str]:
         return False, "Windows scheduled task only available on Windows"
     if not is_admin():
         return False, "Administrator privileges required. Run as Administrator."
-    # The GUI executable owns the explicit scheduled-test dispatch when frozen.
+    # The frozen backer.exe dispatches through its hidden "agent scheduled-test" command.
     command = sys.executable if getattr(sys, "frozen", False) else get_python_path()
     if not re.fullmatch(r"[0-9a-f]{12}", token):
         return False, "Invalid scheduled test token"
     arguments = (
-        f"scheduled-test {token}" if getattr(sys, "frozen", False) else f"-m backer.serverless.scheduled_test {token}"
+        f"agent scheduled-test {token}"
+        if getattr(sys, "frozen", False)
+        else f"-m backer.serverless.scheduled_test {token}"
     )
     task_name = f"BackerLocalTest-{token}"
     action = subprocess.list2cmdline([command, *arguments.split()])
@@ -382,6 +386,21 @@ def remove_local_scheduled_task() -> bool:
     return result.returncode == 0
 
 
+def _task_enabled(document: str) -> bool:
+    """Read Task/Settings/Enabled only - triggers carry their own <Enabled> element.
+
+    Task Scheduler omits Settings/Enabled when the task is enabled, so absent means true.
+    A document that will not parse raises, and every caller fails closed on that.
+    """
+    # schtasks /xml declares encoding="UTF-16"; ElementTree refuses a declared encoding on str.
+    root = ElementTree.fromstring(re.sub(r"^\s*<\?xml[^>]*\?>", "", document, count=1))
+    settings = next((child for child in root if child.tag.rpartition("}")[2] == "Settings"), None)
+    if settings is None:
+        return True
+    enabled = next((child for child in settings if child.tag.rpartition("}")[2] == "Enabled"), None)
+    return enabled is None or (enabled.text or "").strip().lower() != "false"
+
+
 def _windows_task_state(task_name: str) -> dict[str, object]:
     """Read the full task definition and its current state without changing it."""
     definition = subprocess.run(
@@ -403,10 +422,14 @@ def _windows_task_state(task_name: str) -> dict[str, object]:
     )
     if status.returncode:
         raise OSError(status.stderr.strip() or "Could not read local scheduled task state")
+    try:
+        enabled = _task_enabled(definition.stdout)
+    except (ElementTree.ParseError, ValueError) as error:
+        raise OSError(f"Could not read local scheduled task definition: {error}") from error
     return {
         "exists": True,
         "definition": definition.stdout,
-        "enabled": "<enabled>true</enabled>" in definition.stdout.lower(),
+        "enabled": enabled,
         "running": "status: running" in status.stdout.lower(),
     }
 

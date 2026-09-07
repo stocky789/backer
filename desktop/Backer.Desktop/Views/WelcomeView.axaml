@@ -1,0 +1,15 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+             x:Class="Backer.Desktop.Views.WelcomeView"
+             x:DataType="vm:WelcomeViewModel">
+  <StackPanel Spacing="16" MaxWidth="420" Margin="32"
+              HorizontalAlignment="Center" VerticalAlignment="Center">
+    <Image Source="/Assets/backer-logo.png" Width="64" Height="64" HorizontalAlignment="Left" />
+    <TextBlock Classes="title" Text="{Binding Heading}" />
+    <TextBlock Classes="muted" TextWrapping="Wrap" Text="{Binding Body}" />
+    <Button Classes="primary" Content="Set up local backups" HorizontalAlignment="Left"
+            IsVisible="{Binding CanSetUp}"
+            Command="{Binding SetUpLocalBackupsCommand}" />
+  </StackPanel>
+</UserControl>

@@ -1,0 +1,184 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+             x:Class="Backer.Desktop.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+  <DockPanel Margin="24" MaxWidth="920" HorizontalAlignment="Center">
+    <StackPanel DockPanel.Dock="Top" Spacing="2">
+      <TextBlock Classes="title" Text="Settings" />
+      <TextBlock Classes="caption" Text="Agent connectivity, scheduling and repository administration" />
+    </StackPanel>
+
+    <Grid DockPanel.Dock="Bottom" ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,20,0,0">
+      <Button Grid.Column="0" Content="Back" Command="{Binding BackCommand}" />
+      <TextBlock Grid.Column="1" Classes="caption" VerticalAlignment="Center"
+                 TextWrapping="Wrap" Text="{Binding StatusText}" />
+    </Grid>
+
+    <ScrollViewer Margin="0,20,0,0">
+      <StackPanel Spacing="24">
+        <Border Classes="banner attention" IsVisible="{Binding KeystoreFallback}">
+          <TextBlock TextWrapping="Wrap" Text="{Binding KeystoreWarning}" />
+        </Border>
+
+        <StackPanel Spacing="10">
+          <TextBlock Classes="section" Text="SERVER" />
+          <Border Classes="table">
+            <StackPanel>
+              <Border Classes="property-row">
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="16">
+                  <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="Server address" />
+                    <TextBlock Classes="caption" Text="Backer management endpoint" />
+                  </StackPanel>
+                  <TextBox Grid.Column="1" Text="{Binding ServerUrl}" />
+                </Grid>
+              </Border>
+              <Border Classes="property-row">
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="16">
+                  <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="Enrolment token" />
+                    <TextBlock Classes="caption" Text="Used once when connecting" />
+                  </StackPanel>
+                  <TextBox Grid.Column="1" PasswordChar="•" Text="{Binding EnrollmentToken}" />
+                </Grid>
+              </Border>
+              <Border Classes="table-footer">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                  <TextBlock Grid.Column="0" Classes="caption" VerticalAlignment="Center" TextWrapping="Wrap"
+                             Text="Installing or removing the agent service requires administrator access." />
+                  <WrapPanel Grid.Column="1" ItemSpacing="8" LineSpacing="8">
+                    <Button Classes="primary" Content="Connect" Command="{Binding ConnectCommand}"
+                            IsEnabled="{Binding !Busy}" />
+                    <Button Content="Check status" Command="{Binding CheckStatusCommand}" IsEnabled="{Binding !Busy}" />
+                    <Button Content="Install service" Command="{Binding InstallServerServiceCommand}"
+                            IsEnabled="{Binding !Busy}" />
+                    <Button Content="Remove service" Command="{Binding UninstallServerServiceCommand}"
+                            IsEnabled="{Binding !Busy}" />
+                  </WrapPanel>
+                </Grid>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+        <StackPanel Spacing="10">
+          <TextBlock Classes="section" Text="SCHEDULED BACKUPS" />
+          <Border Classes="table">
+            <StackPanel>
+              <Border Classes="property-row">
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="16">
+                  <TextBlock Grid.Column="0" Text="Scheduler status" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" TextWrapping="Wrap" Text="{Binding ScheduleText}"
+                             VerticalAlignment="Center" />
+                </Grid>
+              </Border>
+              <Border Classes="property-row">
+                <Grid ColumnDefinitions="180,*,Auto" ColumnSpacing="16">
+                  <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="System-account test" />
+                    <TextBlock Classes="caption" Text="Run one scheduled backup now" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1" Classes="caption" TextWrapping="Wrap" VerticalAlignment="Center"
+                             Text="Confirms what the installed scheduler can access." />
+                  <Button Grid.Column="2" Content="Run test" Command="{Binding TestScheduledRunCommand}"
+                          IsEnabled="{Binding !ScheduledTestRunning}" />
+                </Grid>
+              </Border>
+              <TextBox Classes="log" Margin="12" Height="120" IsReadOnly="True" AcceptsReturn="True"
+                       IsVisible="{Binding ScheduledTestOutput, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                       TextWrapping="NoWrap" Text="{Binding ScheduledTestOutput}" />
+              <Border Classes="table-footer">
+                <WrapPanel ItemSpacing="8" LineSpacing="8">
+                  <Button Content="Turn on" Command="{Binding EnableScheduleCommand}" IsEnabled="{Binding !Busy}" />
+                  <Button Classes="danger" Content="Turn off" Command="{Binding DisableScheduleCommand}"
+                          IsEnabled="{Binding !Busy}" />
+                  <Button Content="Pause" IsEnabled="{Binding !Busy}">
+                    <Button.Flyout>
+                      <MenuFlyout>
+                        <MenuItem Header="For 1 hour" Command="{Binding PauseOneHourCommand}" />
+                        <MenuItem Header="Until tomorrow" Command="{Binding PauseUntilTomorrowCommand}" />
+                        <MenuItem Header="Until turned back on" Command="{Binding PauseCommand}" />
+                      </MenuFlyout>
+                    </Button.Flyout>
+                  </Button>
+                  <Button Content="Resume" Command="{Binding ResumeCommand}" IsEnabled="{Binding !Busy}" />
+                  <Button Content="Refresh" Command="{Binding RefreshCommand}" IsEnabled="{Binding !Busy}" />
+                </WrapPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+        <StackPanel Spacing="10">
+          <TextBlock Classes="section" Text="REPOSITORIES" />
+          <Border Classes="table">
+            <StackPanel>
+              <Border Classes="table-header">
+                <Grid ColumnDefinitions="220,*" ColumnSpacing="12">
+                  <TextBlock Grid.Column="0" Classes="column-header" Text="NAME" />
+                  <TextBlock Grid.Column="1" Classes="column-header" Text="STORAGE" />
+                </Grid>
+              </Border>
+              <ListBox Height="140" AutomationProperties.Name="Configured repositories"
+                       ItemsSource="{Binding Repositories}"
+                       SelectedItem="{Binding SelectedRepository}">
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RepositoryRow">
+                    <Grid AutomationProperties.Name="{Binding Name, StringFormat='Repository {0}'}"
+                          ColumnDefinitions="220,*" ColumnSpacing="12">
+                      <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                 ToolTip.Tip="{Binding Name}" />
+                      <TextBlock Grid.Column="1" Classes="muted" Text="{Binding Detail}"
+                                 TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Detail}" />
+                    </Grid>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <Border Classes="property-row" IsVisible="{Binding IsEncryptedRepository}">
+                <CheckBox IsChecked="{Binding PlainTextAck}" Content="{Binding PlainTextAcknowledgement}" />
+              </Border>
+              <Border Classes="table-footer">
+                <WrapPanel ItemSpacing="8" LineSpacing="8">
+                  <Button Content="Save recovery record" IsVisible="{Binding IsEncryptedRepository}"
+                          Command="{Binding SaveRecoveryRecordCommand}" IsEnabled="{Binding CanSaveRecoveryRecord}" />
+                  <Button Classes="danger" Content="Remove local access" Command="{Binding RemoveRepositoryCommand}"
+                          IsEnabled="{Binding HasRepositorySelection}" />
+                  <Button Classes="danger" Content="Delete repository and backups"
+                          Command="{Binding DeleteRepositoryDataCommand}"
+                          IsEnabled="{Binding CanDeleteRepositoryData}" />
+                </WrapPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+        <StackPanel Spacing="10">
+          <TextBlock Classes="section" Text="THIS APP" />
+          <Border Classes="table">
+            <StackPanel>
+              <Border Classes="property-row">
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="16">
+                  <TextBlock Grid.Column="0" Text="Theme" VerticalAlignment="Center" />
+                  <ComboBox Grid.Column="1" ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}"
+                            Width="180" HorizontalAlignment="Left" />
+                </Grid>
+              </Border>
+              <Border Classes="table-footer">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                  <TextBlock Grid.Column="0" Classes="caption" VerticalAlignment="Center" TextWrapping="Wrap"
+                             Text="{Binding UpdateHint}" />
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Open logs" Command="{Binding OpenLogsCommand}" />
+                    <Button Content="Check for updates" Command="{Binding CheckForUpdatesCommand}"
+                            IsEnabled="{Binding !Busy}" />
+                  </StackPanel>
+                </Grid>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</UserControl>

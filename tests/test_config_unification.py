@@ -58,6 +58,18 @@ def test_unprivileged_linux_config_dir_is_xdg(monkeypatch, tmp_path: Path) -> No
     assert paths.get_config_dir() == tmp_path / "xdg" / "backer"
 
 
+def test_empty_xdg_variables_fall_back_to_home_defaults(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "")
+    monkeypatch.setenv("XDG_DATA_HOME", "")
+    monkeypatch.delenv("BACKER_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("BACKER_DATA_DIR", raising=False)
+    monkeypatch.setattr(paths, "_machine_config_dir", lambda: tmp_path / "etc" / "backer")
+
+    assert paths.get_config_dir() == Path.home() / ".config" / "backer"
+    assert paths.get_data_dir() == Path.home() / ".local" / "share" / "backer"
+
+
 def test_etc_backer_is_used_when_it_holds_the_only_config(monkeypatch, tmp_path: Path) -> None:
     machine = tmp_path / "etc" / "backer"
     machine.mkdir(parents=True)
@@ -131,7 +143,7 @@ def test_repository_options_accepts_empty_mapping() -> None:
         }
     )
 
-    assert config.repository_options.model_dump() == {}
+    assert config.repository_options.model_dump() == {"smb_transport": None}
 
 
 def test_repository_options_rejects_arbitrary_keys() -> None:

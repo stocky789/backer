@@ -8,13 +8,13 @@ from pathlib import Path
 
 def _user_config_dir() -> Path:
     if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Backer"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "backer"
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Backer"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "backer"
 
 
 def _machine_config_dir() -> Path:
     if sys.platform == "win32":
-        return Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Backer"
+        return Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "Backer"
     return Path("/etc/backer")
 
 
@@ -41,8 +41,8 @@ def get_data_dir() -> Path:
     if configured := os.environ.get("BACKER_DATA_DIR"):
         return Path(configured)
     if sys.platform == "win32":
-        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Backer"
-    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "backer"
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Backer"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "backer"
 
 
 def get_job_subfolder(job_name: str) -> str:

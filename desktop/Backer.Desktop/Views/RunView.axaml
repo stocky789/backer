@@ -1,0 +1,33 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+             x:Class="Backer.Desktop.Views.RunView"
+             x:DataType="vm:RunViewModel">
+  <DockPanel Margin="24">
+    <StackPanel DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Classes="title" Text="Backup run" />
+      <TextBlock Classes="caption" Text="{Binding JobName}" />
+    </StackPanel>
+
+    <Border DockPanel.Dock="Top" Classes="card" Margin="0,16,0,0">
+      <StackPanel Spacing="12">
+        <TextBlock TextWrapping="Wrap" Text="{Binding State}"
+                   Classes.ok="{Binding Succeeded}"
+                   Classes.warn="{Binding Stalled}"
+                   Classes.failed="{Binding Failed}" />
+        <ProgressBar IsIndeterminate="{Binding Indeterminate}"
+                     Maximum="{Binding ProgressMaximum}"
+                     Value="{Binding ProgressValue}" />
+      </StackPanel>
+    </Border>
+
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,16,0,0">
+      <Button Content="Stop" IsEnabled="{Binding CanStop}" Command="{Binding StopCommand}" />
+      <Button Content="Copy error" IsEnabled="{Binding Failed}" Command="{Binding CopyErrorCommand}" />
+      <Button Content="Open log folder" IsEnabled="{Binding Failed}" Command="{Binding OpenLogFolderCommand}" />
+    </StackPanel>
+
+    <TextBox Classes="log" Margin="0,16,0,0" Text="{Binding LogText}" IsReadOnly="True"
+             AcceptsReturn="True" TextWrapping="NoWrap" VerticalAlignment="Stretch" />
+  </DockPanel>
+</UserControl>

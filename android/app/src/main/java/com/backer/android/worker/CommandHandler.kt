@@ -54,8 +54,7 @@ class CommandHandler @Inject constructor(
         val sourcePath = payload["source_path"]?.jsonPrimitive?.content ?: ""
         val destinationPath = payload["destination_path"]?.jsonPrimitive?.content ?: ""
         val backend = payload["backend"]?.jsonPrimitive?.content ?: "proxy"
-        val proxyCapability = (payload["backend_options"] as? JsonObject)
-            ?.get("proxy_capability")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+        val proxyCapability = proxyCapability(payload)
 
         // Extract excludes as a comma-separated string
         val excludes = payload["excludes"]?.toString() ?: "[]"
@@ -124,9 +123,9 @@ class CommandHandler @Inject constructor(
         val sourcePath = payload["source_path"]?.jsonPrimitive?.content ?: ""
         val destinationPath = payload["destination_path"]?.jsonPrimitive?.content ?: ""
         val backend = payload["backend"]?.jsonPrimitive?.content ?: "proxy"
-        val proxyCapability = (payload["backend_options"] as? JsonObject)
-            ?.get("proxy_capability")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+        val proxyCapability = proxyCapability(payload)
         val snapshot = payload["snapshot"]?.jsonPrimitive?.content
+        val sourceSubfolder = payload["source_subfolder"]?.jsonPrimitive?.content
         val cleanRestore = payload["clean_restore"]?.jsonPrimitive?.boolean ?: false
         val dryRun = payload["dry_run"]?.jsonPrimitive?.boolean ?: false
 
@@ -169,6 +168,7 @@ class CommandHandler @Inject constructor(
             .putString("destination_path", destinationPath)
             .putString("proxy_capability", proxyCapability)
             .putString("snapshot", snapshot)
+            .putString("source_subfolder", sourceSubfolder)
             .putBoolean("clean_restore", cleanRestore)
             .putBoolean("dry_run", dryRun)
             .putInt("command_id", command.id)
@@ -207,6 +207,12 @@ class CommandHandler @Inject constructor(
             }
         }
     }
+
+    private fun proxyCapability(payload: JsonObject): String? =
+        sequenceOf("repository_options", "backend_options")
+            .mapNotNull { (payload[it] as? JsonObject)?.get("proxy_capability") }
+            .mapNotNull { it.jsonPrimitive.content.takeIf(String::isNotBlank) }
+            .firstOrNull()
 
     private fun handleBrowseCommand(command: BackupCommand) {
         val payload = command.payload

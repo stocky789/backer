@@ -11,6 +11,15 @@ Android backup agent for the Backer backup system.
 - Real-time progress reporting
 - Background execution with WorkManager
 
+## Repository formats and Android access
+
+- Android always uses the proxy transport and is repository-format blind: the server stores the uploaded tar.gz in either an encrypted Kopia repository or an unencrypted, readable files repository.
+- The proxy archive is plaintext transport data; use HTTPS in production. Files repositories leave names and contents readable to anyone with storage access.
+- Enable **All files access** in the app’s Storage access status for unattended raw-path backup, browsing, and restore. Android cannot access another app’s protected data. Android Auto Backup and Storage Access Framework URI permissions are not used for raw-path jobs.
+- Restore downloads the chosen immutable snapshot and extracts it with traversal protection; clean restore activates only after extraction succeeds.
+- Android 15 limits data-sync foreground work. Large jobs can fail visibly and should be retried.
+- There is no in-place repository conversion. Create a repository in the desired format and run a fresh backup.
+
 ## Requirements
 
 - Android 8.0 (API 26) or higher

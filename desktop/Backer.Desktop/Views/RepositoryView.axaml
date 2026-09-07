@@ -1,0 +1,194 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+             x:Class="Backer.Desktop.Views.RepositoryView"
+             x:DataType="vm:RepositoryViewModel">
+  <!-- One view, staged steps. No second window, no modal in this flow. -->
+  <DockPanel Margin="32" MaxWidth="560" HorizontalAlignment="Center">
+    <StackPanel DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Classes="title" Text="{Binding Title}" />
+      <TextBlock Classes="section" Text="{Binding StepLabel}" />
+    </StackPanel>
+
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,24,0,0">
+      <Button Classes="primary" Content="{Binding PrimaryLabel}"
+              IsEnabled="{Binding !Busy}" Command="{Binding ContinueCommand}" />
+      <Button Content="Back" IsVisible="{Binding CanGoBack}" Command="{Binding BackCommand}" />
+      <Button Content="Cancel" IsVisible="{Binding !Created}" Command="{Binding CancelCommand}" />
+      <TextBlock Classes="caption" VerticalAlignment="Center" TextWrapping="Wrap" Text="{Binding StatusText}" />
+    </StackPanel>
+
+    <ScrollViewer Margin="0,24,0,0">
+      <StackPanel Spacing="16">
+
+        <!-- Step 1: storage type -->
+        <StackPanel Spacing="16" IsVisible="{Binding IsTypeStep}">
+          <StackPanel Spacing="6">
+            <TextBlock Classes="section" Text="BACKUP FORMAT" />
+            <RadioButton GroupName="format" Content="Encrypted backups (recommended)" IsChecked="{Binding UseKopia}" />
+            <RadioButton GroupName="format" Content="Unencrypted files" IsChecked="{Binding UseFiles}" />
+            <Border Classes="banner attention" IsVisible="{Binding IsFiles}">
+              <TextBlock TextWrapping="Wrap" Text="Files backups are not encrypted. Anyone with access to this storage can read backup contents and filenames." />
+            </Border>
+          </StackPanel>
+          <StackPanel Spacing="6">
+            <TextBlock Classes="section" Text="WHERE SHOULD THE BACKUPS BE KEPT?" />
+            <ComboBox ItemsSource="{Binding SupportedTypes}" SelectedItem="{Binding RepositoryType}"
+                      HorizontalAlignment="Stretch" />
+            <TextBlock Classes="caption" TextWrapping="Wrap"
+                       Text="local = a drive on this computer · smb = a network share · s3 = S3-compatible storage" />
+          </StackPanel>
+          <CheckBox Content="Connect to a repository that already exists" IsChecked="{Binding Attach}" />
+        </StackPanel>
+
+        <!-- Step 2: the details for that type -->
+        <StackPanel Spacing="16" IsVisible="{Binding IsDetailStep}">
+          <StackPanel Spacing="6">
+            <TextBlock Classes="section" Text="REPOSITORY NAME" />
+            <TextBox Text="{Binding Name}" />
+          </StackPanel>
+
+          <StackPanel Spacing="6" IsVisible="{Binding IsLocal}">
+            <TextBlock Classes="section" Text="FOLDER" />
+            <TextBox Text="{Binding Path}" />
+            <Button Content="Choose folder" HorizontalAlignment="Left" Command="{Binding ChooseFolderCommand}" />
+          </StackPanel>
+
+          <StackPanel Spacing="16" IsVisible="{Binding IsSmb}">
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="FILE SERVER" />
+              <TextBox Text="{Binding Host}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="USERNAME" />
+              <TextBox Text="{Binding Username}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="PASSWORD" />
+              <TextBox PasswordChar="•" Text="{Binding Password}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="DOMAIN (OPTIONAL)" />
+              <TextBox Text="{Binding Domain}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="SHARE" />
+              <Button Content="List shares" HorizontalAlignment="Left" Command="{Binding ListSharesCommand}" />
+              <ComboBox Name="ShareBox" ItemsSource="{Binding Shares}" SelectedItem="{Binding SelectedShare}"
+                        SelectionChanged="OnShareSelected" HorizontalAlignment="Stretch" />
+            </StackPanel>
+
+            <!-- Folder browser: the current location is what the repository is created at. -->
+            <StackPanel Spacing="8" IsVisible="{Binding HasSelectedShare}">
+              <TextBlock Classes="section" Text="FOLDER INSIDE THE SHARE" />
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                <Button Grid.Column="0" Classes="link" Content="↑ Up"
+                        IsVisible="{Binding CanGoUp}" Command="{Binding UpCommand}" />
+                <TextBlock Grid.Column="1" Classes="caption" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" Text="{Binding BrowseLocation}" />
+              </Grid>
+
+              <Border Classes="card" Padding="0">
+                <ListBox Name="FoldersList" ItemsSource="{Binding Folders}" MaxHeight="220"
+                         Background="Transparent">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:BrowseEntry">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <Button Grid.Column="0" Classes="link" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Left" Content="{Binding Name}"
+                                Command="{Binding #FoldersList.((vm:RepositoryViewModel)DataContext).DescendCommand}"
+                                CommandParameter="{Binding}" />
+                        <TextBlock Grid.Column="1" Classes="warn" VerticalAlignment="Center"
+                                   Text="repository" IsVisible="{Binding IsRepository}" />
+                      </Grid>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+              </Border>
+              <TextBlock Classes="caption" IsVisible="{Binding BrowseBusy}" Text="Loading folders…" />
+
+              <Border Classes="banner attention" IsVisible="{Binding ShowAttachHint}">
+                <TextBlock TextWrapping="Wrap"
+                           Text="This folder already holds a repository, so a new one cannot be created here. Choose an empty folder, or go back and tick &quot;Connect to a repository that already exists&quot; to attach it instead." />
+              </Border>
+
+              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                <TextBox Grid.Column="0" PlaceholderText="New folder name" Text="{Binding NewFolderName}" />
+                <Button Grid.Column="1" Content="New folder" Command="{Binding AddNewFolderCommand}" />
+              </Grid>
+              <TextBlock Classes="caption" TextWrapping="Wrap"
+                         Text="A new folder is created when the repository is added." />
+            </StackPanel>
+          </StackPanel>
+
+          <StackPanel Spacing="16" IsVisible="{Binding IsS3}">
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="BUCKET" />
+              <TextBox Text="{Binding Bucket}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="PREFIX (OPTIONAL)" />
+              <TextBox Text="{Binding Prefix}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="ENDPOINT" />
+              <TextBox Text="{Binding Endpoint}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="REGION" />
+              <TextBox Text="{Binding Region}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="ACCESS KEY ID" />
+              <TextBox Text="{Binding AccessKeyId}" />
+            </StackPanel>
+            <StackPanel Spacing="6">
+              <TextBlock Classes="section" Text="SECRET KEY" />
+              <TextBox PasswordChar="•" Text="{Binding SecretKey}" />
+            </StackPanel>
+          </StackPanel>
+        </StackPanel>
+
+        <!-- Step 3: passphrase -->
+        <StackPanel Spacing="16" IsVisible="{Binding IsPassphraseStep}">
+          <TextBlock TextWrapping="Wrap"
+                     Text="This passphrase is the only key to this repository. If it is lost, the backups cannot be restored." />
+
+          <StackPanel Spacing="8" IsVisible="{Binding !Created}">
+            <RadioButton GroupName="passphrase" Content="Generate a passphrase for me"
+                         IsVisible="{Binding CanGenerate}" IsChecked="{Binding UseGenerated}" />
+            <RadioButton GroupName="passphrase" Content="Use my own passphrase"
+                         IsChecked="{Binding UseSupplied}" />
+            <StackPanel Spacing="8" IsVisible="{Binding ShowSupplied}" Margin="0,4,0,0">
+              <StackPanel Spacing="6">
+                <TextBlock Classes="section" Text="PASSPHRASE" />
+                <TextBox PasswordChar="•" Text="{Binding SuppliedPassphrase}" />
+              </StackPanel>
+              <StackPanel Spacing="6">
+                <TextBlock Classes="section" Text="REPEAT THE PASSPHRASE" />
+                <TextBox PasswordChar="•" Text="{Binding SuppliedConfirmation}" />
+              </StackPanel>
+            </StackPanel>
+          </StackPanel>
+
+          <StackPanel Spacing="16" IsVisible="{Binding ShowReveal}">
+            <!-- The most important string the user will ever see. -->
+            <Border Classes="card" Padding="20">
+              <SelectableTextBlock Classes="mono" FontSize="15" TextWrapping="Wrap"
+                                   Text="{Binding RevealedPassphrase}" />
+            </Border>
+            <StackPanel Spacing="12">
+              <Button Content="Copy (the clipboard is not storage)" HorizontalAlignment="Left"
+                      Command="{Binding CopyPassphraseCommand}" />
+              <CheckBox IsChecked="{Binding PlainTextAck}" Content="{Binding PlainTextAcknowledgement}" />
+              <Button Content="Save recovery record…" HorizontalAlignment="Left"
+                      Command="{Binding SaveRecoveryRecordCommand}"
+                      IsEnabled="{Binding CanSaveRecoveryRecord}" />
+            </StackPanel>
+          </StackPanel>
+        </StackPanel>
+
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</UserControl>

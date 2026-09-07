@@ -14,6 +14,11 @@ Thanks for your interest in contributing! This project is actively evolving, and
    make lint
    make test
    ```
+   `make test` also builds and tests the C# desktop client when the .NET 8 SDK
+   is installed. If you changed anything under `desktop/`, run it directly:
+   ```bash
+   dotnet build desktop/Backer.Desktop.sln -c Release && dotnet test desktop/Backer.Desktop.sln
+   ```
 4. **Open a Pull Request** with a clear description of your changes.
 
 ## Development guidelines

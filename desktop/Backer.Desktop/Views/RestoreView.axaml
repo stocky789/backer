@@ -1,0 +1,85 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+             x:Class="Backer.Desktop.Views.RestoreView"
+             x:DataType="vm:RestoreViewModel">
+  <DockPanel Margin="32">
+    <StackPanel DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Classes="title" Text="Restore" />
+      <TextBlock Classes="caption" TextWrapping="Wrap" Text="{Binding StatusText}" />
+    </StackPanel>
+
+    <StackPanel DockPanel.Dock="Top" Spacing="6" Margin="0,24,0,0">
+      <TextBlock Classes="section" Text="JOB" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <ComboBox Width="240" ItemsSource="{Binding JobNames}" SelectedItem="{Binding SelectedJobName}" />
+        <Button Content="List snapshots" Command="{Binding LoadSnapshotsCommand}" />
+        <ProgressBar Width="120" IsIndeterminate="True" IsVisible="{Binding Busy}"
+                     VerticalAlignment="Center" />
+      </StackPanel>
+    </StackPanel>
+
+    <StackPanel DockPanel.Dock="Bottom" Spacing="10" Margin="0,16,0,0">
+      <Grid ColumnDefinitions="1.5*,1*" ColumnSpacing="16">
+        <StackPanel Grid.Column="0" Spacing="6">
+          <TextBlock Classes="section" Text="RESTORE TO" />
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+            <TextBox Grid.Column="0" Text="{Binding Destination}" />
+            <Button Grid.Column="1" Content="Choose destination" Command="{Binding ChooseDestinationCommand}" />
+          </Grid>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Spacing="6">
+          <TextBlock Classes="section" Text="FOLDER (EMPTY RESTORES ALL)" />
+          <TextBox Text="{Binding Include}" />
+        </StackPanel>
+      </Grid>
+      <CheckBox IsVisible="{Binding ProtectedDestinationOffered}"
+                IsChecked="{Binding RestoreIntoProtectedFolder}"
+                Content="Restore into this protected folder anyway" />
+      <Grid ColumnDefinitions="Auto,160,*,Auto" ColumnSpacing="8">
+        <TextBlock Grid.Column="0" Classes="section" Text="MODE" VerticalAlignment="Center" />
+        <ComboBox Grid.Column="1" ItemsSource="{Binding Modes}" SelectedItem="{Binding Mode}" />
+        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8">
+          <Button Classes="primary" Content="Restore" Command="{Binding RestoreCommand}" IsEnabled="{Binding !Busy}" />
+          <Button Content="Stop" Command="{Binding StopCommand}" IsEnabled="{Binding Busy}" />
+          <Button Content="Copy error" IsEnabled="{Binding Failed}" Command="{Binding CopyErrorCommand}" />
+          <Button Content="Open logs" IsEnabled="{Binding Failed}" Command="{Binding OpenLogFolderCommand}" />
+          <Button Content="Back" Command="{Binding BackCommand}" />
+        </StackPanel>
+      </Grid>
+      <TextBox Classes="log" Text="{Binding Detail}" IsReadOnly="True" AcceptsReturn="True"
+               Height="64" TextWrapping="NoWrap" />
+    </StackPanel>
+
+    <Border Classes="table" Margin="0,16,0,0">
+      <StackPanel>
+        <Border Classes="table-header">
+          <Grid ColumnDefinitions="140,200,*,90" ColumnSpacing="12">
+            <TextBlock Grid.Column="0" Classes="column-header" Text="SNAPSHOT" />
+            <TextBlock Grid.Column="1" Classes="column-header" Text="CREATED" />
+            <TextBlock Grid.Column="2" Classes="column-header" Text="SOURCE" />
+            <TextBlock Grid.Column="3" Classes="column-header" Text="SIZE" />
+          </Grid>
+        </Border>
+        <ListBox AutomationProperties.Name="Available snapshots"
+                 ItemsSource="{Binding Snapshots}" SelectedItem="{Binding SelectedSnapshot}">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="vm:SnapshotRow">
+              <Grid AutomationProperties.Name="{Binding Id, StringFormat='Snapshot {0}'}"
+                    ColumnDefinitions="140,200,*,90" ColumnSpacing="12">
+                <TextBlock Grid.Column="0" Classes="mono" Text="{Binding Id}" TextTrimming="CharacterEllipsis"
+                           ToolTip.Tip="{Binding Id}" />
+                <TextBlock Grid.Column="1" Classes="tabular" Text="{Binding Timestamp}"
+                           TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Timestamp}" />
+                <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Path}"
+                           TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Path}" />
+                <TextBlock Grid.Column="3" Classes="muted tabular" Text="{Binding HumanSize}"
+                           TextTrimming="CharacterEllipsis" />
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </StackPanel>
+    </Border>
+  </DockPanel>
+</UserControl>

@@ -47,12 +47,21 @@ class ClientConfig(ConfigModel):
 
 
 class RepositoryOptions(ConfigModel):
-    """Reserved typed public repository settings."""
+    """Typed public repository settings."""
+
+    # Deprecated and unused. SMB repositories now always go through Kopia's
+    # filesystem provider over a mounted path; the rclone provider was removed.
+    # Kept (not read anywhere) so a config.yaml that persisted it under the old
+    # rclone/mount behaviour still loads under extra="forbid".
+    smb_transport: Literal["rclone", "mount"] | None = None
 
 
 class RepositoryConfig(ConfigModel):
     id: str | None = None
     name: str
+    # Repository storage is a durable choice, independent of transport.  Missing
+    # values in existing configuration deliberately retain the encrypted default.
+    format: Literal["kopia", "files"] = "kopia"
     type: Literal["local", "smb", "s3"]
     path: str | None = None
     server: str | None = None
@@ -141,7 +150,7 @@ def _read_legacy(directory: Path) -> dict[str, str] | None:
 
 
 def migrate_legacy(config_dir: Path | None = None) -> BackerConfig | None:
-    """Write the unified file once from legacy agent and GUI credentials."""
+    """Write the unified file once from legacy agent and pre-0.9 desktop credentials."""
     config_dir = config_dir or get_config_dir()
     from backer.core import paths
 

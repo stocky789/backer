@@ -19,7 +19,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class FileBrowserRepository @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val storageAccess: StorageAccess
 ) {
     companion object {
         private const val TAG = "FileBrowserRepository"
@@ -30,6 +31,15 @@ class FileBrowserRepository @Inject constructor(
      */
     suspend fun browse(path: String): BrowseResults = withContext(Dispatchers.IO) {
         Log.d(TAG, "Browse requested for path: '$path'")
+
+        if (!storageAccess.hasUserFileAccess()) {
+            return@withContext BrowseResults(
+                success = false,
+                path = path,
+                entries = emptyList(),
+                error = storageAccess.denialMessage()
+            )
+        }
 
         try {
             if (path.isEmpty()) {

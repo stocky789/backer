@@ -101,6 +101,14 @@ def _fires(data_dir: Path) -> dict[str, object]:
     return values
 
 
+def _default_data_dir(data_dir: Path | None) -> Path:
+    if data_dir is not None:
+        return data_dir
+    from backer.core.paths import get_data_dir
+
+    return get_data_dir()
+
+
 def schedule_pause(data_dir: Path, paused: bool, until: datetime | None) -> None:
     """Atomically persist the local scheduler pause beside its other runtime state."""
     path = data_dir / "schedule-runtime.json"
@@ -110,9 +118,46 @@ def schedule_pause(data_dir: Path, paused: bool, until: datetime | None) -> None
 
 
 def schedule_pause_state(data_dir: Path) -> tuple[bool, datetime | None]:
-    """Return the raw durable pause selection for the tray and rollback path."""
+    """Return the raw durable pause selection for the CLI and rollback path."""
     _fires(data_dir)
     return _pause(_read(data_dir / "schedule-runtime.json"))
+
+
+def schedule_pause_snapshot(data_dir: Path | None = None) -> tuple[Path, bytes | None]:
+    """Capture pause state before a change for rollback; defaults to the resolved data directory."""
+    path = _default_data_dir(data_dir) / "schedule-runtime.json"
+    return path, path.read_bytes() if path.exists() else None
+
+
+def save_schedule_pause(paused: bool, until: datetime | None, data_dir: Path | None = None) -> None:
+    """Keep scheduler runtime state out of the shared durable config."""
+    schedule_pause(_default_data_dir(data_dir), paused, until)
+
+
+def schedule_pause_consensus(data_dir: Path | None = None) -> tuple[bool, datetime | None]:
+    """The data directory is the single durable pause authority."""
+    return schedule_pause_state(_default_data_dir(data_dir))
+
+
+def schedule_pause_matches(paused: bool, until: datetime | None, data_dir: Path | None = None) -> bool:
+    """Verify the runtime state before advertising it."""
+    return schedule_pause_consensus(data_dir) == (paused, until)
+
+
+def restore_schedule_pause(snapshot: tuple[Path, bytes | None]) -> None:
+    """Restore the exact pause runtime file without touching fire timestamps."""
+    path, content = snapshot
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def schedule_pause_snapshot_matches(snapshot: tuple[Path, bytes | None]) -> bool:
+    """Return whether durable pause fields still match their pre-change snapshot."""
+    path, content = snapshot
+    return (path.read_bytes() if path.exists() else None) == content
 
 
 def scheduling_paused(data_dir: Path, now: datetime) -> bool:

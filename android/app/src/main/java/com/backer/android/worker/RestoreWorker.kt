@@ -15,11 +15,13 @@ import com.backer.android.data.api.models.ProgressReport
 import com.backer.android.data.api.models.RestoreResult
 import com.backer.android.data.repository.BackerApiRepository
 import com.backer.android.data.repository.CredentialRepository
+import com.backer.android.data.repository.StorageAccess
 import com.backer.android.di.ApiServiceFactory
 import com.backer.android.util.TarArchiveExtractor
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,7 +40,8 @@ class RestoreWorker @AssistedInject constructor(
     private val credentialRepository: CredentialRepository,
     private val apiRepository: BackerApiRepository,
     private val apiServiceFactory: ApiServiceFactory,
-    private val tarArchiveExtractor: TarArchiveExtractor
+    private val tarArchiveExtractor: TarArchiveExtractor,
+    private val storageAccess: StorageAccess
 ) : CoroutineWorker(context, params) {
 
     private val notificationManager =
@@ -50,6 +53,7 @@ class RestoreWorker @AssistedInject constructor(
         val sourcePath = inputData.getString("source_path") ?: return@withContext Result.failure()
         val destinationPath = inputData.getString("destination_path") ?: return@withContext Result.failure()
         val snapshot = inputData.getString("snapshot")
+        val sourceSubfolder = inputData.getString("source_subfolder")?.takeIf { it.isNotBlank() }
         val cleanRestore = inputData.getBoolean("clean_restore", false)
         val dryRun = inputData.getBoolean("dry_run", false)
         val commandId = inputData.getInt("command_id", 0)
@@ -83,12 +87,15 @@ class RestoreWorker @AssistedInject constructor(
 
             Log.d(TAG, "Parsed source: repoId=$repoId, subfolder=$subfolder")
 
+            require(storageAccess.hasUserFileAccess()) { storageAccess.denialMessage() }
+
             // Verify destination directory
             val destDir = File(destinationPath)
-            if (!destDir.exists()) {
-                destDir.mkdirs()
+            if (destDir.exists() && !destDir.isDirectory) {
+                throw IllegalArgumentException("Restore destination must be a directory: $destinationPath")
             }
-            if (!destDir.canWrite()) {
+            val writableDir = if (destDir.exists()) destDir else destDir.parentFile
+            if (writableDir == null || !writableDir.canWrite()) {
                 throw IllegalArgumentException("Cannot write to destination path: $destinationPath")
             }
 
@@ -107,7 +114,8 @@ class RestoreWorker @AssistedInject constructor(
                 repoId = repoId,
                 subfolder = subfolder,
                 capability = proxyCapability,
-                snapshot = snapshot
+                snapshot = snapshot,
+                include = sourceSubfolder
             )
 
             if (!response.isSuccessful) {
@@ -144,6 +152,9 @@ class RestoreWorker @AssistedInject constructor(
 
             filesRestored = extractResult.filesExtracted
             bytesRestored = extractResult.bytesExtracted
+            // Surface per-file extraction errors even on overall success so a partial
+            // restore (skipped unsafe entries / failed writes) is not reported as clean.
+            errors.addAll(extractResult.errors)
 
             Log.d(TAG, "Restore completed: ${extractResult.filesExtracted} files, ${extractResult.bytesExtracted} bytes")
 
@@ -156,6 +167,8 @@ class RestoreWorker @AssistedInject constructor(
 
             reportProgress(runId, "finishing", 95, "Finalizing...")
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Restore failed", e)
             errors.add(e.message ?: "Restore failed")
