@@ -3,6 +3,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:Backer.Desktop.ViewModels"
+        xmlns:views="clr-namespace:Backer.Desktop.Views"
         mc:Ignorable="d"
         x:Class="Backer.Desktop.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
@@ -12,8 +13,25 @@
         Width="1040" Height="680"
         MinWidth="820" MinHeight="520">
 
-  <DockPanel>
-    <!-- Header band: identity on the left, where you are on the right. Nothing else. -->
+  <ScrollViewer x:Name="PageViewport" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+    <LayoutTransformControl>
+      <LayoutTransformControl.LayoutTransform>
+        <ScaleTransform ScaleX="{Binding Settings.UiScale}" ScaleY="{Binding Settings.UiScale}" />
+      </LayoutTransformControl.LayoutTransform>
+  <DockPanel MinWidth="820" MinHeight="480">
+    <DockPanel.Width>
+      <MultiBinding Converter="{x:Static views:MainWindow.PageWidth}">
+        <Binding Path="Viewport.Width" ElementName="PageViewport" />
+        <Binding Path="Settings.UiScale" />
+      </MultiBinding>
+    </DockPanel.Width>
+    <DockPanel.Height>
+      <MultiBinding Converter="{x:Static views:MainWindow.PageHeight}">
+        <Binding Path="Viewport.Height" ElementName="PageViewport" />
+        <Binding Path="Settings.UiScale" />
+      </MultiBinding>
+    </DockPanel.Height>
+    <!-- Keep the backups page reachable from every view, including an active run. -->
     <Border DockPanel.Dock="Top" Height="52" Padding="16,0" BorderThickness="0,0,0,1"
             Background="{DynamicResource Surface}"
             BorderBrush="{DynamicResource Hairline}">
@@ -22,8 +40,13 @@
           <Image Source="/Assets/backer-logo.png" Width="22" Height="22" />
           <TextBlock Text="Backer" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
         </StackPanel>
-        <TextBlock Grid.Column="2" Classes="muted" VerticalAlignment="Center"
-                   TextTrimming="CharacterEllipsis" Text="{Binding Status.Subtitle}" />
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="16">
+          <TextBlock Classes="muted" VerticalAlignment="Center"
+                     TextTrimming="CharacterEllipsis" Text="{Binding Status.Subtitle}" />
+          <Button Content="Back" Command="{Binding GoHomeCommand}"
+                  ToolTip.Tip="Return to your backups (Esc). Running backups continue." />
+          <Button Content="Settings" Command="{Binding NavigateCommand}" CommandParameter="settings" />
+        </StackPanel>
       </Grid>
     </Border>
 
@@ -58,4 +81,6 @@
 
     <ContentControl Content="{Binding CurrentView}" />
   </DockPanel>
+    </LayoutTransformControl>
+  </ScrollViewer>
 </Window>

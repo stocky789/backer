@@ -2249,12 +2249,12 @@ def repo_rm(
 @click.option("--confirm-name", help="Exact 'DELETE NAME' confirmation for permanent storage deletion")
 @click.pass_context
 def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | None) -> None:
-    """Permanently delete an SMB repository directory, then remove local access."""
+    """Permanently delete SMB/S3 repository storage, then remove local access."""
     from backer.core import keystore
     from backer.core.config import load_config
     from backer.core.paths import get_data_dir, get_machine_config_dir
     from backer.serverless.modes import local_schedule_configured
-    from backer.serverless.repositories import destroy_smb_repository
+    from backer.serverless.repositories import destroy_repository
     from backer.serverless.schedule import run_lock
 
     path, config = _local_config(ctx)
@@ -2269,13 +2269,20 @@ def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | N
     typed = confirm_name if confirm_name is not None else click.prompt(f"Type {expected} to permanently delete storage")
     if typed != expected:
         raise click.ClickException("Confirmation did not match; nothing was deleted")
-    if record.type != "smb":
-        raise click.ClickException("Permanent storage deletion currently supports SMB repositories only")
+    if record.type not in {"smb", "s3"}:
+        raise click.ClickException("Permanent storage deletion currently supports SMB and S3 repositories only")
     headless_timer = sys.platform != "win32" and Path("/etc/systemd/system/backer-local.timer").exists()
     if local_schedule_configured() or headless_timer:
         raise click.ClickException("Turn off scheduled backups before deleting repository storage")
 
     _, passphrase, storage = _repository_backend(record)
+
+    def _secret_text() -> str | None:
+        if isinstance(storage, dict):
+            secret = storage.get("secret_access_key")
+            return secret if isinstance(secret, str) else None
+        return storage if isinstance(storage, str) else None
+
     try:
         configs = [(path, config, key)]
         machine_path = get_machine_config_dir() / "config.yaml"
@@ -2304,7 +2311,7 @@ def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | N
         with ExitStack() as stack:
             if not all(stack.enter_context(run_lock(directory)) for directory in lock_dirs):
                 raise click.ClickException("A backup or restore is running; nothing was deleted")
-            destroy_smb_repository(record, passphrase, storage if isinstance(storage, str) else None)
+            destroy_repository(record, passphrase, storage)
             for config_path, saved, saved_key in configs:
                 saved.jobs = {
                     job_name: job for job_name, job in saved.jobs.items() if job.repository != saved_key
@@ -2314,8 +2321,7 @@ def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | N
     except click.ClickException:
         raise
     except Exception as error:
-        secret = storage if isinstance(storage, str) else None
-        raise click.ClickException(_redact_error(error, passphrase, secret)) from error
+        raise click.ClickException(_redact_error(error, passphrase, _secret_text())) from error
 
     warnings = []
     secret_scopes = (False,) if keystore.backend_name() == "Secret Service" else (False, True)
@@ -2326,8 +2332,8 @@ def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | N
             try:
                 keystore.delete(reference, machine_scope=machine_scope)
             except Exception as error:
-                warnings.append(_redact_error(error, passphrase, storage if isinstance(storage, str) else None))
-    click.echo(f"Repository '{name}' storage directory and local configuration were permanently deleted")
+                warnings.append(_redact_error(error, passphrase, _secret_text()))
+    click.echo(f"Repository '{name}' storage and local configuration were permanently deleted")
     if warnings:
         raise click.ClickException(
             "Repository data was deleted, but saved secret cleanup failed: " + "; ".join(warnings)

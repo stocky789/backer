@@ -47,6 +47,26 @@ public sealed class SettingsAndNotificationTests : IDisposable
 
     // ---- pause state mapping -------------------------------------------------
 
+    [Fact]
+    public void AppSizePersistsWithoutChangingOtherPreferencesAndRejectsInvalidSizes()
+    {
+        var services = Services("exit 0");
+        services.StateStore.Save(new GuiState { Theme = "dark", CloseHintSeen = true });
+        var settings = new SettingsViewModel(services);
+        Assert.Equal(1, settings.UiScale);
+        settings.UiScalePercent = 150;
+        Assert.Equal(1.5, settings.UiScale);
+        Assert.Equal(150, new SettingsViewModel(services).UiScalePercent);
+        Assert.Equal("dark", services.StateStore.Load().Theme);
+        Assert.True(services.StateStore.Load().CloseHintSeen);
+        settings.UiScalePercent = 0;
+        Assert.Equal(1, settings.UiScale);
+        var state = services.StateStore.Load();
+        state.UiScalePercent = -50;
+        services.StateStore.Save(state);
+        Assert.Equal(1, new SettingsViewModel(services).UiScale);
+    }
+
     [Theory]
     [InlineData(false, null, "")]
     [InlineData(true, null, "Paused")]
@@ -202,7 +222,7 @@ public sealed class SettingsAndNotificationTests : IDisposable
     }
 
     [Fact]
-    public async Task RemovingARepositoryNeedsTheTypedNameAndPassesItOn()
+    public async Task RemovingARepositoryRequiresAHoldAndPassesCliConfirmation()
     {
         var log = Path.Combine(_temp, "argv.log");
         var services = Services($"echo \"$*\" >> {log}\n");
@@ -222,14 +242,23 @@ public sealed class SettingsAndNotificationTests : IDisposable
             shown = request;
             return Task.FromResult(true);
         };
+        services.PickFolder = () => Task.FromResult<string?>(null);
+        await settings.RemoveRepositoryAsync();
+        Assert.False(File.Exists(log));
+
+        services.PickFolder = () => Task.FromResult<string?>(_temp);
         await settings.RemoveRepositoryAsync();
 
-        Assert.Equal("usb", shown!.TypedConfirmation);
-        Assert.Equal("repo rm usb --yes --confirm-name usb", File.ReadAllLines(log)[0]);
+        Assert.True(shown!.HoldToConfirm);
+        Assert.Null(shown.TypedConfirmation);
+        Assert.Contains("plain-text recovery record", shown.Body);
+        Assert.Equal(
+            $"repo rm usb --yes --confirm-name usb --passphrase-out {Path.Combine(_temp, "backer-recovery-usb.txt")}",
+            File.ReadAllLines(log)[0]);
     }
 
     [Fact]
-    public async Task DeletingSmbRepositoryDataNeedsTheExplicitDeletePhrase()
+    public async Task DeletingSmbRepositoryDataRequiresAHoldAndPassesCliConfirmation()
     {
         var log = Path.Combine(_temp, "argv.log");
         var services = Services($"echo \"$*\" >> {log}\n");
@@ -245,9 +274,70 @@ public sealed class SettingsAndNotificationTests : IDisposable
 
         await settings.DeleteRepositoryDataAsync();
 
-        Assert.Equal("DELETE nas", shown!.TypedConfirmation);
+        Assert.True(shown!.HoldToConfirm);
+        Assert.Null(shown.TypedConfirmation);
         Assert.Contains("permanently deleted", shown.Body);
+        Assert.Contains("SMB repository folder", shown.Body);
         Assert.Equal("repo destroy nas --yes --confirm-name DELETE nas", File.ReadAllLines(log)[0]);
+    }
+
+    [Fact]
+    public async Task DeletingS3RepositoryDataWipesStorageWithoutARecoveryFolder()
+    {
+        var log = Path.Combine(_temp, "argv.log");
+        var services = Services($"echo \"$*\" >> {log}\n");
+        var settings = new SettingsViewModel(services);
+        settings.LoadRepositories(new BackerConfig
+        {
+            Repositories = new Dictionary<string, RepositoryConfig>
+            {
+                ["cloud"] = new()
+                {
+                    Id = "cloud",
+                    Name = "cloud",
+                    Type = "s3",
+                    Bucket = "backups",
+                    Prefix = "desk",
+                    Endpoint = "https://s3.example",
+                },
+            },
+        });
+        settings.SelectedRepository = Assert.Single(settings.Repositories);
+        Assert.True(settings.CanDeleteRepositoryData);
+        var opened = false;
+        services.PickFolder = () =>
+        {
+            opened = true;
+            return Task.FromResult<string?>(_temp);
+        };
+        ConfirmRequest? shown = null;
+        services.Confirm = request =>
+        {
+            shown = request;
+            return Task.FromResult(true);
+        };
+
+        await settings.DeleteRepositoryDataAsync();
+
+        Assert.False(opened);
+        Assert.True(shown!.HoldToConfirm);
+        Assert.Contains("S3 prefix", shown.Body);
+        Assert.Equal("repo destroy cloud --yes --confirm-name DELETE cloud", File.ReadAllLines(log)[0]);
+    }
+
+    [Fact]
+    public async Task RepositoryDeletionFailuresRemainVisibleOnHome()
+    {
+        var services = Services("echo 'Repository identity changed; nothing was deleted' >&2; exit 1\n");
+        services.Confirm = _ => Task.FromResult(true);
+        var home = new HomeViewModel(services);
+        home.Reload();
+
+        await home.DeleteRepositoryCommand.ExecuteAsync(home.Repositories.First(row => row.Name == "nas"));
+
+        Assert.Equal("Repository identity changed; nothing was deleted", services.Status.Attention);
+        Assert.True(services.Status.IsFailed);
+        Assert.Contains(home.Repositories, row => row.Name == "nas");
     }
 
     [Fact]
@@ -442,8 +532,8 @@ public sealed class SettingsAndNotificationTests : IDisposable
                 "MainWindowViewModel.ConfirmInterruptAsync",        // quit during a run / update installer
                 "RestoreViewModel.ConfirmReplaceAsync",             // REPLACE restore, typed REPLACE
                 "SettingsViewModel.ConfirmStopAsync",               // turn off schedule / remove agent service
-                "SettingsViewModel.DeleteRepositoryDataAsync",      // erase SMB repository, typed DELETE name
-                "SettingsViewModel.RemoveRepositoryAsync",          // remove a repository, typed name
+                "SettingsViewModel.DeleteRepositoryDataAsync",      // erase SMB/S3 repository, five-second hold
+                "SettingsViewModel.RemoveRepositoryAsync",          // remove a repository, five-second hold
             },
             sites.OrderBy(site => site, StringComparer.Ordinal).ToArray());
     }

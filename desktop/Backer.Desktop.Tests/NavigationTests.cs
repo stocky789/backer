@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using Backer.Desktop.Services;
 using Backer.Desktop.ViewModels;
 using Xunit;
@@ -17,6 +19,29 @@ public sealed class NavigationTests : IDisposable
         Config = new ConfigStore(Path.Combine("Fixtures", "config.yaml")),
         Data = new DataDirStore(_temp),
     });
+
+    [Theory]
+    [InlineData("nas")]
+    [InlineData("usb")]
+    public async Task RemovingARepositoryConfirmsDirectlyWithoutLeavingHome(string name)
+    {
+        var shell = Shell();
+        shell.Home.Reload();
+        var repository = shell.Home.Repositories.Single(row => row.Name == name);
+        ConfirmRequest? shown = null;
+        shell.Services.Confirm = request =>
+        {
+            shown = request;
+            return Task.FromResult(false);
+        };
+
+        await shell.Home.DeleteRepositoryCommand.ExecuteAsync(repository);
+
+        Assert.True(shown?.HoldToConfirm);
+        Assert.Null(shown?.TypedConfirmation);
+        Assert.Same(shell.Home, shell.CurrentView);
+        Assert.Contains(shell.Home.Repositories, row => row.Id == repository.Id);
+    }
 
     [Fact]
     public void ViewInstancesAreRetainedAcrossNavigation()

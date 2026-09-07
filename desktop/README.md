@@ -66,7 +66,7 @@ pins them by name, not by count):
 1. `HomeViewModel.RemoveAsync` — remove a backup job
 2. `RestoreViewModel.ConfirmReplaceAsync` — restore over the originals, typed `REPLACE`
 3. `SettingsViewModel.RemoveRepositoryAsync` — remove a repository, typed repository name
-4. `SettingsViewModel.DeleteRepositoryDataAsync` — permanently erase an SMB repository, typed `DELETE name`
+4. `SettingsViewModel.DeleteRepositoryDataAsync` — permanently erase an SMB or S3 repository, typed `DELETE name`
 5. `SettingsViewModel.ConfirmStopAsync` — stop something that runs backups by itself
 6. `MainWindowViewModel.ConfirmInterruptAsync` — close the app down mid-run
 

@@ -164,6 +164,20 @@
                             Width="180" HorizontalAlignment="Left" />
                 </Grid>
               </Border>
+              <Border Classes="property-row">
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="16">
+                  <TextBlock Grid.Column="0" Text="App size" VerticalAlignment="Center" />
+                  <ComboBox Grid.Column="1" ItemsSource="{Binding UiScales}"
+                            SelectedItem="{Binding UiScalePercent}" AutomationProperties.Name="App size"
+                            Width="180" HorizontalAlignment="Left">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate x:DataType="x:Int32">
+                        <TextBlock Text="{Binding StringFormat='{}{0}%'}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </Grid>
+              </Border>
               <Border Classes="table-footer">
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
                   <TextBlock Grid.Column="0" Classes="caption" VerticalAlignment="Center" TextWrapping="Wrap"

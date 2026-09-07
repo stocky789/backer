@@ -14,6 +14,8 @@ public sealed class GuiState
     /// <summary>"system", "light" or "dark".</summary>
     public string Theme { get; set; } = "system";
 
+    public int UiScalePercent { get; set; } = 100;
+
     /// <summary>True once the close-to-tray hint has been shown.</summary>
     public bool CloseHintSeen { get; set; }
 

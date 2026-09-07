@@ -464,6 +464,67 @@ def test_s3_sidecar_signs_encoded_copy_and_cleans_temp_after_copy_failure(monkey
     assert all("storage-secret" not in url for _, url, _ in requests)
 
 
+def test_s3_sidecar_wipe_deletes_prefix_objects_and_paginates(monkeypatch) -> None:
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    deleted: list[str] = []
+    listed: list[str] = []
+    pages = iter(
+        [
+            _S3Response(
+                200,
+                b"<ListBucketResult>"
+                b"<IsTruncated>true</IsTruncated>"
+                b"<NextContinuationToken>tok</NextContinuationToken>"
+                b"<Contents><Key>repo/a</Key></Contents>"
+                b"</ListBucketResult>",
+            ),
+            _S3Response(204),
+            _S3Response(
+                200,
+                b"<ListBucketResult>"
+                b"<IsTruncated>false</IsTruncated>"
+                b"<Contents><Key>repo/b</Key></Contents>"
+                b"</ListBucketResult>",
+            ),
+            _S3Response(204),
+        ]
+    )
+
+    def request(method: str, url: str, **_: object) -> _S3Response:
+        if method == "GET":
+            listed.append(url)
+        if method == "DELETE":
+            deleted.append(url)
+        return next(pages)
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.requests.request", request)
+    S3Sidecar(
+        {"bucket": "bucket", "prefix": "repo", "endpoint": "https://s3.example"},
+        {"access_key_id": "access", "secret_access_key": "storage-secret"},
+    ).wipe()
+
+    assert listed == [
+        "https://s3.example/bucket?list-type=2&prefix=repo%2F",
+        "https://s3.example/bucket?continuation-token=tok&list-type=2&prefix=repo%2F",
+    ]
+    assert deleted == [
+        "https://s3.example/bucket/repo/a",
+        "https://s3.example/bucket/repo/b",
+    ]
+
+
+def test_s3_sidecar_wipe_refuses_bucket_root() -> None:
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    sidecar = S3Sidecar(
+        {"bucket": "bucket", "prefix": "", "endpoint": "https://s3.example"},
+        {"access_key_id": "access", "secret_access_key": "storage-secret"},
+    )
+    with pytest.raises(ValueError, match="non-root S3 repository prefix"):
+        sidecar.wipe()
+
+
 def test_s3_sidecar_lists_and_gets_without_putting_secrets_in_urls(monkeypatch) -> None:
     from backer.serverless.s3_sidecar import S3Sidecar
 
@@ -490,8 +551,26 @@ def test_s3_sidecar_lists_and_gets_without_putting_secrets_in_urls(monkeypatch) 
 
     assert sidecar.list(".backer/jobs/") == ["prefix/.backer/jobs/a/config.json"]
     assert sidecar.get(".backer/jobs/missing.json") is None
+    assert requests[0] == ("GET", "https://s3.example/bucket?list-type=2&prefix=prefix%2F.backer%2Fjobs")
     assert [method for method, _ in requests] == ["GET", "GET"]
     assert all("storage-secret" not in url and "access" not in url for _, url in requests)
+
+
+def test_s3_sidecar_surfaces_access_denied_body(monkeypatch) -> None:
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    monkeypatch.setattr(
+        "backer.serverless.s3_sidecar.requests.request",
+        lambda *_args, **_kwargs: _S3Response(
+            403, b"<Error><Code>AccessDenied</Code><Message>not allowed</Message></Error>"
+        ),
+    )
+    sidecar = S3Sidecar(
+        {"bucket": "bucket", "prefix": "repo", "endpoint": "https://s3.example"},
+        {"access_key_id": "access", "secret_access_key": "storage-secret"},
+    )
+    with pytest.raises(RuntimeError, match=r"403 AccessDenied: not allowed"):
+        sidecar.list("")
 
 
 def test_s3_adoption_updates_only_local_config() -> None:

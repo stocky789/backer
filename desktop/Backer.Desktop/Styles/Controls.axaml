@@ -178,7 +178,7 @@
     <Setter Property="CornerRadius" Value="3" />
   </Style>
 
-  <!-- Surfaces. A card is the quiet container; the banner variants are the one bold element. -->
+  <!-- Surfaces. -->
   <Style Selector="Border.card">
     <Setter Property="Background" Value="{DynamicResource Surface}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
@@ -214,21 +214,11 @@
   </Style>
 
   <Style Selector="Border.banner">
-    <Setter Property="Background" Value="{DynamicResource Surface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Hairline}" />
-    <Setter Property="BorderThickness" Value="4,0,0,0" />
-    <Setter Property="CornerRadius" Value="6" />
-    <Setter Property="Padding" Value="16" />
+    <Setter Property="Padding" Value="0,12" />
   </Style>
 
-  <Style Selector="Border.banner.protected">
-    <Setter Property="Background" Value="{DynamicResource SuccessTint}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Success}" />
-  </Style>
-
-  <Style Selector="Border.banner.attention">
-    <Setter Property="Background" Value="{DynamicResource WarningTint}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Warning}" />
+  <Style Selector="Border.banner.attention TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Warning}" />
   </Style>
 
   <!-- 8px status dot: green = protected, amber = needs attention, muted = never run. -->

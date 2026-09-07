@@ -14,11 +14,8 @@
                    IsVisible="{Binding ServerManaged}"
                    Text="Server-managed jobs are not listed here" />
       </Grid>
-      <Border Classes="banner"
-              Classes.protected="{Binding AllProtected}"
-              Classes.attention="{Binding NeedsAttention}">
-        <TextBlock FontSize="15" TextWrapping="Wrap" Text="{Binding ProtectionText}" />
-      </Border>
+      <TextBlock Classes="muted" Classes.warn="{Binding NeedsAttention}"
+                 TextWrapping="Wrap" Text="{Binding ProtectionText}" />
     </StackPanel>
 
     <ScrollViewer Margin="0,20,0,0" VerticalScrollBarVisibility="Auto">
@@ -106,23 +103,26 @@
             <Border Classes="table" MinWidth="900">
               <StackPanel>
               <Border Classes="table-header">
-                <Grid ColumnDefinitions="1.1*,100,2.4*" ColumnSpacing="12">
+                <Grid ColumnDefinitions="1.1*,100,2.4*,90" ColumnSpacing="12">
                   <TextBlock Grid.Column="0" Classes="column-header" Text="NAME" />
                   <TextBlock Grid.Column="1" Classes="column-header" Text="TYPE" />
                   <TextBlock Grid.Column="2" Classes="column-header" Text="LOCATION" />
                 </Grid>
               </Border>
-              <ItemsControl AutomationProperties.Name="Repositories" ItemsSource="{Binding Repositories}">
+              <ItemsControl Name="RepositoriesList" AutomationProperties.Name="Repositories" ItemsSource="{Binding Repositories}">
                 <ItemsControl.ItemTemplate>
                   <DataTemplate x:DataType="vm:HomeRepositoryRow">
                     <Border Classes="row" Padding="12,9"
                             AutomationProperties.Name="{Binding Name, StringFormat='Repository {0}'}">
-                      <Grid ColumnDefinitions="1.1*,100,2.4*" ColumnSpacing="12">
+                      <Grid ColumnDefinitions="1.1*,100,2.4*,90" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis"
                                    ToolTip.Tip="{Binding Name}" />
                         <TextBlock Grid.Column="1" Classes="muted" Text="{Binding Type}" />
                         <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Location}"
                                    TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Location}" />
+                        <Button Grid.Column="3" Content="Delete"
+                                Command="{Binding #RepositoriesList.((vm:HomeViewModel)DataContext).DeleteRepositoryCommand}"
+                                CommandParameter="{Binding}" />
                       </Grid>
                     </Border>
                   </DataTemplate>

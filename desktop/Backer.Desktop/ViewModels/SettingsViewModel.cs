@@ -100,6 +100,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _services = services;
         _shell = shell;
         Theme = services.StateStore.Load().Theme;
+        var scale = services.StateStore.Load().UiScalePercent;
+        _uiScalePercent = UiScales.Contains(scale) ? scale : 100;
     }
 
     public SettingsViewModel()
@@ -112,6 +114,26 @@ public sealed partial class SettingsViewModel : ViewModelBase
     public override IRelayCommand PrimaryCommand => ConnectCommand;
 
     public IReadOnlyList<string> Themes { get; } = new[] { "system", "light", "dark" };
+
+    public IReadOnlyList<int> UiScales { get; } = new[] { 100, 125, 150, 175, 200 };
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UiScale))]
+    private int _uiScalePercent = 100;
+
+    public double UiScale => UiScalePercent / 100.0;
+
+    partial void OnUiScalePercentChanged(int value)
+    {
+        if (!UiScales.Contains(value))
+        {
+            UiScalePercent = 100;
+            return;
+        }
+        var state = _services.StateStore.Load();
+        state.UiScalePercent = value;
+        _services.StateStore.Save(state);
+    }
 
     public bool IsWindows => OperatingSystem.IsWindows();
 
@@ -154,7 +176,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     public bool HasRepositorySelection => SelectedRepository is not null;
 
-    public bool CanDeleteRepositoryData => SelectedRepository?.Type == "smb";
+    public bool CanDeleteRepositoryData => SelectedRepository is { Type: "smb" or "s3", IsEncrypted: true };
 
     public bool IsEncryptedRepository => SelectedRepository?.IsEncrypted == true;
 
@@ -483,8 +505,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Confirmation site 3 of 5. The typed repository name collected here is passed on as
-    /// `--confirm-name`, which is what stands in for the CLI's own interactive prompt.
+    /// Local removal requires a sustained hold before supplying the CLI confirmation.
     /// </summary>
     [RelayCommand]
     public async Task RemoveRepositoryAsync()
@@ -494,19 +515,34 @@ public sealed partial class SettingsViewModel : ViewModelBase
             return;
         }
         var recoveryWarning = repository.IsEncrypted
-            ? "along with its saved passphrase, and every backup job that uses it stops. The snapshots already in the storage stay where they are, but without the passphrase nothing in them can be restored."
+            ? "along with its saved passphrase, and every backup job that uses it stops. The snapshots stay in storage. Before removal, choose a folder to save a plain-text recovery record containing the passphrase. Anyone who can read that file can unlock your backups; keep it safe."
             : "and every backup job that uses it stops. The snapshots already in the storage stay where they are and remain readable to anyone with storage access.";
         var confirmed = await _services.Confirm(new ConfirmRequest(
             "Remove repository",
             $"'{repository.Name}' is removed from this computer {recoveryWarning}",
-            "Remove repository",
-            TypedConfirmation: repository.Name));
+            "Delete",
+            HoldToConfirm: true));
         if (!confirmed)
         {
             StatusText = "Nothing was removed.";
             return;
         }
-        await RunAsync(new[] { "repo", "rm", repository.Name, "--yes", "--confirm-name", repository.Name });
+        var arguments = new List<string> { "repo", "rm", repository.Name, "--yes", "--confirm-name", repository.Name };
+        if (repository.IsEncrypted)
+        {
+            var folder = await _services.PickFolder();
+            if (folder is null)
+            {
+                StatusText = "Nothing was removed.";
+                return;
+            }
+            arguments.AddRange(new[] { "--passphrase-out", RecoveryRecord.Destination(folder, repository.Name) });
+        }
+        var result = await RunAsync(arguments);
+        if (!result.Ok)
+        {
+            _services.Status.Attention = result.FailureText;
+        }
         try
         {
             LoadRepositories(_services.Config.Load());
@@ -520,24 +556,30 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [RelayCommand]
     public async Task DeleteRepositoryDataAsync()
     {
-        if (SelectedRepository is not { } repository || repository.Type != "smb")
+        if (SelectedRepository is not { Type: "smb" or "s3", IsEncrypted: true } repository)
         {
             return;
         }
         var typed = $"DELETE {repository.Name}";
+        var storageKind = repository.Type == "s3" ? "S3 prefix" : "SMB repository folder";
         var confirmed = await _services.Confirm(new ConfirmRequest(
             "Permanently delete repository",
-            $"Every backup in '{repository.Name}' and its SMB repository folder will be permanently deleted. "
+            $"Every backup in '{repository.Name}' and its {storageKind} will be permanently deleted. "
             + "Its backup jobs, saved credentials, and local repository entry are removed only after storage deletion succeeds. "
             + "A network failure may leave a partially deleted repository that Backer will not remove locally.",
-            "Delete backups permanently",
-            TypedConfirmation: typed));
+            "Delete",
+            HoldToConfirm: true));
         if (!confirmed)
         {
             StatusText = "Nothing was deleted.";
             return;
         }
-        await RunAsync(new[] { "repo", "destroy", repository.Name, "--yes", "--confirm-name", typed });
+        _services.Status.Set($"Deleting repository '{repository.Name}'…");
+        var result = await RunAsync(new[] { "repo", "destroy", repository.Name, "--yes", "--confirm-name", typed });
+        if (!result.Ok)
+        {
+            _services.Status.Attention = result.FailureText;
+        }
         try
         {
             LoadRepositories(_services.Config.Load());
@@ -630,7 +672,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
             || text.Contains("operation not permitted");
     }
 
-    private async Task RunAsync(
+    private async Task<CliResult> RunAsync(
         IEnumerable<string> arguments,
         IReadOnlyDictionary<string, string>? environment = null,
         bool serviceAction = false)
@@ -650,5 +692,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
                 : result.FailureText;
         }
         _services.Status.Set(StatusText, error: !result.Ok);
+        return result;
     }
 }

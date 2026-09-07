@@ -208,6 +208,47 @@ def destroy_smb_repository(record: RepositoryConfig, passphrase: str, storage: s
             raise OSError("Repository directory still exists after deletion")
 
 
+def destroy_s3_repository(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | None) -> None:
+    """Permanently remove every object under a verified Kopia S3 repository prefix."""
+    if _format(record) != "kopia":
+        raise ValueError("Files repository storage deletion is not supported; nothing was deleted")
+    prefix = (record.prefix or "").strip("/")
+    if (
+        record.type != "s3"
+        or not prefix
+        or "\0" in prefix
+        or any(part in ("", ".", "..") for part in prefix.split("/"))
+    ):
+        raise ValueError("Storage deletion requires a non-root S3 repository prefix")
+    if not record.unique_id:
+        raise ValueError("Repository identity is missing; refusing to delete storage")
+    if not isinstance(storage, dict):
+        raise ValueError("S3 storage credentials are required")
+
+    status, unique_id, message = probe(record, passphrase, storage)
+    if status != "present":
+        raise ValueError(message or f"Repository is {status}; nothing was deleted")
+    if not unique_id or unique_id.casefold() != record.unique_id.casefold():
+        raise ValueError("Repository identity changed; nothing was deleted")
+
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    S3Sidecar(record.model_dump(exclude_none=True), storage).wipe()
+
+
+def destroy_repository(
+    record: RepositoryConfig, passphrase: str, storage: dict[str, str] | str | None
+) -> None:
+    """Permanently delete verified repository storage for SMB or S3."""
+    if record.type == "smb":
+        destroy_smb_repository(record, passphrase, storage if isinstance(storage, str) else None)
+        return
+    if record.type == "s3":
+        destroy_s3_repository(record, passphrase, storage if isinstance(storage, dict) else None)
+        return
+    raise ValueError("Permanent storage deletion currently supports SMB and S3 repositories only")
+
+
 def add_repository(
     config: BackerConfig,
     config_path: Path,

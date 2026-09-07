@@ -5,7 +5,8 @@ namespace Backer.Desktop.Services;
 
 /// <summary>A modal the user must accept before a destructive CLI call is made.</summary>
 /// <param name="TypedConfirmation">When set, the user must type this word exactly.</param>
-public sealed record ConfirmRequest(string Title, string Body, string ConfirmLabel, string? TypedConfirmation = null);
+public sealed record ConfirmRequest(string Title, string Body, string ConfirmLabel, string? TypedConfirmation = null,
+    bool HoldToConfirm = false);
 
 /// <summary>
 /// Everything the view models need from the outside world. Defaults are the safe

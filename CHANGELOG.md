@@ -38,6 +38,8 @@ The release workflow publishes the top section verbatim as the release notes.
 - Windows share discovery works without smbclient, using `net view`, including share names that contain spaces.
 - Desktop Linux mounts SMB shares through gvfs, so backups, restores and scheduled runs no longer need root; an already-mounted share is reused as-is.
 - The backup progress display shows a real percentage and live transfer speed, and keeps moving through the upload phase (when Kopia has finished reading files and is flushing them to the destination).
+- Permanent repository wipe (`repo destroy` / Delete in the desktop) works for S3 prefixes as well as SMB folders.
+- S3 listing for wipe/history hits the bucket root with a correct SigV4 query, instead of signing against the prefix path and failing with 403.
 
 ### Bug Fixes
 

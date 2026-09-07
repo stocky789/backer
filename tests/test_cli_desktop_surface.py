@@ -441,6 +441,101 @@ def test_repo_destroy_refuses_while_local_schedule_exists(tmp_path, monkeypatch)
     assert "r1" in BackerConfig.load(config_path).repositories
 
 
+def test_repo_destroy_wipes_verified_s3_prefix_before_local_config(tmp_path, monkeypatch):
+    from backer.serverless import repositories
+
+    config_path = tmp_path / "config.yaml"
+    record = RepositoryConfig(
+        id="r1",
+        name="r1",
+        type="s3",
+        bucket="backups",
+        prefix="desk",
+        endpoint="https://s3.example",
+        region="us-east-1",
+        unique_id="aabb",
+        passphrase_ref="pass",
+        storage_password_ref="storage",
+    )
+    BackerConfig(
+        repositories={"r1": record},
+        jobs={"backup": JobConfig(repository="r1", source=SourceConfig(path=str(tmp_path)))},
+    ).save(config_path)
+
+    wiped = []
+    monkeypatch.setenv("BACKER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("backer.serverless.modes.local_schedule_configured", lambda: False)
+    monkeypatch.setattr(repositories, "probe", lambda *_args: ("present", "aabb", ""))
+    monkeypatch.setattr(
+        "backer.core.keystore.get",
+        lambda reference, **_kwargs: {
+            "pass": "secret",
+            "storage": '{"access_key_id":"ak","secret_access_key":"sk"}',
+        }.get(reference),
+    )
+    deleted = []
+    monkeypatch.setattr("backer.core.keystore.delete", lambda reference, **_kwargs: deleted.append(reference))
+    monkeypatch.setattr("backer.core.keystore.backend_name", lambda: "Secret Service")
+
+    class FakeSidecar:
+        def __init__(self, settings, credentials):
+            assert settings["bucket"] == "backups"
+            assert settings["prefix"] == "desk"
+            assert credentials["secret_access_key"] == "sk"
+
+        def wipe(self):
+            wiped.append(True)
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.S3Sidecar", FakeSidecar)
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert wiped == [True]
+    saved = BackerConfig.load(config_path)
+    assert not saved.repositories and not saved.jobs
+    assert deleted == ["pass", "storage"]
+
+
+def test_repo_destroy_refuses_s3_bucket_root(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    BackerConfig(
+        repositories={
+            "r1": RepositoryConfig(
+                id="r1",
+                name="r1",
+                type="s3",
+                bucket="backups",
+                prefix="",
+                endpoint="https://s3.example",
+                unique_id="id",
+                passphrase_ref="pass",
+                storage_password_ref="storage",
+            )
+        }
+    ).save(config_path)
+    monkeypatch.setattr(
+        "backer.core.keystore.get",
+        lambda reference, **_kwargs: {
+            "pass": "secret",
+            "storage": '{"access_key_id":"ak","secret_access_key":"sk"}',
+        }.get(reference),
+    )
+    monkeypatch.setattr("backer.serverless.modes.local_schedule_configured", lambda: False)
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"],
+    )
+
+    assert result.exit_code == 1
+    assert "non-root S3 repository prefix" in result.output
+    assert "r1" in BackerConfig.load(config_path).repositories
+
+
 def test_verify_repair_index_commits_with_yes_off_a_tty(monkeypatch):
     from datetime import datetime
 

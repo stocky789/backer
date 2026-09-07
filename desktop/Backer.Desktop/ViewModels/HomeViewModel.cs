@@ -43,6 +43,8 @@ public sealed partial class JobRow : ObservableObject
 
 public sealed class HomeRepositoryRow
 {
+    public required string Id { get; init; }
+
     public required string Name { get; init; }
 
     public required string Type { get; init; }
@@ -236,6 +238,7 @@ public sealed partial class HomeViewModel : ViewModelBase
         {
             Repositories.Add(new HomeRepositoryRow
             {
+                Id = id,
                 Name = repository.Name ?? id,
                 Type = repository.Type ?? "",
                 Location = HomeRepositoryRow.LocationOf(repository),
@@ -357,6 +360,23 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     [RelayCommand]
     private void AddRepository() => _shell?.Navigate("repository");
+
+    [RelayCommand]
+    private async Task DeleteRepositoryAsync(HomeRepositoryRow repository)
+    {
+        var settings = new SettingsViewModel(_services);
+        settings.LoadRepositories(_services.Config.Load());
+        settings.SelectedRepository = settings.Repositories.FirstOrDefault(row => row.Id == repository.Id);
+        if (settings.CanDeleteRepositoryData)
+        {
+            await settings.DeleteRepositoryDataAsync();
+        }
+        else
+        {
+            await settings.RemoveRepositoryAsync();
+        }
+        Reload();
+    }
 
     [RelayCommand]
     private void NewJob() => _shell?.ShowNewJob();
