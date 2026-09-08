@@ -59,8 +59,8 @@ def test_direct_backend_uses_explicit_repository_format(monkeypatch):
     assert selected == [("files", {"format": "files"})]
 
 
-def test_files_backend_rejects_object_storage_before_writes():
-    with pytest.raises(RuntimeError, match="do not support S3"):
+def test_files_backend_requires_s3_configuration_before_writes():
+    with pytest.raises(RuntimeError, match="S3 storage configuration is required"):
         runner._backend_for_location("s3://bucket", {"format": "files"})
 
 
@@ -354,3 +354,22 @@ def test_s3_and_filesystem_sidecars_write_the_same_documents(tmp_path: Path, mon
     assert from_s3[run_key]["files_transferred"] == 3
     assert from_s3[run_key]["snapshot_id"] == "0123456789abcdef"
     assert from_s3[".backer/jobs/nightly/config.json"]["config"]["excludes"] == ["*.tmp"]
+
+
+def test_files_s3_backend_is_selected_by_runner_and_repository_factory():
+    from backer.backends.s3_files import S3FilesBackend
+    from backer.core.config import RepositoryConfig
+    from backer.serverless.repositories import _backend
+
+    s3 = {
+        "bucket": "backups", "prefix": "plain", "endpoint": "https://s3.example.test", "region": "us-east-1",
+        "access_key_id": "access", "secret_access_key": "secret",
+    }
+    selected = runner._backend_for_location("s3://backups/plain/Agents/daily", {"format": "files", "s3": s3})
+    assert isinstance(selected, S3FilesBackend)
+    record = RepositoryConfig(name="plain", type="s3", format="files", unique_id="durable-id", **{
+        key: value for key, value in s3.items() if key not in {"access_key_id", "secret_access_key"}
+    })
+    selected = _backend(record, storage={"access_key_id": "access", "secret_access_key": "secret"})
+    assert isinstance(selected, S3FilesBackend)
+    assert selected.config == {"repository_id": "durable-id", "s3": s3}

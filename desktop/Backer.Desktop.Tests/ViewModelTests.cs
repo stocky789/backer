@@ -66,7 +66,9 @@ public sealed class ViewModelTests : IDisposable
     [Fact]
     public void StaleRefreshResultsAreDiscarded()
     {
-        var home = new HomeViewModel(Services());
+        var services = Services();
+        services.Post = _ => { }; // This test applies refresh results explicitly.
+        var home = new HomeViewModel(services);
         home.Enter();
         var summaries = new List<(string, (string, string))> { ("Daily Docs", ("Success", "1.0 KiB")) };
 
@@ -82,51 +84,109 @@ public sealed class ViewModelTests : IDisposable
         Assert.Equal("Success", home.Jobs[0].Last);
     }
 
-    [Fact]
-    public async Task ReplaceRestoreOnlyDryRunsUntilTheTypedConfirmation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RestoreUsesTheNewestSnapshotAndOpensTheCompletedLocation(bool zip)
     {
-        var log = Path.Combine(_temp, "argv.log");
-        var services = Services(FakeCli($"echo \"$*\" >> {log}; echo 'Dry run: would restore snapshot abc'\n"));
-        services.Confirm = _ => Task.FromResult(false);
-        var restore = new RestoreViewModel(services)
+        if (OperatingSystem.IsWindows())
         {
-            Mode = "REPLACE",
-            Destination = "/home/matt/docs",
-            SelectedJobName = "Daily Docs",
-            SelectedSnapshot = new SnapshotRow { FullId = "abc123" },
-        };
+            return;
+        }
+        var log = Path.Combine(_temp, "restore-argv.log");
+        var restoredPath = Path.Combine(_temp, zip ? "restored.zip" : "original");
+        if (zip)
+        {
+            File.WriteAllText(restoredPath, "archive");
+        }
+        else
+        {
+            Directory.CreateDirectory(restoredPath);
+        }
+        var services = Services(FakeCli(
+            "if [ \"$1\" = snapshots ]; then\n"
+            + "echo '[{\"full_id\":\"older\",\"timestamp\":\"2024-01-01T12:00:00Z\"},"
+            + "{\"full_id\":\"newest\",\"timestamp\":\"2024-02-01T12:00:00Z\"}]'\n"
+            + $"else\necho \"$*\" >> '{log}'\necho 'Restore completed to {restoredPath}'\nfi\n"));
+        var opened = "";
+        services.OpenFolder = path => opened = path;
+        services.Confirm = _ => throw new InvalidOperationException("Restore should not require a replacement confirmation");
+        var restore = new RestoreViewModel(services) { SaveAsZip = zip, SelectedJobName = "Daily Docs" };
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while ((restore.Busy || restore.SelectedSnapshot is null) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+        Assert.False(restore.Busy);
+        Assert.Equal("newest", restore.SelectedSnapshot?.Selector);
 
+        if (zip)
+        {
+            await restore.RestoreAsync();
+            Assert.False(File.Exists(log));
+            Assert.Contains("folder", restore.StatusText, StringComparison.OrdinalIgnoreCase);
+            restore.Destination = _temp;
+        }
         await restore.RestoreAsync();
 
-        var declined = File.ReadAllLines(log);
-        Assert.Single(declined);
-        Assert.Contains("--dry-run", declined[0]);
-        Assert.Contains("the destination is unchanged", restore.StatusText);
-
-        services.Confirm = _ => Task.FromResult(true);
-        await restore.RestoreAsync();
-
-        var accepted = File.ReadAllLines(log);
-        Assert.Equal(3, accepted.Length);
-        Assert.Contains("--dry-run", accepted[1]);
-        Assert.DoesNotContain("--dry-run", accepted[2]);
-        Assert.Contains("--yes-replace", accepted[2]);
+        var arguments = Assert.Single(File.ReadAllLines(log));
+        Assert.Contains("--snapshot newest", arguments);
+        Assert.Contains(zip ? "--into ZIP" : "--into ORIGINAL", arguments);
+        Assert.DoesNotContain("--yes-replace", arguments);
+        Assert.DoesNotContain("--dry-run", arguments);
+        Assert.Equal(restoredPath, restore.RestoredPath);
+        Assert.Equal($"Restore completed to {restoredPath}", restore.StatusText);
+        restore.OpenRestoredLocationCommand.Execute(null);
+        Assert.Equal(zip ? _temp : restoredPath, opened);
     }
 
     [Fact]
-    public void NewAndMergeRestoresNeverCarryTheReplaceFlag()
+    public async Task AVerboseRestoreFailureKeepsTheLogInDetailsAndTheStatusShort()
     {
-        var restore = new RestoreViewModel(Services()) { Destination = "/tmp/out", Include = "reports" };
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        const string failure = "Restoring files: 10%\nRestoring files: 50%\nError: permission denied: /Downloads/report.txt";
+        var services = Services(FakeCli(
+            "if [ \"$1\" = snapshots ]; then\n"
+            + "echo '[{\"full_id\":\"snapshot\"}]'\n"
+            + $"else\necho '{failure}' >&2\nexit 1\nfi\n"));
+        var restore = new RestoreViewModel(services) { SelectedJobName = "Daily Docs" };
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while ((restore.Busy || restore.SelectedSnapshot is null) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+        Assert.False(restore.Busy);
+        Assert.NotNull(restore.SelectedSnapshot);
 
-        var arguments = restore.BuildArguments("Daily Docs", "abc123");
+        await restore.RestoreAsync();
+
+        Assert.True(restore.Failed);
+        Assert.Equal(failure, restore.Detail);
+        Assert.Equal("Restore failed. See Details for the error.", restore.StatusText);
+        Assert.Equal("Failed · " + restore.StatusText, services.Status.Status);
+    }
+
+    [Fact]
+    public void RestoreDefaultsToOriginalAndOnlyZipPassesADestination()
+    {
+        var restore = new RestoreViewModel(Services()) { Destination = " /tmp/out " };
+
+        Assert.False(restore.SaveAsZip);
+        Assert.Equal(
+            new[] { "restore", "--job", "Daily Docs", "--snapshot", "abc123", "--into", "ORIGINAL", "--no-progress" },
+            restore.BuildArguments("Daily Docs", "abc123"));
+
+        restore.SaveAsZip = true;
         Assert.Equal(
             new[]
             {
-                "restore", "--job", "Daily Docs", "--snapshot", "abc123", "--into", "NEW", "--no-progress",
-                "--destination", "/tmp/out", "--include", "reports",
+                "restore", "--job", "Daily Docs", "--snapshot", "abc123", "--into", "ZIP", "--no-progress",
+                "--destination", "/tmp/out",
             },
-            arguments);
-        Assert.DoesNotContain("--yes-replace", arguments);
+            restore.BuildArguments("Daily Docs", "abc123"));
     }
 
     [Fact]

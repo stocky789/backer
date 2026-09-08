@@ -13,8 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
-from backer.backends.base import BackupDestination
-from backer.backends.kopia import KopiaBackend
+from backer.backends.base import BackendBase, BackupDestination
 from backer.backends.s3 import parse_s3_config
 from backer.core import keystore
 from backer.core.config import BackerConfig, RepositoryConfig
@@ -58,21 +57,16 @@ def _format(record: RepositoryConfig) -> str:
     repository_format = getattr(record, "format", "kopia")
     if repository_format not in {"kopia", "files"}:
         raise ValueError(f"Unsupported repository format: {repository_format}")
-    if repository_format == "files" and record.type == "s3":
-        raise ValueError("Files repositories do not support S3 storage")
     return repository_format
 
 
 def _backend(
     record: RepositoryConfig, passphrase: str = "", storage: dict[str, str] | str | None = None
-) -> KopiaBackend:
-    if _format(record) == "files":
-        from backer.backends.files import FilesBackend
-
-        # `id` is the local config key. Only the durable identity discovered
-        # from storage may be compared with the marker during later operations.
-        return FilesBackend({"repository_id": record.unique_id})
-    config: dict[str, object] = {"repository_password": passphrase}
+) -> BackendBase:
+    repository_format = _format(record)
+    config: dict[str, object] = (
+        {"repository_id": record.unique_id} if repository_format == "files" else {"repository_password": passphrase}
+    )
     if record.type == "s3":
         if not isinstance(storage, dict):
             raise ValueError("S3 storage credentials are required")
@@ -84,7 +78,21 @@ def _backend(
             "access_key_id": storage["access_key_id"],
             "secret_access_key": storage["secret_access_key"],
         }
-    return KopiaBackend(config)
+    from backer.backends.registry import get_backend
+
+    return get_backend(repository_format, config)
+
+
+def _job_destination(record: RepositoryConfig, job_name: str) -> str:
+    destination = _destination(record)
+    if _format(record) != "files":
+        return destination
+    from backer.core.paths import get_job_subfolder
+
+    subfolder = get_job_subfolder(job_name)
+    if record.type == "s3":
+        return f"{destination}/Agents/{subfolder}"
+    return str(Path(destination) / "Agents" / subfolder)
 
 
 def probe(
@@ -188,14 +196,21 @@ def destroy_smb_repository(record: RepositoryConfig, passphrase: str, storage: s
         share_root = target
         for _ in parts:
             share_root = share_root.parent
-        if not target.exists() or not target.is_dir():
-            raise ValueError("Repository directory is missing; nothing was deleted")
         if target.is_symlink() or (hasattr(target, "is_junction") and target.is_junction()):
             raise ValueError("Repository directory is a link; refusing to delete storage")
         resolved_root = share_root.resolve(strict=True)
-        resolved_target = target.resolve(strict=True)
+        resolved_target = target.resolve()
         if resolved_target == resolved_root or resolved_root not in resolved_target.parents:
             raise ValueError("Repository directory escapes the SMB share; refusing to delete storage")
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            # Confirm the share is reachable before forgetting an already-removed folder.
+            with os.scandir(share_root) as entries:
+                next(entries, None)
+            return
+        if not target.is_dir():
+            raise ValueError("Repository path is not a directory; nothing was deleted")
 
         status, unique_id, message = probe(operation_record, passphrase, storage)
         if status != "present":
@@ -209,17 +224,16 @@ def destroy_smb_repository(record: RepositoryConfig, passphrase: str, storage: s
 
 
 def destroy_s3_repository(record: RepositoryConfig, passphrase: str, storage: dict[str, str] | None) -> None:
-    """Permanently remove every object under a verified Kopia S3 repository prefix."""
+    """Remove a verified Kopia S3 repository's prefix, or dedicated bucket contents."""
     if _format(record) != "kopia":
         raise ValueError("Files repository storage deletion is not supported; nothing was deleted")
     prefix = (record.prefix or "").strip("/")
     if (
         record.type != "s3"
-        or not prefix
         or "\0" in prefix
-        or any(part in ("", ".", "..") for part in prefix.split("/"))
+        or (prefix and any(part in ("", ".", "..") for part in prefix.split("/")))
     ):
-        raise ValueError("Storage deletion requires a non-root S3 repository prefix")
+        raise ValueError("Invalid S3 repository prefix; refusing to delete storage")
     if not record.unique_id:
         raise ValueError("Repository identity is missing; refusing to delete storage")
     if not isinstance(storage, dict):

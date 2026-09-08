@@ -696,11 +696,12 @@ def _build_backup_command_payload(
     repository_format = repo.get("format", "kopia")
     if repository_format not in {"kopia", "files"}:
         raise ValueError("Unsupported repository format")
-    if repository_format == "files" and repo_type not in {"local", "smb"}:
-        raise ValueError("Files repositories support local and SMB storage only")
+    if repository_format == "files" and repo_type not in {"local", "smb", "s3"}:
+        raise ValueError("Files repositories support local, SMB, and S3 storage only")
     if repository_format == "files" and repo_type != "local" and client_id:
         client = storage.get_client(client_id)
-        if not client or "files-repository-v1" not in client.capabilities:
+        capability = "files-s3-repository-v1" if repo_type == "s3" else "files-repository-v1"
+        if not client or capability not in client.capabilities:
             raise ValueError("Agent does not support files repositories")
     if is_android_client and repo_type != "local":
         raise ValueError("Android agents support local repositories only")
@@ -766,6 +767,8 @@ def _build_backup_command_payload(
             **(storage.get_repository_provider_credentials(repository_id) or {}),
         }
         payload["destination_path"] = kopia_s3_config(s3)["repository"]
+        if repository_format == "files":
+            payload["destination_path"] += f"/Agents/{job_subfolder}"
         payload["repository_options"]["s3"] = s3
     else:
         raise ValueError(f"Unsupported repository type: {repo_type}")
@@ -788,15 +791,16 @@ def _validate_job_config(config: dict[str, Any], storage: Storage) -> None:
         repository_format = repo.get("format", "kopia")
         if repository_format not in {"kopia", "files"}:
             raise HTTPException(status_code=400, detail="Unsupported repository format")
-        if repository_format == "files" and repo_type not in {"local", "smb"}:
-            raise HTTPException(status_code=400, detail="Files repositories support local and SMB storage only")
+        if repository_format == "files" and repo_type not in {"local", "smb", "s3"}:
+            raise HTTPException(status_code=400, detail="Files repositories support local, SMB, and S3 storage only")
     if client_id := config.get("client_id"):
         client = storage.get_client(client_id)
         if client and (client.os_info or "").lower().startswith("android"):
             if repo_type != "local":
                 raise HTTPException(status_code=400, detail="Android agents support local repositories only")
         if repo and repo.get("format", "kopia") == "files" and repo_type != "local":
-            if not client or "files-repository-v1" not in client.capabilities:
+            capability = "files-s3-repository-v1" if repo_type == "s3" else "files-repository-v1"
+            if not client or capability not in client.capabilities:
                 raise HTTPException(status_code=400, detail="Agent does not support files repositories")
 
 
@@ -4516,6 +4520,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             }
             s3_config = kopia_s3_config(s3)
             command_payload["source_path"] = s3_config["repository"]
+            if repository_format == "files":
+                command_payload["source_path"] += f"/Agents/{job_subfolder}"
             command_payload["repository_options"]["s3"] = s3
 
         storage.queue_command(
@@ -4765,8 +4771,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         repository_format = data.get("format", "kopia")
         if repository_format not in {"kopia", "files"}:
             raise HTTPException(status_code=400, detail="Unsupported repository format")
-        if repository_format == "files" and repo_type not in {"local", "smb"}:
-            raise HTTPException(status_code=400, detail="Files repositories support local and SMB storage only")
+        if repository_format == "files" and repo_type not in {"local", "smb", "s3"}:
+            raise HTTPException(status_code=400, detail="Files repositories support local, SMB, and S3 storage only")
         if repository_format == "files" and repo_type == "smb":
             if not data.get("server") or not data.get("share"):
                 raise HTTPException(status_code=400, detail="Files SMB repositories require server and share")
@@ -4935,6 +4941,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 storage.delete_repository(repo_id)
                 raise HTTPException(status_code=400, detail=f"Repository initialization failed: {error}") from error
 
+        elif repo_type == "s3" and repository_format == "files":
+            try:
+                from backer.backends.base import BackupDestination
+                from backer.backends.s3_files import S3FilesBackend
+
+                initialized = S3FilesBackend({"repository_id": repo_id, "s3": data["s3"]}).init_repo(
+                    BackupDestination(path=s3["repository"])
+                )
+                if not initialized.success:
+                    raise RuntimeError("; ".join(initialized.errors) or "Repository initialization failed")
+            except Exception as error:
+                storage.delete_repository(repo_id)
+                raise HTTPException(status_code=400, detail=f"Repository initialization failed: {error}") from error
+
         # Auto-trigger test and scan for better UX
         test_task_id = None
         scan_task_id = None
@@ -5069,7 +5089,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         **repo.get("config", {}).get("s3", {}),
                         **(storage.get_repository_provider_credentials(repo_id) or {}),
                     }
-                    success, message = KopiaBackend({"repository_password": password, "s3": s3}).test_connection(
+                    if repo.get("format", "kopia") == "files":
+                        from backer.backends.s3_files import S3FilesBackend
+
+                        backend = S3FilesBackend({"repository_id": repo_id, "s3": s3})
+                    else:
+                        backend = KopiaBackend({"repository_password": password, "s3": s3})
+                    success, message = backend.test_connection(
                         BackupDestination(path=kopia_s3_config(s3)["repository"])
                     )
                 else:

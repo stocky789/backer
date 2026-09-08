@@ -342,10 +342,9 @@ def test_repo_add_files_initializes_and_attaches_without_a_passphrase(monkeypatc
     "arguments, message",
     [
         (["--passphrase-stdin"], "do not use passphrases"),
-        (["--type", "s3"], "do not support S3"),
     ],
 )
-def test_repo_add_files_rejects_passphrases_and_s3(tmp_path, arguments, message):
+def test_repo_add_files_rejects_passphrases(tmp_path, arguments, message):
     repository = tmp_path / "repository"
     result = CliRunner().invoke(
         main,
@@ -838,16 +837,78 @@ def test_restore_dry_merge_never_creates_its_target(tmp_path):
     assert not target.exists()
 
 
-def test_restore_refuses_repository_containment_in_both_directions(tmp_path):
+@pytest.mark.parametrize("into", ["NEW", "MERGE", "REPLACE", "ORIGINAL", "ZIP"])
+def test_restore_refuses_repository_containment_in_both_directions(tmp_path, into):
     from backer.cli import _restore_prepare_destination
 
     repository = tmp_path / "repository"
     repository.mkdir()
     config = type("Config", (), {"repositories": {}})()
     with pytest.raises(click.ClickException, match="will not restore"):
-        _restore_prepare_destination(repository / "restore", "NEW", config=config, repository_paths=(repository,))
+        _restore_prepare_destination(repository / "restore", into, config=config, repository_paths=(repository,))
     with pytest.raises(click.ClickException, match="will not restore"):
-        _restore_prepare_destination(tmp_path, "NEW", config=config, repository_paths=(repository,))
+        _restore_prepare_destination(tmp_path, into, config=config, repository_paths=(repository,))
+
+
+def test_restore_zip_preserves_links_and_cleans_up_cancelled_archives(tmp_path, monkeypatch):
+    import stat
+    from zipfile import ZipFile
+
+    from backer.cli import _write_restore_zip
+
+    source = tmp_path / "restored"
+    source.mkdir()
+    (source / "keep.txt").write_text("backup", encoding="utf-8")
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside the backup", encoding="utf-8")
+    try:
+        (source / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    destination = tmp_path / "restore.zip"
+    _write_restore_zip(source, destination)
+    with ZipFile(destination) as archive:
+        assert set(archive.namelist()) == {"keep.txt", "link"}
+        assert stat.S_ISLNK(archive.getinfo("link").external_attr >> 16)
+        assert archive.read("link") == str(outside).encode("utf-8")
+        assert archive.read("keep.txt") == b"backup"
+    saved = destination.read_bytes()
+    with pytest.raises(FileExistsError):
+        _write_restore_zip(source, destination)
+    assert destination.read_bytes() == saved
+
+    def cancel(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ZipFile, "write", cancel)
+    partial = tmp_path / "partial.zip"
+    with pytest.raises(KeyboardInterrupt):
+        _write_restore_zip(source, partial)
+    assert not partial.exists()
+
+
+def test_restore_zip_refuses_unreadable_directories(tmp_path, monkeypatch):
+    import os
+
+    from backer.cli import _write_restore_zip
+
+    source = tmp_path / "restored"
+    unreadable = source / "unreadable"
+    unreadable.mkdir(parents=True)
+    (unreadable / "keep.txt").write_text("backup", encoding="utf-8")
+    scandir = os.scandir
+
+    def denied(path):
+        if path == str(unreadable) or path == unreadable:
+            raise PermissionError("cannot read restored directory")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    destination = tmp_path / "restore.zip"
+    with pytest.raises(PermissionError, match="cannot read restored directory"):
+        _write_restore_zip(source, destination)
+    assert not destination.exists()
 
 
 def test_status_message_maps_known_kopia_failure():
@@ -1126,3 +1187,38 @@ def test_repo_adopt_s3_without_a_prefix_reports_cleanly(monkeypatch, tmp_path: P
     assert result.exception is None
     assert fetched == [".backer/jobs/nightly/config.json"]
     assert json.loads(result.output) == {"adopted": ["nightly"], "warnings": [], "failures": {}}
+
+
+def test_repo_add_files_s3_needs_only_storage_credentials(monkeypatch, tmp_path):
+    captured = []
+
+    def add_repository(config, config_path, name, record, passphrase, **kwargs):
+        captured.append((record, passphrase, kwargs["storage"]))
+        return "repo-id", "none"
+
+    monkeypatch.setattr("backer.serverless.repositories.add_repository", add_repository)
+    result = CliRunner().invoke(
+        main,
+        [
+            "--config", str(tmp_path / "config.yaml"), "repo", "add", "plain-s3", "--init",
+            "--format", "files", "--type", "s3", "--bucket", "backups", "--prefix", "plain",
+            "--endpoint", "https://s3.example.test", "--region", "us-east-1",
+            "--access-key-id", "access", "--secret-key-stdin", "--headless",
+        ],
+        input="secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    record, passphrase, storage = captured[0]
+    assert record.format == "files" and record.type == "s3"
+    assert passphrase == ""
+    assert storage == {"access_key_id": "access", "secret_access_key": "secret"}
+
+
+def test_files_s3_job_destinations_preserve_url_and_prefix():
+    from backer.cli import _job_repository_destination
+    from backer.core.config import RepositoryConfig
+    from backer.serverless.repositories import _job_destination
+
+    record = RepositoryConfig(name="plain", type="s3", format="files", bucket="backups", prefix="folder/plain")
+    assert _job_destination(record, "daily") == "s3://backups/folder/plain/Agents/daily"
+    assert _job_repository_destination(record, "daily") == _job_destination(record, "daily")

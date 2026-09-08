@@ -180,7 +180,7 @@ class FilesBackend(BackendBase):
             raise FileNotFoundError(f"Source path does not exist: {root}")
         if root == root.parent:
             raise ValueError("Backing up a filesystem root is not supported")
-        if os.path.commonpath([str(root), str(repo)]) in {str(root), str(repo)}:
+        if root == repo or root in repo.parents or repo in root.parents:
             raise ValueError("Source and repository must not overlap")
         if root.is_file():
             if not self._is_link(root):
@@ -437,7 +437,7 @@ class FilesBackend(BackendBase):
             self._no_symlink(destination)
             if destination.exists() and not destination.is_dir():
                 raise ValueError("Restore destination is not a directory")
-            if os.path.commonpath([str(repo), str(destination)]) in {str(repo), str(destination)}:
+            if repo == destination or repo in destination.parents or destination in repo.parents:
                 raise ValueError("Repository and restore destination must not overlap")
             selected_rows = [
                 row

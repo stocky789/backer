@@ -388,7 +388,6 @@ public sealed partial class RepositoryViewModel : ViewModelBase
 
     private string? DetailProblem() => RepositoryType switch
     {
-        "s3" when IsFiles => "Unencrypted files repositories support local folders and SMB shares, not S3.",
         "local" when Path.Trim().Length == 0 => "Choose a folder for the repository.",
         "smb" when Host.Trim().Length == 0 || Username.Trim().Length == 0 || Password.Length == 0 =>
             "File server credentials are required.",

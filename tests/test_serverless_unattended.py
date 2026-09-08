@@ -476,10 +476,9 @@ def test_s3_sidecar_wipe_deletes_prefix_objects_and_paginates(monkeypatch) -> No
                 b"<ListBucketResult>"
                 b"<IsTruncated>true</IsTruncated>"
                 b"<NextContinuationToken>tok</NextContinuationToken>"
-                b"<Contents><Key>repo/a</Key></Contents>"
+                b"<Contents><Key>repokopia.repository</Key></Contents>"
                 b"</ListBucketResult>",
             ),
-            _S3Response(204),
             _S3Response(
                 200,
                 b"<ListBucketResult>"
@@ -487,7 +486,6 @@ def test_s3_sidecar_wipe_deletes_prefix_objects_and_paginates(monkeypatch) -> No
                 b"<Contents><Key>repo/b</Key></Contents>"
                 b"</ListBucketResult>",
             ),
-            _S3Response(204),
         ]
     )
 
@@ -496,7 +494,7 @@ def test_s3_sidecar_wipe_deletes_prefix_objects_and_paginates(monkeypatch) -> No
             listed.append(url)
         if method == "DELETE":
             deleted.append(url)
-        return next(pages)
+        return next(pages) if method == "GET" else _S3Response(204)
 
     monkeypatch.setattr("backer.serverless.s3_sidecar.requests.request", request)
     S3Sidecar(
@@ -505,23 +503,119 @@ def test_s3_sidecar_wipe_deletes_prefix_objects_and_paginates(monkeypatch) -> No
     ).wipe()
 
     assert listed == [
-        "https://s3.example/bucket?list-type=2&prefix=repo%2F",
-        "https://s3.example/bucket?continuation-token=tok&list-type=2&prefix=repo%2F",
+        "https://s3.example/bucket?list-type=2&prefix=repo",
+        "https://s3.example/bucket?continuation-token=tok&list-type=2&prefix=repo",
     ]
     assert deleted == [
-        "https://s3.example/bucket/repo/a",
         "https://s3.example/bucket/repo/b",
+        "https://s3.example/bucket/repokopia.repository",
     ]
 
 
-def test_s3_sidecar_wipe_refuses_bucket_root() -> None:
+def test_s3_sidecar_wipe_refuses_listed_key_outside_prefix(monkeypatch) -> None:
     from backer.serverless.s3_sidecar import S3Sidecar
 
+    def request(method, _url, **_kwargs):
+        assert method == "GET", "Deleted an object outside the repository prefix"
+        return _S3Response(
+            200, b"<ListBucketResult><Contents><Key>another-repo/data</Key></Contents></ListBucketResult>"
+        )
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.requests.request", request)
+    sidecar = S3Sidecar(
+        {"bucket": "bucket", "prefix": "repo", "endpoint": "https://s3.example"},
+        {"access_key_id": "access", "secret_access_key": "storage-secret"},
+    )
+    with pytest.raises(ValueError, match="escapes the repository prefix"):
+        sidecar.wipe()
+
+
+def test_s3_sidecar_wipe_deletes_exact_bucket_root_keys_and_paginates(monkeypatch) -> None:
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    calls = []
+    pages = iter(
+        [
+            _S3Response(
+                200,
+                b"<ListBucketResult><IsTruncated>true</IsTruncated>"
+                b"<NextContinuationToken>next</NextContinuationToken>"
+                b"<Contents><Key>kopia.repository</Key></Contents>"
+                b"<Contents><Key>/leading</Key></Contents>"
+                b"<Contents><Key>trailing/</Key></Contents></ListBucketResult>",
+            ),
+            _S3Response(
+                200,
+                b"<ListBucketResult><IsTruncated>false</IsTruncated>"
+                b"<Contents><Key>nested/a file</Key></Contents></ListBucketResult>",
+            ),
+        ]
+    )
+
+    def request(method, url, **_kwargs):
+        calls.append((method, url))
+        return next(pages) if method == "GET" else _S3Response(204)
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.requests.request", request)
     sidecar = S3Sidecar(
         {"bucket": "bucket", "prefix": "", "endpoint": "https://s3.example"},
         {"access_key_id": "access", "secret_access_key": "storage-secret"},
     )
-    with pytest.raises(ValueError, match="non-root S3 repository prefix"):
+    sidecar.wipe()
+
+    assert calls == [
+        ("GET", "https://s3.example/bucket?list-type=2&prefix="),
+        ("DELETE", "https://s3.example/bucket//leading"),
+        ("DELETE", "https://s3.example/bucket/trailing/"),
+        ("GET", "https://s3.example/bucket?continuation-token=next&list-type=2&prefix="),
+        ("DELETE", "https://s3.example/bucket/nested/a%20file"),
+        ("DELETE", "https://s3.example/bucket/kopia.repository"),
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "repo"])
+def test_s3_sidecar_wipe_retains_identity_after_deletion_failure(monkeypatch, prefix) -> None:
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    deleted = []
+
+    def request(method, url, **_kwargs):
+        if method == "GET":
+            return _S3Response(
+                200,
+                (
+                    f"<ListBucketResult><Contents><Key>{prefix}kopia.repository</Key></Contents>"
+                    f"<Contents><Key>{prefix}p123</Key></Contents></ListBucketResult>"
+                ).encode(),
+            )
+        deleted.append(url)
+        return _S3Response(500)
+
+    monkeypatch.setattr("backer.serverless.s3_sidecar.requests.request", request)
+    sidecar = S3Sidecar(
+        {"bucket": "bucket", "prefix": prefix, "endpoint": "https://s3.example"},
+        {"access_key_id": "access", "secret_access_key": "storage-secret"},
+    )
+    with pytest.raises(RuntimeError, match="500"):
+        sidecar.wipe()
+    assert deleted == [f"https://s3.example/bucket/{prefix}p123"]
+
+
+@pytest.mark.parametrize("prefix", ["", "repo"])
+def test_s3_sidecar_wipe_rejects_incomplete_listing(monkeypatch, prefix) -> None:
+    from backer.serverless.s3_sidecar import S3Sidecar
+
+    monkeypatch.setattr(
+        "backer.serverless.s3_sidecar.requests.request",
+        lambda *_args, **_kwargs: _S3Response(
+            200, b"<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>"
+        ),
+    )
+    sidecar = S3Sidecar(
+        {"bucket": "bucket", "prefix": prefix, "endpoint": "https://s3.example"},
+        {"access_key_id": "access", "secret_access_key": "storage-secret"},
+    )
+    with pytest.raises(ValueError, match="listing was incomplete"):
         sidecar.wipe()
 
 
@@ -551,7 +645,7 @@ def test_s3_sidecar_lists_and_gets_without_putting_secrets_in_urls(monkeypatch) 
 
     assert sidecar.list(".backer/jobs/") == ["prefix/.backer/jobs/a/config.json"]
     assert sidecar.get(".backer/jobs/missing.json") is None
-    assert requests[0] == ("GET", "https://s3.example/bucket?list-type=2&prefix=prefix%2F.backer%2Fjobs")
+    assert requests[0] == ("GET", "https://s3.example/bucket?list-type=2&prefix=prefix%2F.backer%2Fjobs%2F")
     assert [method for method, _ in requests] == ["GET", "GET"]
     assert all("storage-secret" not in url and "access" not in url for _, url in requests)
 

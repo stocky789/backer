@@ -28,6 +28,9 @@ public sealed class SnapshotRow
     public string Path => Paths.Count > 0 ? Paths[0] : "";
 
     public string HumanSize => HomeViewModel.HumanSize(Size);
+
+    public string DisplayTime => DateTimeOffset.TryParse(Timestamp, out var time)
+        ? time.ToLocalTime().ToString("d MMM yyyy, h:mm tt") : Timestamp ?? "Unknown date";
 }
 
 public sealed partial class RestoreViewModel : ViewModelBase
@@ -36,6 +39,7 @@ public sealed partial class RestoreViewModel : ViewModelBase
     private readonly MainWindowViewModel? _shell;
 
     private CancellationTokenSource? _cancellation;
+    private int _snapshotGeneration;
 
     public RestoreViewModel(AppServices services, MainWindowViewModel? shell = null)
     {
@@ -49,8 +53,6 @@ public sealed partial class RestoreViewModel : ViewModelBase
 
     public ObservableCollection<SnapshotRow> Snapshots { get; } = new();
 
-    public IReadOnlyList<string> Modes { get; } = new[] { "NEW", "MERGE", "REPLACE" };
-
     [ObservableProperty]
     private string? _selectedJobName;
 
@@ -58,14 +60,28 @@ public sealed partial class RestoreViewModel : ViewModelBase
     private SnapshotRow? _selectedSnapshot;
 
     [ObservableProperty]
-    private string _mode = "NEW";
+    [NotifyPropertyChangedFor(nameof(RestoreOriginal), nameof(RestoreAction))]
+    private bool _saveAsZip;
+
+    public bool RestoreOriginal
+    {
+        get => !SaveAsZip;
+        set => SaveAsZip = !value;
+    }
+
+    public string RestoreAction => SaveAsZip ? "Save ZIP" : "Restore files";
+
+    [ObservableProperty]
+    private string _originalLocation = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasRestoredPath))]
+    private string _restoredPath = "";
+
+    public bool HasRestoredPath => RestoredPath.Length > 0;
 
     [ObservableProperty]
     private string _destination = "";
-
-    /// <summary>Folder inside the snapshot; empty restores everything.</summary>
-    [ObservableProperty]
-    private string _include = "";
 
     [ObservableProperty]
     private string _statusText = "Choose a local job.";
@@ -74,7 +90,13 @@ public sealed partial class RestoreViewModel : ViewModelBase
     private bool _busy;
 
     [ObservableProperty]
+    private bool _restoring;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasDetails))]
     private string _detail = "";
+
+    public bool HasDetails => Detail.Length > 0;
 
     /// <summary>The last restore failed: the copy-error and open-log actions become available.</summary>
     [ObservableProperty]
@@ -95,7 +117,29 @@ public sealed partial class RestoreViewModel : ViewModelBase
 
     partial void OnDestinationChanged(string value) => ResetProtectedDestination();
 
-    partial void OnModeChanged(string value) => ResetProtectedDestination();
+    partial void OnSaveAsZipChanged(bool value) => ResetProtectedDestination();
+
+    partial void OnSelectedJobNameChanged(string? value)
+    {
+        ResetProtectedDestination();
+        RestoredPath = "";
+        OriginalLocation = "";
+        if (value is not null)
+        {
+            try
+            {
+                if (_services.Config.Load().Jobs.TryGetValue(value, out var job))
+                {
+                    OriginalLocation = job.Source?.Path ?? "";
+                }
+            }
+            catch (Exception error)
+            {
+                _services.Status.Set(error.Message, error: true);
+            }
+        }
+        _ = LoadSnapshotsAsync();
+    }
 
     private void ResetProtectedDestination()
     {
@@ -126,8 +170,17 @@ public sealed partial class RestoreViewModel : ViewModelBase
     public void Start(string jobName)
     {
         ReloadJobs();
-        SelectedJobName = jobName;
-        _ = LoadSnapshotsAsync();
+        if (SelectedJobName == jobName)
+        {
+            if (!Busy)
+            {
+                _ = LoadSnapshotsAsync();
+            }
+        }
+        else
+        {
+            SelectedJobName = jobName;
+        }
     }
 
     private void ReloadJobs()
@@ -145,34 +198,45 @@ public sealed partial class RestoreViewModel : ViewModelBase
         {
             _services.Status.Set(error.Message, error: true);
         }
-        SelectedJobName = JobNames.Contains(selected ?? "") ? selected : null;
+        SelectedJobName = JobNames.Contains(selected ?? "") ? selected
+            : JobNames.Count == 1 ? JobNames[0] : null;
     }
 
     [RelayCommand]
     public async Task LoadSnapshotsAsync()
     {
-        if (SelectedJobName is not { } job)
-        {
-            return;
-        }
+        var generation = ++_snapshotGeneration;
         Snapshots.Clear();
         SelectedSnapshot = null;
+        if (SelectedJobName is not { } job)
+        {
+            Busy = false;
+            return;
+        }
         Busy = true;
         StatusText = "Checking the repository and loading snapshots…";
         var result = await _services.Cli.RunAsync(new[] { "snapshots", job, "--json" });
+        if (generation != _snapshotGeneration)
+        {
+            return;
+        }
         Busy = false;
         if (!result.Ok)
         {
-            StatusText = result.FailureText;
-            _services.Status.Set(result.FailureText, error: true);
+            Detail = result.FailureText;
+            Failed = true;
+            StatusText = "Could not load backups. See Details for the error.";
+            _services.Status.Set(StatusText, error: true);
             return;
         }
-        foreach (var row in result.Json<List<SnapshotRow>>() ?? new List<SnapshotRow>())
+        foreach (var row in (result.Json<List<SnapshotRow>>() ?? new List<SnapshotRow>())
+            .OrderByDescending(row => DateTimeOffset.TryParse(row.Timestamp, out var time) ? time : DateTimeOffset.MinValue))
         {
             Snapshots.Add(row);
         }
+        SelectedSnapshot = Snapshots.FirstOrDefault();
         StatusText = Snapshots.Count > 0
-            ? "Select a snapshot and a restore destination."
+            ? "Latest backup selected. Choose an earlier backup if needed."
             : "No snapshots found; the repository was checked.";
     }
 
@@ -189,29 +253,31 @@ public sealed partial class RestoreViewModel : ViewModelBase
     [RelayCommand]
     public async Task RestoreAsync()
     {
+        if (Busy)
+        {
+            return;
+        }
         if (SelectedJobName is not { } job || SelectedSnapshot is null)
         {
             StatusText = "Select a snapshot first.";
             return;
         }
-        if (Destination.Trim().Length == 0 && Mode != "NEW")
+        if (SaveAsZip && Destination.Trim().Length == 0)
         {
-            StatusText = "Choose a restore destination.";
+            StatusText = "Choose a folder for the ZIP file.";
             return;
         }
 
         var arguments = BuildArguments(job, SelectedSnapshot.Selector);
         Busy = true;
+        Restoring = true;
         Failed = false;
+        Detail = "";
+        RestoredPath = "";
         _cancellation = new CancellationTokenSource();
         try
         {
-            if (Mode == "REPLACE" && !await ConfirmReplaceAsync(arguments))
-            {
-                StatusText = "Restore cancelled; the destination is unchanged.";
-                return;
-            }
-            StatusText = "Restoring…";
+            StatusText = SaveAsZip ? "Preparing ZIP file…" : "Restoring files to their original location…";
             var result = await _services.Cli.RunAsync(arguments, cancellationToken: _cancellation.Token);
             if (result.Cancelled)
             {
@@ -221,71 +287,42 @@ public sealed partial class RestoreViewModel : ViewModelBase
             else if (result.Ok)
             {
                 Detail = result.Stdout.Trim();
-                StatusText = "Restore completed";
+                const string completed = "Restore completed to ";
+                StatusText = Detail.Split('\n').Select(line => line.Trim())
+                    .LastOrDefault(line => line.StartsWith(completed, StringComparison.Ordinal)) ?? "Restore completed";
+                RestoredPath = StatusText.StartsWith(completed, StringComparison.Ordinal)
+                    ? StatusText[completed.Length..] : "";
                 _services.Status.Set(StatusText);
             }
             else
             {
                 Detail = result.FailureText;
                 Failed = true;
-                _services.Status.Set(result.FailureText, error: true);
                 StatusText = TryOfferProtectedDestination(result.FailureText)
                     ? "That folder is protected. Tick the confirmation below to restore into it anyway."
-                    : result.FailureText;
+                    : "Restore failed. See Details for the error.";
+                _services.Status.Set(StatusText, error: true);
             }
         }
         finally
         {
             Busy = false;
+            Restoring = false;
+            _cancellation.Dispose();
+            _cancellation = null;
         }
-    }
-
-    /// <summary>
-    /// REPLACE moves whatever is in the destination aside, so it is shown as a dry run first
-    /// and then gated on a typed confirmation. No restore runs without both.
-    /// </summary>
-    private async Task<bool> ConfirmReplaceAsync(IReadOnlyList<string> arguments)
-    {
-        StatusText = "Checking what would be replaced…";
-        var preview = await _services.Cli.RunAsync(
-            arguments.Concat(new[] { "--dry-run" }), cancellationToken: _cancellation!.Token);
-        if (!preview.Ok)
-        {
-            Detail = preview.FailureText;
-            _services.Status.Set(preview.FailureText, error: true);
-            StatusText = TryOfferProtectedDestination(preview.FailureText)
-                ? "That folder is protected. Tick the confirmation below to restore into it anyway."
-                : preview.FailureText;
-            return false;
-        }
-        Detail = preview.Stdout.Trim();
-        return await _services.Confirm(new ConfirmRequest(
-            "Overwrite the original folder",
-            preview.Stdout.Trim() + "\n\nWhat is in that folder now is moved aside first, then the snapshot is restored over it.",
-            "Restore over originals",
-            TypedConfirmation: "REPLACE"));
     }
 
     public IReadOnlyList<string> BuildArguments(string job, string snapshot)
     {
         var arguments = new List<string>
         {
-            "restore", "--job", job, "--snapshot", snapshot, "--into", Mode, "--no-progress",
+            "restore", "--job", job, "--snapshot", snapshot, "--into", SaveAsZip ? "ZIP" : "ORIGINAL", "--no-progress",
         };
-        if (Destination.Trim().Length > 0)
+        if (SaveAsZip && Destination.Trim().Length > 0)
         {
             arguments.Add("--destination");
             arguments.Add(Destination.Trim());
-        }
-        if (Include.Trim().Length > 0)
-        {
-            arguments.Add("--include");
-            arguments.Add(Include.Trim());
-        }
-        if (Mode == "REPLACE")
-        {
-            // The flag carries the confirmation the GUI already collected (non-TTY child process).
-            arguments.Add("--yes-replace");
         }
         if (RestoreIntoProtectedFolder && _protectedPath is not null)
         {
@@ -294,6 +331,20 @@ public sealed partial class RestoreViewModel : ViewModelBase
             arguments.Add(_protectedPath);
         }
         return arguments;
+    }
+
+    [RelayCommand]
+    public void OpenRestoredLocation()
+    {
+        if (HasRestoredPath)
+        {
+            var folder = System.IO.File.Exists(RestoredPath)
+                ? System.IO.Path.GetDirectoryName(RestoredPath) : RestoredPath;
+            if (folder is not null)
+            {
+                _services.OpenFolder(folder);
+            }
+        }
     }
 
     [RelayCommand]

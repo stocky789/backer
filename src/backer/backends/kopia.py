@@ -1000,6 +1000,7 @@ class KopiaBackend(BackendBase):
                 "snapshot",
                 "restore",
                 "--progress",
+                "--write-files-atomically",
                 "--overwrite-files",
                 "--overwrite-directories",
                 "--overwrite-symlinks",
@@ -1023,7 +1024,10 @@ class KopiaBackend(BackendBase):
 
             errors = []
             if result.returncode != 0:
-                errors = [line for line in result.stderr.split("\n") if line.strip()]
+                # Kopia can append its failure directly to a carriage-return progress frame.
+                _, marker, cause = result.stderr.partition("error restoring:")
+                error_output = marker + cause if marker else result.stderr
+                errors = [line for line in error_output.split("\n") if line.strip()]
 
             return BackendResult(
                 success=result.returncode == 0,

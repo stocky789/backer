@@ -334,7 +334,7 @@ class AgentService:
                 data={
                     "client_id": self.client_id,
                     "status": "online",
-                    "capabilities": ["files-repository-v1"],
+                    "capabilities": ["files-repository-v1", "files-s3-repository-v1"],
                 },
                 timeout=35,  # Server waits up to 25s, so we need longer timeout
             )

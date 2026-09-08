@@ -327,5 +327,5 @@
   <Thickness x:Key="ViewPadding">32</Thickness>
   <Thickness x:Key="CardPadding">16</Thickness>
   <x:Double x:Key="FormColumnWidth">560</x:Double>
-  <x:Double x:Key="ControlContentThemeFontSize">13.5</x:Double>
+  <x:Double x:Key="ControlContentThemeFontSize">16</x:Double>
 </ResourceDictionary>

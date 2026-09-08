@@ -25,6 +25,10 @@ class BackendRegistry:
             raise ValueError(
                 f"Unknown backend type: {backend_type}. Available backends: {available}"
             )
+        if backend_type == BackendType.FILES and config and config.get("s3"):
+            from backer.backends.s3_files import S3FilesBackend
+
+            return S3FilesBackend(config)
         return _BACKENDS[backend_type](config)
 
     @classmethod

@@ -5,43 +5,43 @@
     every brush is a {DynamicResource} token, so both theme variants and the runtime
     App.ApplyTheme override keep working.
 
-    Type scale: view titles 22/SemiBold · section labels 12/Medium/muted/uppercase
-    · body 13.5 · captions 12/muted · logs monospace.
-    Spacing scale: 4 / 8 / 12 / 16 / 24 / 32. Corner radius 6. Buttons 34 high.
+    Type scale: view titles 24/SemiBold · body and controls 16 · labels and captions 14.
+    Spacing scale: 4 / 8 / 12 / 16 / 24 / 32. Corner radius 6. Controls 40 high.
   -->
 
   <Style Selector="Window">
     <Setter Property="Background" Value="{DynamicResource BgBase}" />
     <Setter Property="Foreground" Value="{DynamicResource Text}" />
-    <Setter Property="FontSize" Value="13.5" />
+    <Setter Property="FontSize" Value="16" />
   </Style>
 
   <Style Selector="TextBlock, SelectableTextBlock">
-    <Setter Property="FontSize" Value="13.5" />
+    <Setter Property="FontSize" Value="16" />
     <Setter Property="Foreground" Value="{DynamicResource Text}" />
   </Style>
 
   <Style Selector="TextBlock.title, SelectableTextBlock.title">
-    <Setter Property="FontSize" Value="22" />
+    <Setter Property="FontSize" Value="24" />
     <Setter Property="FontWeight" Value="SemiBold" />
   </Style>
 
   <Style Selector="TextBlock.section">
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="14" />
     <Setter Property="FontWeight" Value="Medium" />
     <Setter Property="LetterSpacing" Value="0.5" />
     <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
   </Style>
 
   <Style Selector="TextBlock.column-header">
-    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontSize" Value="14" />
     <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="LetterSpacing" Value="0.6" />
     <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
   </Style>
 
   <Style Selector="TextBlock.caption, SelectableTextBlock.caption">
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="TextWrapping" Value="Wrap" />
     <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
   </Style>
 
@@ -75,7 +75,8 @@
   </Style>
 
   <Style Selector="Button">
-    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="MinHeight" Value="40" />
     <Setter Property="Padding" Value="14,0" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -120,7 +121,7 @@
   </Style>
 
   <Style Selector="Button.link">
-    <Setter Property="MinHeight" Value="24" />
+    <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="4,0" />
   </Style>
   <Style Selector="Button.link /template/ ContentPresenter#PART_ContentPresenter">
@@ -135,7 +136,8 @@
   </Style>
 
   <Style Selector="TextBox">
-    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="MinHeight" Value="40" />
     <Setter Property="Padding" Value="10,6" />
   </Style>
 
@@ -147,8 +149,18 @@
   </Style>
 
   <Style Selector="ComboBox">
-    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="MinHeight" Value="40" />
     <Setter Property="Padding" Value="10,0" />
+  </Style>
+
+  <Style Selector="CheckBox, RadioButton, ToggleSwitch, MenuItem">
+    <Setter Property="FontSize" Value="16" />
+  </Style>
+
+  <!-- Flyouts and tooltips live outside the scaled page's visual tree. -->
+  <Style Selector="Popup">
+    <Setter Property="InheritsTransform" Value="True" />
   </Style>
 
   <Style Selector="ListBox">

@@ -254,10 +254,21 @@ def _select_restore_snapshot(
 
 def _restore_execute(
     backend, source_path: str, destination: Path, selected: str, *, include: str | None,
-    original_source_path: str | None, progress: bool | None, passphrase: str
+    original_source_path: str | None, progress: bool | None, passphrase: str, into: str,
 ):
     """The one local restore execution path; callers only supply already-safe inputs."""
     try:
+        if into == "ZIP":
+            with TemporaryDirectory(prefix=".backer-restore-", dir=destination.parent) as temporary:
+                _restore_execute(
+                    backend, source_path, Path(temporary), selected, include=include,
+                    original_source_path=original_source_path, progress=progress, passphrase=passphrase, into="MERGE",
+                )
+                _write_restore_zip(Path(temporary), destination)
+            return None
+        if into in {"NEW", "MERGE", "ORIGINAL"}:
+            destination.mkdir(parents=True, exist_ok=into != "NEW")
+        moved = _replace_destination(destination) if into == "REPLACE" else None
         with _local_progress(progress) as render:
             result = backend.restore(
                 source=BackupDestination(source_path), destination=destination, snapshot=selected, include_path=include,
@@ -265,9 +276,43 @@ def _restore_execute(
             )
     except KeyboardInterrupt as error:
         raise click.exceptions.Exit(130) from error
+    except OSError as error:
+        raise click.ClickException(str(error)) from error
     if not result.success:
         raise click.ClickException(_redact_error(RuntimeError("; ".join(result.errors)), passphrase))
-    return result
+    return moved
+
+
+def _write_restore_zip(source: Path, destination: Path) -> None:
+    """Never overwrite an archive or follow restored links outside the staging tree."""
+    import stat
+    from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+
+    def fail_walk(error: OSError) -> None:
+        raise error
+
+    output = destination.open("xb")
+    completed = False
+    try:
+        with output, ZipFile(output, "w", compression=ZIP_DEFLATED, strict_timestamps=False) as archive:
+            for directory, dirs, names in os.walk(source, followlinks=False, onerror=fail_walk):
+                for name in dirs + names:
+                    path = Path(directory) / name
+                    relative = path.relative_to(source).as_posix()
+                    mode = path.lstat().st_mode
+                    if stat.S_ISLNK(mode):
+                        info = ZipInfo(relative)
+                        info.create_system = 3
+                        info.external_attr = mode << 16
+                        archive.writestr(info, os.readlink(path).encode("utf-8"))
+                    elif stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+                        archive.write(path, relative)
+                    else:
+                        raise click.ClickException(f"Cannot include special file in ZIP: {relative}")
+        completed = True
+    finally:
+        if not completed:
+            destination.unlink(missing_ok=True)
 
 
 def _stale_cutoff(cron: str, now) -> object:
@@ -944,7 +989,7 @@ def backup(
 @click.option("--access-key-id")
 @click.option("--secret-key-stdin", is_flag=True)
 @click.option("--secret-key-file", type=click.Path(path_type=Path))
-@click.option("--into", type=click.Choice(["NEW", "MERGE", "REPLACE"]), default=None)
+@click.option("--into", type=click.Choice(["ORIGINAL", "ZIP", "NEW", "MERGE", "REPLACE"]), default=None)
 @click.option("--destination", type=click.Path(path_type=Path))
 @click.option("--snapshot", "-s", help="Snapshot ID to restore")
 @click.option("--before")
@@ -1031,13 +1076,10 @@ def restore(
                     f"Dry run: would restore immutable snapshot {selected} to {destination}. Nothing was written"
                 )
                 return
-            if into in {"NEW", "MERGE"}:
-                destination.mkdir(parents=True, exist_ok=into == "MERGE")
-            moved = _replace_destination(destination) if into == "REPLACE" else None
-            _restore_execute(
+            moved = _restore_execute(
                 backend, source_path, destination, selected,
                 include=include, original_source_path=configured.source.path,
-                progress=progress, passphrase=passphrase,
+                progress=progress, passphrase=passphrase, into=into,
             )
         if moved:
             click.echo(f"What was in that folder was moved to {moved}")
@@ -1047,7 +1089,7 @@ def restore(
                     shutil.rmtree(moved)
                 except OSError as error:
                     click.echo(f"Warning: restored files are safe, but {moved} could not be removed: {error}")
-        click.echo("Restore completed")
+        click.echo(f"Restore completed to {destination.resolve()}")
         return
     if from_path:
         if passphrase_stdin and (password_stdin or secret_key_stdin):
@@ -1158,16 +1200,13 @@ def restore(
             required = next((item.get("size", 0) for item in rows if item.get("full_id") == selected), 0)
             if required and free < required:
                 raise click.ClickException("The destination does not have enough free space; nothing was changed")
-            if into in {"NEW", "MERGE"}:
-                destination.mkdir(parents=True, exist_ok=into == "MERGE")
-            moved = _replace_destination(destination) if into == "REPLACE" else None
-            _restore_execute(
+            moved = _restore_execute(
                 backend, from_path, destination, selected, include=include, original_source_path=original_path,
-                progress=progress, passphrase=passphrase,
+                progress=progress, passphrase=passphrase, into=into,
             )
             if moved:
                 click.echo(f"What was in that folder was moved to {moved}")
-            click.echo("Restore completed")
+            click.echo(f"Restore completed to {destination.resolve()}")
             click.echo("To keep using this repository: backer repo add NAME --attach, then backer job create")
             return
         finally:
@@ -1631,8 +1670,6 @@ def repo_add(
         if not _interactive() and not headless and (repository_format == "kopia" or repository_type == "smb"):
             raise click.UsageError("--headless is required when repo add is not run from a terminal")
         if repository_format == "files":
-            if repository_type == "s3":
-                raise click.UsageError("Files repositories do not support S3 storage")
             if any((passphrase_stdin, passphrase_file, generate_passphrase, passphrase_out, print_passphrase)):
                 raise click.UsageError("Files repositories do not use passphrases or recovery exports")
             passphrase = ""
@@ -1909,9 +1946,9 @@ def _repository_destination(record) -> str:
 def _job_repository_destination(record, job_name: str) -> str:
     if _repository_format(record) != "files":
         return _repository_destination(record)
-    from backer.core.paths import get_job_subfolder
+    from backer.serverless.repositories import _job_destination
 
-    return str(Path(_repository_destination(record)) / "Agents" / get_job_subfolder(job_name))
+    return _job_destination(record, job_name)
 
 
 def _restore_destination_allowed(
@@ -1983,7 +2020,25 @@ def _restore_destination_allowed(
 
 
 def _restore_target(destination: Path | None, into: str, original_source: Path | None = None) -> Path:
-    """Choose NEW's unique sibling without ever reusing a real directory."""
+    """Resolve the original folder or choose an unused NEW/ZIP destination."""
+    if into == "ORIGINAL":
+        if original_source is None:
+            raise click.UsageError("The snapshot does not identify an original source folder")
+        if destination is not None and destination.expanduser().resolve() != original_source.expanduser().resolve():
+            raise click.UsageError("ORIGINAL restores to the original source folder; omit --destination")
+        return original_source.expanduser()
+    if into == "ZIP":
+        if destination is None or destination.expanduser().is_symlink() or not destination.expanduser().is_dir():
+            raise click.UsageError("ZIP requires --destination to name an existing non-symlink folder")
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        name = original_source.name if original_source and original_source.name else "backup"
+        stem = f"{name} (restored {stamp})"
+        candidate = destination.expanduser() / f"{stem}.zip"
+        suffix = 2
+        while candidate.exists() or candidate.is_symlink():
+            candidate = destination.expanduser() / f"{stem}-{suffix}.zip"
+            suffix += 1
+        return candidate
     if destination is not None:
         return destination.expanduser()
     if into != "NEW" or original_source is None:
@@ -2009,16 +2064,16 @@ def _restore_prepare_destination(
     """Perform every non-destructive destination refusal before a restore starts."""
     destination = destination.expanduser()
     _restore_destination_allowed(destination, config, repository_paths, confirm_destination)
-    if into == "NEW":
-        if destination.exists():
-            raise click.ClickException("A NEW restore destination must not exist; nothing was changed")
+    if into in {"NEW", "ZIP"}:
+        if destination.exists() or destination.is_symlink():
+            raise click.ClickException(f"A {into} restore destination must not exist; nothing was changed")
         return None
-    if into == "MERGE":
+    if into in {"MERGE", "ORIGINAL"}:
         if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
             raise click.ClickException("Restore destination must be a non-symlink directory")
         return None
     if into != "REPLACE":
-        raise click.UsageError("--into must be NEW, MERGE, or REPLACE")
+        raise click.UsageError("--into must be ORIGINAL, ZIP, NEW, MERGE, or REPLACE")
     if not destination.exists():
         raise click.ClickException("REPLACE requires an existing destination; nothing was changed")
     if destination.is_symlink() or not destination.is_dir():
@@ -2247,9 +2302,16 @@ def repo_rm(
 @click.argument("name")
 @click.option("--yes", is_flag=True)
 @click.option("--confirm-name", help="Exact 'DELETE NAME' confirmation for permanent storage deletion")
+@click.option("--confirm-bucket", help="Bucket name, acknowledging deletion of ALL contents when no prefix is set")
 @click.pass_context
-def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | None) -> None:
-    """Permanently delete SMB/S3 repository storage, then remove local access."""
+def repo_destroy(
+    ctx: click.Context, name: str, yes: bool, confirm_name: str | None, confirm_bucket: str | None
+) -> None:
+    """Permanently delete SMB/S3 repository storage, then remove local access.
+
+    An S3 repository without a prefix uses a dedicated bucket: ALL objects in
+    that bucket are deleted, including unrelated files. The bucket itself stays.
+    """
     from backer.core import keystore
     from backer.core.config import load_config
     from backer.core.paths import get_data_dir, get_machine_config_dir
@@ -2266,9 +2328,19 @@ def repo_destroy(ctx: click.Context, name: str, yes: bool, confirm_name: str | N
         raise click.UsageError("--yes acknowledges permanent deletion of every backup in this repository")
     if confirm_name is None and not _interactive():
         raise click.UsageError(f"Repository deletion requires --confirm-name '{expected}' or an interactive prompt")
-    typed = confirm_name if confirm_name is not None else click.prompt(f"Type {expected} to permanently delete storage")
+    scope = (
+        f"ALL objects in bucket '{record.bucket}', including unrelated files"
+        if record.type == "s3" and not (record.prefix or "").strip("/")
+        else "repository storage"
+    )
+    typed = confirm_name if confirm_name is not None else click.prompt(f"Type {expected} to permanently delete {scope}")
     if typed != expected:
         raise click.ClickException("Confirmation did not match; nothing was deleted")
+    if record.type == "s3" and not (record.prefix or "").strip("/"):
+        if confirm_bucket != record.bucket:
+            raise click.UsageError(
+                f"--confirm-bucket {record.bucket} is required to delete ALL bucket contents, including unrelated files"
+            )
     if record.type not in {"smb", "s3"}:
         raise click.ClickException("Permanent storage deletion currently supports SMB and S3 repositories only")
     headless_timer = sys.platform != "win32" and Path("/etc/systemd/system/backer-local.timer").exists()

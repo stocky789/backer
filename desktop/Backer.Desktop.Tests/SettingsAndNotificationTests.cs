@@ -281,8 +281,10 @@ public sealed class SettingsAndNotificationTests : IDisposable
         Assert.Equal("repo destroy nas --yes --confirm-name DELETE nas", File.ReadAllLines(log)[0]);
     }
 
-    [Fact]
-    public async Task DeletingS3RepositoryDataWipesStorageWithoutARecoveryFolder()
+    [Theory]
+    [InlineData("desk")]
+    [InlineData("")]
+    public async Task DeletingS3RepositoryDataWipesStorageWithoutARecoveryFolder(string prefix)
     {
         var log = Path.Combine(_temp, "argv.log");
         var services = Services($"echo \"$*\" >> {log}\n");
@@ -297,7 +299,7 @@ public sealed class SettingsAndNotificationTests : IDisposable
                     Name = "cloud",
                     Type = "s3",
                     Bucket = "backups",
-                    Prefix = "desk",
+                    Prefix = prefix,
                     Endpoint = "https://s3.example",
                 },
             },
@@ -321,8 +323,19 @@ public sealed class SettingsAndNotificationTests : IDisposable
 
         Assert.False(opened);
         Assert.True(shown!.HoldToConfirm);
-        Assert.Contains("S3 prefix", shown.Body);
-        Assert.Equal("repo destroy cloud --yes --confirm-name DELETE cloud", File.ReadAllLines(log)[0]);
+        if (prefix.Length == 0)
+        {
+            Assert.Contains("bucket 'backups'", shown.Body);
+            Assert.Contains("including unrelated files", shown.Body);
+            Assert.Contains("The bucket itself stays", shown.Body);
+        }
+        else
+        {
+            Assert.Contains("S3 prefix", shown.Body);
+            Assert.DoesNotContain("including unrelated files", shown.Body);
+        }
+        Assert.Equal("repo destroy cloud --yes --confirm-name DELETE cloud"
+            + (prefix.Length == 0 ? " --confirm-bucket backups" : ""), File.ReadAllLines(log)[0]);
     }
 
     [Fact]
@@ -504,12 +517,12 @@ public sealed class SettingsAndNotificationTests : IDisposable
     }
 
     /// <summary>
-    /// The whole app may confirm exactly six irreversible actions — no more. Two of the six
+    /// The whole app may confirm exactly five irreversible actions — no more. Two of the five
     /// are parameterised and serve two prompts each (see desktop/README.md), so this pins the
     /// owning members rather than the titles: a count alone cannot notice a swap.
     /// </summary>
     [Fact]
-    public void ThereAreExactlySixConfirmationDialogs()
+    public void ThereAreExactlyFiveConfirmationDialogs()
     {
         var sites = new List<string>();
         foreach (var file in ClientSources())
@@ -530,7 +543,6 @@ public sealed class SettingsAndNotificationTests : IDisposable
             {
                 "HomeViewModel.RemoveAsync",                        // remove a backup job
                 "MainWindowViewModel.ConfirmInterruptAsync",        // quit during a run / update installer
-                "RestoreViewModel.ConfirmReplaceAsync",             // REPLACE restore, typed REPLACE
                 "SettingsViewModel.ConfirmStopAsync",               // turn off schedule / remove agent service
                 "SettingsViewModel.DeleteRepositoryDataAsync",      // erase SMB/S3 repository, five-second hold
                 "SettingsViewModel.RemoveRepositoryAsync",          // remove a repository, five-second hold

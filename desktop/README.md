@@ -28,13 +28,17 @@ Commands the views spawn (the CLI owns the wording of every failure):
     backer job run NAME --json          run_id on the first stdout line, result JSON on the last
     backer job rm NAME --repo ID --yes  after the Remove-job modal
     backer snapshots JOB --json         restore snapshot list
-    backer restore --job J --snapshot S --into MODE [--destination D] [--include P] --no-progress
-                                        REPLACE adds --yes-replace, and is dry-run + typed-modal gated
+    backer restore --job J --snapshot S --into ORIGINAL --no-progress
+                                        default: replace matching files in the original location, preserve extras
+    backer restore --job J --snapshot S --into ZIP --destination FOLDER --no-progress
+                                        optional: uniquely named, unencrypted ZIP; original files stay untouched
 
     backer repo discover --host H --username U --password-stdin --json   wizard share listing
     backer repo add NAME --init|--attach --headless --type ...           wizard create step
     backer repo passphrase NAME --passphrase-out FILE   "Save recovery record" (wizard + Settings)
     backer repo rm NAME --yes --confirm-name NAME       after the typed-name modal
+    backer repo destroy NAME --yes --confirm-name "DELETE NAME" [--confirm-bucket BUCKET]
+                                                       root S3 deletion confirms all bucket contents; the bucket stays
     backer job create NAME --source P [--schedule CRON|--no-schedule] [--keep-* N] [--exclude P]
     backer job set NAME [changed flags only]                             Home -> Edit
     backer schedule show|status --json, schedule pause [--until ISO]     settings + tray + status strip
@@ -60,19 +64,21 @@ password, an S3 secret key and the enrolment token travel in the child process e
 
 Cron strings are not parsed here: the CLI validates them and its error is what the user reads.
 
-The six confirmation sites, app-wide (`SettingsAndNotificationTests.ThereAreExactlySixConfirmationDialogs`
+Restore loads snapshots automatically and selects the newest. The completion message names the
+actual output path, with an Open folder action. NEW/MERGE/REPLACE remain available through the CLI.
+
+The five confirmation sites, app-wide (`SettingsAndNotificationTests.ThereAreExactlyFiveConfirmationDialogs`
 pins them by name, not by count):
 
 1. `HomeViewModel.RemoveAsync` — remove a backup job
-2. `RestoreViewModel.ConfirmReplaceAsync` — restore over the originals, typed `REPLACE`
-3. `SettingsViewModel.RemoveRepositoryAsync` — remove a repository, typed repository name
-4. `SettingsViewModel.DeleteRepositoryDataAsync` — permanently erase an SMB or S3 repository, typed `DELETE name`
-5. `SettingsViewModel.ConfirmStopAsync` — stop something that runs backups by itself
-6. `MainWindowViewModel.ConfirmInterruptAsync` — close the app down mid-run
+2. `SettingsViewModel.RemoveRepositoryAsync` — remove a repository, typed repository name
+3. `SettingsViewModel.DeleteRepositoryDataAsync` — permanently erase an SMB or S3 repository, typed `DELETE name`
+4. `SettingsViewModel.ConfirmStopAsync` — stop something that runs backups by itself
+5. `MainWindowViewModel.ConfirmInterruptAsync` — close the app down mid-run
 
-Eight prompts fit in the six sites because two sites are parameterised. Site 5 serves "Turn off
+Seven prompts fit in the five sites because two sites are parameterised. Site 4 serves "Turn off
 scheduled backups" and "Remove agent service": neither deletes anything, both must say exactly what
-stops running. Site 6 serves "Quit Backer" and "Install the latest Backer": both stop a backup that
+stops running. Site 5 serves "Quit Backer" and "Install the latest Backer": both stop a backup that
 may be in flight. Everything else asks in place, without a modal.
 
 Tray (Windows and Linux): open, back up now per job, pause (1 hour / until tomorrow / until turned

@@ -160,13 +160,17 @@ Repositories have an explicit, immutable format. Existing records with no format
 | Format | Local directory | SMB/CIFS | S3-compatible | Encryption and snapshots |
 | --- | --- | --- | --- | --- |
 | `kopia` (default) | Supported | Supported | Supported | Encrypted, compressed, deduplicated Kopia snapshots |
-| `files` | Supported | Supported | Not supported | Unencrypted, browsable immutable full-copy snapshots |
+| `files` | Supported | Supported | Supported | Unencrypted, browsable immutable full-copy snapshots |
 
 `files` repositories are plaintext: anyone who can read the storage can read backup contents. They do not preserve ACLs, ADS, xattrs, sparse files, hard-link identity, or crash consistency; symlinks and unreadable files fail the snapshot. Android can use files repositories only through server-managed proxy storage; it cannot attach a direct local or SMB files repository.
 
 Restore always selects one completed immutable snapshot. It never restores from a partial snapshot, and it refuses destinations that overlap the repository. A files snapshot is stored at `Agents/<job>/snapshots/<snapshot-id>/contents/` with its `manifest.json`, so it can also be inspected directly during disaster recovery.
 
 There is no in-place conversion between formats. Create a new repository with the desired format and run a fresh backup. Kopia remains the only packaged external backup binary; files mode uses the Python standard library and adds no dependency or installer payload.
+
+For unencrypted S3 backups, select **Unencrypted files** and **s3** in the desktop wizard, or add `--format files` to `backer repo add --type s3`. Use an empty bucket or prefix; no repository passphrase is needed, but S3 credentials are still required. This disables Backer's encryption, not the provider's server-side encryption. S3 files transfers use the existing `requests` dependency and require a provider supporting conditional PUT (`If-None-Match: *`).
+
+S3 files backups stage one full snapshot locally; check and retention currently need temporary disk space for the job's complete history. Transfers use single-object PUTs; multipart uploads are not implemented. Interrupted uploads can leave unreferenced objects. Writers and retention share a per-job lock at `.backer/files-locks/<job>`; after a crashed process, remove that lock only after confirming no writer is running. Whole-repository deletion remains unsupported for files repositories.
 
 Serverless Kopia supports these tested client-to-repository combinations:
 

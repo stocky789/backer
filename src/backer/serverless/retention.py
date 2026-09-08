@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 from backer.backends.base import BackupDestination
 from backer.core import keystore
 from backer.core.config import BackerConfig
-from backer.core.paths import get_job_subfolder
-from backer.serverless.repositories import _backend, _destination, _format, repository_operation_context
+from backer.serverless.repositories import _backend, _format, _job_destination, repository_operation_context
 
 
 def prune_job(config: BackerConfig, name: str, *, apply: bool = False, list_expired: bool = False):
@@ -34,9 +32,7 @@ def prune_job(config: BackerConfig, name: str, *, apply: bool = False, list_expi
         storage = json.loads(raw) if repository.type == "s3" else raw
     policy = job.retention
     with repository_operation_context(repository, storage) as operation_record:
-        destination = _destination(operation_record)
-        if repository_format == "files":
-            destination = str(Path(destination) / "Agents" / get_job_subfolder(name))
+        destination = _job_destination(operation_record, name)
         backend = _backend(operation_record, passphrase, storage)
         if repository_format == "files":
             backend.config["job_name"] = name

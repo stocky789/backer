@@ -58,6 +58,10 @@ public sealed class RepositoryRow
 
     public required string Format { get; init; }
 
+    public string? Bucket { get; init; }
+
+    public string? Prefix { get; init; }
+
     public bool IsEncrypted => Format == "kopia";
 
     public required string Detail { get; init; }
@@ -241,6 +245,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
                 Id = repository.Id ?? id,
                 Type = repository.Type ?? "",
                 Format = repository.Format,
+                Bucket = repository.Bucket,
+                Prefix = repository.Prefix,
                 Detail = string.Join(" · ", new[]
                 {
                     repository.Format == "files" ? "unencrypted files" : "encrypted",
@@ -561,10 +567,14 @@ public sealed partial class SettingsViewModel : ViewModelBase
             return;
         }
         var typed = $"DELETE {repository.Name}";
-        var storageKind = repository.Type == "s3" ? "S3 prefix" : "SMB repository folder";
+        var deletionWarning = repository.Type == "s3" && string.IsNullOrEmpty(repository.Prefix?.Trim('/'))
+            ? $"This repository uses the root of bucket '{repository.Bucket}'. Every object in that bucket, including unrelated files, will be permanently deleted. The bucket itself stays. "
+            : repository.Type == "s3"
+            ? $"Every object whose name starts with S3 prefix '{repository.Prefix}' in bucket '{repository.Bucket}' will be permanently deleted, including all backups and other files under that prefix. "
+            : $"Every backup in '{repository.Name}' and its SMB repository folder will be permanently deleted. ";
         var confirmed = await _services.Confirm(new ConfirmRequest(
             "Permanently delete repository",
-            $"Every backup in '{repository.Name}' and its {storageKind} will be permanently deleted. "
+            deletionWarning
             + "Its backup jobs, saved credentials, and local repository entry are removed only after storage deletion succeeds. "
             + "A network failure may leave a partially deleted repository that Backer will not remove locally.",
             "Delete",
@@ -575,7 +585,12 @@ public sealed partial class SettingsViewModel : ViewModelBase
             return;
         }
         _services.Status.Set($"Deleting repository '{repository.Name}'…");
-        var result = await RunAsync(new[] { "repo", "destroy", repository.Name, "--yes", "--confirm-name", typed });
+        var arguments = new List<string> { "repo", "destroy", repository.Name, "--yes", "--confirm-name", typed };
+        if (repository.Type == "s3" && string.IsNullOrEmpty(repository.Prefix?.Trim('/')))
+        {
+            arguments.AddRange(new[] { "--confirm-bucket", repository.Bucket ?? "" });
+        }
+        var result = await RunAsync(arguments);
         if (!result.Ok)
         {
             _services.Status.Attention = result.FailureText;

@@ -278,6 +278,37 @@ class TestKopiaBackend:
             "total_files": 60,
         }
 
+    @pytest.mark.parametrize(
+        ("stderr", "errors"),
+        [
+            (
+                "Restoring to local filesystem (/Downloads) with parallelism=8...\r"
+                "Processed 17 (216 MB) of 60 (720 MB).\r"
+                "Processed 18 (220 MB) of 60 (720 MB)."
+                "error restoring: restore error: cannot create temp file: /Downloads/assets/file: permission denied\n",
+                ["error restoring: restore error: cannot create temp file: /Downloads/assets/file: permission denied"],
+            ),
+            ("unknown failure\nadditional detail\n", ["unknown failure", "additional detail"]),
+        ],
+    )
+    def test_restore_reports_cause_without_progress_and_preserves_output(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str, errors: list[str]
+    ) -> None:
+        backend = KopiaBackend({"repository_password": "test-password"})
+        monkeypatch.setattr(backend, "_get_binary", lambda: Path("kopia"))
+        monkeypatch.setattr(backend, "_connect_repo", lambda _path: (True, ""))
+        monkeypatch.setattr(backend, "_disconnect_repo", lambda _path: None)
+        monkeypatch.setattr(
+            "backer.backends.kopia._run_kopia_with_progress",
+            lambda *_args: CompletedProcess(["kopia"], 1, "stdout detail\n", stderr),
+        )
+
+        result = backend.restore(BackupDestination("repository"), tmp_path, snapshot="snapshot")
+
+        assert not result.success
+        assert result.errors == errors
+        assert result.output == "stdout detail\n" + stderr
+
     def test_process_owner_is_single_operation_only(self) -> None:
         """Reusing one owner must never let a later run steal cancellation."""
         from backer.backends.kopia import KopiaProcessOwner

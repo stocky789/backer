@@ -151,17 +151,27 @@ public sealed class WizardTests : IDisposable
     }
 
     [Fact]
-    public async Task FilesFormatRejectsS3BeforeAnyCliCall()
+    public async Task FilesFormatCreatesS3WithoutPassphrase()
     {
-        var wizard = Wizard("true\n");
+        var wizard = Wizard("echo \"Repository 'docs' saved (id 9f8e7d6c5b4a)\"\n");
         wizard.Format = "files";
         wizard.RepositoryType = "s3";
+        wizard.Name = "docs";
+        wizard.Bucket = "backups";
+        wizard.Endpoint = "https://s3.example";
+        wizard.Region = "us-east-1";
+        wizard.AccessKeyId = "access";
+        wizard.SecretKey = "storage-secret";
         wizard.Step = "detail";
 
         await wizard.ContinueAsync();
 
-        Assert.Equal("Unencrypted files repositories support local folders and SMB shares, not S3.", wizard.StatusText);
-        Assert.Empty(Argv());
+        var argv = Assert.Single(Argv());
+        Assert.Contains("--format files", argv);
+        Assert.Contains("--type s3", argv);
+        Assert.DoesNotContain("passphrase", argv);
+        Assert.DoesNotContain("storage-secret", argv);
+        Assert.Equal("done", wizard.Step);
     }
 
     [Fact]

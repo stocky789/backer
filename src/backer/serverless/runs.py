@@ -21,6 +21,7 @@ from backer.core.paths import get_data_dir, get_job_subfolder
 from backer.core.runner import run_backup
 from backer.serverless.repositories import (
     _format,
+    _job_destination,
     probe,
     repository_operation_context,
 )
@@ -301,9 +302,7 @@ def _run_local_job(
             report = cancel_report()
             return report
         stage = "backup"
-        destination_path = _destination(operation_repository)
-        if repository_format == "files":
-            destination_path = str(Path(destination_path) / "Agents" / get_job_subfolder(name))
+        destination_path = _job_destination(operation_repository, name)
         report = run_backup(
             {
                 "serverless": True,

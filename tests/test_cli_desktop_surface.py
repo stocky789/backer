@@ -282,7 +282,8 @@ def test_repo_rm_refuses_a_mismatched_confirm_name(tmp_path, monkeypatch):
     assert "r1" in BackerConfig.load(config_path).repositories
 
 
-def test_repo_destroy_wipes_only_verified_smb_folder_before_local_config(tmp_path, monkeypatch):
+@pytest.mark.parametrize("folder_state", ["present", "missing", "offline", "denied", "file", "link"])
+def test_repo_destroy_wipes_only_verified_smb_folder_before_local_config(tmp_path, monkeypatch, folder_state):
     from contextlib import contextmanager
 
     from backer.serverless import repositories
@@ -292,6 +293,25 @@ def test_repo_destroy_wipes_only_verified_smb_folder_before_local_config(tmp_pat
     target.mkdir(parents=True)
     (target / "pack").write_text("backup")
     (share / "keep").write_text("sibling")
+    if folder_state != "present":
+        (target / "pack").unlink()
+        target.rmdir()
+    if folder_state == "offline":
+        (share / "keep").unlink()
+        share.rmdir()
+    elif folder_state == "file":
+        target.write_text("unrelated")
+    elif folder_state == "link":
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path == target)
+    elif folder_state == "denied":
+        original_lstat = Path.lstat
+
+        def denied_lstat(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("access denied")
+            return original_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", denied_lstat)
     config_path = tmp_path / "config.yaml"
     record = RepositoryConfig(
         id="r1",
@@ -324,7 +344,11 @@ def test_repo_destroy_wipes_only_verified_smb_folder_before_local_config(tmp_pat
     monkeypatch.setattr("backer.core.paths.get_machine_config_dir", lambda: machine_dir)
     monkeypatch.setattr("backer.serverless.modes.local_schedule_configured", lambda: False)
     monkeypatch.setattr(repositories, "repository_operation_context", mounted)
-    monkeypatch.setattr(repositories, "probe", lambda *_args: ("present", "aabb", ""))
+    def probe(*_args):
+        assert folder_state == "present", "Only an existing repository should be probed"
+        return "present", "aabb", ""
+
+    monkeypatch.setattr(repositories, "probe", probe)
     monkeypatch.setattr(
         "backer.core.keystore.get",
         lambda reference, **_kwargs: {"pass": "secret", "storage": "smb-secret"}.get(reference),
@@ -338,6 +362,13 @@ def test_repo_destroy_wipes_only_verified_smb_folder_before_local_config(tmp_pat
         ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"],
     )
 
+    if folder_state not in {"present", "missing"}:
+        assert result.exit_code != 0, result.output
+        assert "r1" in BackerConfig.load(config_path).repositories
+        assert "backup" in BackerConfig.load(config_path).jobs
+        assert "r1" in BackerConfig.load(machine_path).repositories
+        assert deleted == []
+        return
     assert result.exit_code == 0, result.output
     assert not target.exists()
     assert (share / "keep").read_text() == "sibling"
@@ -441,7 +472,8 @@ def test_repo_destroy_refuses_while_local_schedule_exists(tmp_path, monkeypatch)
     assert "r1" in BackerConfig.load(config_path).repositories
 
 
-def test_repo_destroy_wipes_verified_s3_prefix_before_local_config(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prefix", ["desk", ""])
+def test_repo_destroy_wipes_verified_s3_storage_before_local_config(tmp_path, monkeypatch, prefix):
     from backer.serverless import repositories
 
     config_path = tmp_path / "config.yaml"
@@ -450,7 +482,7 @@ def test_repo_destroy_wipes_verified_s3_prefix_before_local_config(tmp_path, mon
         name="r1",
         type="s3",
         bucket="backups",
-        prefix="desk",
+        prefix=prefix,
         endpoint="https://s3.example",
         region="us-east-1",
         unique_id="aabb",
@@ -480,7 +512,7 @@ def test_repo_destroy_wipes_verified_s3_prefix_before_local_config(tmp_path, mon
     class FakeSidecar:
         def __init__(self, settings, credentials):
             assert settings["bucket"] == "backups"
-            assert settings["prefix"] == "desk"
+            assert settings["prefix"] == prefix
             assert credentials["secret_access_key"] == "sk"
 
         def wipe(self):
@@ -490,7 +522,8 @@ def test_repo_destroy_wipes_verified_s3_prefix_before_local_config(tmp_path, mon
 
     result = CliRunner().invoke(
         main,
-        ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"],
+        ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"]
+        + (["--confirm-bucket", "backups"] if not prefix else []),
     )
 
     assert result.exit_code == 0, result.output
@@ -500,7 +533,14 @@ def test_repo_destroy_wipes_verified_s3_prefix_before_local_config(tmp_path, mon
     assert deleted == ["pass", "storage"]
 
 
-def test_repo_destroy_refuses_s3_bucket_root(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("probe_result", "error"),
+    [
+        (("present", "different-id", ""), "Repository identity changed"),
+        (("error", None, "Access denied"), "Access denied"),
+    ],
+)
+def test_repo_destroy_preserves_unverified_s3_bucket_root(tmp_path, monkeypatch, probe_result, error):
     config_path = tmp_path / "config.yaml"
     BackerConfig(
         repositories={
@@ -525,14 +565,56 @@ def test_repo_destroy_refuses_s3_bucket_root(tmp_path, monkeypatch):
         }.get(reference),
     )
     monkeypatch.setattr("backer.serverless.modes.local_schedule_configured", lambda: False)
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_args: probe_result)
+    monkeypatch.setattr(
+        "backer.serverless.s3_sidecar.S3Sidecar.wipe", lambda _self: pytest.fail("Unverified storage deleted")
+    )
+    monkeypatch.setattr("backer.core.keystore.delete", lambda *_args, **_kwargs: pytest.fail("Credentials deleted"))
 
     result = CliRunner().invoke(
         main,
-        ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"],
+        [
+            "--config",
+            str(config_path),
+            "repo",
+            "destroy",
+            "r1",
+            "--yes",
+            "--confirm-name",
+            "DELETE r1",
+            "--confirm-bucket",
+            "backups",
+        ],
     )
 
     assert result.exit_code == 1
-    assert "non-root S3 repository prefix" in result.output
+    assert error in result.output
+    assert "r1" in BackerConfig.load(config_path).repositories
+
+
+@pytest.mark.parametrize("confirmation", [[], ["--confirm-bucket", "wrong-bucket"]])
+def test_repo_destroy_requires_matching_bucket_confirmation(tmp_path, monkeypatch, confirmation):
+    config_path = tmp_path / "config.yaml"
+    BackerConfig(
+        repositories={
+            "r1": RepositoryConfig(
+                id="r1", name="r1", type="s3", bucket="backups", prefix="", endpoint="https://s3.example"
+            ),
+        }
+    ).save(config_path)
+    monkeypatch.setattr("backer.serverless.modes.local_schedule_configured", lambda: False)
+    monkeypatch.setattr("backer.serverless.repositories.probe", lambda *_args: pytest.fail("Unconfirmed bucket probed"))
+    monkeypatch.setattr(
+        "backer.serverless.s3_sidecar.S3Sidecar.wipe", lambda _self: pytest.fail("Unconfirmed bucket deleted")
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(config_path), "repo", "destroy", "r1", "--yes", "--confirm-name", "DELETE r1"] + confirmation,
+    )
+
+    assert result.exit_code == 2
+    assert "--confirm-bucket backups" in result.output
     assert "r1" in BackerConfig.load(config_path).repositories
 
 

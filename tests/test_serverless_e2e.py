@@ -65,6 +65,10 @@ def _add_and_run(runner: CliRunner, config: Path, source: Path, repository_type:
 
 
 def _assert_lifecycle(runner: CliRunner, config: Path, source: Path, repository: Path | None) -> None:
+    from zipfile import ZipFile
+
+    read_only = source / "read-only.txt"
+    read_only.write_text("snapshot bytes", encoding="utf-8")
     (source / "keep.txt").write_text("second", encoding="utf-8")
     (source / "deleted.txt").unlink()
     result = runner.invoke(main, ["--config", str(config), "job", "run", "backup", "--no-progress"])
@@ -75,7 +79,7 @@ def _assert_lifecycle(runner: CliRunner, config: Path, source: Path, repository:
     if repository:
         sidecar = repository / ".backer" / "jobs" / "backup" / "config.json"
         assert json.loads(sidecar.read_text(encoding="utf-8"))["config"]["source_path"] == str(source)
-    restored = source.parent / "restored"
+    (source / "keep.txt").unlink()
     result = runner.invoke(
         main,
         [
@@ -85,16 +89,54 @@ def _assert_lifecycle(runner: CliRunner, config: Path, source: Path, repository:
             "--job",
             "backup",
             "--latest",
-            "--destination",
-            str(restored),
             "--into",
             "NEW",
             "--no-progress",
         ],
     )
     assert result.exit_code == 0, result.output
+    restored, = source.parent.glob(f"{source.name} (restored *)")
+    assert f"Restore completed to {restored.resolve()}" in result.output
     assert (restored / "keep.txt").read_text(encoding="utf-8") == "second"
+    assert not (source / "keep.txt").exists()
     assert not (restored / "deleted.txt").exists()
+    for count in (1, 2):
+        selector = (
+            ["--from", str(repository), "--passphrase-stdin"] if repository and count == 2 else ["--job", "backup"]
+        )
+        arguments = ["--config", str(config), "restore", *selector, "--latest",
+                     "--into", "ZIP", "--destination", str(source.parent), "--no-progress"]
+        if count == 1:
+            preview = runner.invoke(main, [*arguments, "--dry-run"])
+            assert preview.exit_code == 0, preview.output
+            assert not list(source.parent.glob("*.zip"))
+        result = runner.invoke(
+            main, arguments, input="serverless-test-passphrase\n",
+        )
+        assert result.exit_code == 0, result.output
+        archives = list(source.parent.glob("*.zip"))
+        assert len(archives) == count
+        assert any(f"Restore completed to {archive.resolve()}" in result.output for archive in archives)
+        for archive in archives:
+            with ZipFile(archive) as contents:
+                assert contents.read("keep.txt") == b"second"
+                assert "deleted.txt" not in contents.namelist()
+        assert not (source / "keep.txt").exists()
+    (source / "extra.txt").write_text("keep extra", encoding="utf-8")
+    read_only.write_text("current bytes", encoding="utf-8")
+    read_only.chmod(0o444)
+    try:
+        result = runner.invoke(
+            main,
+            ["--config", str(config), "restore", "--job", "backup", "--latest", "--into", "ORIGINAL", "--no-progress"],
+        )
+    finally:
+        read_only.chmod(0o644)
+    assert result.exit_code == 0, result.output
+    assert f"Restore completed to {source.resolve()}" in result.output
+    assert (source / "keep.txt").read_text(encoding="utf-8") == "second"
+    assert read_only.read_text(encoding="utf-8") == "snapshot bytes"
+    assert (source / "extra.txt").read_text(encoding="utf-8") == "keep extra"
     protected = source.parent / "protected"
     protected.mkdir()
     (protected / "do-not-delete.txt").write_text("keep", encoding="utf-8")

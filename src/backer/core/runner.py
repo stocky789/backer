@@ -75,8 +75,8 @@ def _backend_for_location(location: str, options: dict[str, Any]):
     repository_format = options.get("format", "kopia")
     if repository_format not in {"kopia", "files"}:
         raise RuntimeError(f"Unsupported repository format: {repository_format}")
-    if repository_format == "files" and lowered.startswith("s3://"):
-        raise RuntimeError("Files repositories do not support S3 storage")
+    if repository_format == "files" and lowered.startswith("s3://") and not options.get("s3"):
+        raise RuntimeError("S3 storage configuration is required")
     if "://" in location and not lowered.startswith("s3://"):
         raise RuntimeError(f"Unsupported repository location: {location}")
     return get_backend(repository_format, options)
